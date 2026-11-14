@@ -72,16 +72,19 @@ void TaskThicknessParameters::initControls()
     ui->Value->setMinimum(0.0);
     ui->Value->setValue(a);
     ui->Value->selectAll();
-    // A new thickness's faces field takes the focus when the dialog opens (Q2)
-    if (!thickness->Base.getSubValues().empty()) {
+    // A new thickness's faces field takes the focus when the dialog opens (Q2), and keeps it
+    // after its first pick placed it (ops#640 rank 14)
+    if (!thickness->Base.getSubValues().empty() && !armsBaseOnOpen()) {
         QMetaObject::invokeMethod(ui->Value, "setFocus", Qt::QueuedConnection);
     }
 
     // Bind input fields to properties
     ui->Value->bind(thickness->Value);
 
+    // Onshape's "Opposite direction" (ops#640 polish P10): walls grow inwards (Reversed) unless
+    // it is ticked
     bool r = thickness->Reversed.getValue();
-    ui->checkReverse->setChecked(r);
+    ui->checkReverse->setChecked(!r);
 
     bool i = thickness->Intersection.getValue();
     ui->checkIntersection->setChecked(i);
@@ -171,7 +174,7 @@ double TaskThicknessParameters::getValue() const
 void TaskThicknessParameters::onReversedChanged(bool on)
 {
     if (PartDesign::Thickness* thickness = onBeforeChange()) {
-        thickness->Reversed.setValue(on);
+        thickness->Reversed.setValue(!on);  // the box is Opposite direction: outwards
         onAfterChange(thickness);
 
         setGizmoPositions();
@@ -180,7 +183,7 @@ void TaskThicknessParameters::onReversedChanged(bool on)
 
 bool TaskThicknessParameters::getReversed() const
 {
-    return ui->checkReverse->isChecked();
+    return !ui->checkReverse->isChecked();  // Opposite direction ticked: outwards
 }
 
 void TaskThicknessParameters::onIntersectionChanged(bool on)
@@ -260,7 +263,8 @@ void TaskThicknessParameters::setGizmoPositions()
         gizmoContainer->visible = false;
         return;
     }
-    auto baseShape = thickness->getBaseTopoShape();
+    // silent: a broken Thickness (its base gone) opens red, as the other dress-ups (review R7W-2)
+    auto baseShape = thickness->getBaseTopoShape(true);
     auto shapes = thickness->getContinuousEdges(baseShape);
     auto faces = thickness->getFaces(baseShape);
 

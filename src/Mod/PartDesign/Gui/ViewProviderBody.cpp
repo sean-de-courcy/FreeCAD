@@ -26,9 +26,15 @@
 #include <algorithm>
 #include <set>
 #include <sstream>
+#include <map>
+#include <memory>
 #include <unordered_map>
+#include <unordered_set>
 
 #include <Inventor/actions/SoGetBoundingBoxAction.h>
+#include <Inventor/nodes/SoGroup.h>
+#include <Inventor/nodes/SoSeparator.h>
+#include <Inventor/nodes/SoSwitch.h>
 #include <QApplication>
 #include <QMenu>
 
@@ -36,6 +42,7 @@
 #include <App/Document.h>
 #include <App/GeoFeature.h>
 #include <App/Origin.h>
+#include <App/Datums.h>
 #include <App/GroupExtension.h>
 #include <App/Part.h>
 #include <App/VarSet.h>
@@ -45,10 +52,13 @@
 #include <Gui/Command.h>
 #include <Gui/Control.h>
 #include <Gui/Document.h>
+#include <Gui/ForkKeymap.h>
 #include <Gui/MainWindow.h>
 #include <Gui/MDIView.h>
 #include <Gui/Selection/Selection.h>
 #include <Gui/ViewProviderDatum.h>
+#include <Mod/Part/App/DatumFeature.h>
+#include <Mod/Part/App/Part2DObject.h>
 #include <Mod/Part/App/PropertyTopoShape.h>
 #include <Mod/PartDesign/App/Body.h>
 #include <Mod/PartDesign/App/FeatureBoolean.h>
@@ -58,8 +68,12 @@
 #include <Mod/PartDesign/App/FeatureBase.h>
 #include <Mod/PartDesign/App/FeatureMultiTransform.h>
 #include <Mod/PartDesign/App/ShapeBinder.h>
+#include <Mod/PartDesign/App/Studio.h>
+#include <Mod/PartDesign/App/StudioList.h>
 
 #include "ViewProviderBody.h"
+#include "RollbackView.h"
+#include "TaskDeletePart.h"
 #include "Utils.h"
 #include "ViewProvider.h"
 
@@ -108,6 +122,237 @@ constexpr const char* editLockedMessage =
 constexpr const char* dragAloneMessage =
     QT_TRANSLATE_NOOP("Exception", "Drag the feature alone, without Ctrl, to reorder it");
 
+/** FreeCAD-CH (ops#640 rank 32, lists plan 8): while member, a member of another Body of other's
+ * part studio, is edited, other is rolled back to it as Onshape rolls every part back to the
+ * feature edited: the edit roll point after other's last solid feature at or above member in the
+ * studio's history (studioSequence(), as rollStudioTo() puts the bar), or at its top the member
+ * just before its first solid feature. Null when that holds nothing its bar doesn't hold already
+ * (never forward: a held feature may not be computed), or it can't be held (other's first member
+ * is a solid feature), or other isn't in member's studio
+ */
+/** FreeCAD-CH (ops#654 S4): while owner, a studio feature (outside every Body), is edited, other
+ * is rolled back to the owner's place in the studio's list: after other's last solid feature
+ * before it (a step of an earlier owner, or a member), the owner's own step held, or at its top
+ * the member just before its first solid feature. Unlike a member's edit the point is kept when it
+ * holds nothing yet: a part ticked in the dialog gets its step after it, held too. Null when
+ * other isn't in the owner's studio, its first member is a solid feature, or its saved bar holds
+ * as much already
+ */
+App::DocumentObject* studioOwnerEditPointFor(const PartDesign::Body* other, const App::DocumentObject* owner)
+{
+    const PartDesign::StudioList* list = PartDesign::StudioList::holding(owner);
+    App::Part* otherStudio = nullptr;
+    if (!list || !other || other->getDocument() != owner->getDocument()
+        || !Part::BodyBase::studioOf(other, otherStudio) || otherStudio != list->studio()) {
+        return nullptr;
+    }
+    std::unordered_set<const App::DocumentObject*> above;
+    bool found = false;
+    for (auto entry : list->Entries.getValues()) {
+        if (entry == owner) {
+            found = true;
+            break;
+        }
+        if (!entry) {
+            continue;
+        }
+        above.insert(entry);
+        for (auto step : PartDesign::StudioList::stepsOf(entry)) {
+            above.insert(step);
+        }
+    }
+    if (!found) {
+        return nullptr;
+    }
+    const auto& group = other->Group.getValues();
+    auto indexOf = [&group](const App::DocumentObject* obj) {
+        return static_cast<std::size_t>(std::ranges::find(group, obj) - group.begin());
+    };
+    App::DocumentObject* point = nullptr;
+    for (auto obj : group) {
+        if (above.count(obj) && PartDesign::Body::isSolidFeature(obj)) {
+            point = obj;
+        }
+    }
+    if (!point) {
+        auto first = std::ranges::find_if(group, PartDesign::Body::isSolidFeature);
+        if (first == group.begin() || first == group.end()) {
+            return nullptr;
+        }
+        point = *(first - 1);
+    }
+    if (other->isRolledBack()) {
+        App::DocumentObject* tip = other->Tip.getValue();
+        if (!tip || indexOf(tip) <= indexOf(point)) {
+            return nullptr;
+        }
+    }
+    return point;
+}
+
+App::DocumentObject* studioEditPointFor(const PartDesign::Body* other, const App::DocumentObject* member)
+{
+    if (member && PartDesign::isStudioOwner(member)) {
+        return studioOwnerEditPointFor(other, member);
+    }
+    auto body = member ? PartDesign::Body::findBodyOf(member) : nullptr;
+    if (!other || !body || body == other || body->getDocument() != other->getDocument()) {
+        return nullptr;
+    }
+    App::Part* studio = nullptr;
+    App::Part* otherStudio = nullptr;
+    if (!Part::BodyBase::studioOf(body, studio) || !Part::BodyBase::studioOf(other, otherStudio)
+        || studio != otherStudio) {
+        return nullptr;
+    }
+    const auto sequence = PartDesign::studioSequence(body->getDocument(), studio);
+    auto at = std::ranges::find(sequence, member);
+    if (at == sequence.end()) {
+        return nullptr;
+    }
+    const std::unordered_set<const App::DocumentObject*> above(sequence.begin(), at);
+    const auto& group = other->Group.getValues();
+    auto indexOf = [&group](const App::DocumentObject* obj) {
+        return static_cast<std::size_t>(std::ranges::find(group, obj) - group.begin());
+    };
+    App::DocumentObject* point = nullptr;
+    for (auto obj : group) {
+        if (above.count(obj) && PartDesign::Body::isSolidFeature(obj)) {
+            point = obj;
+        }
+    }
+    if (point && point == other->lastSolidFeature()) {
+        return nullptr;
+    }
+    if (!point) {
+        auto first = std::ranges::find_if(group, PartDesign::Body::isSolidFeature);
+        if (first == group.begin() || first == group.end()) {
+            return nullptr;
+        }
+        point = *(first - 1);
+    }
+    // Rolled back already at or above the point: the saved bar holds as much
+    if (other->isRolledBack()) {
+        App::DocumentObject* tip = other->Tip.getValue();
+        if (!tip || indexOf(tip) <= indexOf(point)) {
+            return nullptr;
+        }
+    }
+    return point;
+}
+
+/// The scene of each Body rolled back with its studio's edit (studioEditPointFor()), by its view
+/// provider; never destroyed (a view at exit would restore view providers already gone)
+std::map<const PartDesignGui::ViewProviderBody*, std::unique_ptr<PartDesignGui::RollbackView>>& studioRollbacks()
+{
+    static auto* views =
+        new std::map<const PartDesignGui::ViewProviderBody*, std::unique_ptr<PartDesignGui::RollbackView>>();
+    return *views;
+}
+
+/// Shows body at its edit roll point in the scene (RollbackView::showBodyAt()): the point's solid,
+/// or nothing of it at its top
+void showStudioRollback(const PartDesignGui::ViewProviderBody* vpb, PartDesign::Body* body)
+{
+    App::DocumentObject* point = body->getEditRollPoint();
+    if (!point || !vpb->isShow()) {
+        studioRollbacks().erase(vpb);
+        return;
+    }
+    auto& view = studioRollbacks()[vpb];
+    if (!view) {
+        view = std::make_unique<PartDesignGui::RollbackView>();
+    }
+    view->showBodyAt(body, PartDesign::Body::isSolidFeature(point) ? point : nullptr);
+}
+
+/// A dialog of a solid feature starts in Final as its preview group's parameter says
+/// (TaskPreviewParameters, ViewProviderBody::onInEdit())
+bool editStartsFinal(const App::DocumentObject* obj)
+{
+    return PartDesign::Body::isSolidFeature(obj)
+        && App::GetApplication()
+               .GetParameterGroupByPath("User parameter:BaseApp/Preferences/Mod/PartDesign/Preview")
+               ->GetBool("ShowFinal", false);
+}
+
+/* FreeCAD-CH (ops#654 P3a, report 20, notes/parts-design.md 3.4): in Onshape a part studio's
+ * sketches and planes belong to the studio, so hiding a part leaves them shown. A Body still
+ * claims its sketches and datums (in the tree and in 3D: their selection paths stay
+ * Studio.Body.Sketch.), and while the Body is hidden in a part studio a switch after its mode
+ * switch shows their root nodes: each shows as its own Visibility says, the sketch a feature uses
+ * hidden as before. Gui::ViewProviderDocumentObject picks and highlights a child through it
+ * (shownOutsideSwitch there). Nothing is saved: the switch is rebuilt from the Body's state.
+ */
+constexpr const char* studioShownName = "StudioShown";
+
+/// The switch of the Body's root that shows its sketches and datums while it is hidden, or null
+SoSwitch* studioShownSwitch(SoSeparator* root)
+{
+    for (int i = 0, count = root ? root->getNumChildren() : 0; i < count; ++i) {
+        SoNode* node = root->getChild(i);
+        if (node->isOfType(SoSwitch::getClassTypeId()) && node->getName() == studioShownName) {
+            return static_cast<SoSwitch*>(node);
+        }
+    }
+    return nullptr;
+}
+
+/// A member that belongs to the part studio, not to the part: a sketch, a datum, a coordinate
+/// system (the Body's Origin included)
+bool isStudioOwned(const App::DocumentObject* obj)
+{
+    return obj
+        && (obj->isDerivedFrom<Part::Part2DObject>() || obj->isDerivedFrom<Part::Datum>()
+            || obj->isDerivedFrom<App::DatumElement>()
+            || obj->isDerivedFrom<App::LocalCoordinateSystem>());
+}
+
+/// Shows the Body's studio-owned members (isStudioOwned) while the Body is hidden in a part
+/// studio, in "Through" (its members shown one by one); shows none otherwise
+void updateStudioShown(PartDesignGui::ViewProviderBody* vpb)
+{
+    SoSwitch* shown = studioShownSwitch(vpb->getRoot());
+    auto body = vpb->getObject<PartDesign::Body>();
+    if (!shown || shown->getNumChildren() != 1 || !body) {
+        return;
+    }
+    auto group = static_cast<SoGroup*>(shown->getChild(0));
+    std::vector<SoNode*> roots;
+    App::Part* studio = nullptr;
+    Gui::Document* gdoc = vpb->getDocument();
+    if (gdoc && !vpb->isRestoring() && !vpb->Visibility.getValue() && !vpb->isShow()
+        && body->isAttachedToDocument() && !body->isRemoving() && vpb->showsThrough()
+        && Part::BodyBase::studioOf(body, studio)) {
+        std::vector<App::DocumentObject*> members = body->Group.getValues();
+        members.push_back(body->Origin.getValue());
+        for (auto obj : members) {
+            if (!isStudioOwned(obj) || !obj->isAttachedToDocument() || obj->isRemoving()) {
+                continue;
+            }
+            auto vp = gdoc->getViewProvider(obj);
+            if (vp && vp->getRoot()) {
+                roots.push_back(vp->getRoot());
+            }
+        }
+    }
+    // Touch the scene only on a change: each one notifies every view
+    bool same = group->getNumChildren() == static_cast<int>(roots.size());
+    for (int i = 0; same && i < group->getNumChildren(); ++i) {
+        same = group->getChild(i) == roots[i];
+    }
+    if (!same) {
+        Gui::coinRemoveAllChildren(group);
+        for (auto root : roots) {
+            group->addChild(root);
+        }
+    }
+    int which = roots.empty() ? SO_SWITCH_NONE : 0;
+    if (shown->whichChild.getValue() != which) {
+        shown->whichChild = which;
+    }
+}
+
 }  // namespace
 
 PROPERTY_SOURCE_WITH_EXTENSIONS(PartDesignGui::ViewProviderBody, PartGui::ViewProviderPart)
@@ -122,12 +367,29 @@ ViewProviderBody::ViewProviderBody()
     Gui::ViewProviderOriginGroupExtension::initExtension(this);
 }
 
-ViewProviderBody::~ViewProviderBody() = default;
+ViewProviderBody::~ViewProviderBody()
+{
+    // A studio roll-back of this Body's scene goes with it, putting nothing back: the view
+    // providers it would restore may be gone already (ops#640 rank 32)
+    auto& views = studioRollbacks();
+    if (auto it = views.find(this); it != views.end()) {
+        static_cast<void>(it->second.release());
+        views.erase(it);
+    }
+}
 
 void ViewProviderBody::attach(App::DocumentObject* pcFeat)
 {
     // call parent attach method
     ViewProviderPart::attach(pcFeat);
+
+    // The sketches and datums shown while the Body is hidden in a part studio (ops#654 P3a,
+    // updateStudioShown): after the mode switch, under the Body's placement
+    auto shown = new SoSwitch();
+    shown->setName(studioShownName);
+    shown->addChild(new SoGroup());
+    shown->whichChild = SO_SWITCH_NONE;
+    pcRoot->addChild(shown);
 
     // set default display mode
     onChanged(&DisplayModeBody);
@@ -138,6 +400,13 @@ void ViewProviderBody::attach(App::DocumentObject* pcFeat)
                 this->afterRecompute(doc, recomputedObjs);
             }
         );
+        // After the step's regeneration (ops#640: App::Document regenerates before it signals)
+        m_UndoConn = doc->signalUndo.connect([this](const App::Document& doc) {
+            this->afterUndoRedo(doc);
+        });
+        m_RedoConn = doc->signalRedo.connect([this](const App::Document& doc) {
+            this->afterUndoRedo(doc);
+        });
     }
     m_ChangedConn = Gui::Application::Instance->signalChangedObject.connect(
         [this](const Gui::ViewProvider& vp, const App::Property& prop) {
@@ -152,6 +421,41 @@ void ViewProviderBody::attach(App::DocumentObject* pcFeat)
     m_ResetEditConn = Gui::Application::Instance->signalResetEdit.connect(
         [this](const Gui::ViewProviderDocumentObject& vp) { this->onResetEdit(vp); }
     );
+}
+
+void ViewProviderBody::afterUndoRedo(const App::Document& doc)
+{
+    // FreeCAD-CH (ops#640, F35): an undo or a redo restores the features' Visibility as the step
+    // recorded it: a Body that then shows none of its features shows its Tip, so no step leaves
+    // the view empty (as showTipIfNoneShown() at a dialog's close, ops#212). Not while an edit
+    // owns the display, nor for a hidden Body or one rolled back to the top (no Tip). Only when
+    // the step changed what the Body shows (its Group, Tip or a member's Visibility): an
+    // unrelated undo doesn't show a Tip the user hid, as Onshape's undo doesn't touch hide/show
+    bool changedShown = undoChangedShown;
+    undoChangedShown = false;
+    auto body = getObject<PartDesign::Body>();
+    if (!body || !body->isAttachedToDocument() || body->getDocument() != &doc) {
+        return;
+    }
+    // The step's regeneration may have stopped or repaired the Body (F37)
+    updateStoppedDisplay();
+    if (!changedShown || !body->Visibility.getValue()) {
+        return;
+    }
+    auto gdoc = Gui::Application::Instance->getDocument(body->getDocument());
+    if (gdoc && gdoc->getInEdit()) {
+        return;
+    }
+    App::DocumentObject* tip = body->Tip.getValue();
+    if (!tip || !body->hasObject(tip)) {
+        return;
+    }
+    bool shown = std::ranges::any_of(body->Group.getValues(), [](App::DocumentObject* obj) {
+        return obj && obj->isDerivedFrom<PartDesign::Feature>() && obj->Visibility.getValue();
+    });
+    if (!shown) {
+        tip->Visibility.setValue(true);
+    }
 }
 
 void ViewProviderBody::onChangedObject(const Gui::ViewProvider& vp, const App::Property& prop)
@@ -178,13 +482,43 @@ void ViewProviderBody::onChangedObject(const Gui::ViewProvider& vp, const App::P
         || (std::ranges::find(features, changedObj) != features.end());
 
     if (isRelevantChange) {
+        if (body->getDocument() && body->getDocument()->isPerformingTransaction()) {
+            undoChangedShown = true;
+        }
         refreshOverlays();
     }
 }
 
 void ViewProviderBody::afterRecompute(const App::Document& /* doc */, const std::vector<App::DocumentObject*>& /* recomputedObjs */)
 {
+    updateStoppedDisplay();
     refreshOverlays();
+}
+
+bool ViewProviderBody::isStopped() const
+{
+    // F37 (ops#640): stopped by the recompute, the Body has written the empty Shape and is in
+    // error (Body::writeStoppedShape). Not while rolled back (the bar's feature shows, Through)
+    // nor while a member's dialog or edit is open: the edit's display and preview stay
+    auto body = getObject<PartDesign::Body>();
+    return body && !editedMember && body->isError() && body->Shape.getShape().isNull()
+        && !body->isRolledBack();
+}
+
+void ViewProviderBody::updateStoppedDisplay()
+{
+    if (!isRestoring() && showsThrough() != displayedThrough) {
+        applyBodyDisplay();
+    }
+}
+
+void ViewProviderBody::finishRestoring()
+{
+    PartGui::ViewProviderPart::finishRestoring();
+    // A file saved with a stopped Body (its error and empty Shape saved) opens showing nothing
+    updateStoppedDisplay();
+    // A file saved with the Body hidden opens with its studio's sketches and datums shown
+    updateStudioShown(this);
 }
 
 void ViewProviderBody::refreshOverlays()
@@ -390,12 +724,18 @@ bool ViewProviderBody::onDelete(const std::vector<std::string>&)
     // F1). A MultiTransform's steps go with their MultiTransform
     bool everyMember = body && std::ranges::all_of(body->Group.getValues(), [&](App::DocumentObject* obj) {
         auto step = freecad_cast<PartDesign::Transformed*>(obj);
-        return !obj || deleting.count(obj) != 0 || (step && step->isMultiTransformChild());
+        return !obj || deleting.count(obj) != 0 || (step && step->isOutOfChain());
     });
     // A part deleted already, deleted again: the Body goes with its features (review s33e2 F2)
     bool deleted = body && PartDesign::DeletePart::deleterOf(body);
     if (body && !forced && !everyMember && !deleted && Part::BodyBase::studioOf(body, studio)
         && body->Tip.getValue() && !PartDesign::Boolean::mergeOf(body)) {
+        // Under the Onshape keymap, its dialog, prefilled with the part (with the other parts of
+        // the same Delete): OK makes the feature (ops#640 rank 30, blind test F48)
+        if (Gui::ForkKeymap::isOnshape()) {
+            TaskDlgDeletePart::openFor(body);
+            return false;
+        }
         Gui::Command::doCommand(Gui::Command::Doc, "import PartDesign");
         Gui::Command::doCommand(
             Gui::Command::Doc,
@@ -428,6 +768,15 @@ void ViewProviderBody::updateData(const App::Property* prop)
         && showsThrough() != displayedThrough) {
         applyBodyDisplay();
     }
+    // F37 (ops#640): a repair writes the Body's Shape again; show its members at once
+    if (prop == &body->Shape) {
+        updateStoppedDisplay();
+    }
+    // An undo or a redo that restores or removes a member, or moves the Tip (afterUndoRedo)
+    if ((prop == &body->Tip || prop == &body->Group) && body->getDocument()
+        && body->getDocument()->isPerformingTransaction()) {
+        undoChangedShown = true;
+    }
 
     if (prop == &body->Tip) {
         // We changed Tip
@@ -445,6 +794,12 @@ void ViewProviderBody::updateData(const App::Property* prop)
     }
 
     PartGui::ViewProviderPart::updateData(prop);
+
+    // A member added or removed, while hidden: before a removed member's view provider goes
+    // (ops#654 P3a)
+    if (prop == &body->Group || prop == &body->Origin) {
+        updateStudioShown(this);
+    }
 }
 
 void ViewProviderBody::onChanged(const App::Property* prop)
@@ -469,6 +824,12 @@ void ViewProviderBody::onChanged(const App::Property* prop)
 
     if (prop == &Transparency) {
         ShapeAppearance.enableNotify(true);
+    }
+
+    // Hidden or shown, or "Through" on or off (applyBodyDisplay touches Visibility): the studio's
+    // sketches and datums stay shown while the Body is hidden (ops#654 P3a)
+    if (prop == &Visibility || prop == &DisplayModeBody) {
+        updateStudioShown(this);
     }
 }
 
@@ -509,11 +870,13 @@ void ViewProviderBody::applyBodyDisplay()
 
 bool ViewProviderBody::showsThrough() const
 {
-    if (DisplayModeBody.getValue() == 0) {
+    auto body = getObject<PartDesign::Body>();
+    if (body && body->isRolledBack()) {
         return true;
     }
-    auto body = getObject<PartDesign::Body>();
-    return body && body->isRolledBack();
+    // F37 (ops#640): a stopped Body shows its own Shape, the empty one, in place of its members,
+    // whose last shapes would show a part the model no longer makes (Onshape shows none)
+    return DisplayModeBody.getValue() == 0 && !isStopped();
 }
 
 bool ViewProviderBody::isEditLocked(App::Document* doc)
@@ -770,7 +1133,7 @@ void ViewProviderBody::onInEdit(const Gui::ViewProviderDocumentObject& vp)
 {
     auto body = getObject<PartDesign::Body>();
     auto obj = vp.getObject();
-    if (!body || !obj || obj == body || !body->hasObject(obj)) {
+    if (!body || !obj || obj == body) {
         return;
     }
     // A dialog's edit, not a transform (forwarded to the Body) or the face colours
@@ -781,26 +1144,59 @@ void ViewProviderBody::onInEdit(const Gui::ViewProviderDocumentObject& vp)
     if (mode != Gui::ViewProvider::Default) {
         return;
     }
+    if (!body->hasObject(obj)) {
+        // FreeCAD-CH (ops#640 rank 32, lists plan 8): a member of another Body of this Body's
+        // part studio is edited; this Body rolls back to it too, unless the dialog starts in Final
+        if (!editStartsFinal(obj)) {
+            if (auto point = studioEditPointFor(body, obj)) {
+                setEditRoll(point);
+                showStudioRollback(this, body);
+            }
+        }
+        return;
+    }
     editedMember = obj;
     // A feature's dialog starts with its preview group's "Show final result" as this parameter
     // says (TaskPreviewParameters)
-    editFinal = PartDesign::Body::isSolidFeature(obj)
-        && App::GetApplication()
-               .GetParameterGroupByPath("User parameter:BaseApp/Preferences/Mod/PartDesign/Preview")
-               ->GetBool("ShowFinal", false);
+    editFinal = editStartsFinal(obj);
     setEditRoll(editFinal ? finalPointFor(obj) : editRollPointFor(body, obj));
+    // A stopped Body shows its members again while the edit is open (isStopped)
+    updateStoppedDisplay();
 }
 
 void ViewProviderBody::onResetEdit(const Gui::ViewProviderDocumentObject& vp)
 {
     auto body = getObject<PartDesign::Body>();
-    if (!body || !editedMember || vp.getObject() != editedMember) {
+    if (!body) {
+        return;
+    }
+    // Rolled back with another Body's edit (ops#640 rank 32): only this Body has an edit roll
+    // point without a member of its own in edit
+    if (!editedMember && body->getEditRollPoint()) {
+        studioRollbacks().erase(this);
+        setEditRoll(nullptr);
+        App::Document* doc = body->getDocument();
+        if (!doc || doc->isPerformingTransaction() || doc->testStatus(App::Document::Recomputing)
+            || doc->testStatus(App::Document::Restoring) || body->isRemoving()) {
+            return;
+        }
+        // What was held and touched computes now, as for the edited Body below
+        auto touched = [](const App::DocumentObject* obj) {
+            return obj->isTouched() || obj->mustRecompute();
+        };
+        if (touched(body) || std::ranges::any_of(body->Group.getValues(), touched)) {
+            recomputeReporting(doc);
+        }
+        return;
+    }
+    if (!editedMember || vp.getObject() != editedMember) {
         return;
     }
     App::DocumentObject* member = editedMember;
     editedMember = nullptr;
     editFinal = false;
     setEditRoll(nullptr);
+    updateStoppedDisplay();
 
     // What the edit touched after the point computes now, in the edit's transaction (_resetEdit
     // commits after this signal). A sketch has committed its own "Sketch recompute" step by
@@ -832,6 +1228,22 @@ void ViewProviderBody::setEditFinal(App::DocumentObject* member, bool final)
     }
     vpb->editFinal = final;
     vpb->setEditRoll(final ? vpb->finalPointFor(member) : editRollPointFor(body, member));
+    // The studio's other Bodies follow (ops#640 rank 32): Final shows every part's end result,
+    // and leaving it rolls them back to member again
+    App::Part* studio = nullptr;
+    if (Part::BodyBase::studioOf(body, studio)) {
+        for (auto other : PartDesign::studioBodies(body->getDocument(), studio)) {
+            auto ovpb = other == body ? nullptr
+                                      : freecad_cast<ViewProviderBody*>(
+                                            Gui::Application::Instance->getViewProvider(other)
+                                        );
+            if (!ovpb || ovpb->editedMember) {
+                continue;
+            }
+            ovpb->setEditRoll(final ? nullptr : studioEditPointFor(other, member));
+            showStudioRollback(ovpb, other);
+        }
+    }
     if (!final || body->getEditRollPoint()) {
         return;
     }
@@ -1189,6 +1601,8 @@ void ViewProviderBody::show()
 {
     // Call the base version first to ensure normal behavior
     PartGui::ViewProviderPart::show();
+    // Shown again: its members show through the mode switch, not the studio's switch (ops#654)
+    updateStudioShown(this);
 
     auto* body = static_cast<PartDesign::Body*>(getObject());
 

@@ -1195,6 +1195,137 @@ class TestSketcherSolver(unittest.TestCase):
         self.assertIn((1, 3), dependent)
         self.assertNotIn((1, 1), dependent)
 
+    def slotFamily(self, name, count, extra=None):
+        """`count` slots apart from each other in one sketch, each two lines and two arcs, fully
+        constrained in itself and to the origin, with no constraint between slots (ops#640).
+        With `extra`, a function (first line, first arc) -> constraints, those are added to the
+        second slot, after all the others. No slot is constrained when `extra` is "free"."""
+        import math
+
+        sketch = self.Doc.addObject("Sketcher::SketchObject", name)
+        r, length = 1.0, 4.0
+        cons = []
+        second = None
+        for i in range(count):
+            x, y = (i % 8) * 10.0, (i // 8) * 10.0
+            l0, l1, a0, a1 = sketch.addGeometry(
+                [
+                    Part.LineSegment(App.Vector(x, y - r, 0), App.Vector(x + length, y - r, 0)),
+                    Part.LineSegment(App.Vector(x + length, y + r, 0), App.Vector(x, y + r, 0)),
+                    Part.ArcOfCircle(
+                        Part.Circle(App.Vector(x + length, y, 0), App.Vector(0, 0, 1), r),
+                        -math.pi / 2,
+                        math.pi / 2,
+                    ),
+                    Part.ArcOfCircle(
+                        Part.Circle(App.Vector(x, y, 0), App.Vector(0, 0, 1), r),
+                        math.pi / 2,
+                        3 * math.pi / 2,
+                    ),
+                ]
+            )
+            if i == 1:
+                second = (l0, a0)
+            cons += [
+                Sketcher.Constraint("Tangent", l0, 2, a0, 1),
+                Sketcher.Constraint("Tangent", a0, 2, l1, 1),
+                Sketcher.Constraint("Tangent", l1, 2, a1, 1),
+                Sketcher.Constraint("Tangent", a1, 2, l0, 1),
+                Sketcher.Constraint("Horizontal", l0),
+                Sketcher.Constraint("Equal", a0, a1),
+                Sketcher.Constraint("Radius", a0, r),
+                Sketcher.Constraint("Distance", l0, length),
+                Sketcher.Constraint("DistanceX", -1, 1, a1, 3, x),
+                Sketcher.Constraint("DistanceY", -1, 1, a1, 3, y),
+            ]
+        if extra == "free":
+            cons = []
+        elif extra:
+            cons += extra(*second)
+        if cons:
+            sketch.addConstraint(cons)
+        return sketch
+
+    def testDecoupledSlotsDiagnosedByBlocks(self):
+        """ops#640 (FSLC #49): a sketch of some size whose geometries are not all tied together
+        is diagnosed block by block (GCS::System::diagnoseByBlocks, from 200 parameters), a small
+        one whole. Both must say the same: 3 slots (whole) against 40 (blocks; 1040 parameters,
+        where the whole took the sparse QR, and 16 slots, where it took the dense one)."""
+        # free slots: every slot adds the same degrees of freedom, and all its geometry moves
+        small = self.slotFamily("FreeSmall", 3, "free")
+        self.assertEqual(small.solve(), 0)
+        perSlot = small.DoF // 3
+        self.assertEqual(small.DoF, 3 * perSlot)
+        self.assertGreater(perSlot, 0)
+        for count in (16, 40):
+            large = self.slotFamily("Free%d" % count, count, "free")
+            self.assertEqual(large.solve(), 0)
+            self.assertEqual(large.DoF, count * perSlot)
+            self.assertEqual(large.ConflictingConstraints, [])
+            self.assertEqual(large.RedundantConstraints, [])
+            moving = {geo for geo, _ in large.getGeometryWithDependentParameters()}
+            self.assertEqual(moving, set(range(4 * count)))
+
+        # fully constrained slots: nothing is free, nothing conflicts
+        for count in (3, 16, 40):
+            sketch = self.slotFamily("Fixed%d" % count, count)
+            self.assertEqual(sketch.solve(), 0)
+            self.assertEqual(sketch.DoF, 0, count)
+            self.assertEqual(sketch.ConflictingConstraints, [])
+            self.assertEqual(sketch.RedundantConstraints, [])
+            self.assertEqual(sketch.getGeometryWithDependentParameters(), [])
+            self.Doc.recompute()
+            self.assertTrue(sketch.isValid())
+            self.assertEqual(len(sketch.Shape.Wires), count)
+
+        # one slot with a degree of freedom left (no length): the others stay fixed
+        def diagnosis(count, extra):
+            sketch = self.slotFamily("Case", count, extra)
+            sketch.solve()
+            # the constraints' numbers, counted from the end: the extra ones are the last
+            total = sketch.ConstraintCount
+
+            def fromEnd(numbers):
+                return sorted(total - n for n in numbers)
+
+            result = (
+                sketch.DoF,
+                fromEnd(sketch.ConflictingConstraints),
+                fromEnd(sketch.RedundantConstraints),
+                fromEnd(sketch.PartiallyRedundantConstraints),
+            )
+            self.Doc.removeObject(sketch.Name)
+            return result
+
+        cases = {
+            # a second radius that agrees: redundant
+            "redundant": lambda line, arc: [Sketcher.Constraint("Radius", arc, 1.0)],
+            # a second radius that disagrees: a conflict
+            "conflict": lambda line, arc: [Sketcher.Constraint("Radius", arc, 2.5)],
+            # a length that disagrees and a radius that agrees
+            "both": lambda line, arc: [
+                Sketcher.Constraint("Distance", line, 7.0),
+                Sketcher.Constraint("Radius", arc, 1.0),
+            ],
+        }
+        for what, extra in cases.items():
+            whole = diagnosis(3, extra)
+            self.assertTrue(whole[1] or whole[2], what)  # the case is a conflict or a redundancy
+            for count in (16, 40):
+                # the slots in the 40's second row and beyond differ from the 3's only in place;
+                # the constraints left out are named among the second slot's ten and the extra
+                # ones, which lie at the end in neither: compare the extra ones and the counts
+                blocks = diagnosis(count, extra)
+                self.assertEqual(blocks[0], whole[0], (what, count))
+                for part in (1, 2, 3):
+                    extraCount = len(extra(0, 0))
+                    self.assertEqual(
+                        [n for n in blocks[part] if n <= extraCount],
+                        [n for n in whole[part] if n <= extraCount],
+                        (what, count, part),
+                    )
+                    self.assertEqual(len(blocks[part]), len(whole[part]), (what, count, part))
+
     def testConstraintInvalidArgsRaises(self):
         """ops#329: a constructor call that matches no form raises TypeError. The last failed
         parse left its error set, and the message's PyCXX repr then threw a C++ exception out of
@@ -1228,6 +1359,43 @@ class TestSketcherSolver(unittest.TestCase):
             self.assertIsNotNone(message)
             self.assertTrue(message.startswith("Invalid parameters"), message)
         self.assertIn("'Fixed', 0, 1", messages[0])
+
+    def testManyLoopsNameEveryVertexByItsEdgeEnds(self):
+        """ops#640: a sketch of many closed loops (150 unit squares, 600 lines). Its wires' vertices
+        come unnamed and collide on one name before the sketch names them, which the element map
+        resolves by counting; the count search is linear now, and the names are what they were.
+        Expected, from the geometry: edge i is named after geometry i alone, and each vertex after
+        the edge ends that meet at its point (the end of one line and the start of the next)."""
+        sketch = self.Doc.addObject("Sketcher::SketchObject", "ManyLoops")
+        lines = []
+        for k in range(150):
+            x, y = 2.0 * (k % 15), 2.0 * (k // 15)
+            corners = [(x, y), (x + 1, y), (x + 1, y + 1), (x, y + 1)]
+            for i in range(4):
+                a, b = corners[i], corners[(i + 1) % 4]
+                lines.append(Part.LineSegment(FreeCAD.Vector(*a, 0), FreeCAD.Vector(*b, 0)))
+        sketch.addGeometry(lines, False)
+        self.Doc.recompute()
+        self.assertTrue(sketch.isValid())
+        shape = sketch.Shape
+        self.assertEqual(len(shape.Edges), 600)
+        self.assertEqual(len(shape.Vertexes), 600)
+        self.assertEqual(len(shape.Wires), 150)
+
+        ends = {}
+        for i, line in enumerate(lines, start=1):
+            for end, point in ((1, line.StartPoint), (2, line.EndPoint)):
+                ends.setdefault((round(point.x, 6), round(point.y, 6)), []).append(f"g{i}v{end}")
+        tag = sketch.ID
+        expected = {f"g{i};_;{tag};SKT;0;E;0;SRC;_" for i in range(1, 601)}
+        for i, vertex in enumerate(shape.Vertexes, start=1):
+            point = vertex.Point
+            ids = ",".join(sorted(ends[(round(point.x, 6), round(point.y, 6))]))
+            name = f"{ids};_;{tag};SKT;0;V;0;SRC;_"
+            self.assertEqual(shape.getElementMappedName(f"Vertex{i}"), name)
+            expected.add(name)
+        self.assertEqual(len(expected), 1200)
+        self.assertEqual(set(shape.ElementMap), expected)
 
     def tearDown(self):
         # closing doc

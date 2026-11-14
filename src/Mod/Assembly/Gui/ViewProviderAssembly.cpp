@@ -23,6 +23,9 @@
 
 
 #include <boost/core/ignore_unused.hpp>
+#include <QApplication>
+#include <QKeyEvent>
+#include <QLineEdit>
 #include <QMessageBox>
 #include <QTimer>
 #include <QMenu>
@@ -40,17 +43,27 @@
 
 
 #include <chrono>
+#include <functional>
+#include <memory>
+#include <numbers>
 #include <set>
+#include <utility>
 #include <algorithm>
 #include <iterator>
 #include <Inventor/SoPath.h>
+#include <Inventor/SoPickedPoint.h>
 #include <Inventor/details/SoDetail.h>
 
 #include <App/Link.h>
 #include <App/Document.h>
 #include <App/DocumentObject.h>
+#include <App/ExpressionParser.h>
 #include <App/Part.h>
+#include <App/GeoFeature.h>
+#include <App/Services.h>
+#include <Base/ServiceProvider.h>
 
+#include <Base/Quantity.h>
 #include <Base/Tools.h>
 
 #include <Gui/ActionFunction.h>
@@ -58,6 +71,11 @@
 #include <Gui/BitmapFactory.h>
 #include <Gui/CommandT.h>
 #include <Gui/Control.h>
+#include <Gui/TaskView/TaskView.h>
+#include <Gui/Workbench.h>
+#include <Gui/WorkbenchManager.h>
+#include <Gui/Inventor/Draggers/SoLinearDragger.h>
+#include <Gui/Inventor/Draggers/SoRotationDragger.h>
 #include <Gui/Inventor/Draggers/SoTransformDragger.h>
 #include <Gui/MDIView.h>
 #include <Gui/MainWindow.h>
@@ -84,6 +102,87 @@
 
 using namespace Assembly;
 using namespace AssemblyGui;
+
+namespace
+{
+// FreeCAD-CH (ops#640, C8): the value box beside the triad. Enter applies the typed value and keeps
+// the box open for the next one (GC-T2); Esc closes it and keeps the move. Neither key reaches the
+// 3D view, whose Esc would leave the assembly's edit.
+class TriadValueBox: public QLineEdit
+{
+public:
+    explicit TriadValueBox(QWidget* parent)
+        : QLineEdit(parent)
+    {}
+    std::function<void()> onEnter;
+    std::function<void()> onEscape;
+
+protected:
+    void keyPressEvent(QKeyEvent* event) override
+    {
+        if (event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter) {
+            if (onEnter) {
+                onEnter();
+            }
+            event->accept();
+            return;
+        }
+        if (event->key() == Qt::Key_Escape) {
+            if (onEscape) {
+                onEscape();
+            }
+            event->accept();
+            return;
+        }
+        QLineEdit::keyPressEvent(event);
+    }
+};
+
+// The triad's drags are smooth: the dragger rounds each move to whole increments, so they are made
+// small (the typed value is the exact one). The dragger's defaults (1 mm, 22.5 degrees) come back
+// when the triad is put away, for the other users of this dragger (the exploded view's).
+constexpr double triadTranslationIncrement = 1e-4;  // mm
+constexpr double triadRotationIncrement = 1e-5;     // radians
+constexpr double defaultTranslationIncrement = 1.0;
+constexpr double defaultRotationIncrement = std::numbers::pi / 8.0;
+
+Base::Vector3d triadAxis(int index)
+{
+    return Base::Vector3d(index == 0 ? 1.0 : 0.0, index == 1 ? 1.0 : 0.0, index == 2 ? 1.0 : 0.0);
+}
+
+// The triad's child draggers and the handle each one is
+const std::vector<std::pair<const char*, AssemblyGui::ViewProviderAssembly::TriadHandle>>& triadParts()
+{
+    using H = AssemblyGui::ViewProviderAssembly::TriadHandle;
+    static const std::vector<std::pair<const char*, H>> parts {
+        {"xTranslatorDragger", H::TranslateX},
+        {"yTranslatorDragger", H::TranslateY},
+        {"zTranslatorDragger", H::TranslateZ},
+        {"xRotatorDragger", H::RotateX},
+        {"yRotatorDragger", H::RotateY},
+        {"zRotatorDragger", H::RotateZ},
+        {"xyPlanarTranslatorDragger", H::Plane},
+        {"yzPlanarTranslatorDragger", H::Plane},
+        {"zxPlanarTranslatorDragger", H::Plane},
+    };
+    return parts;
+}
+
+// The dragger that handles a triad part's drags: the arrows and rings are containers (interaction
+// kits, not draggers) holding it as their "dragger" part; the plane squares are draggers themselves
+SoDragger* triadPartDragger(Gui::SoTransformDragger* triad, const char* name)
+{
+    SoNode* part = triad ? triad->getPart(name, false) : nullptr;
+    if (auto* linear = dynamic_cast<Gui::SoLinearDraggerContainer*>(part)) {
+        return linear->getDragger();
+    }
+    if (auto* rotation = dynamic_cast<Gui::SoRotationDraggerContainer*>(part)) {
+        return rotation->getDragger();
+    }
+    return dynamic_cast<SoDragger*>(part);
+}
+}  // namespace
 
 void printPlacement(Base::Placement plc, const char* name)
 {
@@ -129,7 +228,7 @@ ViewProviderAssembly::ViewProviderAssembly()
 ViewProviderAssembly::~ViewProviderAssembly()
 {
     m_preTransactionConn.disconnect();
-    QObject::disconnect(workbenchConnection);
+    disconnectEditSignals();
 
     updateTaskPanel(false);
 };
@@ -302,6 +401,12 @@ bool ViewProviderAssembly::setEdit(int mode)
 
         updateTaskPanel(true);
 
+        // FreeCAD-CH (ops#651): an assembly enters edit again each time its tab is activated, and
+        // a document may hold several. A connection left from an earlier edit would outlive this
+        // view provider and call it after its document is closed ("Illegal storage access" at the
+        // next workbench switch), so the edit's connections are always made afresh
+        disconnectEditSignals();
+
         auto* assembly = getObject<AssemblyObject>();
         connectSolverUpdate = assembly->signalSolverUpdate.connect([this] {
             UpdateSolverInformation();
@@ -316,11 +421,30 @@ bool ViewProviderAssembly::setEdit(int mode)
             )
         );
 
+        // FreeCAD-CH (ops#640, round 6 fixes): one connection per edit (disconnectEditSignals()
+        // above). A second setEdit (the typed tabs' switches, an edit restored after a sketch's)
+        // overwrote the handle, and the lost connection called a deleted view provider at the
+        // next workbench switch once the document was closed
         workbenchConnection = QObject::connect(
             Gui::getMainWindow(),
             &Gui::MainWindow::workbenchActivated,
             [this](const QString& name) { this->onWorkbenchActivated(name); }
         );
+
+        // FreeCAD-CH (ops#640 round 7, gap A10): the "Solver messages" panel can only join a task
+        // dialog, so it is added again each time one opens during the edit (a joint's, Insert's)
+        if (auto* taskView = Gui::Control().taskPanel()) {
+            taskViewConnection = QObject::connect(
+                taskView,
+                &Gui::TaskView::TaskView::taskUpdate,
+                [this]() {
+                    auto* workbench = Gui::WorkbenchManager::instance()->active();
+                    if (isInEditMode() && workbench && workbench->name() == "AssemblyWorkbench") {
+                        updateTaskPanel(true);
+                    }
+                }
+            );
+        }
 
         assembly->recomputeFeature(true);
 
@@ -331,6 +455,7 @@ bool ViewProviderAssembly::setEdit(int mode)
 
 void ViewProviderAssembly::unsetEdit(int mode)
 {
+    endTriadOriginPress();
     if (mode == ViewProvider::Default) {
         canStartDragging = false;
         partMoving = false;
@@ -338,6 +463,9 @@ void ViewProviderAssembly::unsetEdit(int mode)
 
         unsetDragger();
         detachSelection();
+
+        // Before the early return below: a document being closed has no active view (ops#651)
+        disconnectEditSignals();
 
         // Check if the view is still active before trying to deactivate the assembly.
         auto activeView = getDocument()->getActiveView();
@@ -358,12 +486,19 @@ void ViewProviderAssembly::unsetEdit(int mode)
 
         updateTaskPanel(false);
 
-        connectSolverUpdate.disconnect();
-        connectActivatedVP.disconnect();
-
         return;
     }
     ViewProviderPart::unsetEdit(mode);
+}
+
+void ViewProviderAssembly::disconnectEditSignals()
+{
+    QObject::disconnect(workbenchConnection);
+    workbenchConnection = {};
+    QObject::disconnect(taskViewConnection);
+    taskViewConnection = {};
+    connectSolverUpdate.disconnect();
+    connectActivatedVP.disconnect();
 }
 
 void ViewProviderAssembly::slotActivatedVP(const Gui::ViewProviderDocumentObject* vp, const char* name)
@@ -437,6 +572,10 @@ App::DocumentObject* ViewProviderAssembly::getActivePart() const
 
 bool ViewProviderAssembly::keyPressed(bool pressed, int key)
 {
+    if (key == SoKeyboardEvent::LEFT_ALT || key == SoKeyboardEvent::RIGHT_ALT) {
+        triadAltHeld = pressed;  // C10's Alt+click; the key stays the viewer's
+        return false;
+    }
     if (key == SoKeyboardEvent::ESCAPE) {
         if (isInEditMode()) {
             if (Gui::Control().activeDialog(nullptr)) {
@@ -478,8 +617,28 @@ bool ViewProviderAssembly::tryMouseMove(const SbVec2s& cursorPos, Gui::View3DInv
     if (canStartDragging) {
         canStartDragging = false;
 
+        // FreeCAD-CH (ops#640, C8): remember the triad, which getSelectedObjectsWithinAssembly()
+        // takes the moving parts from
+        triadShownBeforeMove = getDraggerVisibility();
+        triadAnchor = nullptr;
+        if (triadShownBeforeMove && !docsToMove.empty()) {
+            triadAnchor = docsToMove[0].obj;
+            if (auto* pPlc = triadAnchor->getPlacementProperty()) {
+                triadAnchorPlc = pPlc->getValue();
+            }
+        }
+
         if (enableMovement && getSelectedObjectsWithinAssembly()) {
             initMove(cursorPos, viewer);
+        }
+
+        if (triadShownBeforeMove) {
+            if (partMoving) {
+                endMoveDragger();  // back at endMove(), moved with the part
+            }
+            else {
+                restoreTriadAfterMove();
+            }
         }
     }
 
@@ -632,16 +791,41 @@ bool ViewProviderAssembly::mouseButtonPressed(
     const Gui::View3DInventorViewer* viewer
 )
 {
-    Q_UNUSED(cursorPos);
-    Q_UNUSED(viewer);
-
     if (!isInEditMode()) {
         return false;
     }
 
     // Left Mouse button ****************************************************
     if (Button == 1) {
-        if (pressed && !getDraggerVisibility()) {
+        // FreeCAD-CH (ops#640, C10): Alt (Option) + click on a point of any part, while the triad
+        // shows, moves the triad alone there (snapped to an edge's end as the Transform dialog's
+        // pick does); the selection stays, and a ring then turns the parts about that point
+        if (!pressed && triadOriginPress) {
+            endTriadOriginPress();
+            return true;
+        }
+        const bool alt = triadAltHeld
+            || QApplication::keyboardModifiers().testFlag(Qt::AltModifier);
+        if (pressed && alt && getDraggerVisibility() && !pressIsOnTriad(cursorPos, viewer)) {
+            const auto& pre = Gui::Selection().getPreselection();
+            auto* root = pre.Object.getObject();
+            if (root && pre.pSubName && *pre.pSubName) {
+                Base::Vector3d cursor(pre.x, pre.y, pre.z);
+                moveTriadOriginTo(triadOriginPick(root, pre.pSubName, cursor));
+                triadOriginPress = true;
+                // the selection root would add the clicked element on the release, before this
+                // view provider sees it: no selection until that release
+                auto* view = const_cast<Gui::View3DInventorViewer*>(viewer);
+                if (view && view->isSelectionEnabled()) {
+                    view->setSelectionEnabled(false);
+                    triadOriginViewer = view;
+                }
+                return true;
+            }
+        }
+        // FreeCAD-CH (ops#640, C8): the triad shows whenever a free instance is selected, so a press
+        // beside the triad still drags the part; a press on the triad is the dragger's.
+        if (pressed && (!getDraggerVisibility() || !pressIsOnTriad(cursorPos, viewer))) {
             // Check for double-click
             auto now = std::chrono::steady_clock::now();
             long nowMillis
@@ -791,9 +975,8 @@ bool ViewProviderAssembly::getSelectedObjectsWithinAssembly(bool addPreselection
                 if (subNames.empty()) {
                     continue;
                 }
-                if (onlySolids && subNames.back() != "") {
-                    continue;
-                }
+                // FreeCAD-CH (ops#640, C8): a face, edge or vertex picked on a free instance shows
+                // the triad too (Onshape: clicking an instance shows it, GC-T1)
 
                 App::DocumentObject* selRoot = selObj.getObject();
                 App::DocumentObject* obj = getObjFromRef(selRoot, subNamesStr);
@@ -837,7 +1020,73 @@ bool ViewProviderAssembly::getSelectedObjectsWithinAssembly(bool addPreselection
         }
     }
 
+    if (onlySolids) {
+        // FreeCAD-CH (ops#683, C4): the triad moves what the mouse drag moves (findDragMode): an
+        // ungrounded part brings the parts joined to it, a rigid group's members included (GB11)
+        addPartsJoinedToMoving();
+    }
+
     return !docsToMove.empty();
+}
+
+void ViewProviderAssembly::addPartsJoinedToMoving()
+{
+    auto* assemblyPart = getObject<AssemblyObject>();
+    if (!assemblyPart) {
+        return;
+    }
+    auto has = [this](App::DocumentObject* obj) {
+        return std::ranges::any_of(docsToMove, [obj](const MovingObject& m) { return m.obj == obj; });
+    };
+    // A rigid group is no joint: the mouse drag's solve moves its other members after the moved one
+    // (AssemblyObject::syncActiveRigidGroupPlacements); the triad, which doesn't solve, takes them here
+    const auto rigidGroups = assemblyPart->getRigidGroups();
+    for (size_t i = 0; i < docsToMove.size(); ++i) {
+        App::DocumentObject* member = docsToMove[i].obj;
+        const std::string name = member->getNameInDocument();
+        const std::string& sub = docsToMove[i].sub;
+        // the picked member's path in the selection, for its partners' ("A.Face6" -> "B.")
+        size_t at = sub.rfind("." + name + ".");
+        std::string prefix = at == std::string::npos ? std::string() : sub.substr(0, at + 1);
+        App::DocumentObject* selRoot = docsToMove[i].rootObj;
+        for (auto* group : rigidGroups) {
+            auto* prop = dynamic_cast<App::PropertyLinkList*>(
+                group ? group->getPropertyByName("ObjectsToRigidGroup") : nullptr
+            );
+            const auto members = prop ? prop->getValues() : std::vector<App::DocumentObject*>();
+            if (std::ranges::find(members, member) == members.end()) {
+                continue;
+            }
+            for (auto* other : members) {
+                auto* pPlc = other ? other->getPlacementProperty() : nullptr;
+                if (!pPlc || has(other)) {
+                    continue;
+                }
+                docsToMove.emplace_back(
+                    other,
+                    pPlc->getValue(),
+                    selRoot,
+                    prefix + other->getNameInDocument() + "."
+                );
+            }
+        }
+    }
+
+    const size_t picked = docsToMove.size();
+    for (size_t i = 0; i < picked; ++i) {
+        for (auto& partRef : assemblyPart->getDownstreamParts(docsToMove[i].obj, nullptr)) {
+            if (!partRef.obj || !partRef.ref || has(partRef.obj)) {
+                continue;
+            }
+            auto* pPlc = partRef.obj->getPlacementProperty();
+            App::DocumentObject* selRoot = partRef.ref->getValue();
+            std::vector<std::string> subs = partRef.ref->getSubValues();
+            if (!pPlc || !selRoot || subs.empty()) {
+                continue;
+            }
+            docsToMove.emplace_back(partRef.obj, pPlc->getValue(), selRoot, subs[0]);
+        }
+    }
 }
 
 void ViewProviderAssembly::collectMovableObjects(
@@ -1160,34 +1409,109 @@ void ViewProviderAssembly::endMove()
     if (moveInCommand) {
         getDocument()->commitCommand();
     }
+
+    if (triadShownBeforeMove) {
+        restoreTriadAfterMove();
+    }
 }
 
-void ViewProviderAssembly::initMoveDragger()
+void ViewProviderAssembly::restoreTriadAfterMove()
 {
+    // FreeCAD-CH (ops#640, C8): the triad comes back where it was, moved as its first part moved
+    triadShownBeforeMove = false;
+    Base::Placement at = triadShownAt(triadPlc);
+    if (triadAnchor) {
+        if (auto* pPlc = triadAnchor->getPlacementProperty()) {
+            Base::Placement delta = pPlc->getValue() * triadAnchorPlc.inverse();
+            Base::Placement asmPlc
+                = App::GeoFeature::getGlobalPlacement(getObject<AssemblyObject>());
+            delta = asmPlc * delta * asmPlc.inverse();
+            Base::Vector3d moved;
+            delta.multVec(at.getPosition(), moved);
+            at.setPosition(moved);
+        }
+    }
+    triadAnchor = nullptr;
+    if (enableMovement && getSelectedObjectsWithinAssembly(false, true)) {
+        if (getDraggerVisibility()) {
+            endMoveDragger();
+        }
+        showTriadAt(at);
+    }
+}
+
+void ViewProviderAssembly::initMoveDragger(const Base::Vector3d* pickedPoint)
+{
+    // FreeCAD-CH (ops#640, C8): Onshape's triad sits at the clicked point, aligned with the
+    // assembly's axes (GC-T1); an instance added to the selection shares the triad where it is
+    // (GC-T8). Without a picked point (a pick in the tree) it sits at the bounding box's centre.
+    Base::Placement at;
+    if (getDraggerVisibility()) {
+        at = triadShownAt(triadPlc);
+    }
+    else {
+        Base::Placement asmPlc = App::GeoFeature::getGlobalPlacement(getObject<AssemblyObject>());
+        at = Base::Placement(
+            pickedPoint ? *pickedPoint : getCenterOfBoundingBox(docsToMove),
+            asmPlc.getRotation()
+        );
+    }
+    showTriadAt(at);
+}
+
+Base::Placement ViewProviderAssembly::triadShownAt(const Base::Placement& plc) const
+{
+    // The parts' move keeps the triad's origin where it puts it; the axes are the assembly's
+    Base::Placement asmPlc = App::GeoFeature::getGlobalPlacement(getObject<AssemblyObject>());
+    return {plc.getPosition(), asmPlc.getRotation()};
+}
+
+void ViewProviderAssembly::showTriadAt(const Base::Placement& plc)
+{
+    closeTriadBox();
+    triadDragging = false;
+    triadHandle = TriadHandle::None;
     setDraggerVisibility(true);
 
-    // find the placement for the dragger.
-    App::DocumentObject* part = docsToMove[0].obj;
+    // The moving objects' plc were read when docsToMove was filled: the triad's start
+    triadPlc = plc;
+    triadShownPlc = plc;
+    draggerInitPlc = plc;
+    setDraggerPlacement(plc);
 
-    draggerInitPlc
-        = App::GeoFeature::getGlobalPlacement(part, docsToMove[0].rootObj, docsToMove[0].sub);
-    std::vector<App::DocumentObject*> listOfObjs;
-    std::vector<App::PropertyXLinkSub*> listOfRefs;
-    for (auto& movingObj : docsToMove) {
-        listOfObjs.push_back(movingObj.obj);
-        listOfRefs.push_back(movingObj.ref);
+    asmDragger->translationIncrement.setValue(triadTranslationIncrement);
+    asmDragger->rotationIncrement.setValue(triadRotationIncrement);
+
+    // Registered once, whatever showed the triad before. Start and finish on each handle's own
+    // dragger, which tells the handle; the motion on the triad's, as before.
+    setTriadCallbacks(false);
+    setTriadCallbacks(true);
+}
+
+void ViewProviderAssembly::endTriadOriginPress()
+{
+    triadOriginPress = false;
+    if (triadOriginViewer) {
+        triadOriginViewer->setSelectionEnabled(true);
     }
-    Base::Vector3d pos = getCenterOfBoundingBox(docsToMove);
-    draggerInitPlc.setPosition(pos);
-
-    setDraggerPlacement(draggerInitPlc);
-    asmDragger->addMotionCallback(draggerMotionCallback, this);
+    triadOriginViewer = nullptr;
 }
 
 void ViewProviderAssembly::endMoveDragger()
 {
+    endTriadOriginPress();
+    closeTriadBox();
+    if (triadDragging) {
+        // the selection changed in the middle of a drag: keep what was moved
+        triadDragging = false;
+        if (moveInCommand) {
+            getDocument()->commitCommand();
+        }
+    }
     if (getDraggerVisibility()) {
-        asmDragger->removeMotionCallback(draggerMotionCallback, this);
+        setTriadCallbacks(false);
+        asmDragger->translationIncrement.setValue(defaultTranslationIncrement);
+        asmDragger->rotationIncrement.setValue(defaultRotationIncrement);
         setDraggerVisibility(false);
     }
 }
@@ -1197,8 +1521,22 @@ void ViewProviderAssembly::draggerMotionCallback(void* data, SoDragger* d)
     boost::ignore_unused(d);
     auto sudoThis = static_cast<ViewProviderAssembly*>(data);
 
-    Base::Placement draggerPlc = sudoThis->getDraggerPlacement();
-    Base::Placement movePlc = draggerPlc * sudoThis->draggerInitPlc.inverse();
+    if (!sudoThis->triadDragging) {
+        // a motion without a start (should not happen): measure from here
+        sudoThis->triadDragStartPlc = sudoThis->triadPlc;
+        sudoThis->triadDragStartShown = sudoThis->triadShownPlc;
+        sudoThis->triadDragStartFields = sudoThis->getDraggerPlacement();
+    }
+
+    // The dragger's fields are single precision: take their change since the drag started and
+    // apply it to the exact placement the drag started from.
+    Base::Placement delta
+        = sudoThis->getDraggerPlacement() * sudoThis->triadDragStartFields.inverse();
+    Base::Placement triad = delta * sudoThis->triadDragStartPlc;
+    sudoThis->triadPlc = triad;
+    sudoThis->triadShownPlc = delta * sudoThis->triadDragStartShown;
+
+    Base::Placement movePlc = triad * sudoThis->draggerInitPlc.inverse();
 
     // Transform the global delta `movePlc` in case the assembly is transformed.
     Base::Placement asmPlc = App::GeoFeature::getGlobalPlacement(sudoThis->getObject<AssemblyObject>());
@@ -1214,6 +1552,384 @@ void ViewProviderAssembly::draggerMotionCallback(void* data, SoDragger* d)
             pPlc->setValue(movePlc * movingObj.plc);
         }
     }
+}
+
+void ViewProviderAssembly::setTriadCallbacks(bool on)
+{
+    if (!asmDragger) {
+        return;
+    }
+    if (on) {
+        asmDragger->addMotionCallback(draggerMotionCallback, this);
+    }
+    else {
+        asmDragger->removeMotionCallback(draggerMotionCallback, this);
+    }
+    for (const auto& [name, handle] : triadParts()) {
+        boost::ignore_unused(handle);
+        auto* child = triadPartDragger(asmDragger, name);
+        if (!child) {
+            continue;
+        }
+        if (on) {
+            child->addStartCallback(draggerStartCallback, this);
+            child->addFinishCallback(draggerFinishCallback, this);
+        }
+        else {
+            child->removeStartCallback(draggerStartCallback, this);
+            child->removeFinishCallback(draggerFinishCallback, this);
+        }
+    }
+}
+
+void ViewProviderAssembly::draggerStartCallback(void* data, SoDragger* d)
+{
+    auto sudoThis = static_cast<ViewProviderAssembly*>(data);
+    sudoThis->beginTriadDrag(sudoThis->triadHandleOf(d));
+}
+
+void ViewProviderAssembly::draggerFinishCallback(void* data, SoDragger* d)
+{
+    boost::ignore_unused(d);
+    static_cast<ViewProviderAssembly*>(data)->endTriadDrag();
+}
+
+ViewProviderAssembly::TriadHandle ViewProviderAssembly::triadHandleOf(SoDragger* child) const
+{
+    if (!asmDragger || !child) {
+        return TriadHandle::None;
+    }
+    for (const auto& [name, handle] : triadParts()) {
+        if (child == triadPartDragger(asmDragger, name)) {
+            return handle;
+        }
+    }
+    return TriadHandle::None;
+}
+
+bool ViewProviderAssembly::pressIsOnTriad(
+    const SbVec2s& cursorPos,
+    const Gui::View3DInventorViewer* viewer
+) const
+{
+    if (!viewer || !asmDragger) {
+        return false;
+    }
+    std::unique_ptr<SoPickedPoint> pp(viewer->pickPoint(cursorPos));
+    return pp && pp->getPath() && pp->getPath()->containsNode(asmDragger);
+}
+
+void ViewProviderAssembly::beginTriadDrag(TriadHandle handle)
+{
+    closeTriadBox();
+    if (triadDragging && moveInCommand) {
+        getDocument()->commitCommand();  // a start without a finish: close the earlier step
+    }
+    triadHandle = handle;
+    triadDragStartPlc = triadPlc;
+    triadDragStartShown = triadShownPlc;
+    triadDragStartFields = getDraggerPlacement();
+    triadDragging = true;
+    // One undo step per drag ("Move part", as the mouse drag's); the triad opened none before
+    if (moveInCommand) {
+        getDocument()->openCommand(tr("Move part").toStdString().c_str());
+    }
+}
+
+void ViewProviderAssembly::moveTriadTo(const Base::Placement& triad)
+{
+    if (!getDraggerVisibility()) {
+        return;
+    }
+    if (!triadDragging) {
+        triadDragStartPlc = triadPlc;
+        triadDragStartShown = triadShownPlc;
+    }
+    // as the motion callback: the shown triad's change since the drag started moves the parts
+    triadPlc = triad * triadDragStartShown.inverse() * triadDragStartPlc;
+    triadShownPlc = triad;
+    if (!triadDragging) {
+        // a move outside a drag: back on the assembly's axes; the next value is measured from here
+        triadShownPlc = triadShownAt(triadPlc);
+        triadDragStartPlc = triadPlc;
+        triadDragStartShown = triadShownPlc;
+    }
+    // Setting the fields can run the motion callback, which recomputes both from the single
+    // precision fields: keep the exact ones
+    const Base::Placement exactPlc = triadPlc;
+    const Base::Placement exactShown = triadShownPlc;
+    setDraggerPlacement(triadShownPlc);
+    triadPlc = exactPlc;
+    triadShownPlc = exactShown;
+    if (!triadDragging) {
+        triadDragStartFields = getDraggerPlacement();
+    }
+
+    // The parts follow the parts' move, not the shown triad (which keeps the assembly's axes
+    // between drags, so a ring drag after typed turns would otherwise drop them)
+    Base::Placement movePlc = triadPlc * draggerInitPlc.inverse();
+    Base::Placement asmPlc = App::GeoFeature::getGlobalPlacement(getObject<AssemblyObject>());
+    if (!asmPlc.isIdentity()) {
+        movePlc = asmPlc.inverse() * movePlc * asmPlc;
+    }
+    for (auto& movingObj : docsToMove) {
+        if (auto* pPlc = movingObj.obj->getPlacementProperty()) {
+            pPlc->setValue(movePlc * movingObj.plc);
+        }
+    }
+}
+
+void ViewProviderAssembly::moveTriadOriginTo(const Base::Vector3d& point)
+{
+    if (!getDraggerVisibility()) {
+        return;
+    }
+    endTriadDrag();
+    // The parts' move starts again here: what they are at now (earlier drags and typed values
+    // of this selection included) is the new start, and the triad's move is the identity
+    for (auto& movingObj : docsToMove) {
+        if (auto* pPlc = movingObj.obj->getPlacementProperty()) {
+            movingObj.plc = pPlc->getValue();
+        }
+    }
+    Base::Placement asmPlc = App::GeoFeature::getGlobalPlacement(getObject<AssemblyObject>());
+    showTriadAt(Base::Placement(point, asmPlc.getRotation()));
+}
+
+Base::Vector3d ViewProviderAssembly::triadOriginPick(
+    App::DocumentObject* root,
+    const std::string& subName,
+    const Base::Vector3d& cursor
+) const
+{
+    auto* provider = Base::provideService<App::SubObjectPlacementProvider>();
+    if (!provider || !root) {
+        return cursor;
+    }
+    App::SubObjectT pick(root, subName.c_str());
+    auto* leaf = pick.getSubObject();
+    if (!leaf) {
+        return cursor;
+    }
+    try {
+        // as TaskTransform::referencePlacementFromSelection: the element's owner to the world
+        Base::Placement global = App::GeoFeature::getGlobalPlacement(leaf, root, subName);
+        if (auto snapped = provider->snapPosition(pick, cursor, global.toMatrix())) {
+            return *snapped;
+        }
+    }
+    catch (const Base::Exception&) {
+        // no shape to snap to: the cursor
+    }
+    return cursor;
+}
+
+void ViewProviderAssembly::endTriadDrag()
+{
+    if (!triadDragging) {
+        return;
+    }
+    triadDragging = false;
+    if (moveInCommand) {
+        getDocument()->commitCommand();
+    }
+    // The triad keeps the assembly's axes (GC-T1; after a ring turn unverified, design 4b's
+    // reading): a ring drag turned it with the part, it turns back, the part stays turned
+    triadShownPlc = triadShownAt(triadPlc);
+    setDraggerPlacement(triadShownPlc);
+    // An arrow or a ring gets the box with what it moved (GC-T2, GC-T3); a plane square none (GC-T4)
+    if (triadHandle != TriadHandle::None && triadHandle != TriadHandle::Plane) {
+        openTriadBox();
+    }
+}
+
+double ViewProviderAssembly::getTriadValue() const
+{
+    switch (triadHandle) {
+        case TriadHandle::TranslateX:
+        case TriadHandle::TranslateY:
+        case TriadHandle::TranslateZ: {
+            int i = static_cast<int>(triadHandle) - static_cast<int>(TriadHandle::TranslateX);
+            Base::Vector3d axis = triadDragStartShown.getRotation().multVec(triadAxis(i));
+            return (triadPlc.getPosition() - triadDragStartPlc.getPosition()) * axis;
+        }
+        case TriadHandle::RotateX:
+        case TriadHandle::RotateY:
+        case TriadHandle::RotateZ: {
+            int i = static_cast<int>(triadHandle) - static_cast<int>(TriadHandle::RotateX);
+            Base::Vector3d axis = triadDragStartShown.getRotation().multVec(triadAxis(i));
+            Base::Rotation rel
+                = triadPlc.getRotation() * triadDragStartPlc.getRotation().inverse();
+            Base::Vector3d relAxis;
+            double angle = 0.0;
+            rel.getRawValue(relAxis, angle);
+            if (relAxis * axis < 0) {
+                angle = -angle;
+            }
+            // (-180, 180]
+            while (angle > std::numbers::pi) {
+                angle -= 2 * std::numbers::pi;
+            }
+            while (angle <= -std::numbers::pi) {
+                angle += 2 * std::numbers::pi;
+            }
+            return Base::toDegrees(angle);
+        }
+        default:
+            return 0.0;
+    }
+}
+
+Base::Placement ViewProviderAssembly::triadTarget(TriadHandle handle, double value) const
+{
+    // Along or about the handle's axis as the triad showed it when the drag started
+    Base::Placement start = triadDragStartPlc;
+    Base::Rotation axes = triadDragStartShown.getRotation();
+    switch (handle) {
+        case TriadHandle::TranslateX:
+        case TriadHandle::TranslateY:
+        case TriadHandle::TranslateZ: {
+            int i = static_cast<int>(handle) - static_cast<int>(TriadHandle::TranslateX);
+            Base::Vector3d axis = axes.multVec(triadAxis(i));
+            return {start.getPosition() + axis * value, start.getRotation()};
+        }
+        case TriadHandle::RotateX:
+        case TriadHandle::RotateY:
+        case TriadHandle::RotateZ: {
+            // about the handle's axis through the triad's origin (GC-T3)
+            int i = static_cast<int>(handle) - static_cast<int>(TriadHandle::RotateX);
+            Base::Vector3d axis = axes.multVec(triadAxis(i));
+            Base::Rotation turn(axis, Base::toRadians(value));
+            return {start.getPosition(), turn * start.getRotation()};
+        }
+        default:
+            return start;
+    }
+}
+
+bool ViewProviderAssembly::applyTriadValue(const std::string& text)
+{
+    if (triadHandle == TriadHandle::None || triadHandle == TriadHandle::Plane
+        || !getDraggerVisibility()) {
+        return false;
+    }
+    bool rotation = triadHandle == TriadHandle::RotateX || triadHandle == TriadHandle::RotateY
+        || triadHandle == TriadHandle::RotateZ;
+
+    // An expression, evaluated once (`10 mm + 5 mm`, `#name`); nothing is stored (GC-T2)
+    double value = 0.0;
+    try {
+        App::ExpressionPtr expr = App::Expression::parse(getObject(), text);
+        if (!expr) {
+            throw Base::ValueError("empty");
+        }
+        std::unique_ptr<App::Expression> result(expr->eval());
+        auto* number = freecad_cast<App::NumberExpression*>(result.get());
+        if (!number) {
+            throw Base::ValueError("not a number");
+        }
+        const Base::Quantity& q = number->getQuantity();
+        const Base::Unit wanted = rotation ? Base::Unit::Angle : Base::Unit::Length;
+        if (!q.isDimensionless() && q.getUnit() != wanted) {
+            throw Base::ValueError("wrong unit");
+        }
+        value = q.getValue();  // mm or degrees; a bare number is taken in those
+    }
+    catch (const Base::Exception&) {
+        if (triadBox) {
+            triadBox->setStyleSheet(QStringLiteral("color: red;"));
+        }
+        return false;
+    }
+
+    // The typed value replaces the move, measured from where the drag started (GC-T2), in an undo
+    // step of its own (Ctrl+Z goes back one typed value at a time)
+    if (moveInCommand) {
+        getDocument()->openCommand(tr("Move part").toStdString().c_str());
+    }
+    Base::Placement start = triadDragStartPlc;
+    Base::Placement target = triadTarget(triadHandle, value);
+    triadPlc = target;
+    triadShownPlc = triadShownAt(target);
+    setDraggerPlacement(triadShownPlc);
+    Base::Placement movePlc = target * draggerInitPlc.inverse();
+    Base::Placement asmPlc = App::GeoFeature::getGlobalPlacement(getObject<AssemblyObject>());
+    if (!asmPlc.isIdentity()) {
+        movePlc = asmPlc.inverse() * movePlc * asmPlc;
+    }
+    for (auto& movingObj : docsToMove) {
+        if (auto* pPlc = movingObj.obj->getPlacementProperty()) {
+            pPlc->setValue(movePlc * movingObj.plc);
+        }
+    }
+    triadDragStartPlc = start;  // the next value is measured from the same start
+    if (moveInCommand) {
+        getDocument()->commitCommand();
+    }
+    if (triadBox) {
+        triadBox->setStyleSheet(QString());
+        triadBox->selectAll();
+    }
+    return true;
+}
+
+void ViewProviderAssembly::openTriadBox()
+{
+    closeTriadBox();
+    auto* view = dynamic_cast<Gui::View3DInventor*>(getDocument()->getActiveView());
+    if (!view) {
+        return;
+    }
+    Gui::View3DInventorViewer* viewer = view->getViewer();
+    QWidget* parent = viewer->parentWidget() ? viewer->parentWidget() : viewer;
+
+    bool rotation = triadHandle == TriadHandle::RotateX || triadHandle == TriadHandle::RotateY
+        || triadHandle == TriadHandle::RotateZ;
+    Base::Quantity q(getTriadValue(), rotation ? Base::Unit::Angle : Base::Unit::Length);
+
+    auto* box = new TriadValueBox(parent);
+    box->setObjectName(QStringLiteral("AssemblyTriadValue"));
+    box->setText(QString::fromStdString(q.getUserString()));
+    box->onEnter = [this, box]() { applyTriadValue(box->text().toStdString()); };
+    box->onEscape = [this]() { closeTriadBox(); };
+    box->adjustSize();
+
+    // Beside the triad's origin
+    QPoint at = viewer->toQPoint(viewer->getPointOnViewport(
+        Base::convertTo<SbVec3f>(triadPlc.getPosition())
+    ));
+    if (parent != viewer) {
+        at = viewer->mapTo(parent, at);
+    }
+    const int offset = 16;
+    int x = std::clamp(at.x() + offset, 0, std::max(0, parent->width() - box->width()));
+    int y = std::clamp(at.y() + offset, 0, std::max(0, parent->height() - box->height()));
+    box->move(x, y);
+    box->show();
+    box->raise();
+    box->setFocus();
+    box->selectAll();
+    triadBox = box;
+}
+
+void ViewProviderAssembly::closeTriadBox()
+{
+    if (triadBox) {
+        QLineEdit* box = triadBox;
+        triadBox = nullptr;
+        box->hide();
+        box->deleteLater();
+    }
+}
+
+bool ViewProviderAssembly::isTriadBoxOpen() const
+{
+    return !triadBox.isNull();
+}
+
+QLineEdit* ViewProviderAssembly::getTriadBox() const
+{
+    return triadBox;
 }
 
 void ViewProviderAssembly::onSelectionChanged(const Gui::SelectionChanges& msg)
@@ -1265,7 +1981,16 @@ void ViewProviderAssembly::onSelectionChanged(const Gui::SelectionChanges& msg)
         // If selected object is a single solid show dragger and init dragger move
 
         if (enableMovement && getSelectedObjectsWithinAssembly(false, true)) {
-            initMoveDragger();
+            // FreeCAD-CH (ops#640, C8): a pick in the 3D view carries the clicked point; a
+            // scripted pick of an element with a point is taken the same way
+            std::vector<std::string> names;
+            if (msg.pSubName && *msg.pSubName) {
+                names = Base::Tools::splitSubName(msg.pSubName);
+            }
+            bool element = !names.empty() && !names.back().empty();
+            bool point = msg.hasPickedPoint || (element && (msg.x != 0 || msg.y != 0 || msg.z != 0));
+            Base::Vector3d picked(msg.x, msg.y, msg.z);
+            initMoveDragger(point ? &picked : nullptr);
         }
     }
     if (msg.Type == Gui::SelectionChanges::ClrSelection
@@ -1811,8 +2536,40 @@ void ViewProviderAssembly::UpdateSolverInformation()
     bool hasRedundancies = assembly->getLastHasRedundancies();
     bool hasMalformed = assembly->getLastHasMalformedConstraints();
 
+    // FreeCAD-CH (ops#640, rank 60; Onshape hands-on E3): a joint the solve found redundant
+    // carries an error mark in the tree (JointObject's getOverlayIcons reads RedundantJoints), so
+    // every joint's icon is redrawn after each solve
+    if (auto* jointGroup = assembly->getJointGroup()) {
+        for (auto* joint : jointGroup->getObjects()) {
+            if (auto* vp = Gui::Application::Instance->getViewProvider(joint)) {
+                vp->signalChangeIcon();
+            }
+        }
+    }
+
+    // FreeCAD-CH (ops#640 round 7, gaps A10, A11): the joints in error (a pick whose face is gone)
+    // first, as Onshape's red mates: the solve leaves them out, so they are named here, never
+    // dropped silently; the link selects them in the tree
+    std::vector<std::string> errorJoints;
+    if (auto* jointGroup = assembly->getJointGroup()) {
+        for (auto* joint : jointGroup->getObjects()) {
+            auto* suppressed = dynamic_cast<App::PropertyBool*>(joint->getPropertyByName("Suppressed"));
+            if (joint->isError() && !(suppressed && suppressed->getValue())) {
+                errorJoints.emplace_back(joint->getNameInDocument());
+            }
+        }
+    }
+
     if (assembly->isEmpty()) {
         signalSetUp(QStringLiteral("empty"), tr("Empty Assembly"), QString(), QString());
+    }
+    else if (!errorJoints.empty()) {
+        signalSetUp(
+            QStringLiteral("joints_in_error"),
+            tr("Joints in error:") + QLatin1String(" "),
+            QStringLiteral("#errors"),
+            QStringLiteral("(%1)").arg(objListHelper(assembly, errorJoints))
+        );
     }
     else if (dofs < 0 || /*hasConflicts*/ hasRedundancies) {  // over-constrained
         // Currently the solver does not distinguish between conflicts and redundancies.
@@ -1822,9 +2579,10 @@ void ViewProviderAssembly::UpdateSolverInformation()
                     QStringLiteral("(%1)").arg(objListHelper(assembly,
            assembly->getLastConflicting())));*/
         // So for now we report like follows:
+        // Onshape's words for it (hands-on E3: "Mate overdefines the assembly")
         signalSetUp(
             QStringLiteral("conflicting_constraints"),
-            tr("Over-constrained:") + QLatin1String(" "),
+            tr("Joints overdefine the assembly:") + QLatin1String(" "),
             QStringLiteral("#conflicting"),
             QStringLiteral("(%1)").arg(objListHelper(assembly, assembly->getLastRedundant()))
         );
@@ -1887,13 +2645,30 @@ void ViewProviderAssembly::updateTaskPanel(bool show)
         return;
     }
 
-    if (show && !taskSolver) {
+    // FreeCAD-CH (R7A-1): nothing to do, and the object isn't read. The destructor calls this,
+    // maybe after its object is gone (a deleted assembly's undo step, dropped at the document's
+    // close, deletes the object before its view provider)
+    if (show == !taskSolver.isNull()) {
+        return;
+    }
+
+    // FreeCAD-CH (ops#640 round 7): the panel joins the document's task dialog when there is one;
+    // made while none is open it would never be shown, so it is made only when it can join
+    if (show) {
+        App::Document* doc = this->getObject()->getDocument();
+        if (!Gui::Control().activeDialog(doc)) {
+            return;
+        }
         taskSolver = new TaskAssemblyMessages(this);
-        taskView->addContextualPanel(taskSolver, this->getObject()->getDocument());
+        taskSolverDoc = doc;
+        taskView->addContextualPanel(taskSolver, doc);
         UpdateSolverInformation();
     }
-    else if (!show && taskSolver) {
-        taskView->removeContextualPanel(taskSolver, this->getObject()->getDocument());
+    else {
+        // The document it joined, kept when it was added (R7A-1: no getObject() on this path);
+        // the task view's key only, never dereferenced
+        taskView->removeContextualPanel(taskSolver, taskSolverDoc);
         taskSolver = nullptr;
+        taskSolverDoc = nullptr;
     }
 }

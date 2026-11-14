@@ -28,6 +28,7 @@
 #include <Geom_TrimmedCurve.hxx>
 
 #include <App/Document.h>
+#include <App/DocumentObjectPy.h>
 #include <Base/AxisPy.h>
 #include <Base/QuantityPy.h>
 #include <Base/Tools.h>
@@ -61,7 +62,13 @@ PyObject* SketchObjectPy::solve(PyObject* args)
     if (!PyArg_ParseTuple(args, "")) {
         return nullptr;
     }
-    int ret = this->getSketchObjectPtr()->solve();
+    SketchObject* sketch = this->getSketchObjectPtr();
+    int ret = sketch->solve();
+    // FreeCAD-CH (ops#640): a conflict solved around still reports its code (the geometry of the
+    // rest is solved and written)
+    if (ret == 0 && sketch->getLastSolvedAroundConflict()) {
+        ret = sketch->getLastHasConflicts() ? (sketch->getLastDoF() < 0 ? -4 : -3) : -2;
+    }
     return Py_BuildValue("i", ret);
 }
 
@@ -628,21 +635,25 @@ PyObject* SketchObjectPy::addExternal(PyObject* args)
     char* SubName = nullptr;
     PyObject* defining = Py_False;
     PyObject* intersection = Py_False;
+    PyObject* implicit = Py_False;
     if (!PyArg_ParseTuple(
             args,
-            "ss|O!O!",
+            "ss|O!O!O!",
             &ObjectName,
             &SubName,
             &PyBool_Type,
             &defining,
             &PyBool_Type,
-            &intersection
+            &intersection,
+            &PyBool_Type,
+            &implicit
         )) {
         return nullptr;
     }
 
     bool isDefining = Base::asBoolean(defining);
     bool isIntersection = Base::asBoolean(intersection);
+    bool isImplicit = Base::asBoolean(implicit);
 
     // get the target object for the external link
     Sketcher::SketchObject* skObj = this->getSketchObjectPtr();
@@ -662,7 +673,7 @@ PyObject* SketchObjectPy::addExternal(PyObject* args)
     }
 
     // add the external
-    if (skObj->addExternal(Obj, SubName, isDefining, isIntersection) < 0) {
+    if (skObj->addExternal(Obj, SubName, isDefining, isIntersection, isImplicit) < 0) {
         std::stringstream str;
         str << "Not able to add external shape element " << SubName;
         PyErr_SetString(PyExc_ValueError, str.str().c_str());
@@ -670,6 +681,55 @@ PyObject* SketchObjectPy::addExternal(PyObject* args)
     }
 
     Py_Return;
+}
+
+// FreeCAD-CH (Onshape's Pierce)
+PyObject* SketchObjectPy::addPierce(PyObject* args)
+{
+    int geoId = 0;
+    int pointPos = 0;
+    PyObject* object = nullptr;
+    char* subName = nullptr;
+    if (!PyArg_ParseTuple(args, "iiOs", &geoId, &pointPos, &object, &subName)) {
+        return nullptr;
+    }
+    Sketcher::SketchObject* sketch = this->getSketchObjectPtr();
+    App::DocumentObject* obj = nullptr;
+    if (PyObject_TypeCheck(object, &(App::DocumentObjectPy::Type))) {
+        obj = static_cast<App::DocumentObjectPy*>(object)->getDocumentObjectPtr();
+    }
+    else if (PyUnicode_Check(object)) {
+        obj = sketch->getDocument()->getObject(PyUnicode_AsUTF8(object));
+    }
+    if (!obj) {
+        PyErr_SetString(PyExc_ValueError, "addPierce: the edge's object is not in the document");
+        return nullptr;
+    }
+
+    int index = -1;
+    try {
+        index = sketch->addPierce(geoId, static_cast<Sketcher::PointPos>(pointPos), obj, subName);
+    }
+    catch (const Base::Exception& e) {
+        PyErr_SetString(PyExc_ValueError, e.what());
+        return nullptr;
+    }
+    // as addConstraint: the point meets the crossing inside the caller's command
+    sketch->solve();
+    if (sketch->noRecomputes) {
+        sketch->setUpSketch();
+        sketch->Constraints.touch();
+    }
+    return Py::new_reference_to(Py::Long(index));
+}
+
+PyObject* SketchObjectPy::delUnusedImplicitExternals(PyObject* args)
+{
+    if (!PyArg_ParseTuple(args, "")) {
+        return nullptr;
+    }
+    return Py::new_reference_to(
+        Py::Long(this->getSketchObjectPtr()->delUnusedImplicitExternals()));
 }
 
 PyObject* SketchObjectPy::delExternal(PyObject* args)
@@ -1608,10 +1668,13 @@ PyObject* SketchObjectPy::extend(PyObject* args)
     double increment;
     int endPoint;
     int GeoId;
+    PyObject* toBoundary = Py_False;  // FreeCAD-CH (Onshape's Extend, ops#640)
 
-    if (PyArg_ParseTuple(args, "idi", &GeoId, &increment, &endPoint)) {
-        if (this->getSketchObjectPtr()
-                ->extend(GeoId, increment, static_cast<Sketcher::PointPos>(endPoint))) {
+    if (PyArg_ParseTuple(args, "idi|O!", &GeoId, &increment, &endPoint, &PyBool_Type, &toBoundary)) {
+        auto* sketch = this->getSketchObjectPtr();
+        const auto pos = static_cast<Sketcher::PointPos>(endPoint);
+        if (Base::asBoolean(toBoundary) ? sketch->extendToBoundary(GeoId, increment, pos)
+                                        : sketch->extend(GeoId, increment, pos)) {
             std::stringstream str;
             str << "Not able to extend geometry with id : (" << GeoId << ") for increment ("
                 << increment << ") and point position (" << endPoint << ")";
@@ -1624,7 +1687,7 @@ PyObject* SketchObjectPy::extend(PyObject* args)
     PyErr_SetString(
         PyExc_TypeError,
         "extend() method accepts:\n"
-        "-- int,float,int\n"
+        "-- int,float,int[,bool]\n"
     );
     return nullptr;
 }
@@ -1632,15 +1695,22 @@ PyObject* SketchObjectPy::extend(PyObject* args)
 PyObject* SketchObjectPy::split(PyObject* args)
 {
     PyObject* pcObj;
+    PyObject* pcObj2 = nullptr;
     int GeoId;
 
-    if (!PyArg_ParseTuple(args, "iO!", &GeoId, &(Base::VectorPy::Type), &pcObj)) {
+    // FreeCAD-CH (ops#656 F3): a second point splits a whole circle into two arcs
+    if (!PyArg_ParseTuple(
+            args, "iO!|O!", &GeoId, &(Base::VectorPy::Type), &pcObj, &(Base::VectorPy::Type), &pcObj2
+        )) {
         return nullptr;
     }
 
     Base::Vector3d v1 = static_cast<Base::VectorPy*>(pcObj)->value();
     try {
-        if (this->getSketchObjectPtr()->split(GeoId, v1)) {
+        const int err = pcObj2
+            ? this->getSketchObjectPtr()->split(GeoId, v1, static_cast<Base::VectorPy*>(pcObj2)->value())
+            : this->getSketchObjectPtr()->split(GeoId, v1);
+        if (err) {
             std::stringstream str;
             str << "Not able to split curve with the given index: " << GeoId;
             PyErr_SetString(PyExc_ValueError, str.str().c_str());
@@ -1682,8 +1752,11 @@ PyObject* SketchObjectPy::addSymmetric(PyObject* args)
     PyObject* pcObj;
     int refGeoId;
     int refPosId = static_cast<int>(Sketcher::PointPos::none);
+    // FreeCAD-CH (ops#640): True links each copy to its source with Symmetric constraints, as the
+    // GUI's Mirror does
+    PyObject* linked = Py_False;
 
-    if (!PyArg_ParseTuple(args, "Oi|i", &pcObj, &refGeoId, &refPosId)) {
+    if (!PyArg_ParseTuple(args, "Oi|iO!", &pcObj, &refGeoId, &refPosId, &PyBool_Type, &linked)) {
         return nullptr;
     }
 
@@ -1697,7 +1770,12 @@ PyObject* SketchObjectPy::addSymmetric(PyObject* args)
         }
 
         int ret = this->getSketchObjectPtr()
-                      ->addSymmetric(geoIdList, refGeoId, static_cast<Sketcher::PointPos>(refPosId))
+                      ->addSymmetric(
+                          geoIdList,
+                          refGeoId,
+                          static_cast<Sketcher::PointPos>(refPosId),
+                          PyObject_IsTrue(linked) != 0
+                      )
             + 1;
 
         if (ret == -1) {

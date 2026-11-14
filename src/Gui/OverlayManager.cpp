@@ -53,6 +53,7 @@
 #include "Application.h"
 #include "BitmapFactory.h"
 #include "Control.h"
+#include "ForkKeymap.h"
 #include "MainWindow.h"
 #include "MDIView.h"
 #include "NaviCube.h"
@@ -701,7 +702,7 @@ public:
         if (naviCorner == 2 && paddedCubeSize > rectBottom.height()) {
             delta += paddedCubeSize - rectBottom.height();
         }
-        int lh = std::max(h - ofs.width() - delta, 10);
+        int lh = std::max(_left.tabWidget->fitTaskHeight(h - ofs.width() - delta), 10);
 
         _left.tabWidget->setRect(QRect(ofs.height(), ofs.width(), rect.width(), lh));
 
@@ -721,7 +722,7 @@ public:
         if (naviCorner == 3 && paddedCubeSize > rectBottom.height()) {
             delta += paddedCubeSize - rectBottom.height();
         }
-        int rh = std::max(h - ofs.width() - delta, 10);
+        int rh = std::max(_right.tabWidget->fitTaskHeight(h - ofs.width() - delta), 10);
         w -= ofs.height();
 
         _right.tabWidget->setRect(QRect(w - rect.width(), ofs.width(), rect.width(), rh));
@@ -1765,6 +1766,18 @@ bool OverlayManager::eventFilter(QObject* o, QEvent* ev)
     }
 
     switch (ev->type()) {
+        case QEvent::LayoutRequest:
+        case QEvent::Show:
+            // FreeCAD-CH (ops#640 polish P6): a Tasks panel fitted to its dialog follows its boxes
+            if ((ev->type() == QEvent::Show ? o->inherits("Gui::TaskView::TaskPanel")
+                                             : o->inherits("QSint::ActionPanel"))
+                && ForkKeymap::isOnshape()) {
+                auto tabWidget = findTabWidget(static_cast<QWidget*>(o));
+                if (tabWidget && tabWidget->count() == 1) {
+                    d->refresh();
+                }
+            }
+            break;
         case QEvent::Enter:
             if (Selection().hasPreselection() && !qobject_cast<View3DInventorViewer*>(o)
                 && !isUnderOverlay()) {

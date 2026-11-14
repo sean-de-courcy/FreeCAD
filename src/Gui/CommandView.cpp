@@ -21,6 +21,7 @@
  ***************************************************************************/
 
 #include <cstddef>
+#include <algorithm>
 #include <map>
 #include <set>
 #include <sstream>
@@ -61,6 +62,7 @@
 #include <App/Part.h>
 #include <App/Link.h>
 #include <Base/Console.h>
+#include <Base/Exception.h>
 #include <Base/Parameter.h>
 #include <Base/Tools.h>
 
@@ -176,7 +178,15 @@ bool StdOrthographicCamera::isActive()
         return false;
     }
 
-    const std::string& camera = view->getCamera();
+    // FreeCAD-CH (ops#695): getCamera() throws while the view has no camera (built or torn
+    // down); an exception from isActive() leaves the update timer and aborts FreeCAD on macOS
+    std::string camera;
+    try {
+        camera = view->getCamera();
+    }
+    catch (const Base::Exception&) {
+        return false;
+    }
     const bool mode = camera.find("OrthographicCamera") != std::string_view::npos;
     _pcAction->setChecked(mode);
 
@@ -223,7 +233,15 @@ bool StdPerspectiveCamera::isActive()
         return false;
     }
 
-    const std::string& camera = view->getCamera();
+    // FreeCAD-CH (ops#695): getCamera() throws while the view has no camera (built or torn
+    // down); an exception from isActive() leaves the update timer and aborts FreeCAD on macOS
+    std::string camera;
+    try {
+        camera = view->getCamera();
+    }
+    catch (const Base::Exception&) {
+        return false;
+    }
     const bool mode = camera.find("PerspectiveCamera") != std::string_view::npos;
     _pcAction->setChecked(mode);
 
@@ -1372,6 +1390,161 @@ void StdCmdShowObjects::activated(int iMsg)
 bool StdCmdShowObjects::isActive()
 {
     return App::GetApplication().getActiveDocument();
+}
+
+//===========================================================================
+// Std_ShowParts (FreeCAD-CH, ops#640: Onshape's "Show all parts")
+//===========================================================================
+namespace
+{
+
+/// A PartDesign Body, known by its type's name: Gui is below PartDesign
+bool isBody(const App::DocumentObject* obj)
+{
+    return obj && obj->isDerivedFrom(Base::Type::fromName("PartDesign::Body"));
+}
+
+/// A part of the studio: a Body, or a solid feature in no Body (a Part primitive, a boolean...);
+/// not a sketch, a datum, an origin's planes and axes, or a Body's features
+bool isPart(const App::DocumentObject* obj)
+{
+    if (!obj) {
+        return false;
+    }
+    if (isBody(obj)) {
+        return true;
+    }
+    if (!obj->isDerivedFrom(Base::Type::fromName("Part::Feature"))
+        || obj->isDerivedFrom(Base::Type::fromName("Part::Part2DObject"))
+        || obj->isDerivedFrom(Base::Type::fromName("Part::Datum"))) {
+        return false;
+    }
+    return !isBody(App::GeoFeatureGroupExtension::getGroupOfObject(obj));
+}
+
+/// The part a selection leads to: the Body on its path or holding the picked object, else the
+/// picked object itself when it is a part; nullptr otherwise
+App::DocumentObject* partOf(const SelectionSingleton::SelObj& sel)
+{
+    if (!sel.pObject) {
+        return nullptr;
+    }
+    std::vector<App::DocumentObject*> path = sel.pObject->getSubObjectList(sel.SubName);
+    if (path.empty()) {
+        path.push_back(sel.pObject);
+    }
+    auto body = std::find_if(path.begin(), path.end(), [](App::DocumentObject* obj) {
+        return isBody(obj);
+    });
+    if (body != path.end()) {
+        return *body;
+    }
+    App::DocumentObject* group = App::GeoFeatureGroupExtension::getGroupOfObject(path.back());
+    if (isBody(group)) {
+        return group;
+    }
+    return isPart(path.back()) ? path.back() : nullptr;
+}
+
+}  // namespace
+
+DEF_STD_CMD_A(StdCmdShowParts)
+
+StdCmdShowParts::StdCmdShowParts()
+    : Command("Std_ShowParts")
+{
+    sGroup = "Standard-View";
+    sMenuText = QT_TR_NOOP("Show all parts");
+    sToolTipText = QT_TR_NOOP(
+        "Shows the parts of the document: the bodies, each with its tip when none of its features "
+        "is shown, and the solids outside a body; not the sketches, datums, origins or a body's "
+        "other features"
+    );
+    sStatusTip = sToolTipText;
+    sWhatsThis = "Std_ShowParts";
+    sPixmap = "Std_ShowObjects";
+    eType = Alter3DView;
+}
+
+void StdCmdShowParts::activated(int iMsg)
+{
+    Q_UNUSED(iMsg);
+    Gui::Document* doc = Application::Instance->activeDocument();
+    if (!doc) {
+        return;
+    }
+    App::Document* app = doc->getDocument();
+    // a Body shown shows its tip when none of its features is shown (ViewProviderBody::show)
+    for (App::DocumentObject* obj : app->getObjects()) {
+        if (isPart(obj)) {
+            doCommand(
+                Gui,
+                "Gui.getDocument(\"%s\").getObject(\"%s\").Visibility=True",
+                app->getName(),
+                obj->getNameInDocument()
+            );
+        }
+    }
+}
+
+bool StdCmdShowParts::isActive()
+{
+    return App::GetApplication().getActiveDocument();
+}
+
+//===========================================================================
+// Std_DeletePart (FreeCAD-CH, ops#640: Onshape's "Delete part" in the 3D view's menu)
+//===========================================================================
+DEF_STD_CMD_A(StdCmdDeletePart)
+
+StdCmdDeletePart::StdCmdDeletePart()
+    : Command("Std_DeletePart")
+{
+    sGroup = "Edit";
+    sMenuText = QT_TR_NOOP("Delete part");
+    sToolTipText = QT_TR_NOOP(
+        "Deletes the parts the selected faces, edges or features belong to, as Delete on the "
+        "parts: a body gets a Delete part feature in its history (its features stay); a solid "
+        "outside a body is removed"
+    );
+    sStatusTip = sToolTipText;
+    sWhatsThis = "Std_DeletePart";
+    sPixmap = "edit-delete";
+    eType = ForEdit | NoTransaction;
+}
+
+void StdCmdDeletePart::activated(int iMsg)
+{
+    Q_UNUSED(iMsg);
+    App::Document* doc = App::GetApplication().getActiveDocument();
+    if (!doc) {
+        return;
+    }
+    std::vector<App::DocumentObject*> parts;
+    for (const auto& sel : Selection().getSelection(doc->getName(), ResolveMode::NoResolve)) {
+        App::DocumentObject* part = partOf(sel);
+        if (part && std::find(parts.begin(), parts.end(), part) == parts.end()) {
+            parts.push_back(part);
+        }
+    }
+    if (parts.empty()) {
+        return;
+    }
+    // Std_Delete on the parts selected whole: for a Body, ViewProviderBody::onDelete makes the
+    // Delete part feature (ops#635)
+    Selection().clearSelection(doc->getName());
+    for (App::DocumentObject* part : parts) {
+        Selection().addSelection(doc->getName(), part->getNameInDocument());
+    }
+    Command* del = Application::Instance->commandManager().getCommandByName("Std_Delete");
+    if (del && del->isActive()) {
+        del->invoke(0);
+    }
+}
+
+bool StdCmdDeletePart::isActive()
+{
+    return !Selection().getCompleteSelection().empty();
 }
 
 //===========================================================================
@@ -2807,8 +2980,8 @@ StdViewBoxZoom::StdViewBoxZoom()
     : Command("Std_ViewBoxZoom")
 {
     sGroup = "Standard-View";
-    sMenuText = QT_TR_NOOP("&Box Zoom");
-    sToolTipText = QT_TR_NOOP("Activates the box zoom tool");
+    sMenuText = QT_TR_NOOP("&Zoom to window");
+    sToolTipText = QT_TR_NOOP("Zooms to a window that you drag in the view");
     sWhatsThis = "Std_ViewBoxZoom";
     sStatusTip = sToolTipText;
     sPixmap = "zoom-border";
@@ -4510,8 +4683,9 @@ StdCmdSelectOther::StdCmdSelectOther()
         "in a sketch in edit, its edges, vertices and constraints.\n"
         "Step through the list with the same key (Shift to go back) or the arrow keys: each step "
         "highlights an element. Enter or a click selects the highlighted one, Esc closes the list.\n"
-        "Use its key with the cursor over the 3D view; from the menu, it lists what lies where the "
-        "menu closed (nothing with a menu bar outside the window, as on macOS)."
+        "Use its key with the cursor over the 3D view; from the 3D view's menu, it lists what lay "
+        "under the right click; from the Tools menu, what lies where the menu closed (nothing with "
+        "a menu bar outside the window, as on macOS)."
     );
     sWhatsThis = "Std_SelectOther";
     sStatusTip = sToolTipText;
@@ -4530,33 +4704,47 @@ void StdCmdSelectOther::activated(int iMsg)
         return;
     }
 
-    // The list opens at the cursor, which has to be over the 3D view itself: not over another
-    // window in front of it (a floating panel), nor over an overlay panel where it keeps the mouse.
-    // Where an overlay panel lets a click through to the view (a transparent spot, as
-    // OverlayManager decides it), it counts as the view. From the Tools menu, the cursor is where
-    // the menu closed.
-    const QPoint cursor = QCursor::pos();
-    const QPoint local = widget->mapFromGlobal(cursor);
-    auto overTheView = [widget, &cursor]() {
-        for (QWidget* under = QApplication::widgetAt(cursor); under; under = under->parentWidget()) {
-            if (under == widget) {
-                return true;
-            }
-            if (auto* overlay = qobject_cast<OverlayTabWidget*>(under)) {
-                return OverlayParams::getDockOverlayAutoMouseThrough()
-                    && overlay->testAlpha(cursor, 1) == 0;
-            }
-        }
-        return false;
-    };
-    if (!widget->rect().contains(local) || !overTheView()) {
-        return;
-    }
+    // From the 3D view's context menu, the list opens at the right click and lists what lay under
+    // it: the navigation style keeps the position while the menu lives (ops#640). From the key,
+    // it opens at the cursor, which has to be over the 3D view itself: not over another window in
+    // front of it (a floating panel), nor over an overlay panel where it keeps the mouse. Where an
+    // overlay panel lets a click through to the view (a transparent spot, as OverlayManager
+    // decides it), it counts as the view. From the Tools menu, the cursor is where the menu closed.
     const qreal devicePixelRatio = widget->devicePixelRatioF();
-    const SbVec2s point(
-        static_cast<short>(local.x() * devicePixelRatio),
-        static_cast<short>((widget->height() - local.y() - 1) * devicePixelRatio)
-    );
+    const std::optional<SbVec2s>& rightClick = viewer->navigationStyle()->getRightClickPosition();
+    QPoint cursor = QCursor::pos();
+    SbVec2s point(0, 0);
+    if (rightClick.has_value()) {
+        point = *rightClick;
+        const QPoint local(
+            static_cast<int>(point[0] / devicePixelRatio),
+            widget->height() - static_cast<int>(point[1] / devicePixelRatio) - 1
+        );
+        cursor = widget->mapToGlobal(local);
+    }
+    else {
+        const QPoint local = widget->mapFromGlobal(cursor);
+        auto overTheView = [widget, &cursor]() {
+            for (QWidget* under = QApplication::widgetAt(cursor); under;
+                 under = under->parentWidget()) {
+                if (under == widget) {
+                    return true;
+                }
+                if (auto* overlay = qobject_cast<OverlayTabWidget*>(under)) {
+                    return OverlayParams::getDockOverlayAutoMouseThrough()
+                        && overlay->testAlpha(cursor, 1) == 0;
+                }
+            }
+            return false;
+        };
+        if (!widget->rect().contains(local) || !overTheView()) {
+            return;
+        }
+        point = SbVec2s(
+            static_cast<short>(local.x() * devicePixelRatio),
+            static_cast<short>((widget->height() - local.y() - 1) * devicePixelRatio)
+        );
+    }
 
     // An edit mode with a picking of its own (a sketch in edit) lists what it would pick there
     // (PR E): nothing opens where it picks nothing, or while one of its tools runs
@@ -4612,6 +4800,9 @@ bool StdCmdSelectOther::isActive()
 namespace Gui
 {
 
+// FreeCAD-CH: the view tools, in CommandViewTools.cpp
+void CreateViewToolCommands();
+
 void CreateViewStdCommands()
 {
     // NOLINTBEGIN
@@ -4638,6 +4829,7 @@ void CreateViewStdCommands()
     rcCmdMgr.addCommand(new StdCmdAlignToSelection());
     rcCmdMgr.addCommand(new StdCmdClarifySelection());
     rcCmdMgr.addCommand(new StdCmdSelectOther());
+    rcCmdMgr.addCommand(new StdCmdDeletePart());
     rcCmdMgr.addCommand(new StdCmdViewNormal());
     rcCmdMgr.addCommand(new StdCmdClearSelection());
     rcCmdMgr.addCommand(new StdCmdIsolate());
@@ -4661,10 +4853,12 @@ void CreateViewStdCommands()
     rcCmdMgr.addCommand(new StdCmdSelectVisibleObjects());
     rcCmdMgr.addCommand(new StdCmdToggleObjects());
     rcCmdMgr.addCommand(new StdCmdShowObjects());
+    rcCmdMgr.addCommand(new StdCmdShowParts());
     rcCmdMgr.addCommand(new StdCmdHideObjects());
     rcCmdMgr.addCommand(new StdOrthographicCamera());
     rcCmdMgr.addCommand(new StdPerspectiveCamera());
     rcCmdMgr.addCommand(new StdCmdToggleClipPlane());
+    CreateViewToolCommands();
     rcCmdMgr.addCommand(new StdCmdDrawStyle());
     rcCmdMgr.addCommand(new StdCmdViewSaveCamera());
     rcCmdMgr.addCommand(new StdCmdViewRestoreCamera());

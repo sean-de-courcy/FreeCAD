@@ -51,6 +51,7 @@
 #include <BRepBuilderAPI_MakeVertex.hxx>
 #include <BRepBuilderAPI_NurbsConvert.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
+#include <BRepCheck_Analyzer.hxx>
 #include <BRepClass_FaceClassifier.hxx>
 #include <BRepClass3d_SolidClassifier.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
@@ -62,14 +63,18 @@
 #include <BOPTools_AlgoTools3D.hxx>
 #include <ElCLib.hxx>
 #include <ElSLib.hxx>
+#include <Geom_BSplineCurve.hxx>
 #include <Geom_BSplineSurface.hxx>
+#include <Geom_BezierCurve.hxx>
 #include <Geom_BezierSurface.hxx>
 #include <Geom_Circle.hxx>
+#include <Geom_Curve.hxx>
 #include <Geom_ConicalSurface.hxx>
 #include <Geom_CylindricalSurface.hxx>
 #include <Geom_ElementarySurface.hxx>
 #include <Geom_Plane.hxx>
 #include <Geom_RectangularTrimmedSurface.hxx>
+#include <Geom_TrimmedCurve.hxx>
 #include <GeomAPI_ExtremaCurveSurface.hxx>
 #include <GeomAPI_IntCS.hxx>
 #include <GeomAPI_ProjectPointOnSurf.hxx>
@@ -96,12 +101,15 @@
 #include <TopExp_Explorer.hxx>
 #include <TopLoc_Location.hxx>
 #include <TopTools_DataMapOfShapeListOfShape.hxx>
+#include <TopTools_DataMapOfShapeShape.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <TopTools_ListOfShape.hxx>
 #include <TopTools_MapOfShape.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Compound.hxx>
+#include <TopoDS_Iterator.hxx>
 
+#include <App/Datums.h>
 #include <App/Document.h>
 #include <Base/Console.h>
 #include <Base/Converter.h>
@@ -117,6 +125,7 @@
 #include "FeatureRevolved.h"
 #include "FirstContactConstruction.h"
 #include "FirstContactJumps.h"
+#include "StudioOwner.h"
 
 using namespace PartDesign;
 
@@ -132,6 +141,78 @@ const char* Revolved::SideTypesEnums[] = {"One side", "Two sides", "Symmetric", 
 
 namespace
 {
+
+// The point a side up to a vertex goes to (FreeCAD-CH ops#640 rank 21), in global coordinates:
+// the linked vertex (of a part, a sketch or a datum point), or a coordinate system's point. As
+// FeatureExtrude.cpp's, in a revolution's words
+gp_Pnt revolveUpToVertexPoint(const App::PropertyLinkSub& link)
+{
+    App::DocumentObject* ref = link.getValue();
+    if (!ref) {
+        throw Base::ValueError(QT_TRANSLATE_NOOP("Exception", "Select the vertex to revolve up to"));
+    }
+    const auto& subs = link.getSubValues();
+    if (subs.size() > 1) {
+        throw Base::ValueError(
+            QT_TRANSLATE_NOOP("Exception", "The vertex link names several elements; select one vertex")
+        );
+    }
+    const std::string sub = subs.empty() ? std::string() : subs.front();
+    App::DocumentObject* element = ref;
+    if (!sub.empty() && ref->getDocument()) {
+        if (auto named = ref->getDocument()->getObject(sub.c_str())) {
+            element = named;
+        }
+    }
+    if (auto point = freecad_cast<App::Point*>(element)) {
+        return Base::convertTo<gp_Pnt>(point->getBasePoint());
+    }
+    const TopoShape shape = Part::Feature::getTopoShape(
+        ref,
+        Part::ShapeOption::NeedSubElement | Part::ShapeOption::ResolveLink
+            | Part::ShapeOption::Transform,
+        sub.empty() ? nullptr : sub.c_str()
+    );
+    if (shape.isNull() || shape.hasSubShape(TopAbs_EDGE)
+        || shape.countSubShapes(TopAbs_VERTEX) != 1) {
+        throw Base::ValueError(
+            QT_TRANSLATE_NOOP("Exception", "Up to vertex: the reference isn't a vertex or a point")
+        );
+    }
+    return BRep_Tool::Pnt(TopoDS::Vertex(shape.getSubShape(TopAbs_VERTEX, 1)));
+}
+
+// The angle, in (0, 2 pi), by which `from` turns about `axis` (its sense) until it reaches the
+// half-plane through the axis and `target` (ops#640 rank 21)
+double angleToVertex(const gp_Ax1& axis, const gp_Pnt& from, const gp_Pnt& target)
+{
+    const gp_Vec along(axis.Direction());
+    auto radial = [&](const gp_Pnt& point) {
+        const gp_Vec offset(axis.Location(), point);
+        return offset - along * offset.Dot(along);
+    };
+    const gp_Vec start = radial(from);
+    const gp_Vec end = radial(target);
+    if (end.Magnitude() < Precision::Confusion()) {
+        throw Base::ValueError(
+            QT_TRANSLATE_NOOP("Exception", "The vertex lies on the axis: select a vertex off the axis")
+        );
+    }
+    if (start.Magnitude() < Precision::Confusion()) {
+        throw Base::ValueError("Up to vertex: the profile's centre lies on the axis");
+    }
+    double angle = std::atan2(start.Crossed(end).Dot(along), start.Dot(end));
+    if (angle < 0.0) {
+        angle += 2.0 * std::numbers::pi;
+    }
+    if (angle < Precision::Angular() || angle > 2.0 * std::numbers::pi - Precision::Angular()) {
+        throw Base::ValueError(QT_TRANSLATE_NOOP(
+            "Exception",
+            "The vertex lies in the profile's half-plane: there is nothing to revolve"
+        ));
+    }
+    return angle;
+}
 
 // Whether a side revolves up to a face (up to the first, last or a chosen face): the sweep up to
 // the face (sweepUpToFace())
@@ -2358,6 +2439,441 @@ void certifyFirstContact(
     }
 }
 
+// The curve parameters, in increasing order, where a profile edge touches the axis inside the
+// edge: within the edge's tolerance of the axis, and not within it of one of the edge's vertices.
+// A line touches the axis only at a vertex, lies on it, or crosses it (refused before).
+std::vector<double> axisTouches(const TopoDS_Edge& edge, const TopoDS_Edge& axisEdge)
+{
+    std::vector<double> touches;
+    if (BRepAdaptor_Curve(edge).GetType() == GeomAbs_Line) {
+        return touches;
+    }
+    const double tolerance = std::max(BRep_Tool::Tolerance(edge), Precision::Confusion());
+    BRepExtrema_DistShapeShape distance(edge, axisEdge);
+    if (!distance.IsDone() || distance.Value() > tolerance) {
+        return touches;
+    }
+    TopoDS_Vertex first;
+    TopoDS_Vertex last;
+    TopExp::Vertices(edge, first, last);
+    auto nearVertex = [&](const TopoDS_Vertex& vertex, const gp_Pnt& point) {
+        return !vertex.IsNull()
+            && BRep_Tool::Pnt(vertex).Distance(point)
+            <= std::max(tolerance, BRep_Tool::Tolerance(vertex));
+    };
+    for (int i = 1; i <= distance.NbSolution(); ++i) {
+        if (distance.SupportTypeShape1(i) != BRepExtrema_IsOnEdge) {
+            continue;
+        }
+        double parameter = 0.0;
+        distance.ParOnEdgeS1(i, parameter);
+        const gp_Pnt point = distance.PointOnShape1(i);
+        if (nearVertex(first, point) || nearVertex(last, point)) {
+            continue;
+        }
+        if (std::ranges::none_of(touches, [&](double t) {
+                return std::fabs(t - parameter) <= Precision::PConfusion();
+            })) {
+            touches.push_back(parameter);
+        }
+    }
+    std::ranges::sort(touches);
+    return touches;
+}
+
+// A profile edge seated on the axis: its curve (located; moved, for a circle, as below), its
+// range, and the parameters of its touches inside the edge, in increasing order
+struct EdgeSeat
+{
+    Handle(Geom_Curve) curve;
+    double start {0.0};
+    double end {0.0};
+    std::vector<double> touches;
+};
+
+// How an edge touching the axis inside it is seated, or nothing. A circle (or arc) in a plane
+// through the axis touches it where it comes nearest, within the edge's tolerance on either side.
+// One that falls short of the axis, by as little as 1e-15, turned into a face with a hole of that
+// radius at the pole and an empty solid; one that crosses it by up to its tolerance turned into
+// a sound one. So a circle that falls short, or touches exactly, is moved to cross the axis by
+// 1e-10 (an arc only while its ends stay well inside its vertices' tolerance). Other curves are
+// seated where they touch, as they are.
+std::optional<EdgeSeat> seatOf(const TopoDS_Edge& edge, const gp_Ax1& axis, const TopoDS_Edge& axisEdge)
+{
+    EdgeSeat seat;
+    seat.curve = BRep_Tool::Curve(edge, seat.start, seat.end);
+    if (seat.curve.IsNull()) {
+        return std::nullopt;
+    }
+    Handle(Geom_Curve) basis = seat.curve;
+    while (auto trimmed = Handle(Geom_TrimmedCurve)::DownCast(basis)) {
+        basis = trimmed->BasisCurve();
+    }
+    const double tolerance = std::max(BRep_Tool::Tolerance(edge), Precision::Confusion());
+    TopoDS_Vertex first;
+    TopoDS_Vertex last;
+    TopExp::Vertices(edge, first, last);
+    auto asTouched = [&]() {
+        seat.touches = axisTouches(edge, axisEdge);
+        return seat.touches.empty() ? std::nullopt : std::optional<EdgeSeat>(seat);
+    };
+    auto circle = Handle(Geom_Circle)::DownCast(basis);
+    if (circle.IsNull()) {
+        return asTouched();
+    }
+    const gp_Circ shape = circle->Circ();
+    const gp_Dir& normal = shape.Axis().Direction();
+    const gp_Vec toCentre(axis.Location(), shape.Location());
+    if (std::fabs(axis.Direction().Dot(normal)) > Precision::Angular()
+        || std::fabs(toCentre.Dot(normal)) > tolerance) {
+        return asTouched();  // not in a plane through the axis
+    }
+    const gp_Vec across = toCentre - gp_Vec(axis.Direction()) * toCentre.Dot(axis.Direction());
+    if (across.Magnitude() <= gp::Resolution()) {
+        return std::nullopt;  // centred on the axis: it crosses it (refused before)
+    }
+    const double gap = across.Magnitude() - shape.Radius();
+    if (std::fabs(gap) > tolerance) {
+        return std::nullopt;
+    }
+    const gp_Vec outward = across.Normalized();  // from the axis to the centre
+    const bool closed = first.IsSame(last);
+    double touch = ElCLib::Parameter(shape, shape.Location().Translated(-outward * shape.Radius()));
+    touch = ElCLib::InPeriod(touch, seat.start, seat.start + 2.0 * std::numbers::pi);
+    if (!closed
+        && (touch <= seat.start + Precision::PConfusion()
+            || touch >= seat.end - Precision::PConfusion())) {
+        return std::nullopt;  // nearest outside the arc
+    }
+    constexpr double crossing = 1e-10;
+    const bool moved = gap > -crossing;
+    if (moved) {
+        const gp_Vec shift = -outward * (gap + crossing);
+        if (!closed
+            && shift.Magnitude()
+                > 0.5 * std::min(BRep_Tool::Tolerance(first), BRep_Tool::Tolerance(last))) {
+            return std::nullopt;
+        }
+        seat.curve = Handle(Geom_Curve)::DownCast(seat.curve->Translated(shift));
+    }
+    const gp_Pnt point = seat.curve->Value(touch);
+    if (closed && moved) {
+        // A circle whose seam vertex is already at the touch still has to cross the axis: re-seated
+        // with a new vertex there (the vertex return below dropped the move, and a circle 1e-8
+        // short of the axis gave an empty solid, kernel-6 review T4)
+        seat.touches = {touch};
+        return seat;
+    }
+    for (const TopoDS_Vertex& vertex : {first, last}) {
+        if (!vertex.IsNull()
+            && BRep_Tool::Pnt(vertex).Distance(point)
+                <= std::max(tolerance, BRep_Tool::Tolerance(vertex))) {
+            return std::nullopt;  // at a vertex
+        }
+    }
+    seat.touches = {touch};
+    return seat;
+}
+
+// The profile with a vertex wherever it touches the axis inside an edge (P4, ops#640). A circle
+// tangent to the axis revolved into a face whose boundary met itself on the axis with no vertex
+// there: the solid passed isValid, but the boolean checker found its cap circles crossing, and
+// every fuse or cut with it gave faces that fail the shape check (the feature failed, or later
+// ones did). With a vertex there, the pinch is a pole, as a sphere's, and the booleans come out
+// exact: Onshape's case RV1 (a circle r 5 tangent to the axis, 45 degrees, added to a cylinder)
+// gives its one solid, V 1093.8233, A 594.609, F 4. A closed periodic edge (a circle) is
+// re-seated to start at its first touch, so it stays one edge; any other edge is split there.
+// The new edges are named as modified from the edge, and the new vertices as generated from it;
+// a profile that doesn't touch the axis so is returned as it is.
+TopoShape seatAxisTouches(const TopoShape& profile, const gp_Ax1& axis)
+{
+    Bnd_Box box;
+    BRepBndLib::Add(profile.getShape(), box);
+    if (box.IsVoid()) {
+        return profile;
+    }
+    const double reach = std::sqrt(box.SquareExtent()) + box.CornerMin().Distance(axis.Location())
+        + 1.0;
+    const TopoDS_Edge axisEdge = BRepBuilderAPI_MakeEdge(gp_Lin(axis), -reach, reach);
+
+    Part::ShapeMapper mapper;
+    TopTools_DataMapOfShapeListOfShape pieces;  // a touched edge (forward): its pieces, forward
+    TopTools_IndexedMapOfShape edges;
+    TopExp::MapShapes(profile.getShape(), TopAbs_EDGE, edges);
+    for (int i = 1; i <= edges.Extent(); ++i) {
+        const TopoDS_Edge edge = TopoDS::Edge(edges(i).Oriented(TopAbs_FORWARD));
+        const std::optional<EdgeSeat> seat = seatOf(edge, axis, axisEdge);
+        if (!seat) {
+            continue;
+        }
+        const Handle(Geom_Curve)& curve = seat->curve;
+        TopoDS_Vertex first;
+        TopoDS_Vertex last;
+        TopExp::Vertices(edge, first, last);
+        std::vector<double> parameters;
+        std::vector<TopoDS_Vertex> vertices;
+        auto vertexAt = [&](double t) {
+            TopoDS_Vertex vertex = BRepBuilderAPI_MakeVertex(curve->Value(t));
+            mapper.insert(Part::MappingStatus::Generated, edge, vertex);
+            return vertex;
+        };
+        if (first.IsSame(last) && curve->IsPeriodic()) {
+            // Re-seated at the first touch, the others brought into one period from it
+            const double period = curve->Period();
+            const double from = seat->touches.front();
+            parameters.push_back(from);
+            for (std::size_t k = 1; k < seat->touches.size(); ++k) {
+                parameters.push_back(ElCLib::InPeriod(seat->touches[k], from, from + period));
+            }
+            std::sort(parameters.begin() + 1, parameters.end());
+            for (double t : parameters) {
+                vertices.push_back(vertexAt(t));
+            }
+            parameters.push_back(from + period);
+            vertices.push_back(vertices.front());
+        }
+        else {
+            parameters.push_back(seat->start);
+            vertices.push_back(first);
+            for (double t : seat->touches) {
+                parameters.push_back(t);
+                vertices.push_back(vertexAt(t));
+            }
+            parameters.push_back(seat->end);
+            vertices.push_back(last);
+        }
+        TopTools_ListOfShape list;
+        for (std::size_t k = 0; k + 1 < parameters.size(); ++k) {
+            BRepBuilderAPI_MakeEdge piece(
+                curve,
+                vertices[k],
+                vertices[k + 1],
+                parameters[k],
+                parameters[k + 1]
+            );
+            if (!piece.IsDone()) {
+                // Left as it was: the booleans' own checks report what comes of it
+                list.Clear();
+                break;
+            }
+            list.Append(piece.Edge());
+        }
+        if (list.IsEmpty()) {
+            continue;
+        }
+        for (const TopoDS_Shape& piece : list) {
+            mapper.insert(Part::MappingStatus::Modified, edge, piece);
+        }
+        pieces.Bind(edge, list);
+    }
+    if (pieces.IsEmpty()) {
+        return profile;
+    }
+
+    // The faces are rebuilt in place (the profile's own location applied, as the explorer gives
+    // them, so the pieces, made from the located curves, fit), and gathered as the profile's faces
+    BRep_Builder builder;
+    std::vector<TopoDS_Shape> faces;
+    for (TopExp_Explorer xp(profile.getShape(), TopAbs_FACE); xp.More(); xp.Next()) {
+        const TopoDS_Face& face = TopoDS::Face(xp.Current());
+        bool touched = false;
+        for (TopExp_Explorer ex(face, TopAbs_EDGE); ex.More() && !touched; ex.Next()) {
+            touched = pieces.IsBound(ex.Current().Oriented(TopAbs_FORWARD));
+        }
+        if (!touched) {
+            faces.push_back(face);
+            continue;
+        }
+        const TopoDS_Face forward = TopoDS::Face(face.Oriented(TopAbs_FORWARD));
+        TopoDS_Face seated;
+        builder.MakeFace(seated, BRep_Tool::Surface(forward), BRep_Tool::Tolerance(forward));
+        TopTools_ListOfShape newEdges;
+        for (TopoDS_Iterator wires(forward); wires.More(); wires.Next()) {
+            const TopoDS_Shape& wire = wires.Value();
+            TopoDS_Wire rebuilt;
+            builder.MakeWire(rebuilt);
+            // The edges as the wire holds them (cumOri false): the wire's own orientation is set on
+            // the rebuilt wire below. Composed here as well, a sketch face's Reversed wire (as the
+            // face makers leave it) was turned twice: the face's area came out negative, its revolve
+            // inside out, and S2 stopped a base-less revolve touching the axis (F1, kernel-8)
+            for (TopoDS_Iterator it(wire, false, true); it.More(); it.Next()) {
+                const TopoDS_Shape& edge = it.Value();
+                const TopoDS_Shape forward = edge.Oriented(TopAbs_FORWARD);
+                if (!pieces.IsBound(forward)) {
+                    builder.Add(rebuilt, edge);
+                    continue;
+                }
+                for (const TopoDS_Shape& piece : pieces(forward)) {
+                    builder.Add(rebuilt, piece.Oriented(edge.Orientation()));
+                    newEdges.Append(piece);
+                }
+            }
+            rebuilt.Closed(wire.Closed());
+            rebuilt.Orientation(wire.Orientation());
+            builder.Add(seated, rebuilt);
+        }
+        BRepLib::BuildPCurveForEdgesOnPlane(newEdges, seated);
+        seated.Orientation(face.Orientation());
+        mapper.insert(Part::MappingStatus::Modified, face, seated);
+        faces.push_back(seated);
+    }
+    TopoDS_Shape shape;
+    if (faces.size() == 1 && profile.getShape().ShapeType() == TopAbs_FACE) {
+        shape = faces.front();
+    }
+    else {
+        TopoDS_Compound compound;
+        builder.MakeCompound(compound);
+        for (const TopoDS_Shape& face : faces) {
+            builder.Add(compound, face);
+        }
+        shape = compound;
+    }
+    TopoShape result(profile);
+    result.makeShapeWithElementMap(shape, mapper, {profile}, Part::OpCodes::Split);
+    return result;
+}
+
+// Whether an edge's 3D curve is a free-form one (B-spline or Bezier, under any trimming)
+bool freeFormEdge(const TopoDS_Edge& edge)
+{
+    double first = 0.0;
+    double last = 0.0;
+    Handle(Geom_Curve) curve = BRep_Tool::Curve(edge, first, last);
+    while (auto trimmed = Handle(Geom_TrimmedCurve)::DownCast(curve)) {
+        curve = trimmed->BasisCurve();
+    }
+    return !curve.IsNull()
+        && (curve->DynamicType() == STANDARD_TYPE(Geom_BSplineCurve)
+            || curve->DynamicType() == STANDARD_TYPE(Geom_BezierCurve));
+}
+
+// The profile with fresh edges in every planar face where a free-form edge ends on the axis
+// (FreeCAD-CH ops#640, Case Base #113). BRepPrimAPI_MakeRevol turned such a face, taken from a
+// solid (a rational B-spline half-ellipse cap whose chord lies on the axis), into an invalid solid
+// with no volume, and a quarter turn into the wrong volume (-0.454 for 2.681); the same curves as
+// new edges revolve right. A Groove then cut nothing and reported success. The face is rebuilt
+// on its surface from new edges and vertices made from the edges' located 3D curves; the edges,
+// vertices and face are named as modified from the old ones. Other faces are kept as they are.
+TopoShape freshAxisEdges(const TopoShape& profile, const gp_Ax1& axis)
+{
+    const gp_Lin line(axis);
+    auto onAxis = [&](const TopoDS_Vertex& vertex) {
+        return !vertex.IsNull()
+            && line.Distance(BRep_Tool::Pnt(vertex))
+            <= std::max(BRep_Tool::Tolerance(vertex), Precision::Confusion());
+    };
+    auto needsFresh = [&](const TopoDS_Face& face) {
+        TopLoc_Location location;
+        if (BRep_Tool::Surface(face, location)->DynamicType() != STANDARD_TYPE(Geom_Plane)) {
+            return false;
+        }
+        for (TopExp_Explorer ex(face, TopAbs_EDGE); ex.More(); ex.Next()) {
+            const TopoDS_Edge& edge = TopoDS::Edge(ex.Current());
+            TopoDS_Vertex first;
+            TopoDS_Vertex last;
+            TopExp::Vertices(edge, first, last);
+            if (freeFormEdge(edge) && (onAxis(first) || onAxis(last))) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    Part::ShapeMapper mapper;
+    BRep_Builder builder;
+    std::vector<TopoDS_Shape> faces;
+    bool rebuiltAny = false;
+    for (TopExp_Explorer xp(profile.getShape(), TopAbs_FACE); xp.More(); xp.Next()) {
+        const TopoDS_Face& face = TopoDS::Face(xp.Current());
+        if (!needsFresh(face)) {
+            faces.push_back(face);
+            continue;
+        }
+        TopTools_DataMapOfShapeShape vertices;  // old vertex -> new
+        TopTools_DataMapOfShapeShape edges;     // old edge (forward) -> new (forward)
+        auto freshVertex = [&](const TopoDS_Vertex& vertex) {
+            if (!vertices.IsBound(vertex)) {
+                const TopoDS_Vertex fresh = BRepBuilderAPI_MakeVertex(BRep_Tool::Pnt(vertex));
+                vertices.Bind(vertex, fresh);
+                mapper.insert(Part::MappingStatus::Modified, vertex, fresh);
+            }
+            return TopoDS::Vertex(vertices(vertex));
+        };
+        bool ok = true;
+        for (TopExp_Explorer ex(face, TopAbs_EDGE); ex.More() && ok; ex.Next()) {
+            const TopoDS_Edge edge = TopoDS::Edge(ex.Current().Oriented(TopAbs_FORWARD));
+            if (edges.IsBound(edge)) {
+                continue;
+            }
+            double first = 0.0;
+            double last = 0.0;
+            const Handle(Geom_Curve) curve = BRep_Tool::Curve(edge, first, last);  // located
+            TopoDS_Vertex v1;
+            TopoDS_Vertex v2;
+            TopExp::Vertices(edge, v1, v2);
+            if (curve.IsNull() || v1.IsNull() || v2.IsNull()) {
+                ok = false;
+                break;
+            }
+            BRepBuilderAPI_MakeEdge make(curve, freshVertex(v1), freshVertex(v2), first, last);
+            if (!make.IsDone()) {
+                ok = false;
+                break;
+            }
+            edges.Bind(edge, make.Edge());
+            mapper.insert(Part::MappingStatus::Modified, edge, make.Edge());
+        }
+        if (!ok) {
+            faces.push_back(face);  // left as it was: the tool's check below refuses what comes of it
+            continue;
+        }
+        const TopoDS_Face forward = TopoDS::Face(face.Oriented(TopAbs_FORWARD));
+        TopoDS_Face fresh;
+        builder.MakeFace(fresh, BRep_Tool::Surface(forward), BRep_Tool::Tolerance(forward));
+        TopTools_ListOfShape newEdges;
+        for (TopoDS_Iterator wires(forward); wires.More(); wires.Next()) {
+            const TopoDS_Shape& wire = wires.Value();
+            TopoDS_Wire rebuilt;
+            builder.MakeWire(rebuilt);
+            // as in seatAxisTouches(): the edges as the wire holds them, the wire's own
+            // orientation set on the rebuilt wire
+            for (TopoDS_Iterator it(wire, false, true); it.More(); it.Next()) {
+                const TopoDS_Shape& edge = it.Value();
+                const TopoDS_Shape& made = edges(edge.Oriented(TopAbs_FORWARD));
+                builder.Add(rebuilt, made.Oriented(edge.Orientation()));
+                newEdges.Append(made);
+            }
+            rebuilt.Closed(wire.Closed());
+            rebuilt.Orientation(wire.Orientation());
+            builder.Add(fresh, rebuilt);
+        }
+        BRepLib::BuildPCurveForEdgesOnPlane(newEdges, fresh);
+        fresh.Orientation(face.Orientation());
+        mapper.insert(Part::MappingStatus::Modified, face, fresh);
+        faces.push_back(fresh);
+        rebuiltAny = true;
+    }
+    if (!rebuiltAny) {
+        return profile;
+    }
+    TopoDS_Shape shape;
+    if (faces.size() == 1 && profile.getShape().ShapeType() == TopAbs_FACE) {
+        shape = faces.front();
+    }
+    else {
+        TopoDS_Compound compound;
+        builder.MakeCompound(compound);
+        for (const TopoDS_Shape& face : faces) {
+            builder.Add(compound, face);
+        }
+        shape = compound;
+    }
+    TopoShape result(profile);
+    result.makeShapeWithElementMap(shape, mapper, {profile}, Part::OpCodes::Copy);
+    return result;
+}
+
 }  // namespace
 
 Revolved::Revolved()
@@ -2509,8 +3025,12 @@ App::DocumentObjectExecReturn* Revolved::tryExecuteRevolved(Part::RevolMode revo
     // get revolve axis
     const Base::Vector3d v = Axis.getValue();
     if (v.IsNull()) {
+        // A new Revolve waits for its axis (FreeCAD-CH ops#643), and OK commits it so, in error
+        // (ops#640 H1): Onshape's words, from its red Revolve row
         return new App::DocumentObjectExecReturn(
-            QT_TRANSLATE_NOOP("Exception", "Reference axis is invalid")
+            ReferenceAxis.getValue()
+                ? QT_TRANSLATE_NOOP("Exception", "Reference axis is invalid")
+                : QT_TRANSLATE_NOOP("Exception", "Select the axis to revolve around")
         );
     }
 
@@ -2550,13 +3070,52 @@ App::DocumentObjectExecReturn* Revolved::tryExecuteRevolved(Part::RevolMode revo
     // base and the chosen faces, made together, so that the tool's face parts are still the
     // base's for the fuse or cut with it (ops#347). The sweep adds curves on surfaces to the
     // profile's edges too, which are the sketch's stored shape's: the profile is copied as well
+    // Up to part (ops#640 rank 21, Onshape's): the side stops at the first face of the part it
+    // reaches, as Up to next does at the solid before's. The part is UpToFace's object, whole
+    TopoShape partShape1 = makeTopoShape(false);
+    TopoShape partShape2 = makeTopoShape(false);
+    auto partShape = [&](const App::PropertyLinkSub& link) {
+        App::DocumentObject* part = link.getValue();
+        if (!part) {
+            throw Base::ValueError(QT_TRANSLATE_NOOP("Exception", "Select the part to revolve up to"));
+        }
+        TopoShape shape = Part::Feature::getTopoShape(
+            part,
+            Part::ShapeOption::ResolveLink | Part::ShapeOption::Transform
+        );
+        if (shape.isNull() || !shape.hasSubShape(TopAbs_FACE)) {
+            throw Base::ValueError(
+                QT_TRANSLATE_NOOP("Exception", "Up to part: the part has no faces to revolve up to")
+            );
+        }
+        shape.move(invObjLoc);
+        return shape;
+    };
+    const bool part1 = std::strcmp(Type.getValueAsString(), "UpToShape") == 0;
+    const bool part2 = twoSides && std::strcmp(Type2.getValueAsString(), "UpToShape") == 0;
+    if (part1) {
+        partShape1 = partShape(UpToFace);
+        method = RevolMethod::ToFirst;
+    }
+    if (part2) {
+        partShape2 = partShape(UpToFace2);
+        method2 = RevolMethod::ToFirst;
+    }
+    // Each side's solid to go up to the first face of: its part, or the solid before
+    const TopoShape& upToBase1 = part1 ? partShape1 : base;
+    const TopoShape& upToBase2 = part2 ? partShape2 : base;
+
+    // (a part to go up to too: its stored shape, ops#640 rank 21)
     if (revolvesUpToFace(method, revolMode) || (twoSides && revolvesUpToFace(method2, revolMode))) {
-        const std::vector<TopoShape> copies =
-            Part::FilletFallback::makerInputs({base, chosenFace, chosenFace2, sketchshape});
+        const std::vector<TopoShape> copies = Part::FilletFallback::makerInputs(
+            {base, chosenFace, chosenFace2, sketchshape, partShape1, partShape2}
+        );
         base = copies[0];
         chosenFace = copies[1];
         chosenFace2 = copies[2];
         sketchshape = copies[3];
+        partShape1 = copies[4];
+        partShape2 = copies[5];
     }
 
     const gp_Ax1 revolutionAxis(pnt, dir);
@@ -2580,6 +3139,55 @@ App::DocumentObjectExecReturn* Revolved::tryExecuteRevolved(Part::RevolMode revo
             return new App::DocumentObjectExecReturn(
                 QT_TRANSLATE_NOOP("Exception", "Revolve axis intersects the sketch")
             );
+        }
+    }
+    // A vertex where the profile touches the axis inside an edge (P4): the pinch becomes a pole
+    const TopoShape seatedProfile = seatAxisTouches(sketchshape, revolutionAxis);
+    const bool profileTouchesAxis = !seatedProfile.getShape().IsSame(sketchshape.getShape());
+    sketchshape = seatedProfile;
+    // A free-form edge ending on the axis in a face taken from a solid: fresh edges (ops#640, #113)
+    sketchshape = freshAxisEdges(sketchshape, revolutionAxis);
+    // Such a profile turned both ways from its plane is built as two sides from the plane only
+    // where the base meets the profile (below). Elsewhere the one primitive is right and keeps
+    // the revolved face whole, as Onshape does: two halves split it, and a reference to it kept
+    // one half (kernel-6 review T1)
+    const bool halvesAtProfile = profileTouchesAxis && !base.isNull() && [&]() {
+        BRepExtrema_DistShapeShape distance(sketchshape.getShape(), base.getShape());
+        return distance.IsDone()
+            && distance.Value() <= std::max(
+                   {Precision::Confusion(),
+                    largestTolerance(sketchshape.getShape()),
+                    largestTolerance(base.getShape())}
+               );
+    }();
+
+    // Up to vertex (FreeCAD-CH ops#640 rank 21, Onshape's): the side ends where the profile
+    // reaches the half-plane through the axis and the vertex, so it is the side by that angle,
+    // in the side's own sense (Flip turns the other way round). Symmetric turns each half the
+    // nearer way, both halves to the vertex's angle. The profile's first face's centre stands
+    // for the profile. Converted here, the side is then built as by an angle
+    const bool vertex1 = std::strcmp(Type.getValueAsString(), "UpToVertex") == 0;
+    const bool vertex2 = twoSides && std::strcmp(Type2.getValueAsString(), "UpToVertex") == 0;
+    if (vertex1 || vertex2) {
+        GProp_GProps props;
+        BRepGProp::SurfaceProperties(sketchshape.getSubShape(TopAbs_FACE, 1), props);
+        const gp_Pnt profileCentre = props.CentreOfMass();
+        auto vertexAngle = [&](const App::PropertyLinkSub& link, const gp_Dir& sense) {
+            gp_Pnt target = revolveUpToVertexPoint(link);
+            target.Transform(invObjLoc.Transformation());
+            return angleToVertex(gp_Ax1(pnt, sense), profileCentre, target);
+        };
+        if (vertex1) {
+            angle = vertexAngle(UpToFace, dir);
+            if (sideType == "Symmetric") {
+                // the total; each half the nearer way round
+                angle = 2.0 * std::min(angle, 2.0 * std::numbers::pi - angle);
+            }
+            method = RevolMethod::Angle;
+        }
+        if (vertex2) {
+            angle2 = vertexAngle(UpToFace2, dir.Reversed());
+            method2 = RevolMethod::Angle;
         }
     }
 
@@ -2628,6 +3236,12 @@ App::DocumentObjectExecReturn* Revolved::tryExecuteRevolved(Part::RevolMode revo
         const bool coversFullRevolution = method == RevolMethod::Angle
             && method2 == RevolMethod::Angle
             && std::fabs(combinedAngle) >= fullRevolution - Precision::Angular();
+        // A profile touching the axis, turned both ways from its plane, is built as two sides
+        // from the plane and fused (P4): turned as one primitive from one end, the profile's own
+        // place lay inside the revolved face, and a base face there (the cap the profile sits
+        // on) made the fuse wrong, silently (RV1 symmetric 90: V 1343.05 for 1096.34)
+        const bool sidesFromPlane = halvesAtProfile && angle > Precision::Angular()
+            && angle2 > Precision::Angular();
 
         if (isThroughAll || coversFullRevolution) {
             // Through all is direction-independent, so either side makes the other one
@@ -2646,7 +3260,7 @@ App::DocumentObjectExecReturn* Revolved::tryExecuteRevolved(Part::RevolMode revo
         }
         else if (
             method == RevolMethod::Angle && method2 == RevolMethod::Angle
-            && std::fabs(combinedAngle) >= Precision::Angular()
+            && std::fabs(combinedAngle) >= Precision::Angular() && !sidesFromPlane
         ) {
             // Both limits are angular, so construct the exact interval between them as one
             // primitive. Besides avoiding a boolean seam for opposite-side angles, this is
@@ -2667,7 +3281,7 @@ App::DocumentObjectExecReturn* Revolved::tryExecuteRevolved(Part::RevolMode revo
         }
         else {
             fuseSideResults = revolvesUpToFace(method, revolMode)
-                || revolvesUpToFace(method2, revolMode);
+                || revolvesUpToFace(method2, revolMode) || sidesFromPlane;
 
             // Side 1's seam is marked on each face's tool, before the tools are fused: the
             // fusion renames a start face piece that another face's tool crosses, and the mark
@@ -2677,7 +3291,7 @@ App::DocumentObjectExecReturn* Revolved::tryExecuteRevolved(Part::RevolMode revo
                 angle,
                 chosenFace,
                 sketchshape.makeElementCopy(),
-                base,
+                upToBase1,
                 pnt,
                 dir,
                 revolMode,
@@ -2691,7 +3305,7 @@ App::DocumentObjectExecReturn* Revolved::tryExecuteRevolved(Part::RevolMode revo
                 angle2,
                 chosenFace2,
                 secondSideProfile(),
-                base,
+                upToBase2,
                 pnt,
                 dir2,
                 revolMode
@@ -2701,7 +3315,35 @@ App::DocumentObjectExecReturn* Revolved::tryExecuteRevolved(Part::RevolMode revo
     else if (sideType == "Symmetric") {
         const bool isThroughAll = method == RevolMethod::ThroughAll
             && revolMode == Part::RevolMode::CutFromBase;
-        if (method == RevolMethod::Angle || isThroughAll) {
+        if (method == RevolMethod::Angle && halvesAtProfile
+            && std::fabs(angle) < 2.0 * std::numbers::pi - Precision::Angular()) {
+            // Two halves from the profile's plane, fused, as Two sides (P4, above)
+            addRevolution(generateSingleRevolutionSide(
+                method,
+                angle / 2.0,
+                chosenFace,
+                sketchshape.makeElementCopy(),
+                base,
+                pnt,
+                dir,
+                revolMode,
+                true
+            ));
+            gp_Dir dir2 = dir;
+            dir2.Reverse();
+            addRevolution(generateSingleRevolutionSide(
+                method,
+                angle / 2.0,
+                chosenFace,
+                secondSideProfile(),
+                base,
+                pnt,
+                dir2,
+                revolMode
+            ));
+            fuseSideResults = true;
+        }
+        else if (method == RevolMethod::Angle || isThroughAll) {
             generateRevolution(result, sketchshape, gp_Ax1(pnt, dir), angle, 0.0, true, false, method);
             // One solid, as Two sides by two angles
             addRevolution(std::move(result));
@@ -2730,7 +3372,7 @@ App::DocumentObjectExecReturn* Revolved::tryExecuteRevolved(Part::RevolMode revo
             };
             for (std::size_t i = 0; i < faces.size(); ++i) {
                 TopoShape upToFace
-                    = getRevolutionUpToFace(method, chosenFace, base, faces[i], axis);
+                    = getRevolutionUpToFace(method, chosenFace, upToBase1, faces[i], axis);
                 TopoShape side = tryToRevolveToFace(upToFace, axis, faces[i].makeElementCopy());
                 if (side.isNull() || side.getShape().IsNull()) {
                     continue;
@@ -2757,7 +3399,7 @@ App::DocumentObjectExecReturn* Revolved::tryExecuteRevolved(Part::RevolMode revo
             angle,
             chosenFace,
             sketchshape,
-            base,
+            upToBase1,
             pnt,
             dir,
             revolMode
@@ -2779,6 +3421,23 @@ App::DocumentObjectExecReturn* Revolved::tryExecuteRevolved(Part::RevolMode revo
     }
     else {
         result.makeElementXor(revolutions, Part::OpCodes::Revolve);
+    }
+
+    // A tool with no solid, no volume or (turned by angles) not a valid solid is refused, never
+    // applied as nothing: #113's Groove cut nothing from Case Base and reported success, where
+    // Onshape removes 2.681 (FreeCAD-CH ops#640; refuse loudly, decision 418)
+    {
+        const bool upTo = revolvesUpToFace(method, revolMode)
+            || (sideType == "Two sides" && revolvesUpToFace(method2, revolMode));
+        const TopoDS_Shape& tool = result.getShape();
+        const bool hasSolid = !tool.IsNull() && TopExp_Explorer(tool, TopAbs_SOLID).More();
+        if (!hasSolid || std::fabs(solidVolume(tool).value) <= Precision::Confusion()
+            || (!upTo && !BRepCheck_Analyzer(tool).IsValid())) {
+            return new App::DocumentObjectExecReturn(QT_TRANSLATE_NOOP(
+                "Exception",
+                "The revolution of the profile is not a valid solid: nothing was revolved"
+            ));
+        }
     }
 
     // An up-to-face tool's fuse or cut with the base gave a wrong volume where a torus's seam
@@ -2807,28 +3466,83 @@ void Revolved::setResult(const TopoShape& base, const TopoShape& revolved, bool 
     // set the additive shape property for later usage in e.g. pattern
     this->AddSubShape.setValue(result);
 
+    // FreeCAD-CH ops#654 S2: a studio owner computes only its tool, which its steps apply; its own
+    // shape stays empty, so nothing sees it as a part
+    if (runsAsStudioOwner(this)) {
+        this->rawShape = TopoShape();
+        this->Shape.setValue(TopoShape());
+        return;
+    }
+
+    // A Remove or an Intersect with nothing before it makes nothing, never its tool as material,
+    // as an Extrude's (ops#640 rank 20, H3); FeatureAddSub::recompute fails it, "Nothing to cut".
+    // No raw result: a Refine-only change recomputes fully (FeatureRefine::onlyHaveRefined)
+    if (base.isNull() && getAddSubType() == FeatureAddSub::Type::Subtractive) {
+        this->rawShape = TopoShape();
+        this->Shape.setValue(TopoShape());
+        return;
+    }
+
     if (!base.isNull()) {
         const TopoShape tool = result;
         result = makeShape(base, result);
+        // An Intersect that shares no volume with its base leaves the base as it was, healthy,
+        // with Onshape's info (hands-on R7, ops#640 H3, as an Extrude's); no raw result is kept
+        if (getBooleanOperation() == BooleanOperation::Common
+            && (result.isNull() || !result.hasSubShape(TopAbs_SOLID))) {
+            if (auto doc = getDocument(); doc && !SiblingOf.getValue()) {
+                static const std::string text = "Selected tools and targets do not intersect";
+                const char* previous = doc->getWarningDescription(this);
+                doc->setWarning(
+                    this,
+                    previous && *previous ? std::string(previous) + "\n" + text : text
+                );
+            }
+            this->rawShape = TopoShape();
+            this->Shape.setValue(base);
+            return;
+        }
         // A correct fuse holds at least the larger of the two and at most both; a correct cut at
-        // least the base less the tool and at most the base
-        if (checkVolume) {
-            const auto [baseVolume, baseError] = checkedVolume(base.getShape(), constructedTool);
-            const auto [toolVolume, toolError] = checkedVolume(tool.getShape(), constructedTool);
-            const auto [volume, error] = checkedVolume(result.getShape(), constructedTool);
-            const double slack = 1e-6 * (baseVolume + toolVolume) + baseError + toolError + error
-                + Precision::Confusion();
-            const bool fuse = volume >= std::max(baseVolume, toolVolume) - slack
-                && volume <= baseVolume + toolVolume + slack;
-            const bool cut = volume >= baseVolume - toolVolume - slack
-                && volume <= baseVolume + slack;
-            if (!(getAddSubType() == FeatureAddSub::Type::Additive ? fuse : cut)) {
+        // least the base less the tool and at most the base. Checked for every revolution, not
+        // only up to a face: a thread's cap revolved one way into the thread fused to nothing,
+        // no solid at all, Up-to-date (rehearsal 4; ops#640). Onshape builds it.
+        {
+            const bool intersects = getBooleanOperation() == BooleanOperation::Common;
+            auto withinBounds = [&](SolidVolume baseVolume, SolidVolume toolVolume, SolidVolume volume) {
+                const double slack = 1e-6 * (baseVolume.value + toolVolume.value) + baseVolume.error
+                    + toolVolume.error + volume.error + Precision::Confusion();
+                const bool fuse = volume.value
+                        >= std::max(baseVolume.value, toolVolume.value) - slack
+                    && volume.value <= baseVolume.value + toolVolume.value + slack;
+                const bool cut = volume.value >= baseVolume.value - toolVolume.value - slack
+                    && volume.value <= baseVolume.value + slack;
+                // an Intersect holds at most the smaller of the two (ops#640 rank 20)
+                const bool common = volume.value >= -slack
+                    && volume.value <= std::min(baseVolume.value, toolVolume.value) + slack;
+                return getAddSubType() == FeatureAddSub::Type::Additive ? fuse
+                    : intersects                                        ? common
+                                                                        : cut;
+            };
+            // Refused only by the adaptive integration's volumes: the default's whole-part volume
+            // can be off by more than the slack where the part has helical faces of few spans (a
+            // thread's cap revolved into its wall; ops#640 replica, rb30). Slower: only where the
+            // first measure refuses
+            auto precise = [](const TopoShape& shape) {
+                return SolidVolume {Part::MassProperties::volume(shape.getShape(), true), 0.0};
+            };
+            if (!withinBounds(
+                    checkedVolume(base.getShape(), constructedTool),
+                    checkedVolume(tool.getShape(), constructedTool),
+                    checkedVolume(result.getShape(), constructedTool)
+                )
+                && !withinBounds(precise(base), precise(tool), precise(result))) {
                 throw Base::RuntimeError(QT_TRANSLATE_NOOP(
                     "Exception",
                     "Could not combine the revolution with the base: the result's volume is wrong"
                 ));
             }
-            if (!combinedWithinTolerance(result.getShape(), base.getShape(), tool.getShape())) {
+            if (checkVolume
+                && !combinedWithinTolerance(result.getShape(), base.getShape(), tool.getShape())) {
                 throw Base::RuntimeError(QT_TRANSLATE_NOOP(
                     "Exception",
                     "Could not combine the revolution with the base: the result's edges don't meet "
@@ -3350,11 +4064,15 @@ void Revolved::updateProperties()
     const std::string method = Type.getValueAsString();
     const std::string method2 = Type2.getValueAsString();
 
+    // UpToFace holds the face, the vertex or the part (ops#640 rank 21)
+    auto upToFaceRead = [](const std::string& type) {
+        return type == "UpToFace" || type == "UpToVertex" || type == "UpToShape";
+    };
     bool isAngleEnabled = method == "Angle";
-    bool isUpToFaceEnabled = method == "UpToFace";
+    bool isUpToFaceEnabled = upToFaceRead(method);
     bool isType2Enabled = sideType == "Two sides";
     bool isAngle2Enabled = isType2Enabled && (method2 == "Angle" || isLegacyTwoAngles(method2));
-    bool isUpToFace2Enabled = isType2Enabled && method2 == "UpToFace";
+    bool isUpToFace2Enabled = isType2Enabled && upToFaceRead(method2);
 
     if (isLegacyTwoAngles(method)) {
         isAngleEnabled = true;

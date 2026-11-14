@@ -28,8 +28,20 @@
 #include "ViewProviderTransformed.h"
 #include <Mod/PartDesign/App/FeatureLinearPattern.h>
 
+#include <QPointer>
+#include <vector>
+
+class QLabel;
 class QTimer;
 class Ui_TaskPatternParameters;
+class SoEventCallback;
+class SoSeparator;
+class SbVec2s;
+
+namespace Gui
+{
+class View3DInventorViewer;
+}
 
 namespace PartGui
 {
@@ -79,6 +91,8 @@ private:
     void updateSpacingLabels();
 
     void bindProperties();
+    /// Onshape's Centered and Skip instances fields (FreeCAD-CH ops#640 rank 8)
+    void addOnshapeOptions(QWidget* widget);
 
     // Task-specific logic remains
     void showOriginAxes(bool show);
@@ -87,6 +101,28 @@ private:
 
     Base::Vector3d getStartPoint() const;
 
+    /// Onshape's info banner for a second direction parallel to the first (oracle 9j, Q-D4):
+    /// the pattern is made, its copies overlapping (FreeCAD-CH ops#655)
+    void updateParallelBanner();
+
+    /// Onshape's Skip instances dots (oracle 9j, Q-D5; FreeCAD-CH ops#655): while Skip
+    /// instances is ticked, a dot on every instance of the linear grid but the seed, counted as
+    /// SkippedInstances counts them (2n - 1 along a centered direction); hollow when skipped. A
+    /// click on a dot skips its instance or makes it again.
+    struct SkipDot
+    {
+        long i;
+        long j;
+        Base::Vector3d at;
+        bool skipped;
+    };
+    void updateSkipDots();
+    void clearSkipDots();
+    /// The dot at a viewport point, or -1
+    int skipDotAt(const SbVec2s& point) const;
+    void toggleSkipped(long i, long j);
+    static void skipDotCallback(void* data, SoEventCallback* node);
+
     PartGui::PatternParametersWidget* parametersWidget = nullptr;
     PartGui::PatternParametersWidget* parametersWidget2 = nullptr;
 
@@ -94,6 +130,13 @@ private:
 
     std::unique_ptr<Ui_TaskPatternParameters> ui;
     QTimer* updateViewTimer = nullptr;
+
+    QLabel* parallelBanner = nullptr;
+    QPointer<Gui::View3DInventorViewer> dotViewer;
+    SoSeparator* skipDots = nullptr;
+    std::vector<SkipDot> dots;
+    bool dotCallback = false;
+    bool dotPressed = false;
 };
 
 

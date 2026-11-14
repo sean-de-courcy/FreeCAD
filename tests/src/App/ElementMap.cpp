@@ -853,6 +853,58 @@ TEST_F(ElementMapTest, setElementNameDuplicateCountsV2)
     EXPECT_EQ(map->find(fromCount2), Data::IndexedName("Face", 5));
 }
 
+TEST_F(ElementMapTest, setElementNameManyDuplicatesV2)
+{
+    // Arrange
+    //   one name set on many elements, as a sketch wire's unnamed vertices get (ops#640): the
+    //   search for a free count starts past the counts known to be taken, and must give what
+    //   the search from the first count gives, also after a removal and for a name set again
+    auto map = std::make_shared<Data::ElementMap>();
+    map->hasher = _hasher;
+    const Data::MappedName name(faceName(6, 7L, 0));
+    const int count = 300;
+
+    // Act
+    std::vector<Data::MappedName> stored;
+    for (int i = 1; i <= count; ++i) {
+        stored.push_back(map->setElementName(Data::IndexedName("Face", i), name, 7L));
+    }
+    //   the same name again on elements that have one: no second name
+    const auto again1 = map->setElementName(Data::IndexedName("Face", 1), name, 7L);
+    const auto again120 = map->setElementName(Data::IndexedName("Face", 120), name, 7L);
+    const auto sizeAfterAgain = map->size();
+    //   a name that carries a count starts after it, with its own taken counts
+    const auto from100 = map->setElementName(
+        Data::IndexedName("Face", count + 1),
+        Data::MappedName(faceName(6, 7L, 100)),
+        7L
+    );
+    const auto from100Again = map->setElementName(
+        Data::IndexedName("Face", count + 2),
+        Data::MappedName(faceName(6, 7L, 100)),
+        7L
+    );
+    //   a removal frees a count: the next element takes the lowest free one
+    map->erase(Data::IndexedName("Face", 41));
+    const auto refilled = map->setElementName(Data::IndexedName("Face", count + 3), name, 7L);
+    const auto afterRefill = map->setElementName(Data::IndexedName("Face", count + 4), name, 7L);
+
+    // Assert
+    for (int i = 1; i <= count; ++i) {
+        SCOPED_TRACE(i);
+        EXPECT_EQ(stored[i - 1].toString(), faceName(6, 7L, i - 1));
+    }
+    EXPECT_EQ(again1.toString(), faceName(6, 7L, 0));
+    EXPECT_EQ(again120.toString(), faceName(6, 7L, 119));
+    EXPECT_EQ(sizeAfterAgain, static_cast<unsigned long>(count));
+    EXPECT_EQ(from100.toString(), faceName(6, 7L, count));
+    EXPECT_EQ(from100Again.toString(), faceName(6, 7L, count + 1));
+    EXPECT_EQ(refilled.toString(), faceName(6, 7L, 40));
+    EXPECT_EQ(map->find(refilled), Data::IndexedName("Face", count + 3));
+    EXPECT_EQ(afterRefill.toString(), faceName(6, 7L, count + 2));
+    EXPECT_EQ(map->find(Data::IndexedName("Face", 120)), stored[119]);
+}
+
 TEST_F(ElementMapTest, setElementNameKeepsATwinPlaceV2)
 {
     // Arrange
@@ -1759,7 +1811,7 @@ TEST_F(ElementMapTest, savedReferencesAreIndicesAndRestoreAsTheyWereV2)
     Data::ElementMapPtr fromHashed;
     {
         Data::NameRemap remap;
-        remap.load(file);
+        remap.load(file, Data::NamingFormatWritten);
         fromIndexed = std::make_shared<Data::ElementMap>()->restore(_hasher, indexed);
         fromHashed = std::make_shared<Data::ElementMap>()->restore(_hasher, hashed);
         EXPECT_EQ(remap.unknownCount(), 0U);
@@ -1826,7 +1878,7 @@ TEST_F(ElementMapTest, savedReferencesAreIndicesAndRestoreAsTheyWereV2)
         file.clear();
         file.seekg(0);
         Data::NameRemap remap;
-        remap.load(file);
+        remap.load(file, Data::NamingFormatWritten);
         splitRestored = std::make_shared<Data::ElementMap>()->restore(_hasher, splitSaved);
         EXPECT_EQ(remap.unknownCount(), 0U);
     }

@@ -1179,12 +1179,57 @@ NameRemap* NameRemap::active()
     return activeRemap;
 }
 
-NameTable::LoadSummary NameRemap::load(std::istream& stream)
+NamingFormatRead Data::namingFormatToRead(int fileWritten,
+                                    int fileOldestRead,
+                                    int readerWritten,
+                                    int readerOldestRead)
+{
+    using Verdict = NamingFormatRead::Verdict;
+    if (fileWritten == 0) {
+        return {Verdict::NoTable, 0};
+    }
+    if (fileOldestRead <= 0 || fileOldestRead > fileWritten) {
+        fileOldestRead = fileWritten;
+    }
+    if (fileWritten < readerOldestRead) {
+        return {Verdict::Unreadable, 0};  // below the reader's oldest, or no format at all
+    }
+    if (fileWritten <= readerWritten) {
+        return {Verdict::Read, fileWritten};
+    }
+    if (fileOldestRead <= readerWritten) {
+        // Newer, but the writer says a reader of the reader's newest format reads its table
+        return {Verdict::Read, readerWritten};
+    }
+    return {Verdict::NeedsNewerReader, 0};
+}
+
+bool NameRemap::readsFormat(int format)
+{
+    // The reader table: each format from NamingFormatOldestRead to NamingFormatWritten has its
+    // reader in load(), kept as it was when the format shipped.
+    switch (format) {
+        case 2:
+            return true;
+        default:
+            return false;
+    }
+}
+
+NameTable::LoadSummary NameRemap::load(std::istream& stream, int format)
 {
     if (holdsFile()) {
         FC_ERR("A second name table for one remap: refused (ops#6)");
         return {};
     }
+    if (!readsFormat(format)) {
+        FC_ERR("A name table of naming format " << format << ", which this build has no reader "
+                                                   "for: refused, its names are dropped");
+        setNewerFormat();
+        return {};
+    }
+    // Format 2 (the only one yet): references are indices into the table (T2). A later format
+    // gets its own branch here, and format 2's stays as it is.
     _loaded = true;
     std::vector<NameTable::SavedEntry> entries;
     auto summary = _table.readEntries(stream, &entries, &_byIndex);

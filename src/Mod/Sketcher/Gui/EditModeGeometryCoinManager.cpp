@@ -26,6 +26,7 @@
 
 #include <map>
 #include <memory>
+#include <set>
 
 #include <Inventor/SbVec3f.h>
 #include <Inventor/nodes/SoCoordinate3.h>
@@ -36,6 +37,7 @@
 #include <Inventor/nodes/SoSeparator.h>
 
 #include <Gui/Inventor/MarkerBitmaps.h>
+#include <Gui/ForkKeymap.h>
 #include <Gui/Inventor/SmSwitchboard.h>
 #include <Mod/Sketcher/App/Constraint.h>
 #include <Mod/Sketcher/App/GeoEnum.h>
@@ -160,6 +162,37 @@ void EditModeGeometryCoinManager::updateGeometryColor(
         return false;
     };
 
+    // FreeCAD-CH (ops#640, rank 51): under Onshape's keymap only the geometry of the constraints
+    // that overdefine the sketch (conflicting, redundant, malformed) is drawn red, as Onshape's
+    // over-defined entities are; the rest keeps its colour. Upstream's whole sketch orange stays
+    // under the other keymaps
+    const bool onlyOverdefinedRed = Gui::ForkKeymap::isOnshape();
+    std::set<int> overdefinedGeoIds;
+    if (onlyOverdefinedRed && issketchinvalid) {
+        const auto* sketch = viewProvider.getSketchObject();
+        const auto& constraints = sketch->Constraints.getValues();
+        for (const auto* numbers : {&sketch->getLastConflicting(),
+                                    &sketch->getLastRedundant(),
+                                    &sketch->getLastMalformedConstraints()}) {
+            for (int number : *numbers) {  // 1-based
+                if (number < 1 || number > static_cast<int>(constraints.size())) {
+                    continue;
+                }
+                const Sketcher::Constraint* constraint = constraints[number - 1];
+                for (int geoId : {constraint->First, constraint->Second, constraint->Third}) {
+                    if (geoId >= 0) {
+                        overdefinedGeoIds.insert(geoId);
+                    }
+                }
+            }
+        }
+    }
+    const SbColor overdefinedColor = onlyOverdefinedRed ? SbColor(0.87f, 0.12f, 0.12f)
+                                                        : drawingParameters.InvalidSketchColor;
+    auto isInvalid = [&](int GeoId) {
+        return onlyOverdefinedRed ? overdefinedGeoIds.contains(GeoId) : issketchinvalid;
+    };
+
     // External geometry whose link a reorder set aside (ops#131), asked once per GeoId
     std::map<int, bool> parked;
     auto isParked = [&](int GeoId) {
@@ -269,8 +302,8 @@ void EditModeGeometryCoinManager::updateGeometryColor(
                         : drawingParameters.CurveExternalColor;
                 }
             }
-            else if (issketchinvalid) {
-                pcolor[i] = drawingParameters.InvalidSketchColor;
+            else if (isInvalid(GeoId)) {
+                pcolor[i] = overdefinedColor;
             }
             else if (sketchFullyConstrained) {
                 // root point is not coloured nor external
@@ -487,7 +520,9 @@ void EditModeGeometryCoinManager::updateGeometryColor(
                 // edit->CurveSet->numVertices => [i] indicates number of vertex for line i.
                 int indexes = (editModeScenegraphNodes.CurveSet[l][t]->numVertices[i]);
 
-                bool preselected = (preselectcurve == GeoId);
+                // FreeCAD-CH (ops#640 polish P7): a hovered region's boundary curves too
+                bool preselected = (preselectcurve == GeoId)
+                    || ViewProviderSketchCoinAttorney::isCurveRegionHovered(viewProvider, GeoId);
 
                 auto* obj = viewProvider.getSketchObject();
                 bool isGroupMember = GeoId >= 0 && obj->isInGroup(GeoId, false);
@@ -535,8 +570,8 @@ void EditModeGeometryCoinManager::updateGeometryColor(
                     }
                 }
                 else {
-                    if (issketchinvalid) {
-                        color[i] = drawingParameters.InvalidSketchColor;
+                    if (isInvalid(GeoId)) {
+                        color[i] = overdefinedColor;
 
                         for (int k = j; j < k + indexes; j++) {
                             verts[j].getValue(x, y, z);

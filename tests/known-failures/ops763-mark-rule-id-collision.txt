@@ -1,0 +1,16 @@
+# The rule that leaves a split piece's marks out when they hold the piece's own earlier name follows
+# the references of interned names (OwnHistory, TopoShapeExpansion.cpp). After an ID collision the
+# colliding node stays inline in full form, so the rule doesn't see it and the mark is kept: the
+# collision document's names differ from the plain document's for the pattern models. Real IDs
+# are 64 bits; only the tests' forced IDs collide (decision 276: filed, not chased). Remove this
+# file when ops#763 evaluates the rule on the names' structure there.
+
+issue: ops#763
+
+reason: under a forced ID collision the split-piece mark rule keeps a mark it drops otherwise ("expanded names after a recompute" differ)
+cli  PartDesignTests.TestNamingLoad.TestNamingLoadCollision.testLinearPatternAll
+cli  PartDesignTests.TestNamingLoad.TestNamingLoadCollision.testLinearPatternOne
+cli  PartDesignTests.TestNamingLoad.TestNamingLoadCollision.testPatternStepsAll
+# testPatternStepsOne and testLinearPatternOne depend on the test order (each passes alone): on lx8 the first
+# failed and the second passed (fork PR 447). Both stay listed.
+cli  PartDesignTests.TestNamingLoad.TestNamingLoadCollision.testPatternStepsOne

@@ -27,7 +27,9 @@
 #include "Workbench.h"
 #include <Base/Console.h>
 #include <Gui/Application.h>
+#include <Gui/Command.h>
 #include <Gui/Document.h>
+#include <Gui/ForkKeymap.h>
 #include <Gui/WorkbenchManager.h>
 #include <Mod/Sketcher/App/Constraint.h>
 
@@ -380,6 +382,7 @@ inline void SketcherAddWorkspaceRectangles<Gui::MenuItem>(Gui::MenuItem& geom)
 {
     geom << "Sketcher_CreateRectangle"
          << "Sketcher_CreateRectangle_Center"
+         << "Sketcher_CreateRectangle_Aligned"  // FreeCAD-CH (ops#640, rank 49)
          << "Sketcher_CreateOblong";
 }
 
@@ -477,13 +480,17 @@ inline void SketcherAddWorkbenchConstraints<Gui::MenuItem>(Gui::MenuItem& cons)
         cons << "Sketcher_ConstrainCoincident"
              << "Sketcher_ConstrainPointOnObject";
     }
-    cons << "Sketcher_ConstrainHorVer"
+    cons << "Sketcher_ConstrainConcentric"  // FreeCAD-CH (ops#640, rank 44)
+         << "Sketcher_ConstrainHorVer"
          << "Sketcher_ConstrainHorizontal"
          << "Sketcher_ConstrainVertical"
          << "Sketcher_ConstrainParallel"
          << "Sketcher_ConstrainPerpendicular"
+         << "Sketcher_ConstrainNormal"  // FreeCAD-CH (ops#640, rank 44)
          << "Sketcher_ConstrainTangent"
          << "Sketcher_ConstrainEqual"
+         << "Sketcher_ConstrainMidpoint"
+         << "Sketcher_ConstrainPierce"  // FreeCAD-CH (Onshape's Pierce)
          << "Sketcher_ConstrainSymmetric"
          << "Sketcher_ConstrainBlock"
          << "Sketcher_ConstrainGroup"
@@ -552,6 +559,8 @@ inline void SketcherAddWorkbenchConstraints<Gui::ToolBarItem>(Gui::ToolBarItem& 
          << "Sketcher_ConstrainPerpendicular"
          << "Sketcher_ConstrainTangent"
          << "Sketcher_ConstrainEqual"
+         << "Sketcher_ConstrainMidpoint"
+         << "Sketcher_ConstrainPierce"  // FreeCAD-CH (Onshape's Pierce)
          << "Sketcher_ConstrainSymmetric"
          << "Sketcher_ConstrainBlock"
          << "Sketcher_ConstrainGroup";
@@ -711,6 +720,8 @@ void addSketcherWorkbenchSketchTools(Gui::ToolBarItem& sketch)
         sketch << "Sketcher_ConstrainCoincident"
                << "Sketcher_ConstrainPointOnObject";
     }
+    // FreeCAD-CH (ops#640, rank 44): Onshape's Concentric beside Coincident
+    sketch << "Sketcher_ConstrainConcentric";
     if (hGrp->GetBool("AutoHorVer", true)) {
         sketch << "Sketcher_CompHorVer";
     }
@@ -722,8 +733,25 @@ void addSketcherWorkbenchSketchTools(Gui::ToolBarItem& sketch)
            << "Sketcher_ConstrainPerpendicular"
            << "Sketcher_ConstrainTangent"
            << "Sketcher_ConstrainEqual"
+           << "Sketcher_ConstrainMidpoint"
+           << "Sketcher_ConstrainPierce"  // FreeCAD-CH (Onshape's Pierce)
            << "Sketcher_ConstrainSymmetric"
            << "Sketcher_ConstrainBlock";
+
+    // FreeCAD-CH (ops#640, rank 73, gap W7): under Onshape's keymap the sketch toolbar ends with
+    // Extrude and Revolve [guess: at its end]; from the sketch in edit they accept it and open with
+    // it as their profile, as their keys Shift+E and Shift+W do (PartDesign's Command.cpp, ops#194).
+    // Only once Part Design's commands exist: a toolbar built before is completed at the next
+    // activation of the workbench, which every sketch edit from Part Design is.
+    if (Gui::ForkKeymap::isOnshape()) {
+        Gui::CommandManager& commands = Gui::Application::Instance->commandManager();
+        if (commands.getCommandByName("PartDesign_Pad")
+            && commands.getCommandByName("PartDesign_Revolution")) {
+            sketch << "Separator"
+                   << "PartDesign_Pad"
+                   << "PartDesign_Revolution";
+        }
+    }
 }
 
 void addSketcherWorkbenchSketchActions(Gui::MenuItem& sketch)

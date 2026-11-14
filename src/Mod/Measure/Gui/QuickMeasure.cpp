@@ -48,6 +48,7 @@
 #include <Mod/Part/App/PartFeature.h>
 #include <Mod/Part/App/TopoShape.h>
 #include <Mod/Part/App/DatumFeature.h>
+#include <Mod/Part/Gui/EdgeMidpointMarker.h>
 
 #include <Mod/Measure/App/Measurement.h>
 
@@ -116,6 +117,7 @@ void QuickMeasure::tryMeasureSelection()
     // FreeCAD-CH (ops#153): nothing of the last selection stays if this one throws
     showResult(QString(), {});
     measurement->clear();
+    points.clear();
     if (doc && Gui::Control().activeDialog(nullptr) == nullptr) {
         // we (still) have a doc and are not in a tool dialog where the user needs to click on stuff
         addSelectionToMeasurement();
@@ -165,6 +167,7 @@ void QuickMeasure::addSelectionToMeasurement()
     // list again on every call)
     std::vector<App::DocumentObject*> objects;
     std::vector<std::string> subs;
+    points.clear();
 
     auto selObjs = Gui::Selection().getSelectionEx(
         nullptr,
@@ -180,6 +183,7 @@ void QuickMeasure::addSelectionToMeasurement()
         count += subNames.empty() ? 1 : subNames.size();
         if (count > limit) {
             measurement->clear();
+            points.clear();
             return;
         }
 
@@ -187,11 +191,18 @@ void QuickMeasure::addSelectionToMeasurement()
             if (isObjAcceptable(rootObj)) {
                 objects.push_back(rootObj);
                 subs.emplace_back();
+                points.emplace_back();
             }
             continue;
         }
 
-        for (auto& subName : subNames) {
+        // FreeCAD-CH (ops#673, selection parity 11): an edge picked at its middle (the midpoint
+        // marker showing) measures as that point, as in Onshape (SP10-Q9: "Point", "Min dist").
+        // Only a picked point counts: a tree or Python selection has (0,0,0), which lies on any
+        // edge through the origin (selection parity 11 (2)).
+        const std::vector<Base::Vector3d> picked = selObj.getPickedPoints();
+        for (std::size_t i = 0; i < subNames.size(); ++i) {
+            const std::string& subName = subNames[i];
             App::DocumentObject* obj = rootObj->getSubObject(subName.c_str());
 
             if (!isObjAcceptable(obj)) {
@@ -199,9 +210,19 @@ void QuickMeasure::addSelectionToMeasurement()
             }
             objects.push_back(rootObj);
             subs.push_back(subName);
+            points.push_back(
+                i < picked.size() && selObj.hasPickedPoint(i)
+                    ? PartGui::EdgeMidpointMarker::pickedMiddle(
+                                        selObj.getDocName(),
+                                        selObj.getFeatName(),
+                                        subName.c_str(),
+                                        picked[i]
+                                    )
+                                  : std::nullopt
+            );
         }
     }
-    measurement->setReferences3D(objects, subs);
+    measurement->setReferences3D(objects, subs, points);
 }
 
 static QString areaStr(double value)
@@ -266,7 +287,10 @@ void QuickMeasure::printResult()
                 | Part::ShapeOption::Transform,
             subNames[0].c_str()
         );
-        if (!shape.IsNull() && shape.ShapeType() == TopAbs_VERTEX) {
+        if (!points.empty() && points[0]) {
+            details << xyzStr(QString(), *points[0]);  // FreeCAD-CH (ops#673): an edge's middle
+        }
+        else if (!shape.IsNull() && shape.ShapeType() == TopAbs_VERTEX) {
             gp_Pnt p = BRep_Tool::Pnt(TopoDS::Vertex(shape));
             details << xyzStr(QString(), Base::Vector3d(p.X(), p.Y(), p.Z()));
         }

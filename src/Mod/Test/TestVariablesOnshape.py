@@ -60,11 +60,11 @@ def translate(text, kind="LENGTH", default_units=None):
 ACCEPTED = [
     ("10mm", "LENGTH", 10, "(10 * 1 mm)"),
     ("10 mm", "LENGTH", 10, "(10 * 1 mm)"),
-    ("3/4in", "LENGTH", 19.05, "(3 / 4 * 1 in)"),
-    ("3/4 in", "LENGTH", 19.05, "(3 / 4 * 1 in)"),
+    ("3/4in", "LENGTH", 19.05, "((3 / 4) * 1 in)"),
+    ("3/4 in", "LENGTH", 19.05, "((3 / 4) * 1 in)"),
     ("(3/4) in", "LENGTH", 19.05, "((3 / 4) * 1 in)"),
-    ("-3/4 in", "LENGTH", -19.05, "(-3 / 4 * 1 in)"),
-    ("2in+3/4in", "LENGTH", 69.85, "(2 * 1 in) + (3 / 4 * 1 in)"),
+    ("-3/4 in", "LENGTH", -19.05, "(((-3) / 4) * 1 in)"),
+    ("2in+3/4in", "LENGTH", 69.85, "(2 * 1 in) + ((3 / 4) * 1 in)"),
     ("1 inch + 2 inches", "LENGTH", 76.2, "(1 * 1 in) + (2 * 1 in)"),
     ("1 foot - 6 in", "LENGTH", 152.4, None),
     ("sqrt(16) m", "LENGTH", 4000, "(sqrt(16) * 1 m)"),
@@ -79,12 +79,12 @@ ACCEPTED = [
     ("#Rail < 3 in ? 1 mm : 2 mm", "LENGTH", 2, None),
     ("#Count != 4 ? 1 mm : 2 mm", "LENGTH", 1, None),
     ("1.1 in == 27.95 mm ? 1 mm : 2 mm", "LENGTH", 2, None),
-    ("PI * 2 mm", "LENGTH", 2 * math.pi, "pi * (2 * 1 mm)"),
+    ("PI * 2 mm", "LENGTH", 2 * math.pi, "((pi * 2) * 1 mm)"),
     ("Pi * 2 mm", "LENGTH", 2 * math.pi, None),
     ("max(#Width, 1 cm, 3/4 in)", "LENGTH", 19.05, None),
     ("abs(-2 mm)", "LENGTH", 2, None),
     ("sqrt(#Width * #Width)", "LENGTH", 10, None),
-    ("(2 mm)^2 / 1 mm", "LENGTH", 4, None),
+    ("(2 mm)^2 / (1 mm)", "LENGTH", 4, None),
     ("2^3 * 1 mm", "LENGTH", 8, None),
     # right to left, as Onshape (the reference studio, row 27)
     ("2^3^2", "NUMBER", 512, "2 ^ (3 ^ 2)"),
@@ -97,7 +97,7 @@ ACCEPTED = [
     # ^ binds to the unit, as Onshape (the reference studio, row 23)
     ("2 mm^2 / (1 mm)", "LENGTH", 2, "(2 * ((1 mm) ^ 2)) / (1 * 1 mm)"),
     ("sqrt(3 in^2 + 1 in^2)", "LENGTH", 50.8, None),
-    ("-2 mm^2 / 1 mm", "LENGTH", -2, None),
+    ("-2 mm^2 / (1 mm)", "LENGTH", -2, None),
     ("2 mm^6 / (1 mm)^5", "LENGTH", 2, None),
     # halves up, as Onshape (the reference studio, row 24); FreeCAD's round() goes away from 0
     ("round(2.5) * 10 + round(-2.5)", "NUMBER", 28,
@@ -118,18 +118,37 @@ ACCEPTED = [
     ("#Rail / in", "NUMBER", 4, "Rail / (1 in)"),
     ("#Rail / inches * 2", "NUMBER", 8, None),
     ("90 deg / rad", "NUMBER", math.pi / 2, None),
-    # a fraction with a unit after *, as Onshape (the reference studio, row 21)
-    ("2 * 3/4 in", "LENGTH", 38.1, "2 * (3 / 4 * 1 in)"),
-    ("#Count*3/4 in", "LENGTH", 57.15, "Count * (3 / 4 * 1 in)"),
-    ("2 / 4 * -1/2 in", "LENGTH", -6.35, "(2 / 4) * (-1 / 2 * 1 in)"),
+    # and after *, as Onshape (oracle 14 V3, ops#720)
+    ("2.9*mm", "LENGTH", 2.9, "(2.9 * 1 mm)"),
+    ("-0.0254*m", "LENGTH", -25.4, "((-0.0254) * 1 m)"),
+    ("1.5e-3*m", "LENGTH", 1.5, "(1.5e-3 * 1 m)"),
+    ("#Count * mm", "LENGTH", 3, "(Count * 1 mm)"),
+    ("0.5*rad", "ANGLE", math.degrees(0.5), "(0.5 * 1 rad)"),
+    # a unit word is `* unit`, left to right with * and /, as Onshape (the reference studio,
+    # row 21; oracle 14 V3, ops#728)
+    ("2 * 3/4 in", "LENGTH", 38.1, "(((2 * 3) / 4) * 1 in)"),
+    ("#Count*3/4 in", "LENGTH", 57.15, "(((Count * 3) / 4) * 1 in)"),
+    ("2 / 4 * -1/2 in", "LENGTH", -6.35, "((((2 / 4) * (-1)) / 2) * 1 in)"),
+    ("3/4 in * 2", "LENGTH", 38.1, "((3 / 4) * 1 in) * 2"),
+    ("6 / 3/4 in", "LENGTH", 12.7, None),
+    ("1/3/4 in", "LENGTH", 25.4 / 12, None),
+    ("1.5/2 in", "LENGTH", 19.05, "((1.5 / 2) * 1 in)"),
+    ("2 * 1.5/2 in", "LENGTH", 38.1, None),
+    ("3in/8", "LENGTH", 9.525, "(3 * 1 in) / 8"),
+    ("1/2 mm^2 / (1 mm)", "LENGTH", 0.5, None),
+    ("sqrt(4) mm^2 / (1 mm)", "LENGTH", 2, "(sqrt(4) * ((1 mm) ^ 2)) / (1 * 1 mm)"),
+    ("2^3 mm", "LENGTH", 8, "((2 ^ 3) * 1 mm)"),
+    ("#Count in", "LENGTH", 76.2, "(Count * 1 in)"),
+    ("#Width * 1 mm / mm^2", "NUMBER", 10, "((Width * 1) * 1 mm) / ((1 mm) ^ 2)"),
     ("7 % 4", "NUMBER", 3, None),
+    ("(7 % 3) mm", "LENGTH", 1, "((7 % 3) * 1 mm)"),
     ("floor(2.5) * 1 mm", "LENGTH", 2, None),
     (".5 mm", "LENGTH", 0.5, "(0.5 * 1 mm)"),
     ("#Count * 2", "NUMBER", 6, "Count * 2"),
     ("1.5 rad", "ANGLE", math.degrees(1.5), None),
     # exponent notation: Onshape's 1.5e2 is 150 (the reference studio, row 28)
     ("1.5e2", "NUMBER", 150, "1.5e2"),
-    ("1e3 * 1 mm", "LENGTH", 1000, "1e3 * (1 * 1 mm)"),
+    ("1e3 * 1 mm", "LENGTH", 1000, "((1e3 * 1) * 1 mm)"),
     ("2.5E-1 in", "LENGTH", 6.35, "(2.5E-1 * 1 in)"),
     ("5.e1 mm", "LENGTH", 50, "(5.0e1 * 1 mm)"),
 ]
@@ -151,11 +170,12 @@ REFUSED = [
     ("5", "LENGTH", "default unit"),
     ("#Count * 2", "LENGTH", "default unit"),
     ("#Width*3/4 in", "LENGTH", "length^2"),
-    ("6 / 3/4 in", "LENGTH", "next to *, / or ^"),
-    ("2 * 1.5/2 in", "LENGTH", "fraction of decimals"),
-    ("1/3/4 in", "LENGTH", "next to *, / or ^"),
-    ("3/4 in * 2", "LENGTH", "next to *, / or ^"),
-    ("1.5/2 in", "LENGTH", "fraction of decimals"),
+    # `/ 1 mm` divides by 1 and then multiplies by mm (oracle 14 V3, ops#728)
+    ("(2 mm)^2 / 1 mm", "LENGTH", "length^3"),
+    ("-2 mm^2 / 1 mm", "LENGTH", "length^3"),
+    # a number plus a length, an error in Onshape too (oracle 14 V3)
+    ("1/2 + 1/2in", "LENGTH", "bare number"),
+    ("1/(8in)", "LENGTH", "length^-1"),
     ("-#Count^2", "NUMBER", "minus before ^"),
     ("-(2)^2", "NUMBER", "minus before ^"),
     # the studio shows -2^2 only as a whole expression (review 320, finding 2)
@@ -177,26 +197,34 @@ REFUSED = [
     ("#Count != 3 ? 1 mm : 2 mm", "LENGTH", "equal within rounding"),
     ("٣ mm", "LENGTH", "unexpected character"),  # an Arabic-Indic 3
     ("1٣ mm", "LENGTH", "unexpected character"),
-    ("sqrt(4) mm^2 / 1 mm", "LENGTH", "a unit before ^ after a group or a call"),
+    ("sqrt(4) mm^2 / 1 mm", "LENGTH", "length^3"),
+    ("2 mm^0", "NUMBER", "a unit to the power 0"),
     ("2 mm^-1", "NUMBER", "a unit to a power other than a whole number"),
     ("2 mm^1.5", "NUMBER", "a unit to a power other than a whole number"),
     ("2 mm^2^2", "NUMBER", "chained ^ after a unit"),
     ("2 mm^400 / (1 mm)^399", "LENGTH", "a unit to a power above 6"),
     ("2 mm^7 / (1 mm)^6", "LENGTH", "a unit to a power above 6"),
-    ("1/2 mm^2 / 1 mm", "LENGTH", "next to *, / or ^"),
+    ("1/2 mm^2 / 1 mm", "LENGTH", "length^3"),
     ("2 mm^2", "LENGTH", "length^2"),
-    ("#Width/2 in", "LENGTH", "units cancel"),
+    ("#Width/2 in", "LENGTH", "length^2"),
+    ("#Width*1/8in", "LENGTH", "length^2"),
     ("3in*3in", "LENGTH", "length^2"),
     ("10 mm", "ANGLE", "is a length, but the variable is an angle"),
-    ("7 mm % 4 mm", "LENGTH", "% with units"),
+    ("7 mm % 4 mm", "LENGTH", "a unit after %"),
+    ("7 mm % 4", "LENGTH", "% with units"),
     ("7 % -4", "NUMBER", "% by a negative number or zero"),
     ("7 % 0", "NUMBER", "% by a negative number or zero"),
     ("floor(2.5 mm)", "LENGTH", "floor() of a value with a unit: Onshape rejects it"),
     ("ceil(2.5 mm)", "LENGTH", "ceil() of a value with a unit"),
-    ("#Width / mm^2", "NUMBER", "a unit name after / followed by '^'"),
-    ("#Width / mm mm", "NUMBER", "a unit name after / followed by 'mm'"),
-    ("#Width * mm", "NUMBER", "needs a number"),
-    ("#Width in", "LENGTH", "a unit after #Width"),
+    ("#Width / mm^2", "NUMBER", "length^-1"),
+    ("#Width / mm mm", "NUMBER", "two units"),
+    ("#Width * mm", "NUMBER", "length^2"),
+    ("2 * mm 3", "LENGTH", "unexpected '3'"),
+    ("#Width in", "LENGTH", "length^2"),
+    ("7 % mm", "NUMBER", "% before a unit"),
+    ("7 % 3 mm", "LENGTH", "a unit after % and its operand"),
+    ("2 mm + mm", "LENGTH", "needs a number"),
+    ("2 * (mm)", "LENGTH", "needs a number"),
     ("10 mm mm", "LENGTH", "two units"),
     ("mm", "LENGTH", "needs a number"),
     ("#Nope", "LENGTH", "#Nope isn't defined"),
@@ -500,6 +528,92 @@ class TestReferenceStudio(unittest.TestCase):
         self.assertIn("Onshape rejects it", str(cm.exception))
 
 
+# Oracle 14 V3 (ops#640, 2026-11-12): how Onshape binds a unit. Each expression was an ANY
+# variable in a test studio, evaluated by Onshape's getVariable, with #w = 1 in. The rule: a unit
+# word is `* unit` at the precedence of `*` and `/`, applied left to right (ops#728).
+# (expression, Onshape's value in SI units with its dimensions, or None for Onshape's error)
+V3_W = Quantity(0.0254, LENGTH)
+AREA = (2, 0)
+V3_ORACLE = [
+    ("1/8in", 0.003175, LENGTH),
+    ("3/8in", 0.009525, LENGTH),
+    ("1/32in", 0.00079375, LENGTH),
+    ("3/8 in", 0.009525, LENGTH),
+    ("(3/8)in", 0.009525, LENGTH),
+    ("1/(8in)", 4.92125984, (-1, 0)),
+    ("3in/8", 0.009525, LENGTH),
+    ("2*3/8in", 0.01905, LENGTH),
+    ("1/8in*2", 0.00635, LENGTH),
+    ("1/2 + 1/2in", None, None),
+    ("1/2mm + 1mm", 0.0015, LENGTH),
+    ("2mm*3", 0.006, LENGTH),
+    (".8", 0.8, NONE),
+    ("1.5cm", 0.015, LENGTH),
+    ("0.5cm*2", 0.01, LENGTH),
+    ("100mm*0.95 + 1cm", 0.105, LENGTH),
+    ("-0.0254*m", -0.0254, LENGTH),
+    ("1.5e-3*m", 0.0015, LENGTH),
+    ("0.5*rad", 0.5, ANGLE),
+    ("45 degree", 0.785398163, ANGLE),
+    ("1 meter", 1.0, LENGTH),
+    ("cos(45 deg)", 0.707106781, NONE),
+    ("sqrt(2)", 1.41421356, NONE),
+    ("tan(86.4280321 deg)", 16.0196097, NONE),
+    ("#w/2in", 3.2258e-4, AREA),
+    ("2^3", 8.0, NONE),
+    ("10 mm ^ 2", 1e-5, AREA),
+    # more # forms
+    ("#w/2", 0.0127, LENGTH),
+    ("#w*2", 0.0508, LENGTH),
+    ("#w/(2in)", 0.5, NONE),
+    ("#w/2 in", 3.2258e-4, AREA),
+    ("#w / 2in", 3.2258e-4, AREA),
+    ("#w/2mm", 1.27e-5, AREA),
+    ("#w + 1/8in", 0.028575, LENGTH),
+    ("#w*1/8in", 8.0645e-5, AREA),
+    ("1/2in + #w", 0.0381, LENGTH),
+]
+# Onshape's values above are shown to 9 significant digits
+V3_TOLERANCE = 1e-8
+
+
+def v3_resolve(name):
+    if name != "w":
+        raise Refused(f"#{name} isn't defined")
+    return ("W", V3_W)
+
+
+class TestUnitRuleOracle(unittest.TestCase):
+    """The translator against Onshape's own values for oracle 14 V3 (ops#720, ops#728). A
+    disagreement is a translator bug."""
+
+    def test_every_row_has_onshape_s_value(self):
+        for text, expected, dims in V3_ORACLE:
+            with self.subTest(text=text):
+                tree = onshape.parse(text)
+                if expected is None:
+                    with self.assertRaises(Refused):
+                        onshape.evaluate(tree, lambda name: v3_resolve(name)[1])
+                    continue
+                value = onshape.evaluate(tree, lambda name: v3_resolve(name)[1])
+                self.assertEqual(value.dims, dims, onshape.describe_dims(value.dims))
+                self.assertLessEqual(abs(value.value - expected), V3_TOLERANCE * abs(expected),
+                                     f"Onshape {expected}, the translator {value.value}")
+
+    def test_a_variable_takes_only_its_type(self):
+        """A LENGTH variable rejects what isn't a length, as Onshape's "Bad variable expression"
+        does; a length row translates to the same value."""
+        for text, expected, dims in V3_ORACLE:
+            with self.subTest(text=text):
+                if dims == LENGTH:
+                    result = onshape.translate(text, "LENGTH", v3_resolve)
+                    self.assertLessEqual(abs(result.value.value - expected),
+                                         V3_TOLERANCE * abs(expected))
+                else:
+                    with self.assertRaises(Refused):
+                        onshape.translate(text, "LENGTH", v3_resolve)
+
+
 try:
     import FreeCAD
 except ImportError:  # the translator's own tests run without FreeCAD too
@@ -595,6 +709,92 @@ class TestReferenceStudioImport(unittest.TestCase):
                     value = value.Value  # mm or deg, FreeCAD's internal units
                 self.assertLessEqual(abs(value - number), SHOWN_TOLERANCE,
                                      f"{name}: Onshape shows {shown}, the copy {value}")
+
+
+@unittest.skipIf(FreeCAD is None, "needs FreeCAD")
+class TestUnitRuleInFreeCAD(unittest.TestCase):
+    """Oracle 14 V3 in FreeCAD (ops#720, ops#728): the written text of every row Onshape accepts
+    computes to Onshape's value, and imported variables drive pads. Designed model: 10 x 10 mm
+    squares padded by imported lengths."""
+
+    def setUp(self):
+        self.folder = tempfile.mkdtemp(prefix="TestVariablesOnshape")
+        self.doc = FreeCAD.newDocument("TestUnitRule")
+        self.varSet = self.doc.addObject("App::VarSet", "VarSet")
+        self.varSet.addProperty("App::PropertyDistance", "W")
+        self.varSet.W = "1 in"
+
+    def tearDown(self):
+        FreeCAD.closeDocument(self.doc.Name)
+        shutil.rmtree(self.folder, ignore_errors=True)
+
+    def si_value(self, text, dims):
+        """FreeCAD's value of @a text in SI units: divided by the SI unit of @a dims (multiplied,
+        for an inverse length), so that FreeCAD's result must be a plain number."""
+        length, angle = dims
+        if length > 0:
+            text = f"({text}) / ((1 m) ^ {length})"
+        elif length < 0:
+            text = f"({text}) * ((1 m) ^ {-length})"
+        if angle:
+            text = f"({text}) / (1 rad)"
+        value = self.varSet.evalExpression(text)
+        if isinstance(value, FreeCAD.Units.Quantity):
+            self.assertEqual(value.Unit, FreeCAD.Units.Unit(), f"{text}: {value.Unit}")
+            return value.Value
+        return float(value)
+
+    def test_freecad_computes_onshape_s_value(self):
+        for text, expected, dims in V3_ORACLE:
+            if expected is None:
+                continue
+            with self.subTest(text=text):
+                tree = onshape.parse(text)
+                written = onshape.write(tree, lambda name: v3_resolve(name)[0])
+                actual = self.si_value(written, dims)
+                self.assertLessEqual(abs(actual - expected), V3_TOLERANCE * abs(expected),
+                                     f"{written}: FreeCAD {actual}, Onshape {expected}")
+
+    def pad(self, name, length):
+        import Part
+
+        body = self.doc.addObject("PartDesign::Body", "Body" + name)
+        sketch = body.newObject("Sketcher::SketchObject", "Sketch" + name)
+        corners = [FreeCAD.Vector(x, y, 0) for x, y in ((0, 0), (10, 0), (10, 10), (0, 10))]
+        for i in range(4):
+            sketch.addGeometry(Part.LineSegment(corners[i], corners[(i + 1) % 4]))
+        pad = body.newObject("PartDesign::Pad", "Pad" + name)
+        pad.Profile = sketch
+        pad.setExpression("Length", length)
+        return pad
+
+    def import_studio(self, variables):
+        from freecad.variables import copies
+
+        path = os.path.join(self.folder, "Unit Rule Studio.json")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(export(variables))
+        return copies.import_studios(self.doc, [path]).copies[0]
+
+    def test_a_bare_unit_after_times(self):
+        """ops#720 (G1): L = 2.9*mm imports as 2.9 mm, and a pad by #L is 290 mm³."""
+        copy = self.import_studio([("LENGTH", "L", "2.9*mm")])
+        pad = self.pad("L", "#L")
+        self.doc.recompute()
+        self.assertAlmostEqual(copy.L.Value, 2.9, places=9)
+        self.assertAlmostEqual(pad.Shape.Volume, 290, places=6)
+
+    def test_a_unit_is_times_unit_left_to_right(self):
+        """ops#728 (G10): a = 1/8in*2 and b = 3in/8 import as Onshape reads them, 6.35 mm and
+        9.525 mm, and pads by them are that tall."""
+        copy = self.import_studio([("LENGTH", "a", "1/8in*2"), ("LENGTH", "b", "3in/8")])
+        pad_a = self.pad("A", "#a")
+        pad_b = self.pad("B", "#b")
+        self.doc.recompute()
+        self.assertAlmostEqual(copy.a.Value, 6.35, places=9)
+        self.assertAlmostEqual(copy.b.Value, 9.525, places=9)
+        self.assertAlmostEqual(pad_a.Shape.BoundBox.ZLength, 6.35, places=6)
+        self.assertAlmostEqual(pad_b.Shape.BoundBox.ZLength, 9.525, places=6)
 
 
 if __name__ == "__main__":

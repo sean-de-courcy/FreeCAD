@@ -64,4 +64,23 @@ private:
     bool useFCBakExtension {true};
     std::string saveBackupDateFormat {"%Y%m%d-%H%M%S"};
 };
+
+/// FreeCAD-CH (ops#640, slice A1): a test's way to stop a save at one of its steps. With the
+/// environment variable FREECAD_CH_SAVE_FAULT set to `<step>` the process ends there at once, as
+/// if it were killed; with `<step>:throw` the save throws a Base::FileException there. The steps
+/// in their order: write (the temporary file half written), written, flushed, kept (the old file
+/// kept as a backup), replaced (the new file under the document's name), done. With
+/// `<step>:cut` it returns true and the caller damages what it just wrote, as a short write
+/// would: at `write` the stream goes bad, at `written` the temporary file loses its end, at
+/// `kept` the temporary file is removed. A throw at `replaced` or `done` comes after the file is
+/// in place: the save reports it as a warning and counts as done. Not exported.
+bool saveFaultPoint(const char* step);
+
+/// FreeCAD-CH (ops#640, A1 fix review 3): whether this thread's last BackupPolicy::apply put the
+/// new file under the document's name (reset when apply starts). Not exported.
+bool saveReplacedFile();
+
+/// FreeCAD-CH (ops#640, slice A1): the writer mode `<copyUidMode><uuid>` that Save a Copy sets,
+/// so that the copy's Document.xml holds a document id of its own (PropertyUUID::Save)
+constexpr const char* copyUidMode = "CopyUid=";
 }  // namespace App

@@ -26,6 +26,7 @@
 #include "Body.h"
 #include "Feature.h"
 #include "FeatureAddSub.h"
+#include "FeatureApply.h"
 #include "FeatureBase.h"
 #include "FeatureDressUp.h"
 #include "FeatureSketchBased.h"
@@ -192,10 +193,23 @@ bool emptyOnEmpty(const Feature& feature)
     if (feature.isDerivedFrom<DressUp>() || feature.isDerivedFrom<Transformed>()) {
         return true;
     }
+    // A studio feature's step (FreeCAD-CH ops#654 slice 9): a failed feature contributes nothing
+    // (parts-design 10.9), so a New part whose feature fails holds nothing, never the shape of
+    // the feature's last success
+    if (feature.isDerivedFrom<FeatureApply>()) {
+        return true;
+    }
     // getAddSubType() only reads the type
     auto addSub = freecad_cast<const FeatureAddSub*>(&feature);
-    return addSub
-        && const_cast<FeatureAddSub*>(addSub)->getAddSubType() == FeatureAddSub::Type::Subtractive;
+    if (!addSub) {
+        return false;
+    }
+    // An Add with an empty merge scope fails "No merge scope selected" and makes no part, as
+    // Onshape's red Add adds nothing (ops#640 rank 3a, R7(a)): its part computes without it
+    if (addSub->EmptyMergeScope.getValue() && !addSub->MergeWithAll.getValue()) {
+        return true;
+    }
+    return const_cast<FeatureAddSub*>(addSub)->getAddSubType() == FeatureAddSub::Type::Subtractive;
 }
 
 void passThroughBase(Feature& feature)
@@ -415,6 +429,40 @@ public:
         }
     }
 
+    void afterStop(App::DocumentObject* stopped) const override
+    {
+        // F37 (ops#640): a stopped Body shows no part, as Onshape's failed feature contributes
+        // nothing. Called for a Fail verdict or blocked(), not for a Body whose own execute()
+        // failed. A stopped feature keeps its old output: nothing claimed reads it, and its Body,
+        // stopped through it, shows nothing (in "Through" display ViewProviderBody shows the
+        // Body's empty Shape in place of its members); a sketch or datum isn't a solid
+        auto body = freecad_cast<Body*>(stopped);
+        if (!body) {
+            return;
+        }
+        // Only a Body whose Tip is an unclaimed failure (design D:1, F37: its part is gone, a
+        // first feature with nothing to pass through). A Body stopped through another input with
+        // a claimed or valid Tip (the Bracket that reads a stopped Panel through its Merge,
+        // decision 257) keeps its last shape, as before
+        const App::DocumentObject* tip = body->Tip.getValue();
+        if (!tip || !tip->isError() || continuesAfter(tip)) {
+            return;
+        }
+        try {
+            body->writeStoppedShape();
+        }
+        catch (Base::Exception& e) {
+            e.reportException();
+        }
+        catch (Standard_Failure& e) {
+            FC_ERR("Clearing the shape of " << stopped->getFullName()
+                                            << " failed: " << e.GetMessageString());
+        }
+        catch (std::exception& e) {
+            FC_ERR("Clearing the shape of " << stopped->getFullName() << " failed: " << e.what());
+        }
+    }
+
     bool holds(const App::DocumentObject* obj) const override
     {
         // The roll-back bar (ops#127): a Body holds itself while rolled back, and what is after
@@ -611,7 +659,10 @@ bool inputInError(const App::DocumentObject* owner, std::string& why)
     forEachInput(owner, false, [&](const App::Property* prop, const std::vector<InputLink>& links) {
         if (prop == &owner->ExpressionEngine
             || (feature && prop == &feature->BaseFeature
-                && Body::isSolidFeature(feature->BaseFeature.getValue()))) {
+                && Body::isSolidFeature(feature->BaseFeature.getValue()))
+            // FreeCAD-CH ops#654 S2: a studio owner's bases are its parts' solids before it; a
+            // claimed failure among them passed its own base through (Onshape F1)
+            || (feature && prop == &feature->StudioBases)) {
             return false;
         }
         for (const auto& link : links) {

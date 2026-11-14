@@ -113,13 +113,19 @@ PartExport bool enclosesOutsideSolids(const TopoDS_Shape& shape);
  * @param shape The dress-up's result (its solids are checked)
  * @param base The shape that was dressed up
  * @param edges The edges of \a base that were dressed up
+ * @param size The dress-up's size (the largest radius or distance), or 0 if unknown. A concave
+ * dress-up whose strip runs off its face is clipped by the face beyond (Onshape's rule, ops#640
+ * Case Base #46): the material it adds may lie on a face that meets a face at a concave edge
+ * across a concave edge, within the size's reach of the concave edges (as lostMaterial()
+ * measures it). Without a size, no such face is allowed
  * @return what the result fills, naming the edge nearest to it (e.g. "fills a recess of the base
  * next to Edge3: ..."), or an empty string if the result is right
  */
 PartExport std::string filledPocket(
     const TopoShape& shape,
     const TopoShape& base,
-    const std::vector<TopoShape>& edges
+    const std::vector<TopoShape>& edges,
+    double size = 0.0
 );
 
 /** Why a fillet's or chamfer's result has lost a part of the base its band can't reach, or an

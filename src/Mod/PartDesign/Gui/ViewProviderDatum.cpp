@@ -152,6 +152,14 @@ void ViewProviderDatum::attach(App::DocumentObject* obj)
     addDisplayMaskMode(sep, "Base");
 }
 
+bool ViewProviderDatum::canDelete(App::DocumentObject* obj) const
+{
+    if (obj && getObject() && PartDesign::Body::findBodyOf(getObject()) && Part::BodyBase::findBodyOf(obj)) {
+        return true;
+    }
+    return Gui::ViewProviderGeometryObject::canDelete(obj);
+}
+
 bool ViewProviderDatum::onDelete(const std::vector<std::string>&)
 {
     // TODO: Ask user what to do about dependent objects, e.g. Sketches that have this feature as
@@ -302,7 +310,12 @@ bool ViewProviderDatum::doubleClicked()
 
     std::string Msg("Edit ");
     Msg += this->pcObject->Label.getValue();
-    getDocument()->openCommand(Msg.c_str());
+    // FreeCAD-CH (ops#640): 0 under the step lock means a feature dialog stayed open (its
+    // accept failed and showed why): stop, or setEdit would try the accept a second time
+    if (getDocument()->openCommand(Msg.c_str()) == 0
+        && getDocument()->getDocument()->isStepLocked()) {
+        return true;
+    }
 
     Part::Datum* pcDatum = getObject<Part::Datum>();
     PartDesign::Body* activeBody = activeView->getActiveObject<PartDesign::Body*>(PDBODYKEY);

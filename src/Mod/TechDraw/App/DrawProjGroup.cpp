@@ -74,7 +74,9 @@ DrawProjGroup::DrawProjGroup()
     Anchor.setScope(App::LinkScope::Global);
 
     ProjectionType.setEnums(ProjectionTypeEnums);
-    ADD_PROPERTY_TYPE(ProjectionType, ((long)getDefProjConv()), group, App::Prop_None,
+    // A new group follows its page, whose projection follows its template: ISO first angle,
+    // ANSI third, as Onshape's templates do (FreeCAD-CH ops#640, rank 11)
+    ADD_PROPERTY_TYPE(ProjectionType, ((long)ViewProjectionConvention::Page), group, App::Prop_None,
                       "First or Third angle projection");
 
     ADD_PROPERTY_TYPE(AutoDistribute, (autoDist), agroup, App::Prop_None,

@@ -25,6 +25,11 @@
 #include <Gui/Application.h>
 #include <Gui/BitmapFactory.h>
 #include <Gui/Command.h>
+#include <Gui/Selection/Selection.h>
+#include <App/Document.h>
+#include <App/PropertyStandard.h>
+#include <Mod/Assembly/App/AssemblyObject.h>
+#include <Mod/Assembly/App/Groups.h>
 // #include <Mod/Assembly/App/AssemblyObject.h>
 
 #include "TaskAssemblyMessages.h"
@@ -69,6 +74,9 @@ void TaskAssemblyMessages::updateToolTip(const QString& link)
     else if (link == QStringLiteral("#malformed")) {
         setLinkTooltip(tr("Selects these malformed joints"));
     }
+    else if (link == QStringLiteral("#errors")) {
+        setLinkTooltip(tr("Selects these joints: the solve leaves them out until they are fixed"));
+    }
 }
 
 void TaskAssemblyMessages::onLabelStatusLinkClicked(const QString& str)
@@ -92,6 +100,24 @@ void TaskAssemblyMessages::onLabelStatusLinkClicked(const QString& str)
         Gui::Application::Instance->commandManager().runCommandByName(
             "Assembly_SelectMalformedConstraints"
         );
+    }
+    else if (str == QStringLiteral("#errors") && vp) {
+        // FreeCAD-CH (ops#640 round 7): the joints in error, selected (Onshape's locate)
+        auto* assembly = vp->getObject<Assembly::AssemblyObject>();
+        auto* group = assembly ? assembly->getJointGroup() : nullptr;
+        if (!group) {
+            return;
+        }
+        Gui::Selection().clearSelection();
+        for (auto* joint : group->getObjects()) {
+            auto* suppressed = dynamic_cast<App::PropertyBool*>(joint->getPropertyByName("Suppressed"));
+            if (joint->isError() && !(suppressed && suppressed->getValue())) {
+                Gui::Selection().addSelection(
+                    joint->getDocument()->getName(),
+                    joint->getNameInDocument()
+                );
+            }
+        }
     }
 }
 

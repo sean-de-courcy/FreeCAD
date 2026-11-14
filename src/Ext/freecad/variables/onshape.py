@@ -29,21 +29,24 @@ check FreeCAD's value against the translator's. It needs no document.
 
 **It never guesses.** A form whose meaning in Onshape isn't pinned down, or that FreeCAD can't
 express, is refused with the reason (`Refused`). The reference studio the user built in Onshape
-(decision 68, D3; notes/variables-studio.md 5.1) settled these readings: `2 * 3/4 in` is 1.5 in,
-`-2^2` is (-2)^2, `2 mm^2` is 2 mm², `round` takes halves up, `-7 % 3` is 2, `#a/mm` is #a
-counted in mm, `2^3^2` is 2^9, `1.5e2` is 150. Their neighbours it doesn't settle stay refused: a
-fraction with a unit next to `/` or `^` or before `*` (`1/3/4 in`, `3/4 in * 2`), a minus before
-`^` on anything but a number (`-#a^2`) or after `^` or an operator (`2^-1^2`, `2 * -2^2`), a
-unit before `^` after a group or a call (`sqrt(4) mm^2`), `%` with units or by a negative
-number, and `floor`, `ceil`, `round` of a value with a unit (Onshape rejects `floor` of one).
+(decision 68, D3; notes/variables-studio.md 5.1) settled these readings: `-2^2` is (-2)^2,
+`2 mm^2` is 2 mm², `round` takes halves up, `-7 % 3` is 2, `2^3^2` is 2^9, `1.5e2` is 150.
+Oracle 14 V3 (ops#640) settled the units, with one rule (ops#728): **a unit word is `* unit`, at
+the precedence of `*` and `/`, applied left to right**, and a `^` after it binds to the unit.
+So `3/8in` is (3/8) in, `2 * 3/4 in` is 1.5 in, `1/8in*2` is 0.25 in, `3in/8` is 0.375 in,
+`2.9*mm` is 2.9 mm (ops#720), `#a/mm` is #a counted in mm, and `#w/2in` is (#w/2) in, an area,
+which a length refuses as Onshape does; `1/2 + 1/2in` is a number plus a length, an error in
+both. What the rule and the studio don't settle stays refused: a minus before `^` on anything
+but a number (`-#a^2`) or after `^` or an operator (`2^-1^2`, `2 * -2^2`), a unit word where a
+term starts (`mm`, `2 + mm`) or after `%`, two unit words in a row, a unit to a power other than
+a whole number from 1 to 6, `%` with units or by a negative number, and `floor`, `ceil`, `round`
+of a value with a unit (Onshape rejects `floor` of one).
 
 The writer's rules (section 2.4):
-- every unit is written as a factor: `10mm` becomes `(10 * 1 mm)`;
-- an integer fraction followed by a unit, as a term of its own (bounded by `+`, `-`, a
-  comparison, `?`, `:`, `,`, parentheses or the ends) or the last factor after `*`, is a
-  fraction literal: `3/4 in` becomes `(3 / 4 * 1 in)`; FreeCAD reads `3/4in` as `3/(4 in)`, an
-  inverse length, without an error;
-- a unit after `)` or a function call applies to that group: `sqrt(16) m` is `(sqrt(16) * 1 m)`;
+- every unit is written as a factor of the value before it: `10mm` becomes `(10 * 1 mm)`, `3/4 in`
+  `((3 / 4) * 1 in)`, `#a/mm` `a / (1 mm)`, `2 mm^2` `2 * ((1 mm) ^ 2)`; FreeCAD's own input
+  reads units by its own rules (`3/4in` there is a literal fraction, `(e) in` binds to the
+  group, ops#684), so the text holds a unit only as `1 unit`, never after another number or a `)`;
 - unit words become FreeCAD's symbols, `PI` and `Pi` become `pi`;
 - `round(x)` is written `floor(x + 0.5)`, Onshape's reading (FreeCAD's `round` goes away from
   zero); `%` stays `%`: FreeCAD's takes the divisor's sign, as Onshape's;
@@ -209,45 +212,13 @@ class Num:
 
 
 @dataclass(frozen=True)
-class Qty:
-    """A number followed by a unit: `10mm`, `10 mm`."""
-
-    num: Num
-    unit: str
-
-
-@dataclass(frozen=True)
-class UnitPower:
-    """A number followed by a unit to a whole power: `2 mm^2` is 2 mm²."""
-
-    num: Num
-    unit: str
-    power: Num
-
-
-@dataclass(frozen=True)
-class Frac:
-    """An integer fraction followed by a unit, as a term of its own: `3/4 in`, `-3/4 in`."""
-
-    negative: bool
-    num: Num
-    den: Num
-    unit: str
-
-
-@dataclass(frozen=True)
-class WithUnit:
-    """A unit after a group or a call: `(3/4) in`, `sqrt(16) m`."""
-
-    node: object
-    unit: str
-
-
-@dataclass(frozen=True)
-class BareUnit:
-    """A unit name after `/`, standing for one of it: `#a/mm` is #a counted in millimetres."""
+class UnitFactor:
+    """One of a unit, to a whole power, as a factor of a term (Onshape's unit rule, oracle 14
+    V3): `10 mm` is `10 * mm`, `3/8in` is `(3/8) * in`, `#a/mm` is #a counted in millimetres,
+    `2 mm^2` is `2 * mm^2`."""
 
     unit: str
+    power: int = 1
 
 
 @dataclass(frozen=True)
@@ -362,26 +333,59 @@ class _Parser:
             node = Bin(op, node, self.term())
         return node
 
-    def term(self):
-        factors = [self.unary()]
-        ops = []
-        while self.at_op("*", "/", "%"):
-            ops.append(self.take().text)
-            token = self.peek()
-            if ops[-1] == "/" and token.kind == "name" and token.text in UNITS:
-                factors.append(self.bare_unit())
-            else:
-                factors.append(self.unary())
-        return _fold_term(factors, ops)
-
-    def bare_unit(self):
-        """`#a/mm`: Onshape's floor(#Len_frac/mm) is 69 for 2.75 in (the reference studio,
-        row 26). Only after `/`, as a factor of its own."""
-        unit = self.take().text
+    def at_unit(self) -> bool:
         token = self.peek()
-        if (token.kind == "op" and token.text in ("^", "(")) or token.kind in ("name", "number"):
-            raise Refused(f"a unit name after / followed by {token.text!r}: {UNDOCUMENTED}")
-        return BareUnit(unit)
+        return token.kind == "name" and token.text in UNITS
+
+    def term(self):
+        """Factors joined by `*`, `/` and `%`, left to right. Onshape's unit rule (oracle 14 V3,
+        ops#640): a unit word is `* unit` at this precedence, so `3/8in` is (3/8) in, `1/8in*2`
+        is 0.25 in, `3in/8` is 0.375 in and `#w/2in` is (#w/2) in, an area. After `*` or `/` the
+        word is one of the unit (`2.9*mm`, `#a/mm`)."""
+        node = self.unary()
+        last = None
+        while True:
+            if self.at_unit():
+                if last == "%":
+                    # `7 % 3 mm`: no oracle row pins % beside a unit word (review lbceb, T4)
+                    raise Refused(f"a unit after % and its operand (% ... {self.peek().text}): "
+                                  f"{UNDOCUMENTED}")
+                node = Bin("*", node, self.unit_factor())
+                last = "*"
+            elif self.at_op("*", "/", "%"):
+                op = last = self.take().text
+                if self.at_unit():
+                    if op == "%":
+                        raise Refused(f"% before a unit (% {self.peek().text}): {UNDOCUMENTED}")
+                    node = Bin(op, node, self.unit_factor())
+                else:
+                    node = Bin(op, node, self.unary())
+            else:
+                return node
+
+    def unit_factor(self):
+        """A unit word and its whole power: ^ binds to the unit, as Onshape's 2 mm^2 / (1 mm) is
+        2 mm (the reference studio, row 23) and its 10 mm ^ 2 is 1e-5 m² (oracle 14 V3)."""
+        unit = self.take().text
+        power = 1
+        if self.at_op("^"):
+            self.take()
+            token = self.peek()
+            if token.kind != "number" or not token.text.isdigit():
+                raise Refused(f"a unit to a power other than a whole number ({unit}^"
+                              f"{token.text}): {UNDOCUMENTED}")
+            power = int(token.text)
+            if power == 0:
+                raise Refused(f"a unit to the power 0 ({unit}^{token.text}): {UNDOCUMENTED}")
+            if power > MAX_UNIT_POWER:
+                # 2 mm^400 is 0 in SI units, and FreeCAD's unit exponents are small
+                raise Refused(f"a unit to a power above {MAX_UNIT_POWER} ({unit}^{token.text})")
+            self.take()
+            if self.at_op("^"):
+                raise Refused(f"chained ^ after a unit ({unit}^{token.text}^): {UNDOCUMENTED}")
+        if self.at_unit():
+            raise Refused(f"two units in a row ({unit} {self.peek().text})")
+        return UnitFactor(unit, power)
 
     def unary(self):
         if self.at_op("-", "+"):
@@ -412,28 +416,6 @@ class _Parser:
         base = self.postfix()
         if not self.at_op("^"):
             return base
-        if isinstance(base, Qty):
-            # ^ binds to the unit: Onshape's 2 mm^2 / (1 mm) is 2 mm (the reference studio,
-            # row 23)
-            self.take()
-            power = self.peek()
-            if power.kind != "number" or not power.text.isdigit():
-                raise Refused(f"a unit to a power other than a whole number ({base.unit}^"
-                              f"{power.text}): {UNDOCUMENTED}")
-            if int(power.text) > MAX_UNIT_POWER:
-                # 2 mm^400 is 0 in SI units, and FreeCAD's unit exponents are small
-                raise Refused(f"a unit to a power above {MAX_UNIT_POWER} ({base.unit}^"
-                              f"{power.text})")
-            self.take()
-            if self.at_op("^"):
-                raise Refused(f"chained ^ after a unit ({base.unit}^{power.text}^): "
-                              f"{UNDOCUMENTED}")
-            return UnitPower(base.num, base.unit, Num(power.text))
-        if isinstance(base, WithUnit):
-            # the studio settles a number before the unit, not a group or a call
-            unit = base.unit
-            raise Refused(f"a unit before ^ after a group or a call ({unit}^): {UNDOCUMENTED}; "
-                          f"write (sqrt(4) * 1 {unit})^2 or sqrt(4) * (1 {unit})^2")
         self.take()
         # chained ^ goes right to left: Onshape's 2^3^2 is 512 (the reference studio, row 27)
         return Bin("^", base, self.unary())
@@ -441,32 +423,11 @@ class _Parser:
     def postfix(self):
         node = self.primary()
         token = self.peek()
-        if token.kind == "name" and token.text in UNITS:
-            if isinstance(node, Num):
-                self.take()
-                node = Qty(node, token.text)
-            elif isinstance(node, (Group, Call)):
-                self.take()
-                node = WithUnit(node, token.text)
-            else:
-                raise Refused(f"a unit after {self.text_of(node)} ({token.text}): {UNDOCUMENTED}")
-            after = self.peek()
-            if after.kind == "name" and after.text in UNITS:
-                raise Refused(f"two units in a row ({token.text} {after.text})")
-        elif (token.kind == "name" and isinstance(node, Num) and token.text not in CONSTANTS
-              and token.text not in FUNCTIONS and token.text not in REFUSED_FUNCTIONS):
+        if (token.kind == "name" and isinstance(node, Num) and token.text not in UNITS
+                and token.text not in CONSTANTS and token.text not in FUNCTIONS
+                and token.text not in REFUSED_FUNCTIONS):
             raise Refused(f"unknown unit {token.text!r}")
         return node
-
-    @staticmethod
-    def text_of(node) -> str:
-        if isinstance(node, Ref):
-            return f"#{node.name}"
-        if isinstance(node, Const):
-            return node.name
-        if isinstance(node, Qty):
-            return f"{node.num.text} {node.unit}"
-        return "a value"
 
     def primary(self):
         token = self.take()
@@ -506,40 +467,6 @@ class _Parser:
         raise Refused(f"unexpected {token.text!r} at position {token.pos + 1}")
 
 
-def _number_literal(node) -> Optional[Tuple[bool, Num]]:
-    """(negative, number) for a bare number literal, possibly signed; else None."""
-    if isinstance(node, Num):
-        return False, node
-    if isinstance(node, Unary) and isinstance(node.node, Num):
-        return node.op == "-", node.node
-    return None
-
-
-def _fold_term(factors: list, ops: list):
-    """A product of factors, with the fraction-literal rule (section 2.4): a fraction with a unit
-    is one value standing alone or as the last factor after `*`, as Onshape's 2 * 3/4 in is
-    38.1 mm (the reference studio, row 21)."""
-    if (ops and ops[-1] == "/" and isinstance(factors[-1], Qty)
-            and (len(ops) == 1 or ops[-2] == "*")):
-        literal = _number_literal(factors[-2])
-        if literal is not None:
-            negative, num = literal
-            den = factors[-1].num
-            if not (num.is_int and den.is_int):
-                raise Refused(f"a fraction of decimals with a unit ({num.text}/{den.text} "
-                              f"{factors[-1].unit}): {UNDOCUMENTED}")
-            factors = factors[:-2] + [Frac(negative, num, den, factors[-1].unit)]
-            ops = ops[:-1]
-    for i, op in enumerate(ops, start=1):
-        if (op == "/" and _number_literal(factors[i - 1]) is not None
-                and isinstance(factors[i], (Qty, UnitPower))):
-            raise Refused(f"a fraction with a unit next to *, / or ^: {UNDOCUMENTED}")
-    node = factors[0]
-    for op, factor in zip(ops, factors[1:]):
-        node = Bin(op, node, factor)
-    return node
-
-
 def parse(text: str):
     """The tree of an Onshape expression; raises Refused."""
     return _Parser(text).parse()
@@ -553,7 +480,7 @@ def references(node) -> List[str]:
         if isinstance(n, Ref):
             if n.name not in found:
                 found.append(n.name)
-        elif isinstance(n, (Group, Unary, WithUnit)):
+        elif isinstance(n, (Group, Unary)):
             walk(n.node)
         elif isinstance(n, Bin):
             walk(n.left)
@@ -587,18 +514,15 @@ def write(node, resolve_text: Callable[[str], str], top: bool = True) -> str:
 
     if isinstance(node, Num):
         return _number_text(node)
-    if isinstance(node, Qty):
-        return f"({_number_text(node.num)} * 1 {UNITS[node.unit][2]})"
-    if isinstance(node, UnitPower):
-        return f"({_number_text(node.num)} * ((1 {UNITS[node.unit][2]}) ^ {node.power.text}))"
-    if isinstance(node, Frac):
-        sign = "-" if node.negative else ""
-        return (f"({sign}{_number_text(node.num)} / {_number_text(node.den)} "
-                f"* 1 {UNITS[node.unit][2]})")
-    if isinstance(node, WithUnit):
-        return f"({w(node.node)} * 1 {UNITS[node.unit][2]})"
-    if isinstance(node, BareUnit):
-        return f"(1 {UNITS[node.unit][2]})"
+    if isinstance(node, UnitFactor):
+        unit = f"(1 {UNITS[node.unit][2]})"
+        return unit if node.power == 1 else f"({unit} ^ {node.power})"
+    if (isinstance(node, Bin) and node.op == "*" and isinstance(node.right, UnitFactor)
+            and node.right.power == 1):
+        # `10 mm` as `(10 * 1 mm)`, in parentheses, its left side too: `1 mm` is one FreeCAD
+        # quantity, and the text never holds `3 / 4 in` or `(e) in`, the forms FreeCAD's parser
+        # rewrites by its own rules (rewriteLiteralFractions, ops#684)
+        return f"({w(node.left)} * 1 {UNITS[node.right.unit][2]})"
     if isinstance(node, Ref):
         return resolve_text(node.name)
     if isinstance(node, Const):
@@ -654,28 +578,10 @@ def _evaluate(node, resolve_value: Callable[[str], Quantity]) -> Value:
 
     if isinstance(node, Num):
         return Quantity(float(node.text))
-    if isinstance(node, Qty):
+    if isinstance(node, UnitFactor):
         factor, dims, _symbol = UNITS[node.unit]
-        return Quantity(float(node.num.text) * factor, dims)
-    if isinstance(node, UnitPower):
-        factor, dims, _symbol = UNITS[node.unit]
-        n = int(node.power.text)
-        return Quantity(float(node.num.text) * factor ** n, (dims[0] * n, dims[1] * n))
-    if isinstance(node, Frac):
-        factor, dims, _symbol = UNITS[node.unit]
-        if int(node.den.text) == 0:
-            raise Refused("division by zero")
-        value = int(node.num.text) / int(node.den.text) * factor
-        return Quantity(-value if node.negative else value, dims)
-    if isinstance(node, WithUnit):
-        inner = _quantity(ev(node.node), "the value before a unit")
-        if inner.dims != NONE:
-            raise Refused(f"a unit ({node.unit}) after a value that has one already")
-        factor, dims, _symbol = UNITS[node.unit]
-        return Quantity(inner.value * factor, dims)
-    if isinstance(node, BareUnit):
-        factor, dims, _symbol = UNITS[node.unit]
-        return Quantity(factor, dims)
+        n = node.power
+        return Quantity(factor ** n, (dims[0] * n, dims[1] * n))
     if isinstance(node, Ref):
         return resolve_value(node.name)
     if isinstance(node, Const):
@@ -876,7 +782,7 @@ def translate(expression: str, onshape_type: str,
 def _has_units(node, resolve_value: Callable[[str], Quantity]) -> bool:
     """Whether a unit takes part anywhere: a literal one, a reference to a value with one, or an
     inverse trig function (an angle). Only an expression without any takes the default unit."""
-    if isinstance(node, (Qty, UnitPower, Frac, WithUnit, BareUnit)):
+    if isinstance(node, UnitFactor):
         return True
     if isinstance(node, Ref):
         return resolve_value(node.name).dims != NONE
@@ -1010,8 +916,8 @@ def translate_export(entries: Sequence[StudioEntry], *,
 
     Each entry becomes its own copy, named by @a containers (default `Studio1`, `Studio2`, ...):
     a reference to a sibling is written as its bare FreeCAD name, one to another entry's variable
-    as `Container.Name`. @a name_map renames variables (Onshape name -> FreeCAD name; unit names
-    such as `t` need it, checked by the import). @a bindings resolve names no entry defines,
+    as `Container.Name`. @a name_map renames variables (Onshape name -> FreeCAD name; a unit name
+    such as `t` needs none since rank 54: a bare sibling `t` reads as the copy's own t). @a bindings resolve names no entry defines,
     @a providers pick the entry that provides a name several entries define. Whatever stays
     unresolved is listed, and the variables that need it carry it in `needs` and aren't
     translated: nothing is guessed.

@@ -34,9 +34,17 @@
 #include <Inventor/events/SoKeyboardEvent.h>
 #include <Inventor/lists/SoPickedPointList.h>
 #include <Inventor/nodes/SoCamera.h>
+#include <Inventor/nodes/SoPickStyle.h>
+#include <Inventor/nodes/SoSwitch.h>
 #include <Inventor/nodes/SoShapeHints.h>
 #include <Inventor/nodes/SoSeparator.h>
 #include <Inventor/nodes/SoTransform.h>
+#include <Inventor/details/SoFaceDetail.h>
+#include <Inventor/nodes/SoAnnotation.h>
+#include <Inventor/nodes/SoBaseColor.h>
+#include <Inventor/nodes/SoCoordinate3.h>
+#include <Inventor/nodes/SoDrawStyle.h>
+#include <Inventor/nodes/SoLineSet.h>
 
 #include <QApplication>
 #include <QFontMetricsF>
@@ -62,16 +70,19 @@
 #include <App/Document.h>
 #include <App/ElementNamingUtils.h>
 #include <App/ObjectIdentifier.h>  // FreeCAD-CH (ops#152)
+#include <App/ReferenceRepair.h>   // FreeCAD-CH (ops#644)
 #include <Base/BaseClass.h>
 #include <Base/Console.h>
 #include <Base/Converter.h>
 #include <Base/ServiceProvider.h>
 #include <Base/Vector3D.h>
+#include <Base/Writer.h>  // FreeCAD-CH (ops#640): the Cancel's check
 #include <Gui/Application.h>
 #include <Gui/BitmapFactory.h>
 #include <Gui/CommandT.h>
 #include <Gui/Control.h>
 #include <Gui/Document.h>
+#include <Gui/ForkKeymap.h>  // FreeCAD-CH (ops#640 polish P1): ShowConstraints' default
 #include <Gui/MainWindow.h>
 #include <Gui/MenuManager.h>
 #include <Gui/Selection/Selection.h>
@@ -94,6 +105,8 @@
 #include "DrawSketchHandler.h"
 #include "DrawSketchHandlerDragAutoConstraint.h"
 #include "DrawSketchHandlerExternal.h"  // FreeCAD-CH (ops#634): ModelPickSelection
+#include "SketchEnterTarget.h"  // FreeCAD-CH (ops#640): the Fillet tool's Enter
+#include "ConflictRefusal.h"  // FreeCAD-CH (ops#640, rank 45)
 #include "EditDatumDialog.h"
 #include "EditTextDialog.h"
 #include "EditModeCoinManager.h"
@@ -109,7 +122,15 @@
 #include <BRep_Builder.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
 #include <Precision.hxx>
+#include <BRepClass_FaceClassifier.hxx>
+#include <BRepGProp.hxx>
+#include <BRepAdaptor_Curve.hxx>
+#include <GCPnts_TangentialDeflection.hxx>
+#include <GProp_GProps.hxx>
 #include <TopExp.hxx>
+#include <TopoDS.hxx>
+#include <TopoDS_Compound.hxx>
+#include <TopoDS_Face.hxx>
 #include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <TopTools_ListOfListOfShape.hxx>
@@ -124,8 +145,35 @@ using namespace SketcherGui;
 using namespace Sketcher;
 namespace sp = std::placeholders;
 
+namespace Gui
+{
+/// FreeCAD-CH (ops#640, hands-on B5-5): defined and explained in Gui/Document.cpp (not in
+/// Document.h): undoes the open sketch session, or returns -1 having done nothing
+GuiExport int undoOpenSketchSession(const App::Document* doc);
+}  // namespace Gui
+
 namespace
 {
+/** FreeCAD-CH (ops#640, hands-on B5-5): what a Cancel that undid the edit's transactions checks,
+ * as it was when the edit started: the constraints, the external links and the number of
+ * elements. Not the geometry's coordinates: the edit's own solve (setEdit) and the undo's
+ * (onUndoRedoFinished) may rewrite them, and the solve gives them again from the constraints. */
+std::string cancelCheckOf(Sketcher::SketchObject* sketch)
+{
+    Base::StringWriter writer;
+    sketch->Constraints.Save(writer);
+    sketch->ExternalGeometry.Save(writer);
+    writer.Stream() << sketch->Geometry.getSize() << ' ' << sketch->ExternalGeo.getSize();
+    return writer.getString();
+}
+
+/// The check of each sketch in edit, taken when its edit started (no member: no header change)
+std::map<const ViewProviderSketch*, std::string>& cancelChecks()
+{
+    static std::map<const ViewProviderSketch*, std::string> checks;
+    return checks;
+}
+
 bool isFiniteVector(const SbVec3f& vector)
 {
     return std::isfinite(vector[0]) && std::isfinite(vector[1]) && std::isfinite(vector[2]);
@@ -270,7 +318,8 @@ void ViewProviderSketch::ParameterObserver::updateEscapeKeyBehaviour(const std::
     ParameterGrp::handle hSketch = App::GetApplication().GetParameterGroupByPath(
         "User parameter:BaseApp/Preferences/Mod/Sketcher");
     Client.viewProviderParameters.handleEscapeButton =
-        !hSketch->GetBool("LeaveSketchWithEscape", true);
+        // FreeCAD-CH (ops#640): off by default, as in Onshape, where Esc leaves the running tool only
+        !hSketch->GetBool("LeaveSketchWithEscape", false);
 }
 
 void ViewProviderSketch::ParameterObserver::updateAutoRecompute(const std::string& string,
@@ -604,6 +653,25 @@ void SoSketchFaces::initClass()
     SO_NODE_INIT_CLASS(SoSketchFaces, SoFCShape, "FCShape");
 }
 
+void SoSketchFaces::doAction(SoAction* action)
+{
+    // FreeCAD-CH (ops#640 polish P7, SP10-Q1/Q5): Onshape leaves a hovered region's fill as it
+    // is and draws its boundary curves in the hover colour
+    if (onHoverHighlight && Gui::ForkKeymap::isOnshape()
+        && action->isOfType(Gui::SoHighlightElementAction::getClassTypeId())) {
+        auto* highlight = static_cast<Gui::SoHighlightElementAction*>(action);
+        const SoDetail* detail = highlight->getElement();
+        int face = 0;
+        if (highlight->isHighlighted() && detail
+            && detail->isOfType(SoFaceDetail::getClassTypeId())) {
+            face = static_cast<const SoFaceDetail*>(detail)->getPartIndex() + 1;
+        }
+        onHoverHighlight(face, highlight->getColor());
+        return;
+    }
+    inherited::doAction(action);
+}
+
 /*************************** ViewProviderSketch **************************/
 
 // Struct for holding previous click information
@@ -626,6 +694,8 @@ ViewProviderSketch::ViewProviderSketch()
     , Mode(STATUS_NONE)
     , pcSketchFaces(new SoSketchFaces)
     , pcSketchFacesToggle(new SoToggleSwitch)
+    , pcSelectedRegionsRoot(new SoSwitch)
+    , pcSelectedRegions(new SoSketchFaces)
     , listener(nullptr)
     , editCoinManager(nullptr)
     , snapManager(nullptr)
@@ -738,11 +808,43 @@ ViewProviderSketch::ViewProviderSketch()
     updateColorPropertiesVisibility();
 
     pcSketchFacesToggle->addChild(pcSketchFaces);
+
+    // FreeCAD-CH (selection parity SQ11): the selected regions, unpickable so the edit mode's
+    // picks still find the sketch's points, curves and constraints under them
+    auto selectedRegions = new SoSeparator;
+    auto unpickable = new SoPickStyle;
+    unpickable->style = SoPickStyle::UNPICKABLE;
+    selectedRegions->addChild(unpickable);
+    selectedRegions->addChild(pcSelectedRegions);
+    pcSelectedRegionsRoot->addChild(selectedRegions);
+    pcSelectedRegionsRoot->whichChild = SO_SWITCH_NONE;
+
+    // FreeCAD-CH (ops#640 polish P7): the 3D view's hovered region's boundary curves
+    pcRegionHoverRoot = new SoSwitch;
+    pcRegionHoverRoot->setName("RegionHoverEdges");
+    auto regionHover = new SoAnnotation;
+    auto regionHoverPick = new SoPickStyle;
+    regionHoverPick->style = SoPickStyle::UNPICKABLE;
+    regionHoverColor = new SoBaseColor;
+    regionHoverStyle = new SoDrawStyle;
+    regionHoverCoords = new SoCoordinate3;
+    regionHoverLines = new SoLineSet;
+    regionHover->addChild(regionHoverPick);
+    regionHover->addChild(regionHoverColor);
+    regionHover->addChild(regionHoverStyle);
+    regionHover->addChild(regionHoverCoords);
+    regionHover->addChild(regionHoverLines);
+    pcRegionHoverRoot->addChild(regionHover);
+    pcRegionHoverRoot->whichChild = SO_SWITCH_NONE;
+    pcSketchFaces->onHoverHighlight = [this](int face, const SbColor& color) {
+        showRegionHover(face, color);
+    };
 }
 
 ViewProviderSketch::~ViewProviderSketch()
 {
     connectionToolWidget.disconnect();
+    pcSketchFaces->onHoverHighlight = nullptr;  // FreeCAD-CH (ops#640 polish P7)
 }
 
 void ViewProviderSketch::slotUndoDocument(const Gui::Document& /*doc*/)
@@ -799,6 +901,11 @@ void ViewProviderSketch::activateHandler(std::unique_ptr<DrawSketchHandler> newH
     assert(!sketchHandler);
 
     sketchHandler = std::move(newHandler);
+    // FreeCAD-CH (ops#640 polish P7, SP10-Q2): a tool shows no region hover; one begun before
+    // the tool ends with it
+    if (updateHoveredRegion(0, 0.0, 0.0)) {
+        updateColor();
+    }
     setSketchMode(STATUS_SKETCH_UseHandler);
     // FreeCAD-CH (ops#634): a handler takes the model picks it wants itself (a constraint tool
     // turns selection on with its own gate); a drawing tool must get every click
@@ -1218,6 +1325,9 @@ void ViewProviderSketch::getSelectOtherPicks(
         pick.preselect = [idleSketch, result]() {
             if (ViewProviderSketch* vp = idleSketch()) {
                 if (vp->detectAndShowPreselection(result)) {
+                    if (vp->updateGlyphHover()) {  // FreeCAD-CH (ops#640 polish P1b)
+                        vp->editCoinManager->updateVirtualSpace();
+                    }
                     vp->editCoinManager->drawConstraintIcons();
                     vp->updateColor();
                 }
@@ -1273,6 +1383,21 @@ bool ViewProviderSketch::keyPressed(bool pressed, int key)
                 return viewProviderParameters.handleEscapeButton;
             }
             return false;
+        } break;
+        case SoKeyboardEvent::RETURN:  // ENTER is the same key
+        case SoKeyboardEvent::PAD_ENTER: {
+            // FreeCAD-CH (ops#640, hands-on C-4): a tool waiting for Enter (the Fillet tool's
+            // previewed corner) takes it; it may be gone after it
+            if (isInEditMode() && sketchHandler) {
+                auto* target = dynamic_cast<SketchEnterTarget*>(sketchHandler.get());
+                if (target && target->takesEnter()) {
+                    if (pressed) {
+                        target->enterPressed();
+                    }
+                    return true;
+                }
+                sketchHandler->registerPressedKey(pressed, key);
+            }
         } break;
         default: {
             if (isInEditMode() && sketchHandler)
@@ -1642,6 +1767,16 @@ bool ViewProviderSketch::mouseButtonPressed(int Button, bool pressed, const SbVe
                     if (modelPickedInClick) {
                         modelPickedInClick = false;
                     }
+                    // FreeCAD-CH (selection parity SQ11): a click inside a closed profile
+                    // takes its region, toggled as the sketch's other elements are (Onshape
+                    // picks regions in an open sketch)
+                    else if (const int face = internalFaceAt(x, y); face > 0) {
+                        std::stringstream ss;
+                        ss << "InternalFace" << face;
+                        Base::Vector3d onPlane;
+                        getEditingPlacement().multVec(Base::Vector3d(x, y, 0.0), onPlane);
+                        preselectToSelection(ss, onPlane, true);
+                    }
                     else if (!(QApplication::keyboardModifiers() & Qt::ControlModifier)) {
                         Gui::Selection().clearSelection();
                     }
@@ -1836,11 +1971,9 @@ void ViewProviderSketch::editDoubleClicked()
             editTextDialog.exec();
             setSketchMode(STATUS_NONE);
         }
-        else {
-            // We cannot do toggleWireSelection directly here because the released event with
-            //STATUS_NONE return false which clears the selection.
-            setSketchMode(STATUS_SELECT_Wire);
-        }
+        // FreeCAD-CH (selection parity P6, oracle 8 SQ9): a double click on a sketch line selects
+        // nothing, as in Onshape (its chains come from a menu); upstream selected the whole
+        // closed chain (STATUS_SELECT_Wire). The release that follows clears the selection.
     }
     else if (preselection.isCrossPreselected()) {
         Base::Console().log("double click cross:%d\n",
@@ -2032,13 +2165,31 @@ bool ViewProviderSketch::mouseMove(const SbVec2s& cursorPos, Gui::View3DInventor
     }
 
     switch (Mode) {
-        case STATUS_NONE:
+        case STATUS_NONE: {
+            // FreeCAD-CH (ops#640 polish P7): Onshape tints the region under the pointer when
+            // none of the sketch's elements is under it
+            const bool element = preselection.isPreselectPointValid()
+                || preselection.isPreselectCurveValid() || preselection.isCrossPreselected()
+                || !preselection.PreselectConstraintSet.empty();
+            int region = Gui::ForkKeymap::isOnshape() && !element ? internalFaceAt(x, y) : 0;
+            // SP10-Q4: hovering a selected region changes nothing
+            if (region > 0 && isSelected("InternalFace" + std::to_string(region))) {
+                region = 0;
+            }
+            const bool regionChanged = updateHoveredRegion(region, x, y);
+            if (regionChanged && !preselectChanged) {
+                updateColor();
+            }
             if (preselectChanged) {
+                if (updateGlyphHover()) {  // FreeCAD-CH (ops#640 polish P1b)
+                    editCoinManager->updateVirtualSpace();
+                }
                 editCoinManager->drawConstraintIcons();
                 updateColor();
                 return true;
             }
-            return false;
+            return regionChanged;
+        }
         case STATUS_SELECT_Point:
             if (!getSolvedSketch().hasConflicts() && preselection.isPreselectPointValid()) {
                 int geoId;
@@ -2944,6 +3095,18 @@ void ViewProviderSketch::onSelectionChanged(const Gui::SelectionChanges& msg)
              || msg.Type == Gui::SelectionChanges::RmvSelection)
             && Mode == STATUS_SKETCH_StartRubberBand && msg.Object.getSubObject() != getObject()) {
             modelPickedInClick = true;
+            // FreeCAD-CH (selection parity P3): idle at once. The release goes to the 3D view's
+            // selection, so the press state stayed until the mouse moved, and every constraint
+            // command (active only while idle) did nothing when run right after the pick (a key)
+            setSketchMode(STATUS_NONE);
+        }
+
+        // FreeCAD-CH (selection parity SQ11): the selected regions' shading
+        if (msg.Type == Gui::SelectionChanges::AddSelection
+            || msg.Type == Gui::SelectionChanges::RmvSelection
+            || msg.Type == Gui::SelectionChanges::SetSelection
+            || msg.Type == Gui::SelectionChanges::ClrSelection) {
+            updateSelectedRegions();
         }
 
         std::string temp;
@@ -2955,6 +3118,9 @@ void ViewProviderSketch::onSelectionChanged(const Gui::SelectionChanges& msg)
                 clearSelectPoints();
                 selection.SelCurvSet.clear();
                 selection.SelConstraintSet.clear();
+                if (!showConstraintsPreference()) {  // FreeCAD-CH (ops#640 polish P1)
+                    editCoinManager->updateVirtualSpace();
+                }
                 editCoinManager->drawConstraintIcons();
                 updateColor();
             }
@@ -3002,6 +3168,9 @@ void ViewProviderSketch::onSelectionChanged(const Gui::SelectionChanges& msg)
                             Sketcher::PropertyConstraintList::getIndexFromConstraintName(shapetype);
                         selection.SelConstraintSet.insert(ConstrId);
                         if (!selection.selectionBuffering) {
+                            if (!showConstraintsPreference()) {  // FreeCAD-CH (ops#640 P1)
+                                editCoinManager->updateVirtualSpace();
+                            }
                             editCoinManager->drawConstraintIcons();
                         }
                     }
@@ -3046,6 +3215,9 @@ void ViewProviderSketch::onSelectionChanged(const Gui::SelectionChanges& msg)
                                 Sketcher::PropertyConstraintList::getIndexFromConstraintName(
                                     shapetype);
                             selection.SelConstraintSet.erase(ConstrId);
+                            if (!showConstraintsPreference()) {  // FreeCAD-CH (ops#640 P1)
+                                editCoinManager->updateVirtualSpace();
+                            }
                             editCoinManager->drawConstraintIcons();
                         }
                         updateColor();
@@ -3104,6 +3276,18 @@ void ViewProviderSketch::onSelectionChanged(const Gui::SelectionChanges& msg)
                 && Mode != STATUS_SELECT_Constraint && Mode != STATUS_SELECT_Cross
                 && Mode != STATUS_SELECT_Wire) {
                 resetPreselectPoint();
+                // FreeCAD-CH (ops#640 polish P1b): this removal comes before the move's own
+                // detection, which then finds no preselection to change and skips the glyph
+                // hover: the hovered curve's glyphs would stay. Start their timer here (with
+                // nothing preselected it never asks for a redraw)
+                updateGlyphHover();
+                // FreeCAD-CH (ops#640 polish P7): the 3D view's pick that ends the region's
+                // preselection (the pointer left the region) takes the move: the hover ends here
+                if (hoveredRegion > 0 && !updatingRegionPreselection) {
+                    hoveredRegion = 0;
+                    hoveredRegionCurves.clear();
+                    updateColor();
+                }
             }
         }
     }
@@ -3586,6 +3770,9 @@ void ViewProviderSketch::doBoxSelection(const SbVec2s& startPos, const SbVec2s& 
     }
 
     selection.selectionBuffering = false;
+    if (!showConstraintsPreference()) {  // FreeCAD-CH (ops#640 polish P1): follows the selection
+        editCoinManager->updateVirtualSpace();
+    }
     editCoinManager->drawConstraintIcons();
     updateColor();
 }
@@ -3771,6 +3958,9 @@ bool ViewProviderSketch::selectAll()
     }
 
     selection.selectionBuffering = false;
+    if (!showConstraintsPreference()) {  // FreeCAD-CH (ops#640 polish P1): follows the selection
+        editCoinManager->updateVirtualSpace();
+    }
     editCoinManager->drawConstraintIcons();
     updateColor();
 
@@ -4013,6 +4203,118 @@ bool ViewProviderSketch::getIsShownVirtualSpace() const
     return viewProviderParameters.isShownVirtualSpace;
 }
 
+namespace
+{
+ParameterGrp::handle sketcherGeneralGroup()
+{
+    return App::GetApplication().GetParameterGroupByPath(
+        "User parameter:BaseApp/Preferences/Mod/Sketcher/General");
+}
+}  // namespace
+
+bool ViewProviderSketch::showConstraintsPreference()
+{
+    // FreeCAD-CH (ops#640 polish P1): Onshape draws no constraint glyph until "Show constraints"
+    // is on; FreeCAD's keymap keeps FreeCAD's every glyph drawn
+    return sketcherGeneralGroup()->GetBool("ShowConstraints", !Gui::ForkKeymap::isOnshape());
+}
+
+void ViewProviderSketch::setShowConstraintsPreference(bool show)
+{
+    // the edit mode's parameter observer (EditModeCoinManager) redraws the open sketch
+    sketcherGeneralGroup()->SetBool("ShowConstraints", show);
+}
+
+bool ViewProviderSketch::showExpressionsPreference()
+{
+    // FreeCAD-CH (ops#640 polish P4): Onshape's "Show expressions", off by default
+    return sketcherGeneralGroup()->GetBool("ShowExpressions", false);
+}
+
+void ViewProviderSketch::setShowExpressionsPreference(bool show)
+{
+    // the edit mode's parameter observer (EditModeCoinManager) redraws the labels
+    sketcherGeneralGroup()->SetBool("ShowExpressions", show);
+}
+
+bool ViewProviderSketch::showErrorsPreference()
+{
+    // FreeCAD-CH (ops#640 polish P1b): Onshape's "Show errors", off by default
+    return sketcherGeneralGroup()->GetBool("ShowErrors", false);
+}
+
+void ViewProviderSketch::setShowErrorsPreference(bool show)
+{
+    // the edit mode's parameter observer (EditModeCoinManager) redraws the open sketch
+    sketcherGeneralGroup()->SetBool("ShowErrors", show);
+}
+
+void ViewProviderSketch::updateConstraintsShownByHover()
+{
+    if (!isInEditMode() || !editCoinManager || showConstraintsPreference()) {
+        return;
+    }
+    editCoinManager->updateVirtualSpace();
+    editCoinManager->drawConstraintIcons();
+}
+
+bool ViewProviderSketch::updateGlyphHover()
+{
+    // FreeCAD-CH (ops#640 polish P1b): Onshape draws a curve's constraint glyphs while it is
+    // hovered (PL1b). FreeCAD draws them beside the curve, away from the cursor, so they stay
+    // ~0.8 s after the hover leaves, and while one of them is hovered, to be clicked
+    if (showConstraintsPreference()) {
+        return false;
+    }
+    GlyphHover hovered;
+    if (preselection.isPreselectPointValid()) {
+        hovered.point = preselection.PreselectPoint;
+    }
+    else if (preselection.isPreselectCurveValid()) {
+        hovered.curve = preselection.PreselectCurve;
+    }
+    if (hovered.curve || hovered.point) {
+        if (glyphHoverTimer) {
+            glyphHoverTimer->stop();
+        }
+        if (hovered.curve == glyphHover.curve && hovered.point == glyphHover.point) {
+            return false;
+        }
+        glyphHover = hovered;
+        return true;
+    }
+    if (!glyphHover.curve && !glyphHover.point) {
+        return false;
+    }
+    if (!preselection.PreselectConstraintSet.empty()) {  // a glyph is hovered: keep it
+        if (glyphHoverTimer) {
+            glyphHoverTimer->stop();
+        }
+        return false;
+    }
+    if (!glyphHoverTimer) {
+        glyphHoverTimer = std::make_unique<QTimer>();
+        glyphHoverTimer->setSingleShot(true);
+        glyphHoverTimer->setInterval(800);
+        QObject::connect(glyphHoverTimer.get(), &QTimer::timeout, [this]() {
+            glyphHover = GlyphHover();
+            updateConstraintsShownByHover();
+        });
+    }
+    if (!glyphHoverTimer->isActive()) {
+        glyphHoverTimer->start();
+    }
+    return false;
+}
+
+void ViewProviderSketch::clearGlyphHover()
+{
+    if (glyphHoverTimer) {
+        glyphHoverTimer->stop();
+    }
+    glyphHover = GlyphHover();
+}
+
 
 void ViewProviderSketch::drawEdit(const std::vector<Base::Vector2d>& EditCurve)
 {
@@ -4095,6 +4397,10 @@ void ViewProviderSketch::updateData(const App::Property* prop) {
                 pcSketchFaces,
                 Deviation.getValue(),
                 AngularDeflection.getValue());
+        updateSelectedRegions();  // FreeCAD-CH (selection parity SQ11)
+        // FreeCAD-CH (ops#640 polish P7): the regions are new: the next move finds the hovered one
+        hoveredRegion = 0;
+        hoveredRegionCurves.clear();
     }
 
     if (prop != &getSketchObject()->Constraints) {
@@ -4111,6 +4417,9 @@ void ViewProviderSketch::slotSolverUpdate()
     if (!isInEditMode()) {
         return;
     }
+
+    // FreeCAD-CH (ops#640, rank 45): a constraint that conflicts is refused, not shown collapsed
+    checkAddedConstraint(*this);
 
     // At this point, we do not need to solve the Sketch
     // If we are adding geometry an update can be triggered before the sketch is actually
@@ -4150,6 +4459,8 @@ void ViewProviderSketch::slotConstraintAdded(Sketcher::Constraint* constraint)
     if (!constraint) {
         return;
     }
+
+    noteConstraintAdded(*this, *constraint);  // FreeCAD-CH (ops#640, rank 45)
 
     // Auto-scale label distance for dimensional constraints
     if (constraint->Type == Distance || constraint->Type == DistanceX || constraint->Type == DistanceY) {
@@ -4382,6 +4693,7 @@ void ViewProviderSketch::attach(App::DocumentObject* pcFeat)
     ViewProvider2DObject::attach(pcFeat);
 
     getOrCreateAnnotation()->addChild(pcSketchFacesToggle);
+    getOrCreateAnnotation()->addChild(pcRegionHoverRoot);  // FreeCAD-CH (ops#640 polish P7)
 }
 
 void ViewProviderSketch::setupContextMenu(QMenu* menu, QObject* receiver, const char* member)
@@ -4403,6 +4715,7 @@ bool ViewProviderSketch::setEdit(int ModNum)
     sketchBackup.clear();
     getObject()->dumpToStream(sketchBackup, 0);
     sketchBackup.seekg(0);
+    cancelChecks()[this] = cancelCheckOf(getSketchObject());  // FreeCAD-CH (ops#640, B5-5)
 
     // When double-clicking on the item for this sketch the
     // object unsets and sets its edit mode without closing
@@ -4466,6 +4779,10 @@ bool ViewProviderSketch::setEdit(int ModNum)
     selection.reset();
     editCoinManager = std::make_unique<EditModeCoinManager>(*this);
     snapManager = std::make_unique<SnapManager>(*this);
+    pcSelectedRegionsRoot->whichChild = SO_SWITCH_NONE;
+    editCoinManager->getRootEditNode()->addChild(pcSelectedRegionsRoot);
+    hoveredRegion = 0;
+    hoveredRegionCurves.clear();
 
 
     App::DocumentObject* editObj = getSketchObject();
@@ -4707,15 +5024,28 @@ void ViewProviderSketch::UpdateSolverInformation()
     bool hasRedundancies = getSketchObject()->getLastHasRedundancies();
     bool hasPartiallyRedundant = getSketchObject()->getLastHasPartialRedundancies();
     bool hasMalformed = getSketchObject()->getLastHasMalformedConstraints();
+    // FreeCAD-CH (ops#640): the conflict was solved around (its constraints left out, the rest
+    // solved): Onshape's banner text (PL1d)
+    const bool solvedAround = getSketchObject()->getLastSolvedAroundConflict();
+    const QString couldNotSolve = tr("Sketch could not be solved.") + QLatin1String(" ");
 
     if (getSketchObject()->Geometry.getSize() == 0 &&
         getSketchObject()->ExternalGeo.getSize() <= 2) { // X- and Y-Axis
         signalSetUp(QStringLiteral("empty"), tr("Empty sketch"), QString(), QString());
     }
+    // FreeCAD-CH (ops#644): a missing reference with a closest match, offered as Onshape's repair
+    // does (the error colour of an over-constrained sketch)
+    else if (std::size_t matches = referencesToMatch(getSketchObject()).size(); matches > 0) {
+        signalSetUp(QStringLiteral("conflicting_constraints"),
+                    tr("Missing references: %n", "", static_cast<int>(matches))
+                        + QLatin1String(" "),
+                    QStringLiteral("#closestmatches"),
+                    tr("Use the closest match"));
+    }
     else if (dofs < 0 || hasConflicts) {// over-constrained sketch
         signalSetUp(
             QStringLiteral("conflicting_constraints"),
-            tr("Over-constrained:") + QLatin1String(" "),
+            solvedAround ? couldNotSolve : tr("Over-constrained:") + QLatin1String(" "),
             QStringLiteral("#conflicting"),
             QStringLiteral("(%1)").arg(intListHelper(getSketchObject()->getLastConflicting())));
     }
@@ -4729,7 +5059,7 @@ void ViewProviderSketch::UpdateSolverInformation()
     else if (hasRedundancies) {
         signalSetUp(
             QStringLiteral("redundant_constraints"),
-            tr("Redundant constraints:") + QLatin1String(" "),
+            solvedAround ? couldNotSolve : tr("Redundant constraints:") + QLatin1String(" "),
             QStringLiteral("#redundant"),
             QStringLiteral("(%1)").arg(intListHelper(getSketchObject()->getLastRedundant())));
     }
@@ -4763,10 +5093,12 @@ void ViewProviderSketch::unsetEdit(int ModNum)
     if (ModNum != ViewProviderSketch::Default) {
         return PartGui::ViewProvider2DObject::unsetEdit(ModNum);
     }
+    clearGlyphHover();  // FreeCAD-CH (ops#640 polish P1b)
 
     if (dragAutoConstraintHandler) {
         dragAutoConstraintHandler->clear();
     }
+    forgetAddedConstraint(*this);  // FreeCAD-CH (ops#640, rank 45)
 
     setGridEnabled(nullptr);
     auto gridnode = getGridNode();
@@ -4777,9 +5109,38 @@ void ViewProviderSketch::unsetEdit(int ModNum)
         listener.reset();
     }
 
+    // FreeCAD-CH (ops#640, hands-on B5-5): the check taken when the edit started
+    std::string cancelCheck;
+    if (auto check = cancelChecks().find(this); check != cancelChecks().end()) {
+        cancelCheck = std::move(check->second);
+        cancelChecks().erase(check);
+    }
+
     if (isInEditMode()) {
         if (sketchHandler) {
             deactivateHandler();
+        }
+
+        // FreeCAD-CH (ops#640, hands-on B5-5): Onshape's Cancel of a sketch edit leaves no
+        // history entry, and Ctrl+Z then undoes the step before the edit. The edit's own
+        // transactions are undone while its session is still open (Gui/Document.cpp), as the
+        // sketch's Ctrl+Z steps them, its views still up; the Redo stack loses them. A new
+        // sketch's Cancel removes it (TaskDlgEditSketch::removeNewSketch, its own step): the
+        // restore below, as before. So is a Cancel the undo can't do exactly, or one the undo
+        // didn't bring back to the edit's start (a change outside the transactions).
+        bool cancelUndone = false;
+        bool cancelChanged = false;
+        if (editingCancelled && !cancelCheck.empty()) {
+            const TaskDlgEditSketch* dlg = TaskDlgEditSketch::ofSketchView(this);
+            if (dlg && !dlg->isNewSketch()) {
+                const int undone = Gui::undoOpenSketchSession(getDocument()->getDocument());
+                cancelUndone = undone >= 0 && cancelCheckOf(getSketchObject()) == cancelCheck;
+                cancelChanged = undone > 0;
+                if (cancelUndone && undone == 0) {
+                    // nothing changed: touched only by the edit's own solve, as the restore does
+                    getSketchObject()->purgeTouched();
+                }
+            }
         }
 
         editCoinManager = nullptr;
@@ -4787,13 +5148,29 @@ void ViewProviderSketch::unsetEdit(int ModNum)
         preselection.reset();
         selection.reset();
 
-        if (editingCancelled) {
+        if (editingCancelled && !cancelUndone) {
+            cancelChanged = cancelChanged
+                || (!cancelCheck.empty() && cancelCheckOf(getSketchObject()) != cancelCheck);
             App::AutoTransaction trans(getDocument()->getDocument(), "Cancel sketch editing");
             // Restore the object as it was when edit is set.
             getObject()->restoreFromStream(sketchBackup);
             getSketchObject()->purgeTouched();
         }
-        else {
+        if (editingCancelled && cancelChanged) {
+            // Onshape's toast "Sketch 2 has been canceled." (its Restore link: not here). The
+            // close is followed by a few recomputes (the undo's, the dependents'), each ending
+            // with the progress bar clearing the status message (SequencerBar::resetData), and
+            // they land at no fixed time: a single show cleared by one of them was the flake of
+            // TestSketchCancelGui. The text is shown again while they run down (2026-11-11).
+            const QString text =
+                tr("%1 has been canceled").arg(QString::fromUtf8(getObject()->Label.getValue()));
+            for (const int delay : {0, 150, 400, 900}) {
+                QTimer::singleShot(delay, Gui::getMainWindow(), [text]() {
+                    Gui::getMainWindow()->showMessage(text, 5000);
+                });
+            }
+        }
+        if (!editingCancelled) {
             App::AutoTransaction trans(getDocument()->getDocument(), "Sketch recompute");
             try {
                 // and update the sketch
@@ -5166,6 +5543,28 @@ bool ViewProviderSketch::onDelete(const std::vector<std::string>& subList)
             }
         }
 
+        // FreeCAD-CH (ops#640): a constraint on the deleted geometries alone (a line's own length
+        // or horizontal distance) goes with them, as in Onshape. delGeometries would move it onto
+        // the coincident neighbours' points, a dimension the user believes deleted (blind test F14).
+        for (int i = 0; i < static_cast<int>(constraints.size()); ++i) {
+            const Sketcher::Constraint* constraint = constraints[i];
+            if (constraint->Type == Sketcher::InternalAlignment) {
+                continue;
+            }
+            bool onDeleted = false;
+            bool onOthers = false;
+            for (std::size_t j = 0; constraint->hasElement(j); ++j) {
+                int geoId = constraint->getGeoId(j);
+                if (geoId == GeoEnum::GeoUndef) {
+                    continue;
+                }
+                (delInternalGeometries.count(geoId) ? onDeleted : onOthers) = true;
+            }
+            if (onDeleted && !onOthers) {
+                delConstraints.insert(i);
+            }
+        }
+
         // We stored the vertices, but is there really a coincident constraint? Check
         const std::vector<Sketcher::Constraint*>& vals = getSketchObject()->Constraints.getValues();
 
@@ -5244,6 +5643,17 @@ bool ViewProviderSketch::onDelete(const std::vector<std::string>& subList)
 
             try {
                 Gui::cmdAppObjectArgs(getObject(), "delExternals([%s])", stream.str().c_str());
+            }
+            catch (const Base::Exception& e) {
+                Base::Console().developerError("ViewProviderSketch", "%s\n", e.what());
+            }
+        }
+
+        // FreeCAD-CH (ops#634): a constraint's helper (a model pick's link) goes with its last
+        // constraint, in the deletion's transaction, as in Onshape, where nothing is left
+        if (!getSketchObject()->unusedImplicitExternals().empty()) {
+            try {
+                Gui::cmdAppObjectArgs(getObject(), "delUnusedImplicitExternals()");
             }
             catch (const Base::Exception& e) {
                 Base::Console().developerError("ViewProviderSketch", "%s\n", e.what());
@@ -5657,6 +6067,11 @@ bool ViewProviderSketch::isCurveSelected(int curveId) const
     return selection.SelCurvSet.find(curveId) != selection.SelCurvSet.end();
 }
 
+bool ViewProviderSketch::isCurveRegionHovered(int curveId) const
+{
+    return hoveredRegionCurves.count(curveId) > 0;
+}
+
 bool ViewProviderSketch::isConstraintSelected(int constraintId) const
 {
     return selection.SelConstraintSet.find(constraintId) != selection.SelConstraintSet.end();
@@ -5811,12 +6226,18 @@ void ViewProviderSketch::generateContextMenu(const Gui::View3DInventorViewer* vi
                     menu << "Sketcher_ConstrainPerpendicular"
                          << "Sketcher_ConstrainTangent"
                          << "Sketcher_ConstrainSymmetric";
+                    if (selectedLines == 1) {
+                        menu << "Sketcher_ConstrainMidpoint";  // FreeCAD-CH (ops#645)
+                    }
                 }
             }
             else {
                 menu << "Sketcher_ConstrainCoincidentUnified"
                      << "Sketcher_ConstrainPerpendicular"
                      << "Sketcher_ConstrainTangent";
+                if (selectedConics == 1 && selectedPoints == 1) {
+                    menu << "Sketcher_ConstrainMidpoint";  // FreeCAD-CH (ops#656): an arc's middle
+                }
             }
         }
         else if (selectedEdges == 0 && selectedPoints >= 1 && !onlyOrigin) {
@@ -5836,7 +6257,8 @@ void ViewProviderSketch::generateContextMenu(const Gui::View3DInventorViewer* vi
                 }
             }
             if (selectedPoints == 3) {
-                menu << "Sketcher_ConstrainSymmetric";
+                menu << "Sketcher_ConstrainSymmetric"
+                     << "Sketcher_ConstrainMidpoint";  // FreeCAD-CH (ops#645)
             }
         }
         else if (selectedLines >= 1 && selectedPoints >= 1 && !onlyOrigin) {
@@ -5860,7 +6282,8 @@ void ViewProviderSketch::generateContextMenu(const Gui::View3DInventorViewer* vi
             }
 
             if (selectedLines == 1 && selectedPoints == 1) {
-                menu << "Sketcher_ConstrainSymmetric";
+                menu << "Sketcher_ConstrainSymmetric"
+                     << "Sketcher_ConstrainMidpoint";  // FreeCAD-CH (ops#645)
             }
         }
 
@@ -5937,6 +6360,184 @@ void ViewProviderSketch::generateContextMenu(const Gui::View3DInventorViewer* vi
     QMenu contextMenu(viewer->getGLWidget());
     Gui::MenuManager::getInstance()->setupContextMenu(&menu, contextMenu);
     contextMenu.exec(QCursor::pos());
+}
+
+int ViewProviderSketch::internalFaceAt(double x, double y)
+{
+    auto* sketch = getSketchObject();
+    if (!sketch->MakeInternals.getValue()) {
+        return 0;
+    }
+    // InternalShape is built on recompute; a sketch edited since (a solve, a Python edit) is
+    // recomputed first, so its regions are the ones on screen
+    if (sketch->isTouched() || sketch->mustExecute()) {
+        sketch->recomputeFeature();
+    }
+    const TopoDS_Shape& shape = sketch->InternalShape.getValue();
+    if (shape.IsNull()) {
+        return 0;
+    }
+    TopTools_IndexedMapOfShape faces;
+    TopExp::MapShapes(shape, TopAbs_FACE, faces);
+    int found = 0;
+    double foundArea = 0.0;
+    const gp_Pnt point(x, y, 0.0);
+    for (int i = 1; i <= faces.Extent(); ++i) {
+        const TopoDS_Face& face = TopoDS::Face(faces(i));
+        BRepClass_FaceClassifier classifier(face, point, Precision::Confusion());
+        if (classifier.State() != TopAbs_IN) {
+            continue;
+        }
+        GProp_GProps props;
+        BRepGProp::SurfaceProperties(face, props);
+        if (found == 0 || props.Mass() < foundArea) {
+            found = i;
+            foundArea = props.Mass();
+        }
+    }
+    return found;
+}
+
+void ViewProviderSketch::updateSelectedRegions()
+{
+    if (!isInEditMode() || !editCoinManager) {
+        return;
+    }
+    const TopoDS_Shape& shape = getSketchObject()->InternalShape.getValue();
+    TopoDS_Compound selected;
+    BRep_Builder builder;
+    builder.MakeCompound(selected);
+    bool any = false;
+    if (!shape.IsNull()) {
+        TopTools_IndexedMapOfShape faces;
+        TopExp::MapShapes(shape, TopAbs_FACE, faces);
+        for (int i = 1; i <= faces.Extent(); ++i) {
+            if (isSelected("InternalFace" + std::to_string(i))) {
+                builder.Add(selected, faces(i));
+                any = true;
+            }
+        }
+    }
+    if (any) {
+        pcSelectedRegions->color.setValue(DrawingParameters::SelectColor);
+        pcSelectedRegions->transparency.setValue(0.5F);
+        setupCoinGeometry(selected, pcSelectedRegions, Deviation.getValue(), AngularDeflection.getValue());
+    }
+    pcSelectedRegionsRoot->whichChild = any ? 0 : SO_SWITCH_NONE;
+}
+
+std::set<int> ViewProviderSketch::regionBoundaryCurves(int face) const
+{
+    std::set<int> curves;
+    auto* sketch = getSketchObject();
+    const TopoDS_Shape& shape = sketch->InternalShape.getValue();
+    if (face <= 0 || shape.IsNull()) {
+        return curves;
+    }
+    TopTools_IndexedMapOfShape faces;
+    TopExp::MapShapes(shape, TopAbs_FACE, faces);
+    if (face > faces.Extent()) {
+        return curves;
+    }
+    TopTools_IndexedMapOfShape edges;
+    TopExp::MapShapes(shape, TopAbs_EDGE, edges);
+    TopTools_IndexedMapOfShape faceEdges;
+    TopExp::MapShapes(faces(face), TopAbs_EDGE, faceEdges);
+    const auto elementMap = sketch->getInternalElementMap();
+    for (int i = 1; i <= faceEdges.Extent(); ++i) {
+        const int index = edges.FindIndex(faceEdges(i));
+        auto it = elementMap.find(SketchObject::internalPrefix() + "Edge" + std::to_string(index));
+        int geoId = 0;
+        if (index > 0 && it != elementMap.end()
+            && sketch->geoIdFromShapeType(it->second.c_str(), geoId)) {
+            curves.insert(geoId);
+        }
+    }
+    return curves;
+}
+
+void ViewProviderSketch::showRegionHover(int face, const SbColor& color)
+{
+    auto* sketch = getSketchObject();
+    std::vector<SbVec3f> points;
+    std::vector<int32_t> counts;
+    if (face > 0 && !isInEditMode() && sketch
+        && !Gui::Selection().isSelected(sketch, ("InternalFace" + std::to_string(face)).c_str())) {
+        for (int geoId : regionBoundaryCurves(face)) {
+            const Part::Geometry* geo = geoId >= 0 ? sketch->getGeometry(geoId) : nullptr;
+            if (!geo) {
+                continue;
+            }
+            const TopoDS_Shape edge = geo->toShape();
+            if (edge.IsNull() || edge.ShapeType() != TopAbs_EDGE) {
+                continue;
+            }
+            BRepAdaptor_Curve curve(TopoDS::Edge(edge));
+            GCPnts_TangentialDeflection discretizer(curve, 0.05, 0.01);
+            const int count = discretizer.NbPoints();
+            if (count < 2) {
+                continue;
+            }
+            for (int i = 1; i <= count; ++i) {
+                const gp_Pnt p = discretizer.Value(i);
+                points.emplace_back(float(p.X()), float(p.Y()), float(p.Z()));
+            }
+            counts.push_back(count);
+        }
+    }
+    if (counts.empty()) {
+        pcRegionHoverRoot->whichChild = SO_SWITCH_NONE;
+        return;
+    }
+    regionHoverColor->rgb.setValue(color);
+    regionHoverStyle->lineWidth = std::max(static_cast<float>(LineWidth.getValue()), 2.0F);
+    regionHoverCoords->point.setNum(int(points.size()));
+    regionHoverCoords->point.setValues(0, int(points.size()), points.data());
+    regionHoverLines->numVertices.setNum(int(counts.size()));
+    regionHoverLines->numVertices.setValues(0, int(counts.size()), counts.data());
+    pcRegionHoverRoot->whichChild = 0;
+}
+
+bool ViewProviderSketch::updateHoveredRegion(int face, double x, double y)
+{
+    if (face == hoveredRegion || !isInEditMode()) {
+        return false;
+    }
+    const bool hadRegion = hoveredRegion > 0;
+    hoveredRegion = 0;
+    hoveredRegionCurves.clear();
+    TopoDS_Shape region;
+    const TopoDS_Shape& shape = getSketchObject()->InternalShape.getValue();
+    if (face > 0 && !shape.IsNull()) {
+        TopTools_IndexedMapOfShape faces;
+        TopExp::MapShapes(shape, TopAbs_FACE, faces);
+        if (face <= faces.Extent()) {
+            region = faces(face);
+        }
+    }
+    if (region.IsNull()) {
+        // The region's preselection goes with it; an element's (the pointer on a side) stays
+        const bool element = preselection.isPreselectPointValid()
+            || preselection.isPreselectCurveValid() || preselection.isCrossPreselected()
+            || !preselection.PreselectConstraintSet.empty();
+        if (hadRegion && !element) {
+            updatingRegionPreselection = true;
+            Gui::Selection().rmvPreselect();
+            updatingRegionPreselection = false;
+        }
+        return hadRegion;
+    }
+    hoveredRegion = face;
+    hoveredRegionCurves = regionBoundaryCurves(face);
+    Base::Vector3d onPlane;
+    getEditingPlacement().multVec(Base::Vector3d(x, y, 0.0), onPlane);
+    updatingRegionPreselection = true;  // its removal of the old preselection keeps this hover
+    setPreselect("InternalFace" + std::to_string(face),
+                 static_cast<float>(onPlane.x),
+                 static_cast<float>(onPlane.y),
+                 static_cast<float>(onPlane.z));
+    updatingRegionPreselection = false;
+    return true;
 }
 
 void ViewProviderSketch::preselectToSelection(const std::stringstream& ss,

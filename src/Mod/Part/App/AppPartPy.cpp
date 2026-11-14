@@ -22,7 +22,11 @@
  *                                                                         *
  ***************************************************************************/
 
+#include <chrono>
+#include <thread>
+
 #include <BRep_Builder.hxx>
+#include <Message_ProgressScope.hxx>
 #include <BRep_Tool.hxx>
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
@@ -87,6 +91,7 @@
 #include "BSplineSurfacePy.h"
 #include "edgecluster.h"
 #include "FaceMaker.h"
+#include "KernelBudget.h"
 #include "GeometryCurvePy.h"
 #include "GeometryPy.h"
 #include "ImportIges.h"
@@ -487,6 +492,47 @@ public:
             "export(list,string) -- Export a list of objects into a single file."
         );
         add_varargs_method("read", &Module::read, "read(string) -- Load the file and return the shape.");
+        add_varargs_method(
+            "kernelBudgetTrial",
+            &Module::kernelBudgetTrial,
+            "kernelBudgetTrial(seconds, busy) -- For tests (FreeCAD-CH kernel safety, ops#743): under a "
+            "feature's time limit, one call on a worker that computes (busy) or sleeps for `seconds` on "
+            "the clock. Returns the limit's error, or an empty string when the call ended."
+        );
+        add_varargs_method(
+            "kernelBudget",
+            &Module::kernelBudget,
+            "kernelBudget() -- The time limit for a feature's geometry (FreeCAD-CH kernel safety): "
+            "a dict of the limit in seconds and the abandoned calls still running and in all."
+        );
+        add_varargs_method(
+            "kernelSampleBegin",
+            &Module::kernelSampleBegin,
+            "kernelSampleBegin(delay=10, period=0.5) -- Names a slow step's hot function (FreeCAD-CH, "
+            "ops#640): past `delay` seconds, samples this thread's stack every `period` seconds until "
+            "kernelSampleEnd(). True when it samples (one sampler runs at a time); a second call "
+            "ends the first one's sampling."
+        );
+        add_varargs_method(
+            "kernelSampleEnd",
+            &Module::kernelSampleEnd,
+            "kernelSampleEnd(top=10) -- Ends kernelSampleBegin()'s sampling: a dict of the wall time "
+            "(s), the samples, `top` as [(function, samples it was on the stack in)] most first, "
+            "`self` as [(innermost function, samples)], `phases` as {phase: seconds on this thread} "
+            "and `text`, the whole as one line. None without a kernelSampleBegin()."
+        );
+        add_varargs_method(
+            "kernelCheck",
+            &Module::kernelCheck,
+            "kernelCheck(shape) -- Whether the shape passes the shape check (FreeCAD-CH kernel "
+            "safety): BRepCheck_Analyzer's verdict, faces with many holes checked by parts."
+        );
+        add_varargs_method(
+            "kernelCheckChanged",
+            &Module::kernelCheckChanged,
+            "kernelCheckChanged(shape, base) -- kernelCheck of a result made from base, narrowed to "
+            "the faces base doesn't have and their neighbours (a dress-up's check, FreeCAD-CH)."
+        );
         add_varargs_method(
             "show",
             &Module::show,
@@ -976,6 +1022,122 @@ private:
         shape.write(EncodedName.c_str());
 
         return Py::None();
+    }
+    Py::Object kernelBudgetTrial(const Py::Tuple& args)
+    {
+        double seconds = 0.0;
+        PyObject* busy = Py_False;
+        if (!PyArg_ParseTuple(args.ptr(), "d|O!", &seconds, &PyBool_Type, &busy)) {
+            throw Py::Exception();
+        }
+        const bool compute = busy == Py_True;
+        KernelBudget::Scope scope(true);
+        try {
+            KernelBudget::run("The trial", [seconds, compute](const Message_ProgressRange& range) {
+                Message_ProgressScope progress(range, "The trial", 1);
+                const auto until = std::chrono::steady_clock::now()
+                    + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                                       std::chrono::duration<double>(seconds)
+                    );
+                volatile double sum = 0.0;
+                while (std::chrono::steady_clock::now() < until && !progress.UserBreak()) {
+                    if (compute) {
+                        for (int i = 0; i < 100000; ++i) {
+                            sum = sum + i;
+                        }
+                    }
+                    else {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                    }
+                }
+            });
+        }
+        catch (const Base::CADKernelError& error) {
+            return Py::String(error.what());
+        }
+        return Py::String("");
+    }
+
+    Py::Object kernelBudget(const Py::Tuple& args)
+    {
+        if (!PyArg_ParseTuple(args.ptr(), "")) {
+            throw Py::Exception();
+        }
+        Py::Dict result;
+        result.setItem("limit", Py::Float(KernelBudget::limit()));
+        result.setItem("abandonedRunning", Py::Long(KernelBudget::abandonedRunning()));
+        result.setItem("abandonedTotal", Py::Long(KernelBudget::abandonedTotal()));
+        return result;
+    }
+    // kernelSampleBegin()'s sampler
+    std::unique_ptr<KernelBudget::Sampler> pySampler;
+    Py::Object kernelSampleBegin(const Py::Tuple& args)
+    {
+        double delay = KernelBudget::Sampler::defaultDelay;
+        double period = KernelBudget::Sampler::defaultPeriod;
+        if (!PyArg_ParseTuple(args.ptr(), "|dd", &delay, &period)) {
+            throw Py::Exception();
+        }
+        pySampler.reset();
+        pySampler = std::make_unique<KernelBudget::Sampler>(delay, period);
+        return Py::Boolean(pySampler->armed());
+    }
+    Py::Object kernelSampleEnd(const Py::Tuple& args)
+    {
+        int top = 10;
+        if (!PyArg_ParseTuple(args.ptr(), "|i", &top)) {
+            throw Py::Exception();
+        }
+        if (!pySampler) {
+            return Py::None();
+        }
+        const KernelBudget::SampleReport report = pySampler->finish(top);
+        pySampler.reset();
+        auto frames = [](const std::vector<KernelBudget::SampleFrame>& list) {
+            Py::List result;
+            for (const auto& frame : list) {
+                Py::Tuple item(2);
+                item.setItem(0, Py::String(frame.name));
+                item.setItem(1, Py::Long(frame.count));
+                result.append(item);
+            }
+            return result;
+        };
+        Py::Dict result;
+        result.setItem("wall", Py::Float(report.wall));
+        result.setItem("samples", Py::Long(report.samples));
+        result.setItem("top", frames(report.top));
+        result.setItem("self", frames(report.self));
+        Py::Dict phases;
+        for (int i = 0; i < KernelBudget::phaseCount; ++i) {
+            phases.setItem(
+                KernelBudget::phaseName(static_cast<KernelBudget::Phase>(i)),
+                Py::Float(report.phases[i])
+            );
+        }
+        result.setItem("phases", phases);
+        result.setItem("text", Py::String(KernelBudget::describe(report)));
+        return result;
+    }
+    Py::Object kernelCheck(const Py::Tuple& args)
+    {
+        PyObject* shape = nullptr;
+        if (!PyArg_ParseTuple(args.ptr(), "O!", &TopoShapePy::Type, &shape)) {
+            throw Py::Exception();
+        }
+        const TopoDS_Shape& value = static_cast<TopoShapePy*>(shape)->getTopoShapePtr()->getShape();
+        return Py::Boolean(KernelBudget::checkValid(value));
+    }
+    Py::Object kernelCheckChanged(const Py::Tuple& args)
+    {
+        PyObject* shape = nullptr;
+        PyObject* base = nullptr;
+        if (!PyArg_ParseTuple(args.ptr(), "O!O!", &TopoShapePy::Type, &shape, &TopoShapePy::Type, &base)) {
+            throw Py::Exception();
+        }
+        const TopoDS_Shape& value = static_cast<TopoShapePy*>(shape)->getTopoShapePtr()->getShape();
+        const TopoDS_Shape& from = static_cast<TopoShapePy*>(base)->getTopoShapePtr()->getShape();
+        return Py::Boolean(KernelBudget::checkValidChanged(value, from));
     }
     Py::Object read(const Py::Tuple& args)
     {

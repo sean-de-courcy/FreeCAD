@@ -49,6 +49,7 @@
 #endif
 
 #include <algorithm>
+#include <cmath>
 #include <future>
 #include <iostream>
 #include <limits>
@@ -650,9 +651,12 @@ int System::addConstraintP2PAngle(Point& p1, Point& p2, double* angle, double in
     return addConstraint(constr);
 }
 
-int System::addConstraintP2PAngle(Point& p1, Point& p2, double* angle, int /*tagId*/, bool driving)
+int System::addConstraintP2PAngle(Point& p1, Point& p2, double* angle, int tagId, bool driving)
 {
-    return addConstraintP2PAngle(p1, p2, angle, 0., 0, driving);
+    // FreeCAD-CH (ops#640): the tag is passed on. It was dropped (0), so a line's Angle was never
+    // named in a conflict or redundancy and its error could not be read by tag (a conflict
+    // solved around then left out the other constraints of the conflict instead)
+    return addConstraintP2PAngle(p1, p2, angle, 0., tagId, driving);
 }
 
 int System::addConstraintP2LDistance(Point& p, Line& l, double* distance, bool ccw, int tagId, bool driving)
@@ -1709,6 +1713,24 @@ double System::calculateConstraintErrorByTag(int tagId)
     }
 }
 
+std::map<int, double> System::calculateConstraintErrorsByTag() const
+{
+    std::map<int, std::pair<int, double>> sums;  // tag: (count, sum of squared errors)
+    std::map<int, double> last;                  // tag: the signed error, for a single constraint
+    for (const auto& constr : clist) {
+        const double err = constr->error();
+        auto& [count, sqErr] = sums[constr->getTag()];
+        ++count;
+        sqErr += err * err;
+        last[constr->getTag()] = err;
+    }
+    std::map<int, double> errors;
+    for (const auto& [tag, sum] : sums) {
+        errors[tag] = sum.first == 1 ? last[tag] : std::sqrt(sum.second / sum.first);
+    }
+    return errors;
+}
+
 void System::rescaleConstraint(int id, double coeff)
 {
     if (id >= static_cast<int>(clist.size()) || id < 0) {
@@ -1927,7 +1949,12 @@ int System::solve(bool isFine, Algorithm alg, bool isRedundantsolving)
             res = std::max(res, solve(subSystemsAux[cid], isFine, alg, isRedundantsolving));
         }
     }
-    if (res == Success) {
+    if (res == Success && !redundant.empty()) {
+        // FreeCAD-CH (ops#656): the redundant constraints, left out of the subsystems, are checked
+        // at the solution: the subsystems hold it until applySolution, so the parameters were
+        // still the start's here, and a repeat that holds only once the geometry has moved (two
+        // repeated dimensions driven to a new value together) failed. Apply, check, put back.
+        applySolution();
         for (std::set<Constraint*>::const_iterator constr = redundant.begin();
              constr != redundant.end();
              ++constr) {
@@ -1937,9 +1964,10 @@ int System::solve(bool isFine, Algorithm alg, bool isRedundantsolving)
             double err = (*constr)->error();
             if (err * err > (isRedundantsolving ? convergenceRedundant : convergence)) {
                 res = Converged;
-                return res;
+                break;
             }
         }
+        resetToReference();
     }
     return res;
 }
@@ -4916,6 +4944,15 @@ int System::diagnose(Algorithm alg)
     // From here on, presuming `J.rows() > 0`.
     emptyDiagnoseMatrix = false;
 
+    // FreeCAD-CH (ops#640): a system of some size that falls into decoupled blocks is diagnosed
+    // block by block; one that doesn't, and every small one, whole as before. The size is well
+    // under the dense QR's limit: 35 fully constrained slots (910 parameters) took 11 s whole
+    constexpr std::size_t blocksFrom = 200;
+    if (pdiagnoselist.size() >= blocksFrom
+        && diagnoseByBlocks(alg, J, jacobianconstraintmap, pdiagnoselist, tagmultiplicity)) {
+        return dofs;
+    }
+
     if (qrAlgorithm == EigenDenseQR) {
 #ifdef PROFILE_DIAGNOSE
         Base::TimeElapsed DenseQR_start_time;
@@ -5466,7 +5503,8 @@ void System::identifyConflictingRedundantConstraints(
     Eigen::MatrixXd& R,
     int constrNum,
     int rank,
-    int& nonredundantconstrNum
+    int& nonredundantconstrNum,
+    const std::vector<Constraint*>* blockConstraints
 )
 {
     eliminateNonZerosOverPivotInUpperTriangularMatrix(R, rank);
@@ -5588,9 +5626,12 @@ void System::identifyConflictingRedundantConstraints(
         SolverReportingManager::Manager().LogSetOfConstraints("Chosen redundants", skipped);
     }
 
+    // the constraints the trial solve keeps: the system's, or the diagnosed block's own
+    // (diagnoseByBlocks(), with the block's parameters in `pdiagnoselist`)
+    const std::vector<Constraint*>& candidates = blockConstraints ? *blockConstraints : clist;
     std::vector<Constraint*> clistTmp;
-    clistTmp.reserve(clist.size());
-    std::ranges::copy_if(clist, std::back_inserter(clistTmp), [&skipped](const auto& constr) {
+    clistTmp.reserve(candidates.size());
+    std::ranges::copy_if(candidates, std::back_inserter(clistTmp), [&skipped](const auto& constr) {
         return (constr->isDriving() && skipped.count(constr) == 0);
     });
 
@@ -5704,6 +5745,261 @@ void System::identifyConflictingRedundantConstraints(
     std::ranges::copy(partiallyRedundantTagsSet, partiallyRedundantTags.begin());
 
     nonredundantconstrNum = constrNum;
+}
+
+// FreeCAD-CH (ops#640, FSLC #49): the diagnosis of a large system, block by block. The Jacobian of
+// a sketch whose geometries are not all tied together is block-diagonal: a parameter no
+// constraint acts on is a block of its own, an arc with only its own rules another, a slot
+// constrained in itself another. The whole-system QR took no advantage of it: Eigen's SparseQR
+// spent 5 s per factorization on 229 unconstrained slots (1832 rule equations, 5954 parameters),
+// twice per diagnosis and two diagnoses per recompute, and the cost grew with the cube of the
+// number of slots when each slot was fully constrained.
+//
+// The blocks are the components of the parameters joined by a constraint, and by a tag: a sketch
+// constraint's equations (one tag) stay in one block, so that what is said of a tag (redundant,
+// partially redundant, the choice of the constraint to leave out) is said from all of them. Each
+// block is diagnosed by the same code as the whole was, on its own small Jacobian, and the
+// results add up: the rank, the conflicting tags, the redundant constraints, the dependent
+// parameters. Decoupled blocks share no parameter, so the rank of the whole is the sum of the
+// blocks' ranks, a conflict or a redundancy lies within one block, and the trial solve that tells
+// the two apart is each block's own.
+//
+// Returns false, with nothing changed, when there is nothing to gain (one block, no free
+// parameter) or a constraint acts on no diagnosed parameter (all of them fixed): the caller
+// diagnoses the whole, as before. Each block's QR finds its rank against its own largest pivot,
+// not the whole system's: a nearly dependent pair of constraints beside a block of far larger
+// gradients is judged in its own scale.
+bool System::diagnoseByBlocks(
+    Algorithm alg,
+    const Eigen::MatrixXd& J,
+    const std::map<int, int>& jacobianconstraintmap,
+    const GCS::VEC_pD& pdiagnoselist,
+    const std::map<int, int>& tagmultiplicity
+)
+{
+    const int rows = int(jacobianconstraintmap.size());
+    const int cols = int(pdiagnoselist.size());
+    if (rows == 0 || cols == 0) {
+        return false;
+    }
+    // each row's parameters, in column order: the diagnosed parameters its constraint acts on,
+    // and any other with a gradient. Not the gradient alone: a parameter whose gradient is zero
+    // where the sketch stands (the other line of a Perpendicular to a line of no length) still
+    // moves in the trial solve that tells a redundant constraint from a conflicting one
+    std::map<double*, int> column;
+    for (int c = 0; c < cols; ++c) {
+        column[pdiagnoselist[c]] = c;
+    }
+    std::vector<std::vector<int>> rowCols(rows);
+    for (int r = 0; r < rows; ++r) {
+        std::vector<int>& columns = rowCols[r];
+        const auto acted = c2p.find(clist[jacobianconstraintmap.at(r)]);
+        if (acted != c2p.end()) {
+            for (double* param : acted->second) {
+                const auto found = column.find(param);
+                if (found != column.end()) {
+                    columns.push_back(found->second);
+                }
+            }
+        }
+        for (int c = 0; c < cols; ++c) {
+            if (J(r, c) != 0.0) {
+                columns.push_back(c);
+            }
+        }
+        std::ranges::sort(columns);
+        columns.erase(std::unique(columns.begin(), columns.end()), columns.end());
+    }
+    // components of parameters; a component's root is its first column
+    std::vector<int> parent(cols);
+    for (int c = 0; c < cols; ++c) {
+        parent[c] = c;
+    }
+    auto root = [&parent](int c) {
+        while (parent[c] != c) {
+            parent[c] = parent[parent[c]];
+            c = parent[c];
+        }
+        return c;
+    };
+    auto join = [&parent, &root](int first, int second) {
+        const int a = root(first);
+        const int b = root(second);
+        if (a != b) {
+            parent[std::max(a, b)] = std::min(a, b);
+        }
+    };
+    std::map<int, int> tagColumn;  // a sketch constraint's tag -> a column of its first equation
+    for (int r = 0; r < rows; ++r) {
+        const std::vector<int>& columns = rowCols[r];
+        if (columns.empty()) {
+            return false;
+        }
+        for (std::size_t k = 1; k < columns.size(); ++k) {
+            join(columns[0], columns[k]);
+        }
+        // tag 0 is every geometry's own rules, not one constraint's equations
+        const int tag = clist[jacobianconstraintmap.at(r)]->getTag();
+        if (tag > 0) {
+            const auto known = tagColumn.try_emplace(tag, columns[0]);
+            if (!known.second) {
+                join(known.first->second, columns[0]);
+            }
+        }
+    }
+    std::vector<std::vector<int>> componentRows(cols);
+    std::vector<std::vector<int>> componentCols(cols);
+    for (int r = 0; r < rows; ++r) {
+        componentRows[root(rowCols[r][0])].push_back(r);
+    }
+    int blockCount = 0;
+    int freeCount = 0;
+    for (int c = 0; c < cols; ++c) {
+        componentCols[root(c)].push_back(c);
+    }
+    for (int c = 0; c < cols; ++c) {
+        if (!componentCols[c].empty()) {
+            if (componentRows[c].empty()) {
+                ++freeCount;
+            }
+            else {
+                ++blockCount;
+            }
+        }
+    }
+    if (blockCount <= 1 && freeCount == 0) {
+        return false;
+    }
+
+    pDependentParametersGroups.clear();
+    pDependentParameters.clear();
+    // a block's dependent parameters, as identifyDependentParameters() takes the whole's
+    auto addDependent = [this](const auto& qrJ, Eigen::MatrixXd& Rparams, int rank, const VEC_pD& list) {
+        eliminateNonZerosOverPivotInUpperTriangularMatrix(Rparams, rank);
+        const auto& permutation = qrJ.colsPermutation().indices();
+        for (int j = rank; j < int(qrJ.cols()); ++j) {
+            std::vector<double*> group;
+            for (int row = 0; row < rank; ++row) {
+                if (fabs(Rparams(row, j)) > 1e-10) {
+                    group.push_back(list[permutation[row]]);
+                }
+            }
+            group.push_back(list[permutation[j]]);
+            pDependentParameters.insert(pDependentParameters.end(), group.begin(), group.end());
+            pDependentParametersGroups.push_back(std::move(group));
+        }
+    };
+
+    int totalRank = 0;
+    int totalNonRedundant = 0;
+    SET_I conflicting;
+    for (int c = 0; c < cols; ++c) {
+        const std::vector<int>& blockRows = componentRows[c];
+        const std::vector<int>& blockCols = componentCols[c];
+        if (blockCols.empty()) {
+            continue;  // not a root
+        }
+        if (blockRows.empty()) {
+            // a free parameter: a dependent group of its own
+            pDependentParametersGroups.push_back({pdiagnoselist[c]});
+            pDependentParameters.push_back(pdiagnoselist[c]);
+            continue;
+        }
+        const int constrNum = int(blockRows.size());
+        const int paramsNum = int(blockCols.size());
+        Eigen::MatrixXd block(constrNum, paramsNum);
+        std::map<int, int> blockMap;
+        VEC_pD blockList;
+        std::vector<Constraint*> blockConstraints;
+        blockList.reserve(paramsNum);
+        blockConstraints.reserve(constrNum);
+        for (int j = 0; j < paramsNum; ++j) {
+            blockList.push_back(pdiagnoselist[blockCols[j]]);
+        }
+        for (int i = 0; i < constrNum; ++i) {
+            for (int j = 0; j < paramsNum; ++j) {
+                block(i, j) = J(blockRows[i], blockCols[j]);
+            }
+            const int constraintIndex = jacobianconstraintmap.at(blockRows[i]);
+            blockMap[i] = constraintIndex;
+            blockConstraints.push_back(clist[constraintIndex]);
+        }
+
+        int rank = 0;
+        int nonredundant = constrNum;
+        Eigen::MatrixXd R;
+        bool dense = autoChooseAlgorithm ? paramsNum < autoQRThreshold
+                                         : qrAlgorithm == EigenDenseQR;
+#ifndef EIGEN_SPARSEQR_COMPATIBLE
+        dense = true;
+#endif
+        if (dense) {
+            {
+                Eigen::FullPivHouseholderQR<Eigen::MatrixXd> qrJ;
+                Eigen::MatrixXd Rparams;
+                int paramsRank = 0;
+                makeDenseQRDecomposition(block, blockMap, qrJ, paramsRank, Rparams, false, true);
+                addDependent(qrJ, Rparams, paramsRank, blockList);
+            }
+            Eigen::FullPivHouseholderQR<Eigen::MatrixXd> qrJT;
+            makeDenseQRDecomposition(block, blockMap, qrJT, rank, R, true, true);
+            if (constrNum > rank) {
+                identifyConflictingRedundantConstraints(
+                    alg,
+                    qrJT,
+                    blockMap,
+                    tagmultiplicity,
+                    blockList,
+                    R,
+                    constrNum,
+                    rank,
+                    nonredundant,
+                    &blockConstraints
+                );
+                conflicting.insert(conflictingTags.begin(), conflictingTags.end());
+            }
+        }
+#ifdef EIGEN_SPARSEQR_COMPATIBLE
+        else {
+            {
+                Eigen::SparseQR<Eigen::SparseMatrix<double>, Eigen::COLAMDOrdering<int>> SqrJ;
+                Eigen::MatrixXd Rparams;
+                int paramsRank = 0;
+                makeSparseQRDecomposition(block, blockMap, SqrJ, paramsRank, Rparams, false, true);
+                addDependent(SqrJ, Rparams, paramsRank, blockList);
+            }
+            Eigen::SparseQR<Eigen::SparseMatrix<double>, Eigen::COLAMDOrdering<int>> SqrJT;
+            makeSparseQRDecomposition(block, blockMap, SqrJT, rank, R, true, true);
+            if (constrNum > rank) {
+                identifyConflictingRedundantConstraints(
+                    alg,
+                    SqrJT,
+                    blockMap,
+                    tagmultiplicity,
+                    blockList,
+                    R,
+                    constrNum,
+                    rank,
+                    nonredundant,
+                    &blockConstraints
+                );
+                conflicting.insert(conflictingTags.begin(), conflictingTags.end());
+            }
+        }
+#endif
+        totalRank += rank;
+        totalNonRedundant += nonredundant;
+    }
+
+    // each block's call wrote its own conflicting tags; the redundant tags are taken from the
+    // redundant constraints of all the blocks so far, so the last call's are complete
+    conflictingTags.assign(conflicting.begin(), conflicting.end());
+    dofs = cols - totalRank;
+    if (rows > totalRank && cols == totalRank && totalNonRedundant > totalRank) {
+        // over-constrained
+        dofs = cols - totalNonRedundant;
+    }
+    return true;
 }
 
 void System::clearSubSystems()

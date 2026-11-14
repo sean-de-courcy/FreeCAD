@@ -178,6 +178,13 @@ public:
     void createEditModeInventorNodes();
 
 private:
+    /** Whether each constraint is drawn: the one rule of the switches (updateVirtualSpace()) and
+     * the icons (drawConstraintIcons()). It is in the shown space and visible, and, with
+     * ShowConstraints off (FreeCAD-CH, ops#640 polish P1, Onshape's "Show constraints"), a
+     * dimension, selected, on selected geometry or a selected point, or over-defining.
+     */
+    std::vector<bool> shownConstraints(const std::vector<Sketcher::Constraint*>& constrlist) const;
+
     void rebuildConstraintNodes(const GeoListFacade& geolistfacade);  // with specific geometry
 
     void rebuildConstraintNodes(
@@ -298,8 +305,19 @@ private:
         std::vector<QRect>* boundingBoxes = nullptr,
         //! If not NULL, gets set to the number of pixels
         //! that the text extends below the icon base.
-        int* vPad = nullptr
+        int* vPad = nullptr,
+        //! FreeCAD-CH (ops#640): if valid, the icon is drawn white on a badge of this colour
+        //! (Onshape's Show errors, PL1d)
+        const QColor& badgeColor = QColor()
     );
+
+    /// FreeCAD-CH (ops#640): whether the constraint's glyph is drawn as an error badge: Show
+    /// errors is on and the solver names it conflicting or malformed (Onshape's PL1d)
+    bool isErrorBadge(int constraintId) const;
+
+    /// The badge's fill for an error glyph drawn in iconColor at colour priority priority:
+    /// the selection or preselection colour while selected or preselected, else the error red
+    static QColor badgeFill(const QColor& iconColor, int priority);
 
     /// Copies a QImage constraint icon into a SoImage*
     /*! Used by drawTypicalConstraintIcon() and drawMergedConstraintIcons() */

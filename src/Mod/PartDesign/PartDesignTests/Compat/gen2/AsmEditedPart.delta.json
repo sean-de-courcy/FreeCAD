@@ -1,0 +1,31 @@
+{
+ "approved": "c768, 11-14 (ops#673 6871011296, 6871035881), via Mac coordinator 27",
+ "changes": {
+  "AsmEdited": {
+   "Fixed.Placement2.rotation[0]": {
+    "abs": 1e-12,
+    "new": 1.0,
+    "old": 0.0,
+    "passes": [
+     "recompute",
+     "roundtrip"
+    ],
+    "rel": 1e-13
+   },
+   "Fixed.Placement2.rotation[3]": {
+    "abs": 1e-12,
+    "new": 1.2246467991473532e-16,
+    "old": 1.0,
+    "passes": [
+     "recompute",
+     "roundtrip"
+    ],
+    "rel": 1e-13
+   }
+  }
+ },
+ "format": 1,
+ "issue": "ops#683",
+ "label": "compat-change",
+ "why": "C2: Onshape's connector frames (a planar face's Z out of the material, X the first part axis not along it; oracle 12): a mate on a bottom or side face turns its frame 180 degrees about x, and an angle mate may move its part"
+}

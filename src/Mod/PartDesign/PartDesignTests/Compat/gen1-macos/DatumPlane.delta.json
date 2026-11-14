@@ -1,0 +1,31 @@
+{
+ "approved": "coordinator c730, 11-11, ruling A",
+ "changes": {
+  "DatumPlane": {
+   "Body.shape.area": {
+    "new": 3229.3379332161085,
+    "old": 3229.3379332355885,
+    "rel": 1e-09
+   },
+   "Body.shape.volume": {
+    "new": 9462.222215703134,
+    "old": 9462.222214930964,
+    "rel": 1e-09
+   },
+   "Post.shape.area": {
+    "new": 3229.3379332161085,
+    "old": 3229.3379332355885,
+    "rel": 1e-09
+   },
+   "Post.shape.volume": {
+    "new": 9462.222215703134,
+    "old": 9462.222214930964,
+    "rel": 1e-09
+   }
+  }
+ },
+ "format": 1,
+ "issue": "ops#640",
+ "label": "compat-change",
+ "why": "SC7: free-form faces' volume, area and centre integrated adaptively (the default integration was off on B-spline faces); a solid's centre and inertia readouts on such shapes at 1e-4 relative, the mass the accurate volume's"
+}

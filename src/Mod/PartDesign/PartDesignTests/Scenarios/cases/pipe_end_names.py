@@ -201,6 +201,7 @@ class PipeEnds(Scenario):
             geometry += [m.circle(0, 0, 1)] if self.ROUND_HOLE else m.rectangle(-1, -1, 1, 1)
         profile = m.sketch(doc, "Profile", geometry, body, z=self.PROFILE_Z)
         pipe = body.newObject("PartDesign::AdditivePipe", "Pipe")
+        pipe.ExtendToFullPath = True  # mid-path profiles: the whole path, as before sweeps slice 1
         pipe.Profile = profile
         pipe.Spine = (path, [])
         pipe.Transition = self.TRANSITION

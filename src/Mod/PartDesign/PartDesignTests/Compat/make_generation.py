@@ -68,6 +68,8 @@ OPENED_DELTA_ALLOWED = {
     # The restore sizes Spacings2 to the second direction's occurrences ([-1.0]); the live
     # document leaves it empty until that direction is used, and a recompute empties it again.
     ("PartDesign::LinearPattern", "props", "Spacings2"): "sized at the restore",
+    # The same extension in the face pattern (FacePatternCentered's Row, ops#640)
+    ("PartDesign::FaceLinearPattern", "props", "Spacings2"): "sized at the restore",
 }
 
 

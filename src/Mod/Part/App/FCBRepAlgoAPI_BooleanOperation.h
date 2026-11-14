@@ -41,6 +41,15 @@ public:
     /// inside its base: OCCT's solid builder can drop a void, or keep the tool as a separate
     /// overlapping solid (ops#472). Costs a look at the tool faces' history unless one left no trace
     static void checkLostTools(BRepAlgoAPI_BooleanOperation* op);
+    /** Throws Standard_ConstructionError, before OCCT starts, when a face of \a shapes has no
+     * width in its parameters (its UV bounds' u or v range under Precision::PConfusion()) on a
+     * surface that can have a singular line: such a face has no area, and OCCT 8.0.1's face-face
+     * intersection never ends on it (ops#773: IntPatch_Intersection::CheckSingularPoints steps
+     * along the face's bounds by a quarter of their length, zero, until a derivative grows,
+     * which on the singular line it never does; no progress range reaches it, so a cancel can't
+     * stop it). A fuse step can leave such a face (a thickened U-turn whose ring crosses its axis).
+     * Planes and cylinders, the bulk of faces, have no singular line and aren't looked at. */
+    static void refuseFacesWithoutWidth(const TopTools_ListOfShape& shapes);
 };
 
 class FCBRepAlgoAPI_BooleanOperation: public BRepAlgoAPI_BooleanOperation

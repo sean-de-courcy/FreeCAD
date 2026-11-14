@@ -40,6 +40,7 @@ from PartDesignTests.TestMaterial import TestMaterial
 from PartDesignTests.TestActiveObject import TestActiveObject
 from PartDesignTests.TestSuppressed import TestSuppressedStrikethrough
 from PartDesignTests.TestPreviewPython import TestPreviewPython
+from PartDesignTests.TestSolidOpsGui import TestSolidOpsGui  # FreeCAD-CH, lane solid-ops
 from PartDesignTests.TestProfileLinkDialog import TestProfileLinkDialog
 from PartDesignTests.TestReferencePickerGui import TestReferencePickerGui
 from PartDesignTests.TestRollBackBarGui import TestRollBackBarGui
@@ -60,9 +61,85 @@ from PartDesignTests.TestCrossBodyGui import TestResultBoxGui  # FreeCAD-CH, ops
 from PartDesignTests.TestCrossBodyGui import TestSiblingsGui  # FreeCAD-CH, ops#630
 from PartDesignTests.TestCrossBodyGui import TestMergeGui  # FreeCAD-CH, ops#630
 from PartDesignTests.TestCrossBodyGui import TestSplitGui  # FreeCAD-CH, ops#630
+from PartDesignTests.TestStudioPicksGui import TestStudioPicksGui  # FreeCAD-CH, ops#640 rank 14
+from PartDesignTests.TestStudioPicksGui import TestStudioDressUpsGui  # FreeCAD-CH, ops#640 rank 14
+from PartDesignTests.TestPlaneEdgePointGui import TestPlaneEdgePointGui  # FreeCAD-CH, ops#673
+from PartDesignTests.TestPlaneEdgePointGui import TestPlaneEdgePointNoPickGui  # FreeCAD-CH, ops#673
+from PartDesignTests.TestOpeningScopeGui import TestOpeningScopeGui  # FreeCAD-CH, ops#640 A-1
+from PartDesignTests.TestExtrudeFieldsGui import TestExtrudeFieldsGui  # FreeCAD-CH, ops#640 rank 22
+from PartDesignTests.TestCrossBodyGui import (  # FreeCAD-CH, ops#640
+    TestOperationRowGui as TestCrossBodyOperationRowGui,  # TestRevolveFieldsGui has one too
+)
+from PartDesignTests.TestCrossBodyGui import TestOperationRefusalGui  # FreeCAD-CH, ops#640
+from PartDesignTests.TestCrossBodyGui import TestOkInErrorGui  # FreeCAD-CH, ops#640
+from PartDesignTests.TestCrossBodyGui import TestRevolveAxisGui  # FreeCAD-CH, ops#643
 from PartDesignTests.TestNewSketchDialogGui import TestNewSketchDialogGui
 from PartDesignTests.TestToolbarsGui import TestToolbarsGui  # FreeCAD-CH, ops#605
+from PartDesignTests.TestContextMenuGui import TestContextMenuGui  # FreeCAD-CH, ops#640
 from PartDesignTests.TestOnshapeStudioGui import TestOnshapeStudioGui
+from PartDesignTests.TestMeasuredVariablesGui import TestMeasuredVariablesGui  # FreeCAD-CH, ops#640
+from PartDesignTests.TestMergeScopeGui import TestMergeScopeGui  # FreeCAD-CH, ops#640
+from PartDesignTests.TestMergeScopeGui import TestMergeScopeListGui  # FreeCAD-CH, ops#640
+from PartDesignTests.TestPickFirstGui import TestPickFirstGui  # FreeCAD-CH, ops#640
+from PartDesignTests.TestPolishGui import TestHoverStatusGui  # FreeCAD-CH, ops#640 polish 1
+from PartDesignTests.TestPolishGui import TestShowConstraintsGui  # FreeCAD-CH, ops#640 polish 1
+from PartDesignTests.TestPolishGui import TestSketchDialogCheckboxesGui  # FreeCAD-CH, ops#640 polish 2
+from PartDesignTests.TestPolishGui import TestShellWordsGui  # FreeCAD-CH, ops#640 polish 2
+from PartDesignTests.TestPolishGui import TestWindowLeftoversGui  # FreeCAD-CH, ops#640 polish 3
+from PartDesignTests.TestPolishGui import TestFlatFeatureDialogGui  # FreeCAD-CH, ops#640 polish 4
+from PartDesignTests.TestPolishGui import TestTitleRenameGui  # FreeCAD-CH, ops#640 polish P13
+from PartDesignTests.TestPolishGui import TestDoubleClickCreatorGui  # FreeCAD-CH, ops#640 polish 5
+from PartDesignTests.TestPolishGui import TestCompactDialogGui  # FreeCAD-CH, ops#640 polish 6
+from PartDesignTests.TestPolishGui import TestCameraCommandsGui  # FreeCAD-CH, ops#695
+from PartDesignTests.TestEscCancelsGui import TestEscCancelsGui  # FreeCAD-CH, ops#640
+from PartDesignTests.TestSketchPlaneGui import TestSketchPlaneGui  # FreeCAD-CH, ops#640
+from PartDesignTests.TestBooleanDialogGui import TestBooleanDialogGui  # FreeCAD-CH, ops#640
+from PartDesignTests.TestBooleanDialogGui import TestPartsListGui  # FreeCAD-CH, ops#640
+from PartDesignTests.TestDialogFlowGui import TestOpeningOperationGui  # FreeCAD-CH, ops#640
+from PartDesignTests.TestDialogFlowGui import TestDialogKeysGui  # FreeCAD-CH, ops#640
+from PartDesignTests.TestDialogFlowGui import TestAnotherToolGui  # FreeCAD-CH, ops#640
+from PartDesignTests.TestDialogFlowGui import TestStudioPlanesStayGui  # FreeCAD-CH, ops#640
+from PartDesignTests.TestRevolveFieldsGui import TestRevolveFieldsGui  # FreeCAD-CH, ops#640 ranks 20, 21, 52
+from PartDesignTests.TestRevolveFieldsGui import TestOperationRowGui  # FreeCAD-CH, ops#640 rank 20
+from PartDesignTests.TestLoftFilletOptionsGui import TestLoftConditionsGui  # FreeCAD-CH, ops#655
+from PartDesignTests.TestLoftFilletOptionsGui import TestTangentPropagationGui  # FreeCAD-CH, ops#655
+from PartDesignTests.TestLoftConnectionsGui import TestLoftConnectionsGui  # FreeCAD-CH, ops#640
+from PartDesignTests.TestPatternDefaultsGui import TestPatternDefaultsGui  # FreeCAD-CH, ops#640
+from PartDesignTests.TestPatternDefaultsGui import TestPatternSecondDirectionGui  # FreeCAD-CH, ops#655
+from PartDesignTests.TestRegenerateGui import TestRegenerateGui  # FreeCAD-CH, ops#640
+from PartDesignTests.TestDressUpAnyPartGui import TestDressUpAnyPartGui  # FreeCAD-CH, ops#640 rank 14
+from PartDesignTests.TestOperationSwitchGui import TestOperationSwitchGui  # FreeCAD-CH, ops#640 round 5
+from PartDesignTests.TestOperationSwitchGui import TestMergedSwitchGui  # FreeCAD-CH, ops#640 round 5
+from PartDesignTests.TestDerivedGui import TestDerivedGui  # FreeCAD-CH, ops#640 round 6
+from PartDesignTests.TestDerivedGui import TestDerivedFromFileGui  # FreeCAD-CH, ops#640 D1
+from PartDesignTests.TestWorkflowGui import TestWorkflowGui  # FreeCAD-CH, ops#640 round 7
+from PartDesignTests.TestStudioSketchesShownGui import TestStudioSketchesShownGui  # FreeCAD-CH, ops#654 P3a
+from PartDesignTests.TestStudioSketchesShownGui import (  # FreeCAD-CH, ops#654 P3a
+    TestTopLevelStudioSketchesShownGui,
+)
+from PartDesignTests.TestStudioFeatureGui import TestStudioFeatureGui  # FreeCAD-CH, ops#654
+from PartDesignTests.TestStudioFeatureGui import (  # FreeCAD-CH, ops#654 S4 fix
+    TestExtrudePrefillGui,
+    TestLeavingNewGui,
+)
+from PartDesignTests.TestStudioFeatureGui import TestListOnFirstUseGui  # FreeCAD-CH, ops#654
+from PartDesignTests.TestStudioHistoryGui import TestStudioHistoryGui  # FreeCAD-CH, ops#654
+from PartDesignTests.TestStudioPatternsGui import TestStudioPatternsGui  # FreeCAD-CH, ops#654 slice 8
+from PartDesignTests.TestStudioPartMirrorGui import TestStudioPartMirrorGui  # FreeCAD-CH, ops#654 slice 9
+from PartDesignTests.TestStudioTransformGui import TestStudioTransformGui  # FreeCAD-CH, ops#655
+from PartDesignTests.TestFacePatternGui import TestFacePatternGui  # FreeCAD-CH, ops#655 T8
+from PartDesignTests.TestConfigurationsGui import TestConfigurationsGui  # FreeCAD-CH, ops#671 slice C2
+from PartDesignTests.TestPartsListGui import TestPartsListGui  # FreeCAD-CH, ops#654
+from PartDesignTests.TestSelectionParityGui import (  # FreeCAD-CH, selection parity P1, P2
+    TestBoxSelectionGui,
+    TestProfileFieldStaysArmedGui,
+)
+from PartDesignTests.TestViewToolsGui import (  # FreeCAD-CH, ops#640 view tools
+    TestCameraMenuGui,
+    TestDisplayStylesGui,
+    TestNamedViewsGui,
+    TestSectionViewGui,
+)
 
 
 # timer runs this class in order to access modal dialog

@@ -44,8 +44,34 @@ public:
      */
     App::PropertyLinkSub Base;
     App::PropertyBool SupportTransform;
+    /// A studio dress-up's picks on any parts, resolved (FreeCAD-CH ops#654, P8a)
+    App::PropertyLinkSubList StudioPicks;
+    /// The part id of each of StudioPicks (intent)
+    App::PropertyStringList StudioPickIds;
+    /** FreeCAD-CH ops#701 (F2b): the dress-up this one was made with, in another part, by one
+     * command over edges of several parts (this one follows its sizes by expression). When that
+     * one builds and this one fails, this one passes its part through with a warning, as
+     * Onshape's FILLET_PARTIAL_FAIL; when that one fails too, this one's failure is an error.
+     * Hidden scope, as FeatureAddSub::SiblingOf: no dependency of its own (the expressions order
+     * the two). Not SiblingOf itself: FeatureAddSub::recompute() checks a sibling's links against
+     * its primary's, and a dress-up's Base is its own part's edges.
+     */
+    App::PropertyLinkHidden MultiPartPrimary;
 
     short mustExecute() const override;
+
+    /** FreeCAD-CH ops#701 (F2b): ret, the dress-up's result, as Onshape's partial failure: when
+     * it failed and MultiPartPrimary built (itself: not suppressed or passed through), the base
+     * passes through, the failure becomes the warning "Failed to <verb> selections on <part>:
+     * <why>" and the result is a success, so the part's later features recompute on its base.
+     * Only while the expression of sizeProperty still refers to the primary (F2c). Otherwise ret
+     * unchanged.
+     */
+    App::DocumentObjectExecReturn* partialFailure(
+        App::DocumentObjectExecReturn* ret,
+        const char* verb,
+        const char* sizeProperty
+    );
     /// updates the Placement property from the Placement of the BaseFeature
     void positionByBaseFeature();
     /**
