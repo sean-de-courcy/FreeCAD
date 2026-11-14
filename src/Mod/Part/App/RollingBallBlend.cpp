@@ -1594,8 +1594,18 @@ Report correct(const TopoDS_Shape& shape, const std::vector<TopoDS_Face>& blendF
 {
     // FREECAD_CH_ROLLINGBALL=off leaves every fillet as OCCT built it; =trace reports each call on
     // stderr. For measuring and bisecting only
+#ifdef _MSC_VER
+    std::string mode;
+    char* value = nullptr;
+    std::size_t size = 0;
+    if (_dupenv_s(&value, &size, "FREECAD_CH_ROLLINGBALL") == 0 && value) {
+        mode = value;
+        std::free(value);
+    }
+#else
     const char* value = std::getenv("FREECAD_CH_ROLLINGBALL");
     const std::string mode = value ? value : "";
+#endif
     if (mode == "off") {
         Report report;
         report.reason = "switched off";
