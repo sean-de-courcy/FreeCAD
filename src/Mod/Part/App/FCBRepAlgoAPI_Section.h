@@ -67,4 +67,9 @@ public:
 
     // set fuzzyness based on size
     void setAutoFuzzy();
+
+    //! OCCT's Build, after refusing an input face of no width (FreeCAD-CH ops#773): OCCT 8.0.1's
+    //! face-face intersection never ends on one, and no progress range reaches that loop
+    Standard_EXPORT void Build(const Message_ProgressRange& theRange = Message_ProgressRange()
+    ) Standard_OVERRIDE;
 };

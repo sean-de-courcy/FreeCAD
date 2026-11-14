@@ -390,6 +390,59 @@ class KernelBudgetTest(unittest.TestCase):
         self.assertLess(time.perf_counter() - start, 5.0)
         self.assertEqual(Part.kernelBudget()["abandonedTotal"], before)
 
+    def testSectionOfFaceWithoutWidthIsRefused(self):
+        """ops#773's follow-up: the hang designed, through the paths that the guard missed
+        (Shape.section, slice of a non-solid, Part::Section, check(True)'s self-interference).
+        The circle of radius 4.75 about (-4, 0, 0) turned about the y axis is a spindle torus;
+        its arc between the two points on the axis, turned by no angle, is a face whose UV box
+        has no width and both v ends singular. Sectioned with a cylinder, OCCT 8.0.1 looped in CheckSingularPoints with no end
+        (on lx9 72a672dfab, killed after 40 s); a sliver 1e-3 wide sections at once."""
+        V2 = FreeCAD.Base.Vector2d
+        t0 = math.acos(4.0 / 4.75)
+        arc = Part.ArcOfCircle(Part.Circle(V(-4, 0, 0), V(0, 0, 1), 4.75), t0, 2 * math.pi - t0)
+        surf = Part.SurfaceOfRevolution(arc, V(0, 0, 0), V(0, -1, 0))
+
+        def strip(w):
+            pts = [V2(0.0, t0), V2(w, t0), V2(w, 2 * math.pi - t0), V2(0.0, 2 * math.pi - t0)]
+            edges = [
+                Part.Geom2d.Line2dSegment(a, b).toShape(surf)
+                for a, b in zip(pts, pts[1:] + pts[:1])
+                if a.distance(b) > 0
+            ]
+            return Part.Face(surf, Part.Wire(edges))
+
+        wall = Part.makeCylinder(2, 10, V(0, -5, 0), V(0, 1, 0)).Faces[0]
+        sliver = strip(1e-3)
+        self.assertGreater(len(sliver.section(wall).Edges), 0)
+        flat = strip(0.0)
+        self.assertEqual(flat.ParameterRange[0], flat.ParameterRange[1])
+        before = Part.kernelBudget()["abandonedTotal"]
+        start = time.perf_counter()
+        for build in (
+            lambda: flat.section(wall),
+            lambda: wall.section(flat),
+            lambda: flat.slice(V(0, 0, 1), 0.5),
+            lambda: Part.Compound([flat, wall]).check(True),
+        ):
+            with self.assertRaises(Exception) as caught:
+                build()
+            self.assertIn("no width", str(caught.exception))
+        doc = FreeCAD.newDocument("SectionWithoutWidth")
+        try:
+            a = doc.addObject("Part::Feature", "Flat")
+            a.Shape = flat
+            b = doc.addObject("Part::Feature", "Wall")
+            b.Shape = wall
+            sec = doc.addObject("Part::Section", "Section")
+            sec.Base = a
+            sec.Tool = b
+            doc.recompute()
+            self.assertFalse(sec.isValid())
+        finally:
+            FreeCAD.closeDocument(doc.Name)
+        self.assertLess(time.perf_counter() - start, 5.0)
+        self.assertEqual(Part.kernelBudget()["abandonedTotal"], before)
+
     def testScriptThatSwallowsTheStopFails(self):
         """A PartDesign Python feature whose execute() catches the stopped cut and goes on
         (BIM-style: skip a subtraction that fails) would pass the plate without its hole as a
