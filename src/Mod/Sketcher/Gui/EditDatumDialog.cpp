@@ -31,10 +31,12 @@
 #include <QKeyEvent>
 #include <QLineEdit>
 #include <QPointer>
+#include <QTimer>
 #include <functional>
 
 
 #include <Base/Tools.h>
+#include <Base/UnitsApi.h>
 #include <Gui/Application.h>
 #include <App/Expression.h>
 #include <App/ExpressionParser.h>
@@ -62,6 +64,7 @@
 #include <Precision.hxx>
 #include <cmath>
 #include <numeric>
+#include <regex>
 
 
 using namespace SketcherGui;
@@ -135,6 +138,35 @@ private:
 bool refersToProperty(const App::Expression* expr)
 {
     return expr && !expr->getIdentifiers().empty();
+}
+
+/// Whether a constraint's value is a length (the ones whose typed text ops#684 keeps).
+bool isLengthDimension(const Sketcher::Constraint* constr)
+{
+    const Sketcher::ConstraintType type = constr->Type;
+    return type == Sketcher::Distance || type == Sketcher::DistanceX
+        || type == Sketcher::DistanceY || type == Sketcher::Radius
+        || type == Sketcher::Diameter;
+}
+
+/// The text a dimension's constant expression was typed as (ops#684): its comment, where
+/// EditDatumDialog::applyKeptText puts it, while the comment still reads as the same
+/// expression; otherwise the expression as the engine prints it.
+std::string typedText(const App::DocumentObject* owner, const App::Expression& expr)
+{
+    const std::string printed = expr.toString();
+    if (!expr.comment.empty()) {
+        try {
+            App::ExpressionPtr typed = App::ExpressionParser::parse(owner, expr.comment.c_str());
+            if (typed && typed->toString() == printed) {
+                return expr.comment;
+            }
+        }
+        catch (const Base::Exception&) {
+            // Not an expression: a comment of another kind.
+        }
+    }
+    return printed;
 }
 
 /// Places a widget centred on a point, inside a rectangle.
@@ -368,7 +400,128 @@ void EditDatumDialog::setupValueEdit(QString& title, QString& label)
     valueEdit->setValue(init_val);
     valueEdit->pushToHistory();
     valueEdit->selectNumber();
-    valueEdit->bind(sketch->Constraints.createPath(ConstrNbr));
+
+    // A constant expression, e.g. a typed `(1/8) in`, is shown as text to edit, as Onshape shows
+    // the stored text again (GS1). Bound, it would make the field read-only: take it out of the
+    // engine for the edit (the open transaction, or Esc, puts it back).
+    const App::ObjectIdentifier path = sketch->Constraints.createPath(ConstrNbr);
+    keptExpression = sketch->getExpression(path).expression;
+    if (keptExpression && refersToProperty(keptExpression.get())) {
+        keptExpression.reset();
+    }
+    if (keptExpression) {
+        sketch->setExpression(path, std::shared_ptr<App::Expression>());
+    }
+    valueEdit->bind(path);
+    initialText = valueEdit->text().trimmed().toStdString();
+}
+
+void EditDatumDialog::showKeptText()
+{
+    // After the field is shown: QuantitySpinBox::showEvent writes its value's text.
+    if (!keptExpression || !valueEdit) {
+        return;
+    }
+    if (auto* edit = valueEdit->findChild<QLineEdit*>()) {
+        edit->setText(QString::fromStdString(typedText(sketch, *keptExpression)));
+        edit->selectAll();
+    }
+}
+
+std::string EditDatumDialog::keptLengthText(const QString& field) const
+{
+    if (!isLengthDimension(Constr)) {
+        return {};
+    }
+    const std::string text = field.trimmed().toStdString();
+    if (text.empty() || (!keptExpression && text == initialText)) {
+        return {};
+    }
+
+    std::shared_ptr<App::Expression> expr;
+    Base::Quantity quantity;
+    try {
+        expr = App::ExpressionParser::parse(sketch, text.c_str());
+        if (!expr || refersToProperty(expr.get())) {
+            return {};
+        }
+        App::ExpressionPtr result = expr->eval();
+        auto* number = freecad_cast<App::NumberExpression*>(result.get());
+        if (!number) {
+            return {};
+        }
+        quantity = number->getQuantity();
+    }
+    catch (const Base::Exception&) {
+        return {};  // e.g. a value in the user's locale: the field reads it as a value
+    }
+
+    // A single number, with or without a unit word (ASCII: the parser's units are).
+    static const std::regex single(
+        R"(^[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?\s*([A-Za-z"']*)$)"
+    );
+    std::smatch match;
+    const bool isSingle = std::regex_match(text, match, single);
+    const std::string unitWord = isSingle ? match[1].str() : std::string();
+    const bool inchDocument = Base::UnitsApi::getBasicLengthUnit() == "in";
+
+    if (quantity.isDimensionless()) {
+        if (!inchDocument) {
+            return {};  // in document units already, as a value (D5: `10+5` is 15)
+        }
+        return isSingle ? text + " in" : "(" + text + ") in";
+    }
+    if (quantity.getUnit() != Base::Unit::Length) {
+        return {};  // the value path refuses it
+    }
+    if (!inchDocument && isSingle
+        && unitWord == Base::UnitsApi::getBasicLengthUnit()) {
+        return {};  // `25 mm` in a mm document: the same as the value
+    }
+    return text;
+}
+
+void EditDatumDialog::applyKeptText(const std::string& text)
+{
+    std::shared_ptr<App::Expression> expr = App::ExpressionParser::parse(sketch, text.c_str());
+    App::ExpressionPtr result = expr->eval();
+    auto* number = freecad_cast<App::NumberExpression*>(result.get());
+    if (!number) {
+        throw Base::ValueError("The expression doesn't give a number");
+    }
+    const Base::Quantity quantity = number->getQuantity();
+    const double oldDatum = Constr->getValue();
+
+    performAutoScale(quantity.getValue());
+
+    auto unitString = Base::Tools::escapeQuotesFromString(quantity.getUnit().getString());
+    Gui::cmdAppObjectArgs(
+        sketch,
+        "setDatum(%i,App.Units.Quantity('%.17g %s'))",
+        ConstrNbr,
+        quantity.getValue(),
+        unitString
+    );
+    try {
+        // The engine prints its own form (`(1/8) in` reads back as `1 / 8 * 1 in`): the text as
+        // typed goes in the expression's comment, which the file keeps (typedText reads it).
+        auto escaped = [](const std::string& s) {
+            return Base::Tools::escapeQuotesFromString(
+                Base::Tools::escapedUnicodeFromUtf8(s.c_str())
+            );
+        };
+        Gui::cmdAppObjectArgs(
+            sketch,
+            "setExpression('%s', u'%s', u'%s')",
+            sketch->Constraints.createPath(ConstrNbr).toEscapedString(),
+            escaped(expr->toString()),
+            escaped(text)
+        );
+    }
+    catch (const Base::Exception&) {
+        sketch->setDatum(ConstrNbr, oldDatum);
+        throw;
+    }
 }
 
 int EditDatumDialog::exec(bool atCursor)
@@ -448,6 +601,8 @@ int EditDatumDialog::exec(bool atCursor)
             dlg.setGeometry(x, y, dlg.geometry().width(), dlg.geometry().height());
         }
 
+        // Once exec has shown the dialog (ops#684).
+        QTimer::singleShot(0, &dlg, [this]() { showKeptText(); });
         return dlg.exec();
     }
 
@@ -517,12 +672,21 @@ int EditDatumDialog::execInPlace(bool hasNext, bool hasPrevious)
     // is answered, and the next recompute moves the value with it. Esc then keeps what the
     // constraint had (ops#203 review M1).
     const auto expressionPath = sketch->Constraints.createPath(ConstrNbr);
-    const auto expressionBefore = sketch->getExpression(expressionPath).expression;
+    // (A constant expression was taken out for the edit by setupValueEdit: it is the one before.)
+    const auto expressionBefore = keptExpression
+        ? keptExpression
+        : sketch->getExpression(expressionPath).expression;
     const double datumBefore = Constr->getValue();
 
     popup.show();
     box->setFocus();
     box->selectNumber();
+    if (keptExpression) {
+        showKeptText();
+        box->setMinimumWidth(std::max(80, metrics.horizontalAdvance(box->text()) + 24));
+        popup.adjustSize();
+        placeCentred(&popup, centre, area);
+    }
     int result = popup.exec();
     while (result == InPlaceFormula) {
         if (QPointer<Gui::Dialog::DlgExpressionInput> formula = visibleFormulaEditor(box)) {
@@ -691,6 +855,12 @@ void EditDatumDialog::applyValue()
         return;
     }
 
+    if (const std::string kept = keptLengthText(valueEdit->text()); !kept.empty()) {
+        valueEdit->pushToHistory();
+        applyKeptText(kept);
+        return;
+    }
+
     if (!valueEdit->hasValidInput()) {
         throw Base::ValueError("Invalid value");
     }
@@ -699,6 +869,13 @@ void EditDatumDialog::applyValue()
     if (Constr->Type != Sketcher::SnellsLaw && Constr->Type != Sketcher::Weight
         && newQuant.isDimensionless()) {
         throw Base::ValueError("Invalid value");
+    }
+
+    if (isLengthDimension(Constr) && !keptExpression
+        && valueEdit->text().trimmed().toStdString() == initialText) {
+        // The proposed value, unchanged: the length as it is, not as the field rounds it
+        // (0.39 in for 10 mm at two decimals), as Onshape stores it at full precision (GS1).
+        newQuant = Base::Quantity(Constr->getValue(), Base::Unit::Length);
     }
 
     valueEdit->pushToHistory();
@@ -784,6 +961,11 @@ void EditDatumDialog::accepted()
             if (!ui_ins_datum->cbDriving->isChecked()) {
                 if (ui_ins_datum->labelEdit->hasExpression()) {
                     ui_ins_datum->labelEdit->apply();
+                }
+                else if (const std::string kept
+                         = keptLengthText(ui_ins_datum->labelEdit->text());
+                         !kept.empty()) {
+                    applyKeptText(kept);  // ops#684, as in applyValue
                 }
                 else {
                     auto unitString = newQuant.getUnit().getString();
