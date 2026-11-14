@@ -1668,7 +1668,7 @@ bool moveInStudio(App::Document* doc,
                   App::DocumentObject* bar)
 {
     // FreeCAD-CH (ops#723): the Part Studio variables stay where they are in the history
-    const auto before = studioSequence(doc, studio);
+    const auto before = studioRowNames(doc, studio);
     const bool changed = moveRowsInStudio(doc, studio, rows, after, hinted, bar);
     if (changed) {
         keepVariablePlaces(doc, studio, before, rows);

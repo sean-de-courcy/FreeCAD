@@ -213,6 +213,81 @@ class TestVariableHistoryPosition(unittest.TestCase):
         doc.recompute()
         self.assertLength(d, 20)
 
+    def listStudio(self):
+        """A studio with a feature list, its owner E inserted (its step is the last row), a set
+        with q = 20 made at the bar (after the step), and D by #q below it."""
+        from PartDesignTests.TestStudioList import makeOwner, newStudio
+
+        doc, studio = newStudio("VariableHistoryList")
+        owner = makeOwner(doc, studio, "E", (22, 2, 25, 5), 2, "Subtraction", ["B"])
+        PartDesign.studioInsert(owner, -1)
+        doc.recompute()
+        sequence = PartDesign.studioSequence(studio)
+        vs = doc.addObject("App::VarSet", "StudioVars")
+        studio.addObject(vs)
+        vs.addProperty("App::PropertyLength", "q")
+        vs.q = 20
+        self.assertEqual(PartDesign.variablePosition(vs, "q"), sequence[-1])
+        body = doc.addObject("PartDesign::Body", "D")
+        studio.addObject(body)
+        d = body.newObject("PartDesign::AdditiveBox", "DBox")
+        d.Length = d.Width = d.Height = 10
+        d.Placement = App.Placement(App.Vector(60, 0, 0), App.Rotation())
+        doc.recompute()
+        d.setExpression("Length", "#q")
+        doc.recompute()
+        self.assertLength(d, 20)
+        return doc, studio, owner, vs, d, sequence[-2]
+
+    def testOwnerRemovedFromTheListFirstKeepsThePlace(self):
+        """As the Features list deletes an owner: studioRemove, then removeObject (review
+        prpending-r1 fix, F1)."""
+        doc, studio, owner, vs, d, above = self.listStudio()
+        PartDesign.studioRemove(owner)
+        doc.removeObject(owner.Name)
+        doc.recompute()
+        self.assertEqual(PartDesign.variablePosition(vs, "q"), above)
+        d.touch()
+        doc.recompute()
+        self.assertLength(d, 20)
+
+    def testOwnerAboveItsVariableCantUseIt(self):
+        """An owner is placed where its steps are: E is above q, so #q on E is refused (DV4); with
+        q moved to the start E may use it (review fix F3)."""
+        doc, studio, owner, vs, d, above = self.listStudio()
+        with self.assertRaises(Exception) as ctx:
+            owner.setExpression("Height", "#q")
+        self.assertIn("before it is set", str(ctx.exception))
+        PartDesign.setVariablePosition(vs, "q", None)
+        owner.setExpression("Height", "#q / 10")
+        doc.recompute()
+        self.assertNotIn("Invalid", owner.State, owner.getStatusString())
+
+    def testRemovedFromItsBodyFirstKeepsThePlace(self):
+        """As the tree's Delete removes a feature: out of its Body first, then from the document
+        (review fix F2). q followed B: it now follows A, and C stays 20."""
+        a = self.box("A")
+        b = self.box("B")
+        self.addVariable("q", 20)
+        c = self.box("C")
+        c.setExpression("Length", "#q")
+        self.doc.recompute()
+        body = b.getParentGeoFeatureGroup()
+        body.removeObject(b)
+        self.doc.removeObject(b.Name)
+        self.doc.recompute()
+        self.assertEqual(PartDesign.variablePosition(self.vars, "q"), a)
+        self.assertLength(c, 20)
+
+    def testListMoveLeavesTheVariableInPlace(self):
+        """studioMove of the owner whose step q follows, up above C (after BPad: it reads B): q
+        stays where it was, after CPad, so D still sees it (review fix F4)."""
+        doc, studio, owner, vs, d, above = self.listStudio()
+        PartDesign.studioMove(owner, 4)
+        doc.recompute()
+        self.assertEqual(PartDesign.variablePosition(vs, "q"), above)
+        self.assertLength(d, 20)
+
     def testRenameKeepsThePlace(self):
         a = self.box("A")
         self.addVariable("q", 20)

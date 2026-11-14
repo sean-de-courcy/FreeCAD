@@ -15,6 +15,7 @@
 #include "StudioConfig.h"
 #include "StudioEdit.h"
 #include "StudioList.h"
+#include "StudioVariables.h"
 
 namespace PartDesign
 {
@@ -164,7 +165,14 @@ bool studioMove(App::DocumentObject* entry, int index, std::string* why)
         }
         App::DocumentObject* after = index > 0 ? others[index - 1] : nullptr;
         bool changed = false;
-        return moveStudioEntries(list, {entry}, after, false, nullptr, why, &changed);
+        // FreeCAD-CH (ops#723): the Part Studio variables stay where they are in the history
+        App::Document* doc = list->getDocument();
+        const auto before = studioRowNames(doc, list->studio());
+        const bool done = moveStudioEntries(list, {entry}, after, false, nullptr, why, &changed);
+        if (done && changed) {
+            keepVariablePlaces(doc, list->studio(), before, {entry});
+        }
+        return done;
     }, why);
 }
 
