@@ -70,6 +70,10 @@ True if TestMateAfterEdits else False
 True if TestMateFaceGone else False
 True if TestOnshapeConnectors else False
 
-from AssemblyTests.TestRigidCachePointers import TestRigidCachePointers  # FreeCAD-CH, ops#778
+from AssemblyTests.TestRigidCachePointers import (  # FreeCAD-CH, ops#778
+    TestRigidCachePointers,
+    TestRigidCacheUndo,
+)
 
 True if TestRigidCachePointers else False
+True if TestRigidCacheUndo else False

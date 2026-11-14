@@ -1070,19 +1070,43 @@ void AssemblyObject::pruneRigidPlacementCache()
 
 void AssemblyObject::refreshStaleRigidCaches()
 {
-    for (const auto& [obj, id] : rigidCacheIds) {
-        boost::ignore_unused(id);
-        if (!isRigidCacheLive(obj)) {
-            rebuildRigidClusters();
-            return;
-        }
+    const App::Document* doc = getDocument();
+    const bool gone = std::ranges::any_of(rigidCacheIds, [&](const auto& entry) {
+        return !isRigidCacheLive(entry.first);
+    });
+    // An object deleted since a rebuild and brought back by undo is in the document again, in its
+    // rigid group again, but in no cache (review R1)
+    const bool back = doc && std::ranges::any_of(rigidDroppedIds, [&](long id) {
+        return doc->getObjectByID(id) != nullptr;
+    });
+    if (gone || back) {
+        rebuildRigidClusters();
     }
 }
 
 void AssemblyObject::rebuildRigidClusters()
 {
-    // FreeCAD-CH (ops#778): the placement cache outlives a rebuild; an object deleted since the
-    // last one leaves it here, before its ID is forgotten
+    // FreeCAD-CH (ops#778): the IDs of the cached objects that have left the document, kept until
+    // they come back (undo); before the IDs are forgotten below
+    {
+        const App::Document* doc = getDocument();
+        std::vector<long> dropped;
+        for (const auto& [obj, id] : rigidCacheIds) {
+            if (!isRigidCacheLive(obj)) {
+                dropped.push_back(id);
+            }
+        }
+        for (long id : rigidDroppedIds) {
+            if (doc && !doc->getObjectByID(id)) {
+                dropped.push_back(id);
+            }
+        }
+        std::ranges::sort(dropped);
+        const auto [first, last] = std::ranges::unique(dropped);
+        dropped.erase(first, last);
+        rigidDroppedIds = std::move(dropped);
+    }
+    // The placement cache outlives a rebuild; an object deleted since the last one leaves it here
     pruneRigidPlacementCache();
     rigidRepByPart.clear();
     rigidMembersByRep.clear();
@@ -1126,6 +1150,8 @@ void AssemblyObject::rebuildRigidClusters()
         if (!rigidGroup) {
             continue;
         }
+        // The group's deletion makes the caches stale too (review O2)
+        rigidCacheIds[rigidGroup] = rigidGroup->getID();
 
         auto* const prop = dynamic_cast<App::PropertyLinkList*>(
             rigidGroup->getPropertyByName("ObjectsToRigidGroup")
