@@ -3720,6 +3720,39 @@ bool CmdPartDesignThickness::isActive()
 // Common functions for all Transformed features
 //===========================================================================
 
+/** FreeCAD-CH (ops#783 follow-up, walk bugs 1): the part a transform of the selection goes in.
+ * The first selected feature decides: a studio feature (an owner) its step's part (the active
+ * Body when it has a step there, else the one part it has a step in). Anything else: the
+ * active Body, as before (an in-Body feature of another Body is left out and said, rank 13).
+ * The active Body was always taken, so a studio feature on another part was dropped and the
+ * pattern left empty */
+static PartDesign::Body* transformBody()
+{
+    PartDesign::Body* active = PartDesignGui::getBody(/*messageIfNot = */ false);
+    for (const auto& sel : Gui::Selection().getSelectionEx()) {
+        const App::DocumentObject* obj = sel.getObject();
+        if (!obj) {
+            continue;
+        }
+        if (PartDesign::isStudioOwner(obj)) {
+            if (active && PartDesign::StudioList::stepOf(obj, active)) {
+                return active;
+            }
+            std::vector<PartDesign::Body*> withStep;
+            for (PartDesign::Body* part : PartDesign::studioScopeOf(obj)) {
+                if (PartDesign::StudioList::stepOf(obj, part)) {
+                    withStep.push_back(part);
+                }
+            }
+            if (withStep.size() == 1) {
+                return withStep.front();
+            }
+        }
+        break;
+    }
+    return PartDesignGui::getBody(/*messageIfNot = */ true);
+}
+
 void prepareTransformed(
     PartDesign::Body* pcActiveBody,
     Gui::Command* cmd,
@@ -3808,7 +3841,8 @@ void prepareTransformed(
     // Say which picks the transform leaves out, once its panel is open (ops#252: a sketch alone
     // made a "Whole shape" transform without a word). FreeCAD-CH (ops#640, rank 13): a feature
     // of another body is left out too, said in the Features field's status: it was a modal
-    PartDesign::Body* activeBody = PartDesignGui::getBody(true);
+    // the part the transform goes in (transformBody), not a re-read of the active Body
+    PartDesign::Body* activeBody = pcActiveBody;
     // FreeCAD-CH ops#654 slice 8: a studio feature (a Features-list row) with a step in the
     // active Body is taken: its step is copied
     auto takes = [activeBody](const App::DocumentObject* obj) {
@@ -3979,7 +4013,7 @@ void CmdPartDesignMirrored::activated(int iMsg)
     if (prepareStudioPartMirror(this)) {
         return;
     }
-    PartDesign::Body* pcActiveBody = PartDesignGui::getBody(true);
+    PartDesign::Body* pcActiveBody = transformBody();
 
     if (!pcActiveBody) {
         return;
@@ -4040,7 +4074,7 @@ void CmdPartDesignLinearPattern::activated(int iMsg)
 {
     Q_UNUSED(iMsg);
 
-    PartDesign::Body* pcActiveBody = PartDesignGui::getBody(true);
+    PartDesign::Body* pcActiveBody = transformBody();
 
     if (!pcActiveBody) {
         return;
@@ -4115,7 +4149,7 @@ void CmdPartDesignPolarPattern::activated(int iMsg)
 {
     Q_UNUSED(iMsg);
 
-    PartDesign::Body* pcActiveBody = PartDesignGui::getBody(true);
+    PartDesign::Body* pcActiveBody = transformBody();
 
     if (!pcActiveBody) {
         return;
@@ -4180,7 +4214,7 @@ void CmdPartDesignCurvePattern::activated(int iMsg)
 {
     Q_UNUSED(iMsg);
 
-    PartDesign::Body* pcActiveBody = PartDesignGui::getBody(true);
+    PartDesign::Body* pcActiveBody = transformBody();
     if (!pcActiveBody) {
         return;
     }
@@ -4221,7 +4255,7 @@ void CmdPartDesignScaled::activated(int iMsg)
 {
     Q_UNUSED(iMsg);
 
-    PartDesign::Body* pcActiveBody = PartDesignGui::getBody(true);
+    PartDesign::Body* pcActiveBody = transformBody();
 
     if (!pcActiveBody) {
         return;
