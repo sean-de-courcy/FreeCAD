@@ -4533,11 +4533,18 @@ class BlendEndTrimTest(unittest.TestCase):
         # d, r_b, h, h0. On 17c18a4dc3: the first built 3.8e-4 off (2 new faces), the other two refused
         # ("the surface of an end face that is not a plane leaves 0 pieces beside its edge").
         # Measured 7.5e-7, 2.9e-6, 4.0e-6: the blend's own surface is that far from the torus inside
-        # its face. Each end's continuation is one face more than the blend (Onshape: one face)
-        for d, rb, h, h0 in ((1.0, 1.0, 0.6, 0.1), (0.0, 1.5, 1.0, 0.2), (0.0, 1.0, 0.8, 0.2)):
+        # its face. Each end's continuation is one face more than the blend (Onshape: one face).
+        # The third blend (4.4e-6 off) is made a rolling ball when it is built (RollingBallBlend,
+        # ops#640): its own surface is then the blend past its face too, the round is cut by it and
+        # each end is one face, as Onshape's. The other two blends are left as OCCT built them
+        for d, rb, h, h0, more in (
+            (1.0, 1.0, 0.6, 0.1, 4),
+            (0.0, 1.5, 1.0, 0.2, 4),
+            (0.0, 1.0, 0.8, 0.2, 2),
+        ):
             with self.subTest(d=d, rb=rb, h=h):
                 shape, blended = self.check(d, rb, h, h0, 1e-5)
-                self.assertEqual(len(shape.Faces), len(blended.Faces) + 4)
+                self.assertEqual(len(shape.Faces), len(blended.Faces) + more)
 
 
 class RoundBetweenCylindersTest(unittest.TestCase):
