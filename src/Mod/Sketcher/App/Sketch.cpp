@@ -5080,7 +5080,7 @@ int Sketch::solveHolding(
     }
 
     std::vector<double*> unknowns;
-    bool anyGeometry = false;
+    std::vector<double*> geometry;  // the free parameters of geometry
     for (double* param : Parameters) {
         const auto element = param2geoelement.find(param);
         if (element == param2geoelement.end()) {
@@ -5091,10 +5091,10 @@ int Sketch::solveHolding(
         const auto& [geoId, pos, index] = element->second;
         if (isFree(geoId, pos, index)) {
             unknowns.push_back(param);
-            anyGeometry = true;
+            geometry.push_back(param);
         }
     }
-    if (!anyGeometry) {
+    if (geometry.empty()) {
         return GCS::Failed;
     }
     const bool whole = unknowns.size() == Parameters.size();
@@ -5124,13 +5124,23 @@ int Sketch::solveHolding(
 
     clearTemporaryConstraints();
     if (!whole || holdingNarrowed) {
-        // a whole system set up at the drawn parameters (setUpSketch's) is solved as it is
+        // a whole system set up at the drawn parameters keeps setUpSketch's diagnosis
         GCSsys.invalidatedDiagnosis();
         GCSsys.declareUnknowns(unknowns);
         GCSsys.declareDrivenParams(DrivenParameters);
-        GCSsys.initSolution(defaultSolverRedundant);
         holdingNarrowed = !whole;
     }
+    // Least motion, exactly: every free parameter of geometry is held weakly where it is drawn, and
+    // the constraints are solved as the hard part of one problem (planegcs's SQP, as a drag's is).
+    // An iterated least-norm step alone reaches the constraints, not their nearest point: a line
+    // moved square to itself also slid along itself. The weak holds are temporary constraints, so
+    // the diagnosis does not see them.
+    InitParameters.assign(geometry.size(), 0.0);
+    for (std::size_t i = 0; i < geometry.size(); ++i) {
+        InitParameters[i] = *geometry[i];
+        GCSsys.addConstraintEqual(geometry[i], &InitParameters[i], GCS::DefaultTemporaryConstraint);
+    }
+    GCSsys.initSolution(defaultSolverRedundant);
     const int ret = GCSsys.solve(isFine, GCS::DogLeg);
 
     bool holds = ret == GCS::Success;
@@ -5172,9 +5182,10 @@ int Sketch::endHolding(bool solved)
         GCSsys.invalidatedDiagnosis();
         GCSsys.declareUnknowns(Parameters);
         GCSsys.declareDrivenParams(DrivenParameters);
-        GCSsys.initSolution(defaultSolverRedundant);
         holdingNarrowed = false;
     }
+    // set up again without the weak holds (the diagnosis is kept when it is the whole sketch's)
+    GCSsys.initSolution(defaultSolverRedundant);
     if (!solved) {
         return GCS::Failed;
     }
