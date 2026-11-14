@@ -1020,7 +1020,73 @@ bool ViewProviderAssembly::getSelectedObjectsWithinAssembly(bool addPreselection
         }
     }
 
+    if (onlySolids) {
+        // FreeCAD-CH (ops#683, C4): the triad moves what the mouse drag moves (findDragMode): an
+        // ungrounded part brings the parts joined to it, a rigid group's members included (GB11)
+        addPartsJoinedToMoving();
+    }
+
     return !docsToMove.empty();
+}
+
+void ViewProviderAssembly::addPartsJoinedToMoving()
+{
+    auto* assemblyPart = getObject<AssemblyObject>();
+    if (!assemblyPart) {
+        return;
+    }
+    auto has = [this](App::DocumentObject* obj) {
+        return std::ranges::any_of(docsToMove, [obj](const MovingObject& m) { return m.obj == obj; });
+    };
+    // A rigid group is no joint: the mouse drag's solve moves its other members after the moved one
+    // (AssemblyObject::syncActiveRigidGroupPlacements); the triad, which doesn't solve, takes them here
+    const auto rigidGroups = assemblyPart->getRigidGroups();
+    for (size_t i = 0; i < docsToMove.size(); ++i) {
+        App::DocumentObject* member = docsToMove[i].obj;
+        const std::string name = member->getNameInDocument();
+        const std::string& sub = docsToMove[i].sub;
+        // the picked member's path in the selection, for its partners' ("A.Face6" -> "B.")
+        size_t at = sub.rfind("." + name + ".");
+        std::string prefix = at == std::string::npos ? std::string() : sub.substr(0, at + 1);
+        App::DocumentObject* selRoot = docsToMove[i].rootObj;
+        for (auto* group : rigidGroups) {
+            auto* prop = dynamic_cast<App::PropertyLinkList*>(
+                group ? group->getPropertyByName("ObjectsToRigidGroup") : nullptr
+            );
+            const auto members = prop ? prop->getValues() : std::vector<App::DocumentObject*>();
+            if (std::ranges::find(members, member) == members.end()) {
+                continue;
+            }
+            for (auto* other : members) {
+                auto* pPlc = other ? other->getPlacementProperty() : nullptr;
+                if (!pPlc || has(other)) {
+                    continue;
+                }
+                docsToMove.emplace_back(
+                    other,
+                    pPlc->getValue(),
+                    selRoot,
+                    prefix + other->getNameInDocument() + "."
+                );
+            }
+        }
+    }
+
+    const size_t picked = docsToMove.size();
+    for (size_t i = 0; i < picked; ++i) {
+        for (auto& partRef : assemblyPart->getDownstreamParts(docsToMove[i].obj, nullptr)) {
+            if (!partRef.obj || !partRef.ref || has(partRef.obj)) {
+                continue;
+            }
+            auto* pPlc = partRef.obj->getPlacementProperty();
+            App::DocumentObject* selRoot = partRef.ref->getValue();
+            std::vector<std::string> subs = partRef.ref->getSubValues();
+            if (!pPlc || !selRoot || subs.empty()) {
+                continue;
+            }
+            docsToMove.emplace_back(partRef.obj, pPlc->getValue(), selRoot, subs[0]);
+        }
+    }
 }
 
 void ViewProviderAssembly::collectMovableObjects(

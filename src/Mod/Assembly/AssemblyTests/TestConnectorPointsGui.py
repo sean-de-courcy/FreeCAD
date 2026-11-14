@@ -14,6 +14,7 @@
 # millimetres away from every candidate is many pixels from all of them.
 
 import time
+import gc
 import unittest
 
 import FreeCAD as App
@@ -80,6 +81,12 @@ class TestConnectorPointsGui(unittest.TestCase):
         if Gui.ActiveDocument and Gui.ActiveDocument.getInEdit():
             Gui.ActiveDocument.resetEdit()
         App.closeDocument(self.doc.Name)
+        Gui.doCommand("panel = None")  # activateJoint's console reference to the last dialog
+        # as TestMateOffsetsGui: let the dialog's widgets go (deleteLater) before the next test,
+        # so that its Qt objects don't meet a stale wrapper ("Signal source has been deleted")
+        pump()
+        gc.collect()
+        pump()
 
     def topFace(self):
         for i, face in enumerate(self.a.Shape.Faces):
