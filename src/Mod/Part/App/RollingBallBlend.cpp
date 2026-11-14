@@ -198,7 +198,14 @@ double reachable(const gp_Pnt& at, double radius)
 {
     const double size = std::max({std::fabs(at.X()), std::fabs(at.Y()), std::fabs(at.Z())}) + radius;
     return std::max(3e-13, 64.0 * std::numeric_limits<double>::epsilon() * size);
+
 }
+
+// Where Newton stops improving above reachable() it has still settled when it is within this: the
+// noise of a wall's own evaluation is not known in advance (a 1000 mm wave prism stalls at 1e-11 on one
+// platform and under it on another), the surface is judged at 1e-7 between stations and the result at
+// 1e-6, and a refusal here would turn a fillet OCCT built into an error
+constexpr double settled = 1e-9;
 
 // One ball position: the centre and its two feet (on the face's side 0 and side 1 walls)
 struct Station
@@ -223,11 +230,23 @@ Station solveStation(
     if (warm) {
         station.feet = warm->feet;
     }
+    // The best position so far, and how often in a row a step did not halve its residual
+    Station best;
+    best.residual = Precision::Infinite();
+    int stalled = 0;
+    auto settle = [&]() {
+        if (best.residual < settled) {
+            best.ok = true;
+            return best;
+        }
+        station.centre = centre;
+        return station;
+    };
     for (int iteration = 0; iteration <= 40; ++iteration) {
         for (int side = 0; side < 2; ++side) {
             station.feet[side] = foot(walls[side], centre, &station.feet[side]);
             if (!station.feet[side].ok) {
-                return station;
+                return settle();
             }
         }
         const std::array<double, 2> f = {station.feet[0].distance - radius, station.feet[1].distance - radius};
@@ -235,6 +254,14 @@ Station solveStation(
         if (station.residual < reachable(centre, radius)) {
             station.ok = true;
             break;
+        }
+        stalled = station.residual < 0.5 * best.residual ? 0 : stalled + 1;
+        if (station.residual < best.residual) {
+            best = station;
+            best.centre = centre;
+        }
+        if (stalled >= 3) {
+            return settle();
         }
         const gp_Vec& g0 = station.feet[0].normal;
         const gp_Vec& g1 = station.feet[1].normal;
@@ -248,6 +275,9 @@ Station solveStation(
             return station;
         }
         centre.SetXYZ(centre.XYZ() + jacobian.Inverted() * gp_XYZ(-f[0], -f[1], 0.0));
+    }
+    if (!station.ok) {
+        return settle();
     }
     station.centre = centre;
     return station;
@@ -919,6 +949,9 @@ void solveSeam(Context& context, Seam& seam)
         s1 = s0;
         f1 = residual(s1);
     }
+    // The best place so far: where the secant stops improving above `within`, it has settled there
+    double sBest = std::fabs(f0) < std::fabs(f1) ? s0 : s1;
+    double fBest = std::min(std::fabs(f0), std::fabs(f1));
     for (int iteration = 0; iteration < 60 && !converged; ++iteration) {
         if (std::fabs(f1 - f0) < 1e-300) {
             break;
@@ -929,9 +962,17 @@ void solveSeam(Context& context, Seam& seam)
         s1 = s2;
         f1 = residual(s1);
         converged = std::fabs(f1) < within;
+        if (std::fabs(f1) < fBest) {
+            fBest = std::fabs(f1);
+            sBest = s1;
+        }
     }
     if (!converged) {
-        throw Refusal {"a seam's ball position did not converge"};
+        if (fBest >= settled) {
+            throw Refusal {"a seam's ball position did not converge"};
+        }
+        s1 = sBest;
+        f1 = residual(s1);
     }
     // The ball must touch the next wall face at the same point: K is a tangent edge
     const gp_Pnt onK = curve->Value(s1);
