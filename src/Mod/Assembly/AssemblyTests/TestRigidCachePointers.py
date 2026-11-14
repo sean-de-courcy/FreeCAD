@@ -70,8 +70,8 @@ class TestRigidCachePointers(unittest.TestCase):
 
     def test_deleted_member_then_a_joint(self):
         """As ops#778's sequence: B deleted, then a Fastened mate between C and a new box D. The
-        joint's checks (isPartConnected, via ensureUnconnectedIsSecondRef) read the rigid caches
-        before any solve: D and C are connected to nothing grounded."""
+        questions a new joint asks (isPartConnected, as ensureUnconnectedIsSecondRef does; asked
+        here directly) read the rigid caches before any solve: neither D nor C is connected."""
         self.doc.removeObject("B")
         d = self.box("D", App.Vector(60, 0, 0))
         joint = self.joints.newObject("App::FeaturePython", "Fastened")
@@ -93,3 +93,59 @@ class TestRigidCachePointers(unittest.TestCase):
         boxes = [self.box(f"New{i}", App.Vector(0, 20 + 20 * i, 0)) for i in range(NEW_BOXES)]
         self.assertNoneGrounded(boxes)
         self.assertTrue(self.assembly.isPartGrounded(self.a))
+
+
+class TestRigidCacheUndo(unittest.TestCase):
+    """As TestRigidCachePointers with undo on: a deleted object stays alive in the undo stack, so
+    these answers are deterministic (no reuse of freed memory). Review R1 and R2 of ops#778."""
+
+    def setUp(self):
+        self.doc = App.newDocument("RigidCacheUndo")
+        self.doc.UndoMode = 1
+        self.assembly = self.doc.addObject("Assembly::AssemblyObject", "Assembly")
+        self.assembly.Type = "Assembly"
+        self.joints = self.assembly.newObject("Assembly::JointGroup", "Joints")
+        self.a = TestRigidCachePointers.box(self, "A", App.Vector(0, 0, 0))
+        self.b = TestRigidCachePointers.box(self, "B", App.Vector(20, 0, 0))
+        ground = self.joints.newObject("App::FeaturePython", "GroundedA")
+        JointObject.GroundedJoint(ground, self.a)
+        self.group = self.joints.newObject("App::FeaturePython", "RigidAB")
+        JointObject.RigidGroupJoint(self.group, [self.a, self.b])
+        self.doc.recompute()
+        self.assertEqual(self.assembly.solve(), 0)
+        self.assertTrue(self.assembly.isPartGrounded(self.b))
+
+    def tearDown(self):
+        App.closeDocument(self.doc.Name)
+
+    def delete(self, name):
+        self.doc.openTransaction("Delete " + name)
+        self.doc.removeObject(name)
+        self.doc.commitTransaction()
+
+    def test_deleted_member_is_not_grounded(self):
+        """B deleted (kept for undo), no solve: B is no longer in the document, so it is neither
+        grounded nor connected; before, the stale cluster still grounded it."""
+        self.delete("B")
+        self.assertFalse(self.assembly.isPartGrounded(self.b))
+        self.assertFalse(self.assembly.isPartConnected(self.b))
+        self.assertTrue(self.assembly.isPartGrounded(self.a))
+
+    def test_undo_brings_the_member_back_grounded(self):
+        """B deleted, asked about, then the delete undone, no solve: B is in its rigid group with
+        the grounded A again, so it is grounded and connected again."""
+        self.delete("B")
+        self.assertFalse(self.assembly.isPartGrounded(self.b))
+        self.doc.undo()
+        self.assertIn(self.b, self.group.ObjectsToRigidGroup)
+        self.assertTrue(self.assembly.isPartGrounded(self.b))
+        self.assertTrue(self.assembly.isPartConnected(self.b))
+
+    def test_deleted_rigid_group_frees_its_members(self):
+        """The rigid group deleted, no solve: B is grounded through nothing now (review O2);
+        undo brings the group, and B's grounding, back."""
+        self.delete("RigidAB")
+        self.assertFalse(self.assembly.isPartGrounded(self.b))
+        self.assertFalse(self.assembly.isPartConnected(self.b))
+        self.doc.undo()
+        self.assertTrue(self.assembly.isPartGrounded(self.b))
