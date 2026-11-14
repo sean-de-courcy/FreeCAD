@@ -155,6 +155,64 @@ class TestVariableHistoryPosition(unittest.TestCase):
         self.assertEqual(PartDesign.variablePosition(self.vars, "q"), a)
         self.assertLength(c, 20)
 
+    def testDraggedAnchorLeavesTheVariableInPlace(self):
+        """A, B, q (after B), C by #q; B dragged below C: q stays above C (it now follows A), so C
+        is still 20 (review prpending-r1, VarPosAnchorDragged)."""
+        a = self.box("A")
+        b = self.box("B")
+        self.addVariable("q", 20)
+        c = self.box("C")
+        c.setExpression("Length", "#q")
+        self.doc.recompute()
+        self.assertTrue(PartDesign.moveInStudio(self.studio, b, c))
+        self.doc.recompute()
+        self.assertEqual(PartDesign.variablePosition(self.vars, "q"), a)
+        self.assertLength(c, 20)
+
+    def testDraggedAboveItsVariableFails(self):
+        """A, q, C by #q; C dragged to the top: C fails at the next recompute (DV4)."""
+        self.box("A")
+        self.addVariable("q", 20)
+        c = self.box("C")
+        c.setExpression("Length", "#q")
+        self.doc.recompute()
+        self.assertTrue(PartDesign.moveInStudio(self.studio, c, None))
+        self.doc.recompute()
+        self.assertFails(c, "can't be used before it is set")
+
+    def testDeletedStudioOwnerKeepsThePlace(self):
+        """A studio with a feature list: owner E (its step E_at_B is the last row), q made at the
+        bar (after the step), D by #q; E deleted: q follows the row above the step, D stays 20
+        (review prpending-r1, VarPosOwnerDeleted)."""
+        from PartDesignTests.TestStudioList import makeOwner, newStudio
+
+        doc, studio = newStudio("VariableHistoryList")
+        owner = makeOwner(doc, studio, "E", (22, 2, 25, 5), 2, "Subtraction", ["B"])
+        PartDesign.studioInsert(owner, -1)
+        doc.recompute()
+        sequence = PartDesign.studioSequence(studio)
+        step, above = sequence[-1], sequence[-2]
+        vs = doc.addObject("App::VarSet", "StudioVars")
+        studio.addObject(vs)
+        vs.addProperty("App::PropertyLength", "q")
+        vs.q = 20
+        self.assertEqual(PartDesign.variablePosition(vs, "q"), step)
+        body = doc.addObject("PartDesign::Body", "D")
+        studio.addObject(body)
+        d = body.newObject("PartDesign::AdditiveBox", "DBox")
+        d.Length = d.Width = d.Height = 10
+        d.Placement = App.Placement(App.Vector(60, 0, 0), App.Rotation())
+        doc.recompute()
+        d.setExpression("Length", "#q")
+        doc.recompute()
+        self.assertLength(d, 20)
+        doc.removeObject(owner.Name)
+        doc.recompute()
+        self.assertEqual(PartDesign.variablePosition(vs, "q"), above)
+        d.touch()
+        doc.recompute()
+        self.assertLength(d, 20)
+
     def testRenameKeepsThePlace(self):
         a = self.box("A")
         self.addVariable("q", 20)

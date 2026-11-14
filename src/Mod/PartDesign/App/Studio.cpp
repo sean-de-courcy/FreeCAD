@@ -48,6 +48,7 @@
 #include "Pieces.h"
 #include "Retarget.h"
 #include "StudioList.h"
+#include "StudioVariables.h"
 
 namespace PartDesign
 {
@@ -1483,12 +1484,12 @@ bool moveStudioEntries(StudioList* list,
     return true;
 }
 
-bool moveInStudio(App::Document* doc,
-                  App::Part* studio,
-                  const std::vector<App::DocumentObject*>& rows,
-                  App::DocumentObject* after,
-                  bool hinted,
-                  App::DocumentObject* bar)
+static bool moveRowsInStudio(App::Document* doc,
+                             App::Part* studio,
+                             const std::vector<App::DocumentObject*>& rows,
+                             App::DocumentObject* after,
+                             bool hinted,
+                             App::DocumentObject* bar)
 {
     // FreeCAD-CH ops#654 S3: a studio with a list drags its entries (an owner with all its steps)
     if (StudioList* list = StudioList::of(doc, studio)) {
@@ -1727,6 +1728,22 @@ bool moveInStudio(App::Document* doc,
         body->rollTo(last);
     }
     return changed || body->Tip.getValue() != oldTip;
+}
+
+bool moveInStudio(App::Document* doc,
+                  App::Part* studio,
+                  const std::vector<App::DocumentObject*>& rows,
+                  App::DocumentObject* after,
+                  bool hinted,
+                  App::DocumentObject* bar)
+{
+    // FreeCAD-CH (ops#723): the Part Studio variables stay where they are in the history
+    const auto before = studioSequence(doc, studio);
+    const bool changed = moveRowsInStudio(doc, studio, rows, after, hinted, bar);
+    if (changed) {
+        keepVariablePlaces(doc, studio, before, rows);
+    }
+    return changed;
 }
 
 std::vector<App::DocumentObject*> readsOfOtherBodies(const App::DocumentObject* member,
