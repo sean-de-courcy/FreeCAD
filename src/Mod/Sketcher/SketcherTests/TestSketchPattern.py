@@ -289,6 +289,9 @@ class TestSketchCircularPattern(PatternCase):
     def testAnArcCopyFollowsItsSeedsSweep(self):
         ac = self.arc(0, 10, 3, 0, 90)
         index = self.sketch.addCircularPattern([ac], 2, V(0, 0, 0))
+        # the pivot tied to the root: a free pivot may move instead of the copy's ends
+        pivot = self.sketch.getPattern(index)["Pivot"]
+        self.sketch.addConstraint(Sketcher.Constraint("Coincident", pivot, START, ROOT, START))
         angle = self.sketch.addConstraint(Sketcher.Constraint("Angle", ac, math.radians(90)))
         self.fixCentre(ac, 0, 10)
         self.sketch.addConstraint(Sketcher.Constraint("Radius", ac, 3))
@@ -450,6 +453,9 @@ class TestSketchLinearPattern(PatternCase):
         self.doc = App.openDocument(path)
         sketch = self.doc.getObject("Sketch")
         self.assertEqual(sketch.getPattern(self.pattern), record)
+        # the direction lines held: free ones may take up the seed's move instead of the copies
+        for direction in record["Directions"]:
+            sketch.addConstraint(Sketcher.Constraint("Block", direction))
         sketch.addConstraint(Sketcher.Constraint("DistanceX", ROOT, START, self.seed, MID, 1))
         sketch.addConstraint(Sketcher.Constraint("DistanceY", ROOT, START, self.seed, MID, 1))
         self.assertSolvedClean(sketch)
