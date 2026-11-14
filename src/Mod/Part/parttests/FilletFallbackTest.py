@@ -4912,8 +4912,12 @@ class RoundAlongASplineEdgeTest(unittest.TestCase):
                     self.assertEqual(len(shape.Solids), 1)
                     self.assertEqual(len(shape.Faces), 10)
                     removed = r * r * (1 - math.pi / 4) * (P - 2 * math.pi * k * r)
+                    # Shape.Volume is OCCT's default integration, which is 1e-4 mm3 off on these
+                    # bodies either way (measured against the adaptive one: the loft at r 0.5 reads
+                    # 7097.58318 as the ball's and 7097.58299 as OCCT's, for 7097.58310 both). At
+                    # r 0.5 that is more than 1e-5 of what the round removes
                     self.assertAlmostEqual(
-                        (body.Volume - shape.Volume) / removed, 1.0, delta=1e-5
+                        (body.Volume - shape.Volume) / removed, 1.0, delta=1e-5 + 2e-4 / removed
                     )
                     rounds = [
                         f

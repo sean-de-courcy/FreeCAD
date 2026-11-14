@@ -1250,8 +1250,12 @@ void solveStations(const Context& context, Blend& blend, int interior)
         };
         gp_Vec out = outward[end];
         int beyond = 0;
+        // How far the surface runs on past the end is the same at every station count (two spacings of the
+        // first pass): what is built on the blend reads its surface there (blendBeyond), and a denser pass
+        // must not hand it a shorter one
+        const double runOn = 2.0 * spacing * (interior + 1.0) / (firstStations + 1.0);
         for (int steps = 0;; ++steps) {
-            if (clearance(outermost()) > 2.0 * spacing && ++beyond >= 2) {
+            if (clearance(outermost()) > runOn && ++beyond >= 2) {
                 break;
             }
             if (steps > 4000) {
@@ -1971,6 +1975,24 @@ Report correctNow(const TopoDS_Shape& shape, const std::vector<TopoDS_Face>& ble
                     report.reason += "; ";
                 }
                 report.reason += e.why;
+                continue;
+            }
+            catch (const Refusal& e) {
+                // A seam that cannot be placed. In a chain of spline faces only, that fails the fillet. In a
+                // chain with faces of exact form the run is not recognised: such chains were OCCT's whole
+                // before runs were corrected by themselves, and a seam beside an exact face that the ball
+                // cannot find says the run is not this class (a rim past its land: FilletFallbackTest's
+                // OverflowTest)
+                const bool mixed = std::any_of(context.blends.begin(), context.blends.end(), [&](const Blend& blend) {
+                    return blend.kept && blend.chain == context.blends[ball.front()].chain;
+                });
+                if (!mixed) {
+                    throw;
+                }
+                if (!report.reason.empty()) {
+                    report.reason += "; ";
+                }
+                report.reason += "not recognised: " + e.why;
                 continue;
             }
             catch (const Standard_Failure& e) {
