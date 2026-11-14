@@ -2684,6 +2684,9 @@ int Sketch::addConstraint(const Constraint* constraint)
         }
         case Pattern:  // FreeCAD-CH (Onshape's sketch patterns)
             rtn = addPatternConstraint(constraint, c);
+            if (rtn == -1) {
+                ++ConstraintsCounter;  // malformed: the later constraints keep their tags
+            }
             break;
         case Sketcher::None:   // ambiguous enum value
         case Sketcher::Block:  // handled separately while adding geometry
@@ -2704,7 +2707,7 @@ int Sketch::addConstraint(const Constraint* constraint)
 int Sketch::addPatternConstraint(const Constraint* constraint, ConstrDef& c)
 {
     const auto record = PatternRecord::read(*constraint);
-    if (!record) {
+    if (!record || !record->namesEachGeometryOnce()) {
         return -1;
     }
     const int internalCount = std::ranges::count_if(Geoms, [](const GeoDef& g) { return !g.external; });

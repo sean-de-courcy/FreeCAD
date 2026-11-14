@@ -349,6 +349,23 @@ class TestSketchCircularPattern(PatternCase):
             pass
         self.assertEqual(self.sketch.solve(), 0)
 
+    def testMirroringOrCopyingAWholePatternCopiesNoPattern(self):
+        # the record is not copied with its geometry: the new geometry is free, and the pattern
+        # still drives its own copies only
+        everything = [self.seed, self.pivot, self.copyAt(1), self.copyAt(2)]
+        axis = self.line(20, -5, 20, 5)
+        count = self.sketch.GeometryCount
+        self.sketch.addSymmetric(everything, axis, NONE)
+        self.assertEqual(self.sketch.GeometryCount, count + 4)
+        self.assertEqual(self.patterns(), [self.pattern])
+        self.sketch.addCopy(everything, V(0, 30, 0), False)
+        self.assertGreaterEqual(self.sketch.GeometryCount, count + 8)
+        self.assertEqual(self.patterns(), [self.pattern])
+        self.assertSolvedClean()
+        self.assertEqual(self.sketch.getPattern(self.pattern)["Counts"], (3, 1))
+        for k, deg in ((1, 120), (2, 240)):
+            self.assertAt(self.copyAt(k), *rot(10, 0, deg))
+
     def testTrimmingTheSeedRemovesThePatternAndLeavesTheCopies(self):
         # a line through the seed circle (crossing it at (10, -2) and (10, 2)); the circle's
         # right half is trimmed away. The trim replaces the seed, so the pattern goes as for a
