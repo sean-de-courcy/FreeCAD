@@ -1811,7 +1811,7 @@ TEST_F(ElementMapTest, savedReferencesAreIndicesAndRestoreAsTheyWereV2)
     Data::ElementMapPtr fromHashed;
     {
         Data::NameRemap remap;
-        remap.load(file);
+        remap.load(file, Data::NamingFormatWritten);
         fromIndexed = std::make_shared<Data::ElementMap>()->restore(_hasher, indexed);
         fromHashed = std::make_shared<Data::ElementMap>()->restore(_hasher, hashed);
         EXPECT_EQ(remap.unknownCount(), 0U);
@@ -1878,7 +1878,7 @@ TEST_F(ElementMapTest, savedReferencesAreIndicesAndRestoreAsTheyWereV2)
         file.clear();
         file.seekg(0);
         Data::NameRemap remap;
-        remap.load(file);
+        remap.load(file, Data::NamingFormatWritten);
         splitRestored = std::make_shared<Data::ElementMap>()->restore(_hasher, splitSaved);
         EXPECT_EQ(remap.unknownCount(), 0U);
     }
