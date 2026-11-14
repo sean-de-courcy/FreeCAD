@@ -11,7 +11,6 @@
 #include <App/Expression.h>
 #include <App/Part.h>
 #include <App/VarSet.h>
-#include <App/VarSetCopy.h>
 #include <App/VariableLookup.h>
 #include <App/VariablePosition.h>
 #include <Base/Exception.h>
@@ -27,11 +26,13 @@ namespace
 
 using Place = App::VariablePosition::Place;
 
-/// A part studio's set: a VarSet (not an imported copy) inside an App::Part, else null
+/// A part studio's set: a plain App::VarSet inside an App::Part, else null. Not an imported copy
+/// (VarSetCopy) nor a configuration (StudioConfig): Onshape's configuration inputs are seen by the
+/// whole studio (CF5b), they are no rows of its history
 App::Part* studioOfSet(const App::DocumentObject* holder)
 {
-    if (!holder || !holder->isAttachedToDocument() || !holder->isDerivedFrom<App::VarSet>()
-        || holder->isDerivedFrom<App::VarSetCopy>()) {
+    if (!holder || !holder->isAttachedToDocument()
+        || holder->getTypeId() != App::VarSet::getClassTypeId()) {
         return nullptr;
     }
     return App::Part::getPartOfObject(holder, true);
