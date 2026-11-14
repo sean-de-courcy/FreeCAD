@@ -5008,10 +5008,12 @@ class RoundAlongASplineEdgeTest(unittest.TestCase):
                     self.assertAlmostEqual(
                         (body.Volume - shape.Volume) / removed, 1.0, delta=1e-5 + 2e-4 / removed
                     )
+                    # By their corners: a spline face's box is its poles', which the compact fit
+                    # of the ball's surface takes below the round
                     rounds = [
                         f
                         for f in shape.Faces
-                        if f.BoundBox.ZMin > self.H - r - 1e-7
+                        if all(v.Point.z > self.H - r - 1e-7 for v in f.Vertexes)
                         and f.Surface.TypeId != "Part::GeomPlane"
                     ]
                     self.assertEqual(len(rounds), 4)
