@@ -848,6 +848,152 @@ def RoundOnSpline(make):
     return {"volumes": {}}
 
 
+LEANING_BOSS_LEAN = (0.3, 0.2)
+LEANING_BOSS_RADIUS = 2.0
+LEANING_BOSS_FLOOR = 5.0
+
+
+def roundUnderLeaningWallContact(fillet, radius, grid=13):
+    """How far the foot round of `RoundUnderLeaningWall` is from the ball's contact, in closed
+    form (no kernel distance): (cylinder blend faces, other blend faces, ball residual).
+
+    A round of radius r is the surface a ball of radius r sweeps while it touches both walls.
+    Here the walls are the slab's top z = 5 and the boss's side: the stadium (the lines
+    y = -10 and y = 10 for x -20..20, half circles of radius 10 about (-20, 0) and (20, 0))
+    drawn at z = 0 and swept along (0.3, 0.2, 1). For a point p of a blend face with unit
+    normal n the ball's centre is c = p + r n or p - r n, the one at height 5 + r, and it
+    must be at distance r from the boss's side: under a leaning plane the distance to that
+    plane, under a leaning circle's wall the distance from c, moved back along the sweep to
+    z = 0, to the circle, measured across the sweep (one angle, found by search). The ball
+    residual is the largest | distance - r | and | height - (5 + r) | over a grid on every
+    blend face."""
+    lx, ly = LEANING_BOSS_LEAN
+    floor = LEANING_BOSS_FLOOR
+    sweep = V(lx, ly, 1)
+    sweep.normalize()
+
+    def across(offset):
+        return (offset - sweep * offset.dot(sweep)).Length
+
+    def circleWallDistance(c, centreX):
+        def at(angle):
+            on = V(centreX + 10 * math.cos(angle), 10 * math.sin(angle), 0)
+            return across(c - on)
+
+        step = math.pi / 180
+        k = min(range(360), key=lambda i: at(i * step))
+        low, high = (k - 1) * step, (k + 1) * step
+        for _ in range(80):
+            m1 = low + (high - low) * 0.381966
+            m2 = low + (high - low) * 0.618034
+            if at(m1) < at(m2):
+                high = m2
+            else:
+                low = m1
+        return at((low + high) / 2)
+
+    planeNormal = V(1, 0, 0).cross(sweep)
+    planeNormal.normalize()
+
+    def planeWallDistance(c, y0):
+        return abs((c - V(0, y0, 0)).dot(planeNormal))
+
+    blends = [
+        f
+        for f in fillet.Shape.Faces
+        if not isinstance(f.Surface, Part.Plane)
+        # by its corners (a spline face's box is its poles'); a wall that leans over the round
+        # is touched above 5 + r
+        and all(floor - 1e-6 < v.Point.z < floor + 2 * radius for v in f.Vertexes)
+    ]
+    cylinders = [
+        f
+        for f in blends
+        if isinstance(f.Surface, Part.Cylinder) and abs(f.Surface.Radius - radius) < 1e-9
+    ]
+    ball = 0.0
+    for face in blends:
+        u0, u1, v0, v1 = face.ParameterRange
+        for i in range(grid):
+            for j in range(grid):
+                u = u0 + (u1 - u0) * (i + 0.5) / grid
+                v = v0 + (v1 - v0) * (j + 0.5) / grid
+                p = face.valueAt(u, v)
+                n = face.normalAt(u, v)
+                c = min((p + n * radius, p - n * radius), key=lambda q: abs(q.z - floor - radius))
+                # Back along the sweep to the sketch's plane: which part of the stadium is beside it
+                foot = c - V(lx, ly, 1) * c.z
+                if face in cylinders:
+                    wall = planeWallDistance(c, 10.0 if foot.y > 0 else -10.0)
+                else:
+                    wall = circleWallDistance(c, 20.0 if foot.x > 0 else -20.0)
+                ball = max(ball, abs(c.z - floor - radius), abs(wall - radius))
+    return len(cylinders), len(blends) - len(cylinders), ball
+
+
+def RoundUnderLeaningWall(make):
+    """A round whose chain has cylinders and spline faces (ops#640, decision 425: a round is
+    the rolling ball's surface, also where the kernel's own fillet is not; Nest Insert's slot
+    round under a leaning elliptic wall).
+
+    Body: a slab, the rectangle -45..55 by -30..40 padded 5; a stadium on the XY plane (the
+    lines y = -10 and y = 10 for x -20..20, half circles of radius 10 about (-20, 0) and
+    (20, 0)) padded 30 along (0.3, 0.2, 1), so the boss leans: its side is two leaning planes
+    and two walls swept from the circles, which are elliptic cylinders, not normal to the
+    slab; a Fillet of radius 2 round the boss's whole foot on the slab. Under the planes the
+    round is a cylinder of radius 2. Under the circles' walls the wall's normal turns about
+    the foot's edge, so a circle swept in the plane normal to the edge is off the ball by
+    5e-3, and the kernel's seams between the four faces by 1.4e-2.
+
+    The expected result is the ball's contact, in closed form (`roundUnderLeaningWallContact`):
+    two cylinders of the radius and two other faces, each within 1e-6 of it."""
+    radius = LEANING_BOSS_RADIUS
+    doc = make("RoundUnderLeaningWall")
+    body = newBody(doc, "Body")
+    slab = block(body, -45, -30, 55, 40, LEANING_BOSS_FLOOR, "Slab")
+    stadium = [
+        Part.LineSegment(V(-20, -10, 0), V(20, -10, 0)),
+        Part.ArcOfCircle(Part.Circle(V(20, 0, 0), TOP, 10), -math.pi / 2, math.pi / 2),
+        Part.LineSegment(V(20, 10, 0), V(-20, 10, 0)),
+        Part.ArcOfCircle(Part.Circle(V(-20, 0, 0), TOP, 10), math.pi / 2, 3 * math.pi / 2),
+    ]
+    boss = body.newObject("PartDesign::Pad", "LeaningBoss")
+    boss.Profile = attachedSketch(body, "StadiumSketch", plane(body, "XY_Plane"), stadium)
+    boss.UseCustomVector = True
+    boss.Direction = V(LEANING_BOSS_LEAN[0], LEANING_BOSS_LEAN[1], 1)
+    boss.AlongSketchNormal = True
+    boss.Length = 30
+    boss.Refine = False
+    doc.recompute()
+    if abs(slab.Shape.Volume - 100 * 70 * LEANING_BOSS_FLOOR) > 1e-6:
+        raise AssertionError("the slab is not 100 x 70 x 5")
+    foot = [
+        f"Edge{i + 1}"
+        for i, e in enumerate(boss.Shape.Edges)
+        if abs(e.BoundBox.ZMin - LEANING_BOSS_FLOOR) < 1e-7
+        and abs(e.BoundBox.ZMax - LEANING_BOSS_FLOOR) < 1e-7
+        and e.BoundBox.XMin > -40
+        and e.BoundBox.XMax < 50
+        and e.BoundBox.YMin > -25
+        and e.BoundBox.YMax < 35
+    ]
+    if len(foot) != 5:
+        raise AssertionError(f"the boss's foot has {len(foot)} edges, expected five")
+    fillet = body.newObject("PartDesign::Fillet", "FootRound")
+    fillet.Base = (boss, foot)
+    fillet.Radius = radius
+    body.Tip = fillet
+    doc.recompute()
+    cylinders, others, ball = roundUnderLeaningWallContact(fillet, radius)
+    if (cylinders, others) != (2, 2):
+        raise AssertionError(
+            f"FootRound has {cylinders} cylinders and {others} other blend faces, expected 2 and 2"
+        )
+    if ball > 1e-6:
+        raise AssertionError(f"FootRound is off the ball's contact by {ball:.3g}, allowed 1e-6")
+    return {"volumes": {}}
+
+
 def bossTops(shape, z):
     """The (x, y) centres of the shape's 6 x 6 planar faces facing +z at height z, sorted."""
     return sorted(
@@ -936,4 +1082,5 @@ MODELS = [
     IndexToldGroups,
     RoundOnSpline,
     FacePatternCentered,
+    RoundUnderLeaningWall,
 ]
