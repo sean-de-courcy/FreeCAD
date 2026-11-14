@@ -1131,7 +1131,10 @@ class Joint:
             joint.Detach2 = det1
 
             if activeTask and activeTask.joint == joint:
-                activeTask.updateTaskboxFromJoint()
+                # FreeCAD-CH (ops#772): the picks are selected already. Selected again (under
+                # their tip names, new entries for a Body's instance), the panel rejected both
+                # as a third and fourth pick and dropped the first: Onshape takes either order.
+                activeTask.updateTaskboxFromJoint(select=False)
 
     def areJcsSameDir(self, joint):
         globalJcsPlc1 = UtilsAssembly.getJcsGlobalPlc(joint.Placement1, joint.Reference1)
@@ -1990,7 +1993,9 @@ class TaskAssemblyCreateJoint(QtCore.QObject):
 
         self.createDeleteAction()
 
-        self.addition_rejected = False
+        # FreeCAD-CH (ops#772): how many rejected additions still have their removeSelection to
+        # come. A flag ate only the first, and the next rejection's removal dropped a kept pick.
+        self.addition_rejected = 0
 
     def bindFields(self):
         bind = Gui.ExpressionBinding(self.jForm.angleSpinbox).bind(self.joint, "Angle")
@@ -2438,7 +2443,9 @@ class TaskAssemblyCreateJoint(QtCore.QObject):
         else:
             assembly_vobj.clearIsolate()
 
-    def updateTaskboxFromJoint(self):
+    def updateTaskboxFromJoint(self, select=True):
+        """The panel from the joint. select: also select the joint's references in the view
+        (an edited joint's; a new one's picks are selected already)."""
         self.refs = []
         self.presel_ref = None
 
@@ -2448,12 +2455,14 @@ class TaskAssemblyCreateJoint(QtCore.QObject):
         if UtilsAssembly.isRefValid(ref1, 2):
             self.refs.append(ref1)
             sub1 = UtilsAssembly.addTipNameToSub(ref1)
-            Gui.Selection.addSelection(ref1[0].Document.Name, ref1[0].Name, sub1)
+            if select:
+                Gui.Selection.addSelection(ref1[0].Document.Name, ref1[0].Name, sub1)
 
         if UtilsAssembly.isRefValid(ref2, 2):
             self.refs.append(ref2)
             sub2 = UtilsAssembly.addTipNameToSub(ref2)
-            Gui.Selection.addSelection(ref2[0].Document.Name, ref2[0].Name, sub2)
+            if select:
+                Gui.Selection.addSelection(ref2[0].Document.Name, ref2[0].Name, sub2)
 
         self.jForm.angleSpinbox.setProperty("rawValue", self.joint.Angle.Value)
         self.jForm.distanceSpinbox.setProperty("rawValue", self.joint.Distance.Value)
@@ -2697,8 +2706,12 @@ class TaskAssemblyCreateJoint(QtCore.QObject):
                 acceptable = False
 
         if not acceptable:
-            self.addition_rejected = True
+            # The removal notifies removeSelection at once, which takes this count back; if it
+            # doesn't come (the item wasn't selected), take it back here.
+            pending = self.addition_rejected
+            self.addition_rejected = pending + 1
             Gui.Selection.removeSelection(doc_name, obj_name, sub_name)
+            self.addition_rejected = min(self.addition_rejected, pending)
             return
 
         # Selection is acceptable so add it
@@ -2717,8 +2730,8 @@ class TaskAssemblyCreateJoint(QtCore.QObject):
         self.joint.ViewObject.Proxy.showConnectorPoints(None)
 
     def removeSelection(self, doc_name, obj_name, sub_name, mousePos=None):
-        if self.addition_rejected:
-            self.addition_rejected = False
+        if self.addition_rejected > 0:
+            self.addition_rejected -= 1
             return
 
         rootObj = App.getDocument(doc_name).getObject(obj_name)
