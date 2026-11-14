@@ -228,6 +228,29 @@ PartExport bool roundUnderPlane(
     double& volume
 );
 
+/** Whether the volume a rim's rounds removed passes the direct builder's check (ops#640).
+ *
+ * The slack is what the base's own measure may be off where its vertices stand beside their edges'
+ * crossings (a Boolean's by 1e-6): wide enough there to hide a wrong round. So:
+ * - the bodies' measure (the changed faces', or the whole bodies' difference) passes alone only
+ *   where it agrees within 2e-4 of the expected volume, without the slack;
+ * - else the rounds' own measure (roundUnderPlane(), summed) must agree within 2e-4, without the
+ *   slack (it follows the plan, not the base's vertices), while the bodies' agrees within
+ *   rimVolumeCoarse(): the rounds' measure alone is blind to a wrong wall;
+ * - where the rounds have no measure ( rounds null), the bodies' passes within the slack.
+ */
+PartExport bool rimVolumeAccepted(
+    double expected,
+    double slack,
+    double whole,
+    double bodies,
+    const double* rounds
+);
+
+/// How far the bodies' measure may be off beside the rounds' own: OCCT's accuracy on the whole
+/// body (1e-6 of its volume), 2e-4 of the expected volume, and the slack
+PartExport double rimVolumeCoarse(double expected, double slack, double whole);
+
 /** The part of a fillet that is whole rim loops of plane faces with walls square to them, lines
  * and circles, built directly without a Boolean (notes/boolean-free-mitre.md); the caller rounds
  * the rest of the selection on the result. At the limit only (Request::limitOnly): the loops with
