@@ -70,6 +70,7 @@ from parttests.RefineElementMapTest import RefineElementMapTest
 from parttests.GTransformKeepsPlanesTest import GTransformKeepsPlanesTest
 from parttests.RefineFuseEdgesTest import RefineFuseEdgesTest
 from parttests.RefineInternalVertexTest import RefineInternalVertexTest
+from parttests.RefineExtensionTest import RefineExtensionTest  # FreeCAD-CH ops#640: a face on an extension of its neighbour's surface
 from parttests.SplitEdgeNamesTest import SplitEdgeNamesTest
 from parttests.SweepFrenetTest import SweepFrenetTest, SweepApproximationTest
 from parttests.BooleanLocationsTest import BooleanLocationsTest

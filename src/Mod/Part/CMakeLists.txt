@@ -85,6 +85,7 @@ set(Part_tests
     parttests/RefineElementMapTest.py
     parttests/RefineFuseEdgesTest.py
     parttests/RefineInternalVertexTest.py
+    parttests/RefineExtensionTest.py
     parttests/SplitEdgeNamesTest.py
     parttests/TopoShapeListTest.py
     parttests/ColorPerFaceTest.py
