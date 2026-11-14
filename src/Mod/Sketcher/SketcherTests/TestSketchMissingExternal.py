@@ -360,6 +360,75 @@ class TestSketchMissingExternalReturnsSolver(TestSketchMissingExternalReturns):
     solver = True
 
 
+class TestSketchMissingExternalSourceDeleted(unittest.TestCase):
+    """The source object of a sketch's external edge deleted (review rows656-r1 T1). Deleting it
+    takes the link with it, so no link is left to report or repair the reference: the sketch keeps
+    its error (decision 150), unlike a link whose element is missing, which warns (ops#656 D4 row 2).
+    A 20 x 20 x 10 box; a free sketch projects its top edge on y = 0 and holds a circle r 1 on it."""
+
+    solver = False
+
+    def setUp(self):
+        self.doc = App.newDocument("SourceDeleted")
+        if self.solver:
+            self.doc.HistoryAlgorithm = "V2"
+            self.doc.ReferenceSolver = True
+        box = self.doc.addObject("Part::Box", "Src")
+        box.Length, box.Width, box.Height = 20, 20, 10
+        self.sketch = self.doc.addObject("Sketcher::SketchObject", "Sk")
+        self.doc.recompute()
+        names = [
+            f"Edge{i + 1}"
+            for i, e in enumerate(box.Shape.Edges)
+            if abs(e.BoundBox.ZMin - 10) < TOL
+            and abs(e.BoundBox.ZMax - 10) < TOL
+            and abs(e.BoundBox.YMax) < TOL
+        ]
+        self.assertEqual(len(names), 1)
+        self.sketch.addExternal("Src", names[0])
+        circle = self.sketch.addGeometry(Part.Circle(V(5, 0, 0), V(0, 0, 1), 1))
+        self.sketch.addConstraint(Sketcher.Constraint("PointOnObject", circle, 3, -3))
+        self.doc.recompute()
+        self.assertTrue(self.sketch.isValid(), self.sketch.getStatusString())
+
+    def tearDown(self):
+        App.closeDocument(self.doc.Name)
+
+    def testDeletedSourceFails(self):
+        self.doc.removeObject("Src")
+        self.doc.recompute()
+        self.assertEqual(self.sketch.ExternalGeometry, [])
+        self.assertFalse(self.sketch.isValid())
+        self.assertIn("Src", self.sketch.getStatusString())
+        # the frozen line stays, flagged missing, with the circle on it
+        self.assertEqual(len(self.sketch.ExternalGeo), 3)
+        facade = Sketcher.ExternalGeometryFacade(self.sketch.ExternalGeo[2])
+        self.assertTrue(facade.testFlag("Missing"))
+        centre = self.sketch.Geometry[0].Center
+        self.assertLess(abs(centre.y), TOL)
+
+
+    def testSourceNameReused(self):
+        """Another box takes the deleted one's name and the sketch links an edge of it (review
+        rows656-r1 r2 F1): the old line's source is still gone, so the sketch still fails."""
+        self.doc.removeObject("Src")
+        self.doc.recompute()
+        self.assertFalse(self.sketch.isValid())
+        box = self.doc.addObject("Part::Box", "Src")
+        self.assertEqual(box.Name, "Src")
+        box.Length, box.Width, box.Height = 30, 30, 5
+        self.doc.recompute()
+        self.sketch.addExternal("Src", "Edge1")
+        self.doc.recompute()
+        self.assertFalse(self.sketch.isValid())
+
+
+class TestSketchMissingExternalSourceDeletedSolver(TestSketchMissingExternalSourceDeleted):
+    """The same in a reference solver document."""
+
+    solver = True
+
+
 class TestSketchFaceLinkPairing(unittest.TestCase):
     """A link to a whole face gives one geometry per edge of the face. After an edit of its
     source, each one takes the Id of its predecessor that came from the same source edge (by

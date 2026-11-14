@@ -509,7 +509,20 @@ App::DocumentObjectExecReturn* SketchObject::execute()
                            && ExternalGeometryFacade::getFacade(other)->getRef() == ref;
                    });
         });
-        if (lost) {
+        // A geometry no link holds any more (its source object deleted: the link went with it,
+        // even when another object took its name since) keeps the error too: no link is left to
+        // report or repair, and the text can only name the stored reference (reviews rows656-r1
+        // T1 and r2 F1; decision 150). A link whose element is missing keeps its key, which is
+        // its geometry's ref.
+        const std::set<std::string> keys(externalGeoRef.begin(), externalGeoRef.end());
+        const bool orphaned = std::any_of(geos.begin(), geos.end(), [&](const Part::Geometry* geo) {
+            if (!missing(geo)) {
+                return false;
+            }
+            const std::string& ref = ExternalGeometryFacade::getFacade(geo)->getRef();
+            return !ref.empty() && !keys.contains(ref);
+        });
+        if (lost || orphaned) {
             return new App::DocumentObjectExecReturn(externalError, this);
         }
         // In a reference solver document the recompute check has worded the missing references
