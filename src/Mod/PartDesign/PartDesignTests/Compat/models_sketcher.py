@@ -205,6 +205,75 @@ def SketchCarbonCopy(make):
     return {"volumes": {"Pad": 120, "Pad001": 200}}
 
 
+def SketchPatterns(make):
+    """A polar and a linear sketch pattern (one Pattern constraint each) and a linked mirror, in
+    one fully constrained sketch outside a Body (ops#725).
+
+    0, A: a circle, radius 2, at (10, 0). 1, B: a circle, radius 1, at (20, 20). 2, M: a line
+    (30, 0)-(34, 3). 3: a blocked construction line x = 40, y -5..10, the mirror's axis.
+    The polar pattern: 4 instances of A over the full turn about a pivot on the origin, so
+    copies of A at (0, 10), (-10, 0) and (0, -10). The linear pattern: B, 3 along a direction
+    line (20, 20)-(25, 20) and 2 along a second (20, 20)-(20, 24), so copies of B at
+    (20 + 5 a, 20 + 4 b) for a 0..2, b 0..1 (but the seed). The mirror: M about the axis,
+    linked (Symmetric constraints), so its copy is (50, 0)-(46, 3)."""
+    doc = make("SketchPatterns")
+    sketch = freeSketch(
+        doc,
+        "Sketch",
+        [m.circle(10, 0, 2), m.circle(20, 20, 1), line((30, 0), (34, 3)), line((40, -5), (40, 10))],
+    )
+    sketch.setConstruction(3, True)
+    for constraint in [
+        C("DistanceX", -1, 1, 0, 3, 10),
+        C("PointOnObject", 0, 3, -1),
+        C("Radius", 0, 2),
+        C("DistanceX", -1, 1, 1, 3, 20),
+        C("DistanceY", -1, 1, 1, 3, 20),
+        C("Radius", 1, 1),
+        C("DistanceX", -1, 1, 2, 1, 30),
+        C("PointOnObject", 2, 1, -1),
+        C("DistanceX", -1, 1, 2, 2, 34),
+        C("DistanceY", -1, 1, 2, 2, 3),
+        C("Block", 3),
+    ]:
+        sketch.addConstraint(constraint)
+    polar = sketch.addCircularPattern([0], 4, V(0, 0, 0))
+    pivot = sketch.getPattern(polar)["Pivot"]
+    sketch.addConstraint(C("Coincident", pivot, 1, -1, 1))
+    linear = sketch.addLinearPattern([1], 3, V(5, 0, 0), 2, V(0, 4, 0))
+    first, second = sketch.getPattern(linear)["Directions"]
+    for constraint in [
+        C("Coincident", first, 1, 1, 3),
+        C("Horizontal", first),
+        C("DistanceX", first, 1, first, 2, 5),
+        C("Coincident", second, 1, 1, 3),
+        C("Vertical", second),
+        C("DistanceY", second, 1, second, 2, 4),
+    ]:
+        sketch.addConstraint(constraint)
+    mirrored = sketch.GeometryCount
+    sketch.addSymmetric([2], 3, 0, True)
+    doc.recompute()
+    checkSketch(sketch, dof=0)
+
+    def expect(what, geoId, pos, x, y):
+        p = sketch.getPoint(geoId, pos)
+        if abs(p.x - x) > 1e-6 or abs(p.y - y) > 1e-6:
+            raise AssertionError(f"SketchPatterns: {what} at ({p.x}, {p.y}), expected ({x}, {y})")
+
+    table = sketch.getPattern(polar)["Instances"]
+    for k, (x, y) in {1: (0, 10), 2: (-10, 0), 3: (0, -10)}.items():
+        expect(f"polar copy {k}", table[(0, k, 0)], 3, x, y)
+    table = sketch.getPattern(linear)["Instances"]
+    if sorted(table) != [(0, a, b) for a in range(3) for b in range(2) if (a, b) != (0, 0)]:
+        raise AssertionError(f"SketchPatterns: the linear table's slots are {sorted(table)}")
+    for (_, a, b), geoId in table.items():
+        expect(f"linear copy ({a}, {b})", geoId, 3, 20 + 5 * a, 20 + 4 * b)
+    expect("the mirrored line's start", mirrored, 1, 50, 0)
+    expect("the mirrored line's end", mirrored, 2, 46, 3)
+    return {}
+
+
 def checkSketch(sketch, dof=None):
     """Raises unless the sketch solves cleanly (and, given `dof`, has that many degrees of
     freedom)."""
@@ -218,4 +287,10 @@ def checkSketch(sketch, dof=None):
         raise AssertionError(f"{sketch.Name}: DoF {sketch.DoF}, expected {dof}")
 
 
-MODELS = [SketchConstraints, SketchCurves, SketchUnderConstrained, SketchCarbonCopy]
+MODELS = [
+    SketchConstraints,
+    SketchCurves,
+    SketchUnderConstrained,
+    SketchCarbonCopy,
+    SketchPatterns,
+]
