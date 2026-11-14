@@ -30,6 +30,10 @@ SKETCHER_PARAMS = "User parameter:BaseApp/Preferences/Mod/Sketcher"
 DIMENSIONING_PARAMS = SKETCHER_PARAMS + "/dimensioning"
 AUTO_SCALE_NEVER = 1  # SketcherGui::AutoScaleMode::Never
 
+MM = 0  # Base::UnitsApi schema "Standard" (mm, kg, s, degree)
+INCH = 3  # "ImperialDecimal": lengths in inches
+INCH_MM = 25.4
+
 POPUP_NAME = "SketcherDatumInPlace"
 POPUP_VALUE_NAME = "SketcherDatumInPlaceValue"
 
@@ -79,6 +83,8 @@ class TestDimensionInPlaceGui(SketcherGuiTestCase):
                 state["stop"] = True
             super().tearDown()
         finally:
+            if getattr(self, "saved_schema", None) is not None:
+                FreeCAD.Units.setSchema(self.saved_schema)
             for path, kind, name, had, value in reversed(getattr(self, "saved_params", [])):
                 group = FreeCAD.ParamGet(path)
                 if had:
@@ -87,6 +93,14 @@ class TestDimensionInPlaceGui(SketcherGuiTestCase):
                     getattr(group, "Rem" + kind)(name)
 
     # Preferences ---------------------------------------------------------------------------
+
+    def use_units(self, schema):
+        """The document's unit system and the active schema: INCH (Imperial decimal, lengths
+        in inches) or MM (Standard). Put back by tearDown."""
+        if getattr(self, "saved_schema", None) is None:
+            self.saved_schema = FreeCAD.Units.getSchema()
+        self.doc.UnitSystem = schema
+        FreeCAD.Units.setSchema(schema)
 
     def set_param(self, path, kind, name, value):
         group = FreeCAD.ParamGet(path)
@@ -1492,3 +1506,161 @@ class TestDimensionInPlaceGui(SketcherGuiTestCase):
         ends = sorted((p.x, p.y) for p in (geometry.StartPoint, geometry.EndPoint))
         self.assert_point(V(*ends[0], 0), 10, 0)
         self.assert_point(V(*ends[1], 0), 16, 0)
+
+    # D41-D49: a typed length keeps its text, as Onshape does (ops#684, oracle fact GS1) ------
+
+    def place_typed(self, text, schema):
+        """Line 0 (10 mm, anchored) in a document of the given units, then Distance on it with
+        `text` and Enter. Returns the Distance."""
+        self.use_units(schema)
+        state = self.place_distance([{"text": text, "key": QtCore.Qt.Key_Return}])
+        self.wait_answered(state, 1)
+        self.assertFalse(state["seen"][0]["open_after"], state["seen"][0]["tooltip"])
+        return self.constraints_of("Distance")[0]
+
+    def assert_kept(self, text, schema, stored, length):
+        """Typing `text` gives a Distance of `length` mm with an expression, the line's free end
+        at (length, 0), in one undo step; on edit the field shows `stored` (then Cancel), and
+        the expression is still there."""
+        distance = self.place_typed(text, schema)
+        self.assertAlmostEqual(distance.Value, length, places=9)
+        self.assertEqual(len(self.expressions()), 1, self.expressions())
+        self.assert_point(self.line_end(), length, 0)
+        self.assert_one_undo_step()
+        index = [c.Type for c in self.sketch.Constraints].index("Distance")
+        self.assertEqual(self.edit_from_list(index, None, accept=False), stored)
+        self.assertEqual(len(self.expressions()), 1, self.expressions())
+        self.assertAlmostEqual(self.sketch.Constraints[index].Value, length, places=9)
+
+    def test_d41_inch_document_bare_fraction_gets_the_unit(self):
+        """D41 (GS1): in an inch document, 1/8 is stored as (1/8) in: 3.175 mm."""
+        self.assert_kept("1/8", INCH, "(1/8) in", INCH_MM / 8)
+
+    def test_d42_inch_document_bare_expression_is_wrapped(self):
+        """D42 (GS1): the whole bare expression is wrapped: 3+1/2 -> (3+1/2) in, 3.5 in."""
+        self.assert_kept("3+1/2", INCH, "(3+1/2) in", 3.5 * INCH_MM)
+
+    def test_d43_inch_document_bare_number_keeps_its_digits(self):
+        """D43 (GS1): 1.23456789 -> 1.23456789 in, at full precision."""
+        self.assert_kept("1.23456789", INCH, "1.23456789 in", 1.23456789 * INCH_MM)
+
+    def test_d44_typed_units_are_kept_as_typed(self):
+        """D44 (GS1): 1 ft + 2 in is 14 in, stored as typed."""
+        self.assert_kept("1 ft + 2 in", INCH, "1 ft + 2 in", 14 * INCH_MM)
+
+    def test_d45_inch_document_millimetres_are_kept(self):
+        """D45 (GS1): 25 mm in an inch document is stored as 25 mm."""
+        self.assert_kept("25 mm", INCH, "25 mm", 25.0)
+
+    def test_d46_mm_document_inch_fraction_is_kept(self):
+        """D46: in a mm document, (1/32) in keeps its text (it was 0.79375 mm as a plain
+        value): 25.4 / 32 mm."""
+        self.assert_kept("(1/32) in", MM, "(1/32) in", INCH_MM / 32)
+
+    def test_d47_mm_document_own_unit_is_a_value(self):
+        """D47 (control): 25 mm in a mm document is a plain 25, with no expression, as are a
+        bare 25 and 10+5 (D5)."""
+        distance = self.place_typed("25 mm", MM)
+        self.assertAlmostEqual(distance.Value, 25.0, places=9)
+        self.assertEqual(self.expressions(), {})
+
+    def test_d48_inch_document_unchanged_value_is_a_value(self):
+        """D48: Enter on the proposed value, typing nothing, stores no expression and keeps the
+        measured 10 mm (the field shows it rounded, 0.39 in: 9.906 mm was stored)."""
+        self.use_units(INCH)
+        state = self.place_distance([{"key": QtCore.Qt.Key_Return}])
+        self.wait_answered(state, 1)
+        self.assertEqual(self.expressions(), {})
+        self.assertAlmostEqual(self.constraints_of("Distance")[0].Value, 10.0, places=9)
+
+    def constraint_list_item(self, index):
+        """The constraint list's row for constraint `index` (0-based; its row reads
+        "<index + 1>-<type> (<value>)")."""
+        from PySide import QtWidgets
+
+        lists = [
+            widget
+            for widget in FreeCADGui.getMainWindow().findChildren(QtWidgets.QListWidget)
+            if widget.objectName() == "listWidgetConstraints"
+        ]
+        self.assertEqual(len(lists), 1, "Expected the sketch's constraint list")
+        view = lists[0]
+        name = f"{index + 1}-"
+        for row in range(view.count()):
+            item = view.item(row)
+            if item.text().startswith(name):
+                return view, item
+        texts = [view.item(row).text() for row in range(view.count())]
+        self.fail(f"Expected {name} in the constraint list, got {texts}")
+
+    def edit_from_list(self, index, text=None, accept=True):
+        """Opens the datum dialog on constraint `index` from the constraint list (as a
+        double-click there does), records the field's text, types `text` (None: nothing) and
+        presses OK or Cancel. Returns the text the field opened with."""
+        view, item = self.constraint_list_item(index)
+        seen = {}
+
+        def fill():
+            dialog = QtGui.QApplication.activeModalWidget()
+            spinbox = dialog.findChild(QtGui.QAbstractSpinBox, "labelEdit") if dialog else None
+            if spinbox is None:
+                if seen.setdefault("waited", 0) < 6000:
+                    seen["waited"] += 50
+                    QtCore.QTimer.singleShot(50, fill)
+                return
+            line_edit = spinbox.findChild(QtGui.QLineEdit)
+            seen["text"] = line_edit.text()
+            if text is not None:
+                line_edit.selectAll()
+                line_edit.insert(text)
+            if accept:
+                dialog.accept()
+            else:
+                dialog.reject()
+
+        QtCore.QTimer.singleShot(50, fill)
+        view.itemActivated.emit(item)
+        self.assertTrue(self.wait_until(lambda: "text" in seen, 6000), "Expected the dialog")
+        self.flush_gui(100)
+        return seen["text"]
+
+    def reopen(self):
+        """Saves the document, closes it and opens it again, in sketch edit."""
+        import os
+        import tempfile
+
+        FreeCADGui.ActiveDocument.resetEdit()
+        self.flush_gui(100)
+        folder = tempfile.mkdtemp(prefix="d49-")
+        path = os.path.join(folder, "kept.FCStd")
+        self.doc.saveAs(path)
+        FreeCAD.closeDocument(self.doc.Name)
+        self.flush_gui(100)
+        self.doc = FreeCAD.openDocument(path)
+        self.sketch = self.doc.getObject("Sketch")
+        self.start_edit()
+
+    def test_d49_kept_text_survives_a_change_of_units_and_shows_on_edit(self):
+        """D49 (GS1): 3+1/2 typed in an inch document is kept as (3+1/2) in, 88.9 mm. The
+        document goes to millimetres and through a save and reopen: the value stays 88.9 mm and
+        the field shows (3+1/2) in again on edit. Cancel keeps it; a plain 50 typed over it gives
+        a value of 50 with no expression."""
+        self.place_typed("3+1/2", INCH)
+        index = [c.Type for c in self.sketch.Constraints].index("Distance")
+        self.use_units(MM)
+        self.reopen()
+        self.doc.recompute()
+        self.assertAlmostEqual(self.sketch.Constraints[index].Value, 3.5 * INCH_MM, places=9)
+        self.assertEqual(len(self.expressions()), 1)
+
+        self.assertEqual(self.edit_from_list(index, "40", accept=False), "(3+1/2) in")
+        self.doc.recompute()
+        self.assertEqual(len(self.expressions()), 1)
+        self.assertAlmostEqual(self.sketch.Constraints[index].Value, 3.5 * INCH_MM, places=9)
+        self.assertEqual(self.edit_from_list(index, None, accept=False), "(3+1/2) in")
+
+        self.assertEqual(self.edit_from_list(index, "50"), "(3+1/2) in")
+        self.doc.recompute()
+        self.assertEqual(self.expressions(), {})
+        self.assertAlmostEqual(self.sketch.Constraints[index].Value, 50.0, places=9)
+        self.assert_point(self.line_end(), 50, 0)
