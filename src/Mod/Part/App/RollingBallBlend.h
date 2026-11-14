@@ -17,10 +17,11 @@
  * pcurves and vertices go into the body through one BRepTools_Modification. Faces, edges and
  * vertices stay the same in number and in order, so element names stay as they are.
  *
- * Recognised: chains of spline blend faces, each between two walls (a contact side may be several
+ * Recognised: runs of spline blend faces, each between two walls (a contact side may be several
  * edges in a row), each end a seam on a tangent edge between two wall faces or an end on one face
- * of the base. Left as OCCT's: exact forms (cylinders, tori), chains mixing those with spline
- * faces, ends on several faces, corner patches.
+ * of the base. A chain's faces of exact form (cylinders, tori) are the ball's already and stay as
+ * they are; each run of spline faces between them is corrected by itself, and its seam to an exact
+ * face is the ball's arc on that face. Left as OCCT's: ends on several faces, corner patches.
  *
  * Plain shapes only: no TopoShape, no document, no console.
  *
