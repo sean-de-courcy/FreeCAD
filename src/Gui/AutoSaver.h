@@ -23,6 +23,7 @@
 
 #pragma once
 
+#include <QElapsedTimer>
 #include <QObject>
 
 #include <map>
@@ -125,6 +126,9 @@ protected:
     void saveDocument(const std::string&, AutoSaveProperty&);
     void startSoonPass(const std::string& name);
     int soonDelay(const AutoSaveProperty& saver) const;
+    double expectedSeconds(const AutoSaveProperty& saver) const;
+    /// The user's input (keys, clicks, drags, the wheel): a slow soon pass waits for a pause in it
+    bool eventFilter(QObject* watched, QEvent* event) override;
 
 public Q_SLOTS:
     void flushPendingSave(const QString& documentName);
@@ -135,6 +139,7 @@ public:
 
 private:
     int timeout; /*!< Timeout in milliseconds */
+    QElapsedTimer sinceInput;
     bool compressed;
     std::map<std::string, AutoSaveProperty*> saverMap;
 };

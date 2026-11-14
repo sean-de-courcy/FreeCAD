@@ -33,7 +33,7 @@ import zipfile
 
 import FreeCAD
 import FreeCADGui
-from PySide6 import QtCore, QtWidgets
+from PySide6 import QtCore, QtGui, QtWidgets
 
 # ---------------------------------------------------------------------------
 # define the functions to test the FreeCAD Gui Document code
@@ -537,6 +537,31 @@ class TestGuiDocument(unittest.TestCase):
             self._processEventsUntil(lambda: self._recoveryLabel("AutoSaveStepTwo"), 10.0),
             "the step after the first snapshot is not in a snapshot within 10 s",
         )
+
+    def testAutoSaverSlowSoonPassWaitsForAPause(self):
+        # A snapshot expected to block the window past AutoSaveSoonIdleAbove seconds waits until the
+        # user has given no input for 3 s; 0 makes this small document's snapshot count as slow
+        self._autoSaveTimerMinutes()
+        group = FreeCAD.ParamGet("User parameter:BaseApp/Preferences/Document")
+        group.SetFloat("AutoSaveSoonIdleAbove", 0.0)
+        try:
+            obj = self.doc.addObject("App::FeaturePython", "AutoSaveBusyObject")
+            obj.Label = "AutoSaveBusy"
+            window = FreeCADGui.getMainWindow()
+            typing_until = time.monotonic() + 6.0
+            while time.monotonic() < typing_until:
+                key = QtGui.QKeyEvent(
+                    QtCore.QEvent.Type.KeyPress, QtCore.Qt.Key.Key_Shift, QtCore.Qt.KeyboardModifier.NoModifier
+                )
+                QtWidgets.QApplication.sendEvent(window, key)
+                self._processEventsUntil(lambda: False, 0.3)
+            self.assertFalse(self._recoveryLabel("AutoSaveBusy"), "a slow soon pass ran while the user typed")
+            self.assertTrue(
+                self._processEventsUntil(lambda: self._recoveryLabel("AutoSaveBusy"), 10.0),
+                "no snapshot within 10 s of the pause",
+            )
+        finally:
+            group.RemFloat("AutoSaveSoonIdleAbove")
 
     def testAutoSaverSoonPassSkipsAnUnmodifiedDocument(self):
         self._autoSaveTimerMinutes()
