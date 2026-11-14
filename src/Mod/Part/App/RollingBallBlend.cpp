@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <functional>
+#include <limits>
 #include <map>
 #include <numbers>
 #include <utility>
@@ -191,6 +192,14 @@ gp_Vec surfaceNormal(const Handle(Geom_Surface)& surface, double u, double v)
     return du.Crossed(dv).Normalized();
 }
 
+// How near r a distance can be brought at a place: 3e-13, or what double precision leaves of it far from the origin
+// (a wall 500 mm out has its points to 1e-13 at best)
+double reachable(const gp_Pnt& at, double radius)
+{
+    const double size = std::max({std::fabs(at.X()), std::fabs(at.Y()), std::fabs(at.Z())}) + radius;
+    return std::max(3e-13, 64.0 * std::numeric_limits<double>::epsilon() * size);
+}
+
 // One ball position: the centre and its two feet (on the face's side 0 and side 1 walls)
 struct Station
 {
@@ -223,7 +232,7 @@ Station solveStation(
         }
         const std::array<double, 2> f = {station.feet[0].distance - radius, station.feet[1].distance - radius};
         station.residual = std::max(std::fabs(f[0]), std::fabs(f[1]));
-        if (station.residual < 3e-13) {
+        if (station.residual < reachable(centre, radius)) {
             station.ok = true;
             break;
         }
@@ -904,7 +913,8 @@ void solveSeam(Context& context, Seam& seam)
     double f0 = residual(s0);
     double s1 = old + 1e-4 * (last - first) * (old > 0.5 * (first + last) ? -1.0 : 1.0);
     double f1 = residual(s1);
-    bool converged = std::fabs(f0) < 1e-13;
+    const double within = reachable(start, context.radius);
+    bool converged = std::fabs(f0) < within;
     if (converged) {
         s1 = s0;
         f1 = residual(s1);
@@ -918,7 +928,7 @@ void solveSeam(Context& context, Seam& seam)
         f0 = f1;
         s1 = s2;
         f1 = residual(s1);
-        converged = std::fabs(f1) < 1e-13;
+        converged = std::fabs(f1) < within;
     }
     if (!converged) {
         throw Refusal {"a seam's ball position did not converge"};
