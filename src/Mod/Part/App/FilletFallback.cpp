@@ -10723,7 +10723,11 @@ std::vector<RimLoop> rimLoops(
             RimCorner& g = corner.geometry;
             gp_XY exact = g.tangent ? g.after->nearest(corner.plan) : g.at(0.0, corner.plan);
             double moved = (exact - corner.plan).Modulus();
-            if (!(moved <= 10 * rimTolerance)) {
+            // Within the vertex's own tolerance of both edges it stands up to about twice that
+            // from their crossing (a pad's Boolean leaves 1.3e-6: FSLC #50's 458 root corners
+            // stand 1.18e-6 off), and no vertex is followed further than 100 rim tolerances
+            const double own = std::min(2 * BRep_Tool::Tolerance(corner.vertex), 100 * rimTolerance);
+            if (!(moved <= std::max(10 * rimTolerance, own))) {
                 refuse("a rim vertex away from where its edges cross");
             }
             corner.moved = moved;
@@ -12496,30 +12500,39 @@ TopoDS_Shape rimRounds(
                                   << describe(expected.volume) << ", slack "
                                   << describe(expected.volumeSlack) << ", band slack "
                                   << describe(expected.bandSlack));
-    if (std::abs(removed - expected.volume) > 2e-4 * expected.volume + expected.volumeSlack) {
-        // OCCT's measure is off by more than the rounds remove where the walls and the plane
-        // face are large beside them. The rounds' own measure then decides, but only while a
-        // measure that sees every face (the walls too) agrees within OCCT's own accuracy on
-        // the whole body: the rounds' measure alone is blind to a wrong wall
+    // The slack is what the base's own measure may be off where its vertices stand beside their
+    // edges' crossings: wide enough there to hide a wrong round. So within it the changed faces'
+    // measure decides only where it agrees without the slack. Else the rounds' own measure
+    // decides, without the slack too (it follows the plan, not the base's vertices), and only
+    // while a measure that sees every face (the walls too) agrees within OCCT's accuracy on the
+    // whole body and the slack: the rounds' measure alone is blind to a wrong wall
+    const double strict = 2e-4 * expected.volume;
+    double allowed = strict + expected.volumeSlack;
+    if (std::abs(removed - expected.volume) > strict) {
         const double whole = volumeOf(base);
-        const double coarse = 1e-6 * std::abs(whole) + 2e-4 * expected.volume + expected.volumeSlack;
+        const double coarse = 1e-6 * std::abs(whole) + allowed;
         double byBodies = removed;
         if (std::abs(byBodies - expected.volume) > coarse) {
             byBodies = whole - volumeOf(solid);
         }
         double byRounds = 0.0;
-        if (std::abs(byBodies - expected.volume) <= coarse && rimRoundsVolume(loops, byRounds)) {
-            removed = byRounds;
-            FC_LOG("rim rounds: removed " << describe(removed) << " by the rounds, the bodies' "
+        if (rimRoundsVolume(loops, byRounds)) {
+            FC_LOG("rim rounds: removed " << describe(byRounds) << " by the rounds, the bodies' "
                                           << describe(byBodies) << " within "
                                           << describe(coarse));
+            if (std::abs(byBodies - expected.volume) > coarse) {
+                refuse("the rim rounds removed " + describe(byBodies) + " instead of "
+                       + describe(expected.volume));
+            }
+            removed = byRounds;
+            allowed = strict;
         }
-        else {
+        else if (std::abs(removed - expected.volume) > allowed) {
             removed = whole - volumeOf(solid);
             FC_LOG("rim rounds: removed " << describe(removed) << " by the whole bodies");
         }
     }
-    if (std::abs(removed - expected.volume) > 2e-4 * expected.volume + expected.volumeSlack) {
+    if (std::abs(removed - expected.volume) > allowed) {
         refuse("the rim rounds removed " + describe(removed) + " instead of "
                + describe(expected.volume));
     }
@@ -12688,6 +12701,7 @@ bool constructRims(
         std::vector<TopoDS_Shape> taken;
         std::vector<const std::vector<TopoDS_Shape>*> takenGroups;
         size_t alone = 0;
+        std::string firstRefusal;
         for (const auto& group : groups) {
             try {
                 std::vector<RimLoop> own = rimLoops(base, group, r, edgeFaces, vertexEdges);
@@ -12703,6 +12717,9 @@ bool constructRims(
             }
             catch (const Refusal& refusal) {
                 FC_LOG("rim loop of " << group.size() << " edges not built directly: " << refusal.reason);
+                if (firstRefusal.empty()) {
+                    firstRefusal = refusal.reason;
+                }
             }
             catch (const Standard_Failure&) {
             }
@@ -12710,6 +12727,7 @@ bool constructRims(
         FC_LOG("rim loops: " << groups.size() << " whole, " << alone << " in scope alone, "
                              << takenGroups.size() << " together (" << taken.size() << " edges)");
         if (taken.empty()) {
+            out.rimRefusal = firstRefusal;
             return false;
         }
         auto mapper = std::make_shared<ShapeMapper>();
