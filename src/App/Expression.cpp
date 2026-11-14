@@ -54,6 +54,7 @@
 #include <App/PropertyUnits.h>
 #include <App/VariableChoice.h>
 #include <App/VariableLookup.h>
+#include <App/VariablePosition.h>
 #include <Base/Interpreter.h>
 #include <Base/MatrixPy.h>
 #include <Base/PlacementPy.h>
@@ -4048,14 +4049,36 @@ std::string resolveVariable(const App::DocumentObject* owner, const std::string&
         const App::Part* ownerStudio = App::Part::getPartOfObject(owner, true);
         std::vector<App::VariableRef> mine;
         std::vector<App::VariableRef> open;
+        // FreeCAD-CH (ops#723, DV1 and DV4): a studio variable placed after the owner's row of
+        // the history isn't set there yet: the outer one of the same name is used, else it fails
+        std::vector<App::VariableRef> later;
         for (const auto& ref : refs) {
             const App::Part* holderStudio = App::Part::getPartOfObject(ref.holder, true);
             if (!holderStudio) {
                 open.push_back(ref);
             }
             else if (holderStudio == ownerStudio) {
-                mine.push_back(ref);
+                using Place = App::VariablePosition::Place;
+                const Place place = App::VariablePosition::placeOf(owner, ref);
+                if (place == Place::Lost) {
+                    throw ParserError(fmt::format(
+                        "#{} ({}) has lost its place in the part studio's history: set its "
+                        "place again (in expression '{}')",
+                        name,
+                        ref.path(),
+                        buffer
+                    ));
+                }
+                (place == Place::Before ? later : mine).push_back(ref);
             }
+        }
+        if (mine.empty() && open.empty() && !later.empty()) {
+            throw ParserError(fmt::format(
+                "#{} is set after this feature in the part studio's history: it can't be used "
+                "before it is set (in expression '{}')",
+                name,
+                buffer
+            ));
         }
         refs = mine.empty() ? open : mine;
         if (refs.empty()) {

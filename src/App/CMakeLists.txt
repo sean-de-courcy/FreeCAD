@@ -214,6 +214,7 @@ SET(Document_CPP_SRCS
     VarSetCopy.cpp
     DocumentTabs.cpp
     VariableLookup.cpp
+    VariablePosition.cpp
     License.h
 )
 
@@ -267,6 +268,7 @@ SET(Document_HPP_SRCS
     VariableChoice.h
     DocumentTabs.h
     VariableLookup.h
+    VariablePosition.h
     Link.h
 )
 SET(Document_SRCS

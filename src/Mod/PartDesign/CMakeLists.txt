@@ -129,6 +129,7 @@ set(PartDesign_TestScripts
     PartDesignTests/TestDerivedFollowUps.py
     PartDesignTests/TestPartStudioVariables.py
     PartDesignTests/TestMeasuredVariables.py
+    PartDesignTests/TestVariableHistoryPosition.py
     PartDesignTests/TestResultCheck.py
     PartDesignTests/TestStudioPartMirror.py
     PartDesignTests/TestStudioTransform.py
