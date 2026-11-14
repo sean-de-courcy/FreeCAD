@@ -3798,4 +3798,213 @@ TEST_F(FilletFallbackTest, tangentChainRoundsWhicheverEdgeIsListedFirst)
     EXPECT_LT(added[0], section * (h - 2 + lengths.Mass()));
 }
 
+namespace
+{
+
+/// A wheel in the proportions of a grip rim (ops#640, FSLC #50), as a prism of its outline: root
+/// R 82.345905, and at each 229th of a turn a grip of two flanks of radius 0.4 centred on the root
+/// circle, 0.136 degrees apart, under a tip arc of R 82.745905. The flanks meet the root at reflex
+/// corners and the tip tangentially. Returns the solid; its top face is at the height
+TopoDS_Shape gripWheel(int grips, double height)
+{
+    const double root = 82.345905;
+    const double flank = 0.4;
+    const double half = 0.068 * pi / 180;
+    const double pitch = 2 * pi / 229;
+    const double reach = 2 * std::asin(flank / 2 / root);
+    auto at = [](double radius, double angle) {
+        return gp_Pnt(radius * std::cos(angle), radius * std::sin(angle), 0);
+    };
+    auto arc = [](const gp_Pnt& centre, double radius, const gp_Pnt& from, const gp_Pnt& to) {
+        return BRepBuilderAPI_MakeEdge(gp_Circ(gp_Ax2(centre, gp::DZ()), radius), from, to).Edge();
+    };
+    BRepBuilderAPI_MakeWire wire;
+    for (int k = 0; k < grips; ++k) {
+        const double a = k * pitch;
+        const gp_Pnt foot = at(root, a - half - reach);
+        const gp_Pnt rise = at(root + flank, a - half);
+        const gp_Pnt fall = at(root + flank, a + half);
+        const gp_Pnt land = at(root, a + half + reach);
+        const gp_Pnt next = at(root, (k + 1 == grips ? 0.0 : a + pitch) - half - reach);
+        wire.Add(arc(at(root, a - half), flank, foot, rise));
+        wire.Add(arc(gp_Pnt(), root + flank, rise, fall));
+        wire.Add(arc(at(root, a + half), flank, fall, land));
+        wire.Add(arc(gp_Pnt(), root, land, next));
+    }
+    const TopoDS_Face face = BRepBuilderAPI_MakeFace(wire.Wire()).Face();
+    return BRepPrimAPI_MakePrism(face, gp_Vec(0, 0, height)).Shape();
+}
+
+std::vector<TopoDS_Shape> edgesAtHeight(const TopoDS_Shape& shape, double height)
+{
+    std::vector<TopoDS_Shape> edges;
+    TopTools_IndexedMapOfShape all;
+    TopExp::MapShapes(shape, TopAbs_EDGE, all);
+    for (int i = 1; i <= all.Extent(); ++i) {
+        Bnd_Box box;
+        BRepBndLib::Add(all(i), box, false);
+        double low[3];
+        double high[3];
+        box.Get(low[0], low[1], low[2], high[0], high[1], high[2]);
+        if (std::abs(low[2] - height) < 1e-6 && std::abs(high[2] - height) < 1e-6) {
+            edges.push_back(all(i));
+        }
+    }
+    return edges;
+}
+
+/// The rim rounds of the wheel's top face built directly, as its tori
+std::vector<TopoDS_Face> gripRounds(int grips, double height, double r)
+{
+    const TopoDS_Shape wheel = gripWheel(grips, height);
+    FF::Construction built;
+    std::vector<TopoDS_Shape> rest;
+    std::vector<TopoDS_Face> rounds;
+    if (!FF::constructRims(wheel, edgesAtHeight(wheel, height), fillet(r), built, rest)) {
+        ADD_FAILURE() << "the rim was not built directly: " << built.rimRefusal;
+        return rounds;
+    }
+    EXPECT_TRUE(rest.empty());
+    for (TopExp_Explorer it(built.shape, TopAbs_FACE); it.More(); it.Next()) {
+        if (surfaceType(it.Current()) == GeomAbs_Torus) {
+            rounds.push_back(TopoDS::Face(it.Current()));
+        }
+    }
+    return rounds;
+}
+
+double underPlane(const std::vector<TopoDS_Face>& rounds, double height)
+{
+    double sum = 0.0;
+    for (const auto& round : rounds) {
+        double own = 0.0;
+        EXPECT_TRUE(FF::roundUnderPlane(round, gp_Pnt(0, 0, height), gp::DZ(), own));
+        sum += own;
+    }
+    return sum;
+}
+
+}  // namespace
+
+TEST_F(FilletFallbackTest, aRimRoundsVolumeIsMeasuredOnItsFaceAlone)
+{
+    // A whole plain rim: the torus of a round r on a disc's top edge removes the section's area
+    // around its centroid's circle (Pappus), measured on the round's face alone
+    const double r = 2.0;
+    const TopoDS_Shape disc = BRepPrimAPI_MakeCylinder(10, 5).Shape();
+    BRepFilletAPI_MakeFillet maker(disc);
+    for (const auto& edge : edgesAtHeight(disc, 5.0)) {
+        maker.Add(r, TopoDS::Edge(edge));
+    }
+    maker.Build();
+    ASSERT_TRUE(maker.IsDone());
+    int tori = 0;
+    for (TopExp_Explorer it(maker.Shape(), TopAbs_FACE); it.More(); it.Next()) {
+        if (surfaceType(it.Current()) != GeomAbs_Torus) {
+            continue;
+        }
+        ++tori;
+        double removed = 0.0;
+        ASSERT_TRUE(
+            FF::roundUnderPlane(TopoDS::Face(it.Current()), gp_Pnt(3, 4, 5), gp::DZ(), removed)
+        );
+        EXPECT_NEAR(removed, filletSection(r) * 2 * pi * (10 - filletCentroid(r)), 1e-9);
+        // Not a round of that plane: a plane the torus does not stand on
+        double other = 0.0;
+        EXPECT_FALSE(FF::roundUnderPlane(TopoDS::Face(it.Current()), gp_Pnt(3, 4, 5), gp::DX(), other));
+    }
+    EXPECT_EQ(tori, 1);
+    // A straight edge's round: the section along the edge
+    const TopoDS_Shape block = box(30, 20, 10);
+    BRepFilletAPI_MakeFillet straight(block);
+    for (const auto& edge : edgesAtHeight(block, 10.0)) {
+        Bnd_Box bounds;
+        BRepBndLib::Add(edge, bounds, false);
+        if (bounds.CornerMax().Y() < 1e-6) {
+            straight.Add(r, TopoDS::Edge(edge));
+        }
+    }
+    straight.Build();
+    ASSERT_TRUE(straight.IsDone());
+    int cylinders = 0;
+    for (TopExp_Explorer it(straight.Shape(), TopAbs_FACE); it.More(); it.Next()) {
+        if (surfaceType(it.Current()) != GeomAbs_Cylinder) {
+            continue;
+        }
+        ++cylinders;
+        double removed = 0.0;
+        ASSERT_TRUE(
+            FF::roundUnderPlane(TopoDS::Face(it.Current()), gp_Pnt(0, 0, 10), gp::DZ(), removed)
+        );
+        EXPECT_NEAR(removed, filletSection(r) * 30, 1e-9);
+    }
+    EXPECT_EQ(cylinders, 1);
+}
+
+TEST_F(FilletFallbackTest, aGripRimsRoundsAreMeasuredOnTheRoundsAndAWrongRoundIsTold)
+{
+    // FSLC #50's rim in designed geometry (ops#640): 229 grips, 916 arcs, 458 reflex corners,
+    // r 0.05. The body's removed volume is checked against the closed form to 2e-4 of it. OCCT's
+    // volume of the changed faces (the walls and the plane face, about a point of the body) can
+    // be off by more than the rounds remove, so the rounds' own measure decides then. It is a
+    // real check: the right rounds measure the closed form (the same slices give 0.3352465 for
+    // this outline), and with one root arc's torus of radius 0.06 for 0.05, or with one flank's
+    // horn torus missing, the sum is off by more than the check allows
+    const double height = 3.0;
+    const double r = 0.05;
+    const double closedForm = 0.3352465102;
+    const double allowed = 2e-4 * closedForm;
+    const std::vector<TopoDS_Face> rounds = gripRounds(229, height, r);
+    ASSERT_EQ(rounds.size(), 916U);
+    const double right = underPlane(rounds, height);
+    EXPECT_NEAR(right, closedForm, 0.1 * allowed);
+
+    auto torusOf = [](const TopoDS_Face& face) {
+        return BRepAdaptor_Surface(face).Torus();
+    };
+    // One root arc's round (major radius: the root's less r) of a wrong radius: the same arc's
+    // round at r 0.06, built on two grips
+    const std::vector<TopoDS_Face> wider = gripRounds(2, height, 0.06);
+    ASSERT_EQ(wider.size(), 8U);
+    auto rootArc = [&](const std::vector<TopoDS_Face>& faces, double radius) {
+        // (the shortest: between two grips next to each other)
+        TopoDS_Face found;
+        double least = std::numeric_limits<double>::max();
+        for (const auto& face : faces) {
+            if (std::abs(torusOf(face).MajorRadius() - (82.345905 - radius)) > 1e-9) {
+                continue;
+            }
+            GProp_GProps props;
+            BRepGProp::SurfaceProperties(face, props);
+            if (props.Mass() < least) {
+                least = props.Mass();
+                found = face;
+            }
+        }
+        return found;
+    };
+    const TopoDS_Face rightArc = rootArc(rounds, r);
+    const TopoDS_Face wrongArc = rootArc(wider, 0.06);
+    ASSERT_FALSE(rightArc.IsNull());
+    ASSERT_FALSE(wrongArc.IsNull());
+    std::vector<TopoDS_Face> oneWider;
+    for (const auto& face : rounds) {
+        oneWider.push_back(face.IsSame(rightArc) ? wrongArc : face);
+    }
+    EXPECT_GT(std::abs(underPlane(oneWider, height) - closedForm), 2 * allowed);
+
+    // One flank's torus (major radius: the flank's 0.4 less r) missing
+    std::vector<TopoDS_Face> oneMissing;
+    bool dropped = false;
+    for (const auto& face : rounds) {
+        if (!dropped && std::abs(torusOf(face).MajorRadius() - (0.4 - r)) < 1e-9) {
+            dropped = true;
+            continue;
+        }
+        oneMissing.push_back(face);
+    }
+    ASSERT_TRUE(dropped);
+    EXPECT_GT(std::abs(underPlane(oneMissing, height) - closedForm), 2 * allowed);
+}
+
 // NOLINTEND(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)

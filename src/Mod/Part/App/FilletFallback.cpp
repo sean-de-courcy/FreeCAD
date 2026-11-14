@@ -79,6 +79,7 @@
 #include <GeomAdaptor_Curve.hxx>
 #include <Geom_OffsetSurface.hxx>
 #include <Geom_Plane.hxx>
+#include <Geom_RectangularTrimmedSurface.hxx>
 #include <GeomLib.hxx>
 #include <Geom_BoundedSurface.hxx>
 #include <Geom_Surface.hxx>
@@ -11579,6 +11580,24 @@ double rimSurfaceDistance(const BRepAdaptor_Surface& surface, const gp_Pnt& p)
     }
 }
 
+/// What the rounds built remove, by roundUnderPlane() on each; false where a round has no such
+/// measure (a tight arc's canal patch)
+bool rimRoundsVolume(const std::vector<RimLoop>& loops, double& volume)
+{
+    volume = 0.0;
+    for (const auto& loop : loops) {
+        for (const auto& round : loop.rounds) {
+            double own = 0.0;
+            if (round.tight || round.face.IsNull()
+                || !roundUnderPlane(round.face, loop.origin, loop.normal, own)) {
+                return false;
+            }
+            volume += own;
+        }
+    }
+    return true;
+}
+
 TopoDS_Shape rimRounds(
     const TopoDS_Shape& base,
     const std::vector<TopoDS_Shape>& edges,
@@ -12473,8 +12492,32 @@ TopoDS_Shape rimRounds(
                + describe(expected.band));
     }
     double removed = -changedVolume(base, solid);
+    FC_LOG("rim rounds: removed " << describe(removed) << " by the changed faces, expected "
+                                  << describe(expected.volume) << ", slack "
+                                  << describe(expected.volumeSlack) << ", band slack "
+                                  << describe(expected.bandSlack));
     if (std::abs(removed - expected.volume) > 2e-4 * expected.volume + expected.volumeSlack) {
-        removed = volumeOf(base) - volumeOf(solid);
+        // OCCT's measure is off by more than the rounds remove where the walls and the plane
+        // face are large beside them. The rounds' own measure then decides, but only while a
+        // measure that sees every face (the walls too) agrees within OCCT's own accuracy on
+        // the whole body: the rounds' measure alone is blind to a wrong wall
+        const double whole = volumeOf(base);
+        const double coarse = 1e-6 * std::abs(whole) + 2e-4 * expected.volume + expected.volumeSlack;
+        double byBodies = removed;
+        if (std::abs(byBodies - expected.volume) > coarse) {
+            byBodies = whole - volumeOf(solid);
+        }
+        double byRounds = 0.0;
+        if (std::abs(byBodies - expected.volume) <= coarse && rimRoundsVolume(loops, byRounds)) {
+            removed = byRounds;
+            FC_LOG("rim rounds: removed " << describe(removed) << " by the rounds, the bodies' "
+                                          << describe(byBodies) << " within "
+                                          << describe(coarse));
+        }
+        else {
+            removed = whole - volumeOf(solid);
+            FC_LOG("rim rounds: removed " << describe(removed) << " by the whole bodies");
+        }
     }
     if (std::abs(removed - expected.volume) > 2e-4 * expected.volume + expected.volumeSlack) {
         refuse("the rim rounds removed " + describe(removed) + " instead of "
@@ -12484,6 +12527,109 @@ TopoDS_Shape rimRounds(
 }
 
 }  // namespace
+
+bool roundUnderPlane(
+    const TopoDS_Face& round,
+    const gp_Pnt& onPlane,
+    const gp_Dir& normal,
+    double& volume
+)
+{
+    volume = 0.0;
+    try {
+        const gp_Vec k(normal);
+        const TopoDS_Face face = TopoDS::Face(round.Oriented(TopAbs_FORWARD));
+        Handle(Geom_Surface) surface = BRep_Tool::Surface(face);
+        while (auto trimmed = Handle(Geom_RectangularTrimmedSurface)::DownCast(surface)) {
+            surface = trimmed->BasisSurface();
+        }
+        // The integrand in the one parameter it depends on (alongU: on u): the depth under the
+        // plane times the part of the surface's normal (not unit: with the area's element)
+        // along the plane's
+        std::function<double(double)> integrand;
+        bool alongU = false;
+        if (auto torus = Handle(Geom_ToroidalSurface)::DownCast(surface)) {
+            const gp_Ax3 frame = torus->Position();
+            if (!parallel(frame.Direction(), normal)) {
+                return false;
+            }
+            const double zk = gp_Vec(frame.Direction()).Dot(k);
+            const double depth = gp_Vec(frame.Location(), onPlane).Dot(k);
+            const double major = torus->MajorRadius();
+            const double minor = torus->MinorRadius();
+            integrand = [=](double v) {
+                const double rise = minor * zk * std::sin(v);
+                return (depth - rise) * rise * (major + minor * std::cos(v));
+            };
+        }
+        else if (auto cylinder = Handle(Geom_CylindricalSurface)::DownCast(surface)) {
+            const gp_Ax3 frame = cylinder->Position();
+            if (std::abs(gp_Vec(frame.Direction()).Dot(k)) > angularTolerance) {
+                return false;
+            }
+            const double xk = gp_Vec(frame.XDirection()).Dot(k);
+            const double yk = gp_Vec(frame.YDirection()).Dot(k);
+            const double depth = gp_Vec(frame.Location(), onPlane).Dot(k);
+            const double radius = cylinder->Radius();
+            integrand = [=](double u) {
+                const double rise = radius * (xk * std::cos(u) + yk * std::sin(u));
+                return (depth - rise) * rise;
+            };
+            alongU = true;
+        }
+        else {
+            return false;
+        }
+        // The integral of f(v) du dv over the face is that of u f(v) dv around it, of f(u) du dv
+        // that of -v f(u) du (Green's theorem): by Gauss's rule between the curves' knots
+        double sum = 0.0;
+        for (TopExp_Explorer it(face, TopAbs_EDGE); it.More(); it.Next()) {
+            const TopoDS_Edge edge = TopoDS::Edge(it.Current());
+            double first = 0.0;
+            double last = 0.0;
+            Handle(Geom2d_Curve) curve = BRep_Tool::CurveOnSurface(edge, face, first, last);
+            if (curve.IsNull() || !(last > first)) {
+                return false;
+            }
+            std::vector<double> breaks {first};
+            if (auto spline = Handle(Geom2d_BSplineCurve)::DownCast(curve)) {
+                for (int i = 1; i <= spline->NbKnots(); ++i) {
+                    const double knot = spline->Knot(i);
+                    if (knot > breaks.back() + 1e-12 && knot < last - 1e-12) {
+                        breaks.push_back(knot);
+                    }
+                }
+            }
+            else if (!curve->IsKind(STANDARD_TYPE(Geom2d_Line))) {
+                // (no other curve is built on a round: evenly, as finely as a mitre's)
+                const int pieces = 256;
+                for (int i = 1; i < pieces; ++i) {
+                    breaks.push_back(first + (last - first) * i / pieces);
+                }
+            }
+            breaks.push_back(last);
+            double along = 0.0;
+            for (size_t i = 0; i + 1 < breaks.size(); ++i) {
+                const double middle = (breaks[i] + breaks[i + 1]) / 2;
+                const double half = (breaks[i + 1] - breaks[i]) / 2;
+                for (int j = 0; j < 8; ++j) {
+                    gp_Pnt2d at;
+                    gp_Vec2d speed;
+                    curve->D1(middle + half * gaussNodes[j], at, speed);
+                    along += half * gaussWeights[j]
+                        * (alongU ? -at.Y() * integrand(at.X()) * speed.X()
+                                  : at.X() * integrand(at.Y()) * speed.Y());
+                }
+            }
+            sum += edge.Orientation() == TopAbs_REVERSED ? -along : along;
+        }
+        volume = std::abs(sum);
+        return true;
+    }
+    catch (const Standard_Failure&) {
+        return false;
+    }
+}
 
 bool constructRims(
     const TopoDS_Shape& base,
@@ -12561,6 +12707,8 @@ bool constructRims(
             catch (const Standard_Failure&) {
             }
         }
+        FC_LOG("rim loops: " << groups.size() << " whole, " << alone << " in scope alone, "
+                             << takenGroups.size() << " together (" << taken.size() << " edges)");
         if (taken.empty()) {
             return false;
         }
@@ -12571,6 +12719,7 @@ bool constructRims(
         TopoDS_Shape shape;
         try {
             shape = rimRounds(base, taken, direct, *mapper, corners);
+            FC_LOG("rim rounds built directly: " << taken.size() << " edges, " << corners << " corners");
         }
         catch (const Refusal& refusal) {
             out.rimRefusal = refusal.reason;
@@ -12623,6 +12772,7 @@ bool constructRims(
             if (out.rimRefusal.empty()) {
                 out.rimRefusal = "rim loops that are not built together";
             }
+            FC_LOG("rim rounds not built directly (the split): " << out.rimRefusal);
             return false;
         }
         out.rimRefusal.clear();
@@ -12641,6 +12791,7 @@ bool constructRims(
             if (!kept.Contains(edge)) {
                 rest.clear();
                 out.rimRefusal = "a selected edge that a rim round shortens";
+                FC_LOG("rim rounds not built directly (the split): " << out.rimRefusal);
                 return false;
             }
             rest.push_back(edge);
@@ -12663,6 +12814,7 @@ bool constructRims(
     catch (const std::exception& e) {
         out.rimRefusal = e.what();
     }
+    FC_LOG("rim rounds not built directly (the split): " << out.rimRefusal);
     rest.clear();
     return false;
 }
