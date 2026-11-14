@@ -9,10 +9,12 @@
 
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
+#include <TopExp_Explorer.hxx>
 #include <BRepGProp.hxx>
 #include <GC_MakeCircle.hxx>
 #include <GProp_GProps.hxx>
 #include <gp_Pln.hxx>
+#include <chrono>
 #include <numbers>
 
 // NOLINTBEGIN(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)
@@ -344,6 +346,87 @@ TEST_F(FaceMakerBullseyeTest, buildEssenceManyWires)
 
     double expected = 10000.0 - (count * std::numbers::pi * r * r);
     EXPECT_NEAR(faceArea(fm.Shape()), expected, 1e-3);
+}
+
+TEST_F(FaceMakerBullseyeTest, buildEssenceManySeparateCellsWithIslands)
+{
+    // Perf profile 4 (ops#640): 400 separate cells, each a square with a square hole and a square
+    // island in it. Every wire was classified against every face made before it: 34 s (a
+    // through-all Pocket of 1600 squares took 520 s). A face whose box the wire's first vertex is
+    // away from isn't asked now: about 1 s. Same faces: an outer face with its hole and an island
+    // face per cell
+    FaceMakerBullseye fm;
+    gp_Pln plane;
+    fm.setPlane(plane);
+    constexpr int cells = 20;
+    for (int row = 0; row < cells; ++row) {
+        for (int col = 0; col < cells; ++col) {
+            const double x = 10.0 * col;
+            const double y = 10.0 * row;
+            fm.addWire(makeRectWire(x, y, x + 8, y + 8));
+            fm.addWire(makeRectWire(x + 2, y + 2, x + 6, y + 6));
+            fm.addWire(makeRectWire(x + 3, y + 3, x + 5, y + 5));
+        }
+    }
+    const auto start = std::chrono::steady_clock::now();
+    fm.Build();
+    const double spent =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    ASSERT_TRUE(fm.IsDone());
+    int faces = 0;
+    int holed = 0;
+    for (TopExp_Explorer xp(fm.Shape(), TopAbs_FACE); xp.More(); xp.Next()) {
+        ++faces;
+        int wires = 0;
+        for (TopExp_Explorer w(xp.Current(), TopAbs_WIRE); w.More(); w.Next()) {
+            ++wires;
+        }
+        holed += wires == 2 ? 1 : 0;
+    }
+    EXPECT_EQ(faces, 2 * cells * cells);
+    EXPECT_EQ(holed, cells * cells);
+    EXPECT_NEAR(faceArea(fm.Shape()), cells * cells * (64.0 - 16.0 + 4.0), 1e-6);
+    EXPECT_LT(spent, 15.0);
+}
+
+TEST_F(FaceMakerBullseyeTest, buildEssenceSeparateHoledFacesOnATiltedPlane)
+{
+    // Perf profile 4 (ops#640): the faces' boxes are compared on the plane (the projection of the
+    // wires' boxes), so a hole is found on a tilted plane away from the origin, and a square of
+    // another face that is near in space but not on the plane's footprint starts its own face
+    const gp_Dir normal(0, -1, 1);
+    const gp_Pln plane(gp_Pnt(3, -7, 11), normal);
+    gp_Ax2 ax(gp_Pnt(3, -7, 11), normal);
+    const gp_XYZ o = ax.Location().XYZ();
+    const gp_XYZ xDir = ax.XDirection().XYZ();
+    const gp_XYZ yDir = ax.YDirection().XYZ();
+    auto square = [&](double x0, double y0, double x1, double y1) {
+        const gp_Pnt p0(o + x0 * xDir + y0 * yDir);
+        const gp_Pnt p1(o + x1 * xDir + y0 * yDir);
+        const gp_Pnt p2(o + x1 * xDir + y1 * yDir);
+        const gp_Pnt p3(o + x0 * xDir + y1 * yDir);
+        BRepBuilderAPI_MakeWire mw;
+        mw.Add(BRepBuilderAPI_MakeEdge(p0, p1).Edge());
+        mw.Add(BRepBuilderAPI_MakeEdge(p1, p2).Edge());
+        mw.Add(BRepBuilderAPI_MakeEdge(p2, p3).Edge());
+        mw.Add(BRepBuilderAPI_MakeEdge(p3, p0).Edge());
+        return mw.Wire();
+    };
+    FaceMakerBullseye fm;
+    fm.setPlane(plane);
+    fm.addWire(square(0, 0, 10, 10));
+    fm.addWire(square(4, 4, 6, 6));  // a hole in the first
+    fm.addWire(square(20, 0, 30, 10));
+    fm.addWire(square(21, 1, 29, 9));  // a hole in the second
+    fm.addWire(square(11, 0, 19, 10));  // between them: a face of its own
+    fm.Build();
+    ASSERT_TRUE(fm.IsDone());
+    int faces = 0;
+    for (TopExp_Explorer xp(fm.Shape(), TopAbs_FACE); xp.More(); xp.Next()) {
+        ++faces;
+    }
+    EXPECT_EQ(faces, 3);
+    EXPECT_NEAR(faceArea(fm.Shape()), (100.0 - 4.0) + (100.0 - 64.0) + 80.0, 1e-6);
 }
 
 // NOLINTEND(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)

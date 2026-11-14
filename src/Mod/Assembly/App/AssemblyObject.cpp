@@ -34,6 +34,7 @@
 #include <App/Datums.h>
 #include <App/Document.h>
 #include <App/DocumentObjectGroup.h>
+#include <App/DocumentObjectPy.h>
 #include <App/FeaturePythonPyImp.h>
 #include <App/Link.h>
 #include <App/PropertyPythonObject.h>
@@ -96,6 +97,142 @@ namespace PartApp = Part;
 
 namespace
 {
+
+// The solver-only joints that hold a floating group of parts in solve() (ops#640, rank 60)
+const std::string floatingAnchorPrefix = "FloatingAnchor-";
+
+// FreeCAD-CH (asm-patterns): assembly instance patterns (AssemblyPattern.py, design note
+// notes/assembly-patterns-design.md in the ops repo). A pattern is an object of the joint group whose
+// Python proxy has placeInstances(). Each seed and its copies share one solver body (a rigid
+// cluster, as a rigid group's members), and the pattern places its copies before and after each solve.
+
+/// The pattern proxy of obj, or None
+Py::Object patternProxy(App::DocumentObject* obj)
+{
+    auto* proxy = obj ? dynamic_cast<App::PropertyPythonObject*>(obj->getPropertyByName("Proxy"))
+                      : nullptr;
+    if (!proxy) {
+        return Py::None();
+    }
+    Py::Object py = proxy->getValue();
+    if (py.isNone() || !py.hasAttr("placeInstances") || !py.hasAttr("clusters")) {
+        return Py::None();
+    }
+    return py;
+}
+
+/// The patterns of a joint group that act: not in error, not suppressed
+std::vector<App::DocumentObject*> activePatterns(App::DocumentObject* jointGroup)
+{
+    std::vector<App::DocumentObject*> patterns;
+    auto* group = jointGroup ? jointGroup->getExtensionByType<App::GroupExtension>(true) : nullptr;
+    if (!group) {
+        return patterns;
+    }
+    Base::PyGILStateLocker lock;
+    for (auto* obj : group->Group.getValues()) {
+        if (!obj || !obj->isAttachedToDocument() || obj->isError()) {
+            continue;
+        }
+        auto* suppressed = dynamic_cast<App::PropertyBool*>(obj->getPropertyByName("Suppressed"));
+        if (suppressed && suppressed->getValue()) {
+            continue;
+        }
+        if (!patternProxy(obj).isNone()) {
+            patterns.push_back(obj);
+        }
+    }
+    return patterns;
+}
+
+/// Calls the proxy's method on the pattern; a Python error is reported, not thrown
+Py::Object callPattern(App::DocumentObject* pattern, const char* method)
+{
+    Base::PyGILStateLocker lock;
+    try {
+        Py::Object py = patternProxy(pattern);
+        if (py.isNone()) {
+            return Py::None();
+        }
+        Py::Tuple args(1);
+        args.setItem(0, Py::asObject(pattern->getPyObject()));
+        return Py::Callable(py.getAttr(method)).apply(args);
+    }
+    catch (Py::Exception&) {
+        Base::PyException e;
+        FC_ERR(pattern->getFullName() << "." << method << ": " << e.what());
+    }
+    return Py::None();
+}
+
+/// Each seed with its copies, as the patterns list them
+std::vector<std::vector<App::DocumentObject*>> patternClusters(
+    const std::vector<App::DocumentObject*>& patterns
+)
+{
+    std::vector<std::vector<App::DocumentObject*>> clusters;
+    Base::PyGILStateLocker lock;
+    for (auto* pattern : patterns) {
+        Py::Object result = callPattern(pattern, "clusters");
+        if (!result.isList()) {
+            continue;
+        }
+        Py::List list(result);
+        for (Py::List::size_type i = 0; i < list.size(); ++i) {
+            Py::Object item(list[i]);
+            if (!item.isList()) {
+                continue;
+            }
+            Py::List members(item);
+            std::vector<App::DocumentObject*> cluster;
+            for (Py::List::size_type j = 0; j < members.size(); ++j) {
+                Py::Object member(members[j]);
+                if (PyObject_TypeCheck(member.ptr(), &App::DocumentObjectPy::Type)) {
+                    auto* obj = static_cast<App::DocumentObjectPy*>(member.ptr())->getDocumentObjectPtr();
+                    if (obj && obj->isAttachedToDocument() && obj->getPropertyByName("Placement")) {
+                        cluster.push_back(obj);
+                    }
+                }
+            }
+            if (cluster.size() > 1) {
+                clusters.push_back(std::move(cluster));
+            }
+        }
+    }
+    return clusters;
+}
+
+/// The copies of the patterns (every cluster member but its seed)
+std::unordered_set<App::DocumentObject*> patternCopies(const std::vector<App::DocumentObject*>& patterns)
+{
+    std::unordered_set<App::DocumentObject*> copies;
+    for (const auto& cluster : patternClusters(patterns)) {
+        copies.insert(cluster.begin() + 1, cluster.end());
+    }
+    return copies;
+}
+
+/// Places the copies of the patterns; how far the farthest point of a copy moved (mm)
+double placePatterns(const std::vector<App::DocumentObject*>& patterns)
+{
+    double moved = 0.0;
+    Base::PyGILStateLocker lock;
+    for (auto* pattern : patterns) {
+        Py::Object result = callPattern(pattern, "placeInstances");
+        if (PyFloat_Check(result.ptr()) || PyLong_Check(result.ptr())) {
+            moved = std::max(moved, PyFloat_AsDouble(result.ptr()));
+        }
+    }
+    return moved;
+}
+
+/// A copy that moved less than this after a solve is where it was (mm): the solver's own residue
+constexpr double patternSettled = 1e-6;
+/// A copy still this far off after the second solve is off (mm)
+constexpr double patternOff = 1e-3;
+
+/// A solve() run again after its copies moved (at most one, see solve())
+int patternResolveDepth = 0;
 
 struct RotationJointSide
 {
@@ -319,6 +456,10 @@ int AssemblyObject::solve(bool enableRedo)
     objectPartMap.clear();
     rebuildRigidClusters();
     syncActiveRigidGroupPlacements();
+    // FreeCAD-CH (asm-patterns): the copies at the pattern's placements, so their offsets in their
+    // seed's solver body are the pattern's
+    const auto patterns = activePatterns(getJointGroup());
+    placePatterns(patterns);
     motions.clear();
 
     auto groundedObjs = fixGroundedParts();
@@ -328,6 +469,61 @@ int AssemblyObject::solve(bool enableRedo)
     }
 
     std::vector<App::DocumentObject*> joints = getJoints();
+
+    // FreeCAD-CH (ops#640, rank 60; Onshape hands-on E4): no instance has to be fixed before
+    // the joints solve. Each group of parts joined by joints but reached from no grounded part
+    // is held, for this solve only, by the part of its first joint's second pick: the joint
+    // dialog moves the first pick onto the second, so that part stays where it is. Nothing is
+    // saved; dragging such a group still moves it whole (findDragMode's no-solve case).
+    {
+        std::vector<ObjRef> reached;
+        for (auto* obj : groundedObjs) {
+            reached.push_back({obj, nullptr});
+        }
+        for (auto* obj : groundedObjs) {
+            traverseAndMarkConnectedParts(obj, reached, joints);
+        }
+        for (auto* joint : joints) {
+            if (!isJointTypeConnecting(joint)) {
+                continue;
+            }
+            App::DocumentObject* part1 = getMovingPartFromRef(joint, "Reference1");
+            App::DocumentObject* anchor = getMovingPartFromRef(joint, "Reference2");
+            if (!part1 || !anchor || isObjInSetOfObjRefs(anchor, reached)) {
+                continue;
+            }
+            if (auto* rep = getRigidRepresentative(anchor)) {
+                anchor = rep;
+            }
+            // Fix the solver body at its current placement (a bundled or rigid-group member
+            // carries the offset from its body)
+            MbDPartData data = getMbDData(anchor);
+            if (!data.part) {
+                continue;
+            }
+            Base::Placement bodyPlc = getPlacementFromProp(anchor, "Placement")
+                * data.offsetPlc.inverse();
+            std::string markerName1 = "marker-" + floatingAnchorPrefix + anchor->getFullName();
+            auto mbdMarker1 = makeMbdMarker(markerName1, bodyPlc);
+            mbdAssembly->addMarker(mbdMarker1);
+            std::string markerName2 = "FloatingAnchorMarker";
+            Base::Placement identity;
+            auto mbdMarker2 = makeMbdMarker(markerName2, identity);
+            data.part->addMarker(mbdMarker2);
+            auto mbdJoint = CREATE<ASMTFixedJoint>::With();
+            mbdJoint->setName(floatingAnchorPrefix + anchor->getFullName());
+            mbdJoint->setMarkerI("/OndselAssembly/" + mbdMarker1->name);
+            mbdJoint->setMarkerJ("/OndselAssembly/" + data.part->name + "/" + mbdMarker2->name);
+            mbdAssembly->addJoint(mbdJoint);
+
+            groundedObjs.insert(anchor);
+            reached.push_back({anchor, nullptr});
+            traverseAndMarkConnectedParts(anchor, reached, joints);
+            if (!isObjInSetOfObjRefs(part1, reached)) {
+                reached.push_back({part1, nullptr});
+            }
+        }
+    }
 
     removeUnconnectedJoints(joints, groundedObjs);
 
@@ -354,7 +550,54 @@ int AssemblyObject::solve(bool enableRedo)
         return -1;
     }
 
+    // FreeCAD-CH (asm-patterns): a result that moves a grounded part is refused, as the drag refuses
+    // it (two Fixed joints that disagree, e.g. a pattern copy fastened to a grounded part where the
+    // pattern doesn't put it, turned the grounded part and reported success)
+    if (!validateNewPlacements()) {
+        FC_ERR("Assembly " << getFullName() << ": the solve would move a grounded part; nothing moved");
+        lastSolverStatus = -1;
+        updateSolveStatus();
+        return -1;
+    }
+
     setNewPlacements();
+
+    // FreeCAD-CH (asm-patterns): the copies moved with their seed's body; placing them again makes
+    // them exact when the solve turned the seed against the part the pattern's direction is on. A copy
+    // that moved and that a joint holds needs the solve again, once (a mechanism that keeps turning
+    // the seed against the direction isn't solved further: the copies are placed, the joint is not)
+    if (const double moved = patterns.empty() ? 0.0 : placePatterns(patterns); moved > patternSettled) {
+        const auto copies = patternCopies(patterns);
+        const bool held = std::ranges::any_of(joints, [&copies](App::DocumentObject* joint) {
+            return copies.contains(getMovingPartFromRef(joint, "Reference1"))
+                || copies.contains(getMovingPartFromRef(joint, "Reference2"));
+        });
+        if (held && patternResolveDepth == 0) {
+            updateRigidPlacementCache();
+            ++patternResolveDepth;
+            int result = -1;
+            try {
+                result = solve(false);
+            }
+            catch (...) {
+                --patternResolveDepth;
+                throw;
+            }
+            --patternResolveDepth;
+            return result;
+        }
+        if (held && moved > patternOff) {
+            // The second solve turned the seed against the direction again: the copies are placed,
+            // the joints on them don't hold. Said, not left silent.
+            FC_ERR("Assembly " << getFullName()
+                               << ": a pattern's copies and the joints on them don't settle: the "
+                                  "pattern's direction is on a part that turns against its seed");
+            lastSolverStatus = -1;
+            updateRigidPlacementCache();
+            updateSolveStatus();
+            return -1;
+        }
+    }
     updateRigidPlacementCache();
 
     redrawJointPlacements(joints);
@@ -368,6 +611,29 @@ void AssemblyObject::updateSolveStatus()
 {
     lastRedundantJoints.clear();
     lastHasRedundancies = false;
+
+    // FreeCAD-CH (ops#640 round 7, gap A10): a joint whose two picks are both made but don't name
+    // two different parts (both on one part, or a pick naming no part) is malformed. The solve
+    // leaves it out (getJoints); it is reported instead of being dropped silently. A joint still
+    // being picked (a reference empty) is not.
+    lastMalformedJoints.clear();
+    if (JointGroup* jointGroup = getJointGroup()) {
+        for (auto* joint : jointGroup->getObjects()) {
+            auto* suppressed = dynamic_cast<App::PropertyBool*>(joint->getPropertyByName("Suppressed"));
+            auto* ref1 = dynamic_cast<App::PropertyXLinkSub*>(joint->getPropertyByName("Reference1"));
+            auto* ref2 = dynamic_cast<App::PropertyXLinkSub*>(joint->getPropertyByName("Reference2"));
+            if (!suppressed || suppressed->getValue() || !ref1 || !ref2 || joint->isError()
+                || !ref1->getValue() || !ref2->getValue()) {
+                continue;
+            }
+            auto* part1 = getMovingPartFromRef(joint, "Reference1");
+            auto* part2 = getMovingPartFromRef(joint, "Reference2");
+            if (!part1 || !part2 || part1->getFullName() == part2->getFullName()) {
+                lastMalformedJoints.emplace_back(joint->getNameInDocument());
+            }
+        }
+    }
+    lastHasMalformedConstraints = !lastMalformedJoints.empty();
 
     int numberOfSolverBodies = numberOfComponents();
     if (!objectPartMap.empty()) {
@@ -413,8 +679,12 @@ void AssemblyObject::updateSolveStatus()
         // Base::Console().warning("jm->name %s\n", jm->name);
         bool isJointRedundant = false;
 
+        // A floating group's holding joint is not the user's: its 6 constraints stay degrees of
+        // freedom, as in Onshape, where an unfixed group keeps them (ops#640, rank 60)
+        const bool isFloatingAnchor = jm->name.find(floatingAnchorPrefix) != std::string::npos;
+
         jm->constraintsDo([&](std::shared_ptr<MbD::Constraint> con) {
-            if (!con) {
+            if (!con || isFloatingAnchor) {
                 return;
             }
 
@@ -666,6 +936,10 @@ bool AssemblyObject::validateNewPlacements()
     // First we check if a grounded object has moved. It can happen that they flip.
     auto groundedParts = getGroundedParts();
     for (auto* obj : groundedParts) {
+        // FreeCAD-CH (asm-patterns): solve() checks too now, where the origin can be unset
+        if (!obj || !obj->isAttachedToDocument()) {
+            continue;
+        }
         auto* propPlacement = obj->getPlacementProperty();
         if (propPlacement) {
             Base::Placement oldPlc = propPlacement->getValue();
@@ -697,6 +971,10 @@ bool AssemblyObject::validateNewPlacements()
 void AssemblyObject::postDrag()
 {
     mbdAssembly->runPostDrag();  // Do this after last drag
+    // FreeCAD-CH (asm-patterns): the copies moved with their seed's body; a direction on another part
+    // makes them exact only when placed again
+    placePatterns(activePatterns(getJointGroup()));
+    updateRigidPlacementCache();
     purgeTouched();
 }
 
@@ -710,17 +988,12 @@ void AssemblyObject::savePlacementsForUndo()
             continue;
         }
 
-        std::pair<App::DocumentObject*, Base::Placement> savePair;
-        savePair.first = obj;
-
         // Check if the object has a "Placement" property
         auto* propPlc = obj->getPlacementProperty();
         if (!propPlc) {
             continue;
         }
-        savePair.second = propPlc->getValue();
-
-        previousPositions.push_back(savePair);
+        previousPositions.push_back({App::DocumentObjectWeakPtrT(obj), obj->getID(), propPlc->getValue()});
     }
 }
 
@@ -730,9 +1003,10 @@ void AssemblyObject::undoSolve()
         return;
     }
 
-    for (auto& pair : previousPositions) {
-        App::DocumentObject* obj = pair.first;
-        if (!obj) {
+    for (auto& saved : previousPositions) {
+        // null, or another object at the same address, when the part was deleted since the solve
+        auto* obj = saved.obj.get<App::DocumentObject>();
+        if (!obj || obj->getID() != saved.id) {
             continue;
         }
 
@@ -742,7 +1016,7 @@ void AssemblyObject::undoSolve()
             continue;
         }
 
-        propPlacement->setValue(pair.second);
+        propPlacement->setValue(saved.placement);
     }
     previousPositions.clear();
 
@@ -822,6 +1096,15 @@ void AssemblyObject::rebuildRigidClusters()
         }
     }
 
+    // FreeCAD-CH (asm-patterns): each pattern seed shares its solver body with its copies
+    for (const auto& cluster : patternClusters(activePatterns(getJointGroup()))) {
+        for (auto* const member : cluster | std::views::drop(1)) {
+            if (hasObject(member)) {
+                unite(cluster.front(), member);
+            }
+        }
+    }
+
     std::unordered_map<App::DocumentObject*, std::vector<App::DocumentObject*>> clusters;
 
     for (const auto& [node, _] : parent) {
@@ -881,6 +1164,11 @@ const std::vector<App::DocumentObject*>* AssemblyObject::getRigidMembers(App::Do
 
 void AssemblyObject::syncActiveRigidGroupPlacements()
 {
+    // FreeCAD-CH (asm-patterns): a pattern's copy that moved was moved by its pattern (or by hand,
+    // and the pattern puts it back): it doesn't drag its cluster
+    const auto copies = rigidMembersByRep.empty()
+        ? std::unordered_set<App::DocumentObject*>()
+        : patternCopies(activePatterns(getJointGroup()));
     for (const auto& [rep, members] : rigidMembersByRep) {
         if (!rep || members.size() < 2) {
             continue;
@@ -902,7 +1190,7 @@ void AssemblyObject::syncActiveRigidGroupPlacements()
             }
 
             Base::Placement currentPlc = getPlacementFromProp(member, "Placement");
-            if (!cacheIt->second.isSame(currentPlc)) {
+            if (!cacheIt->second.isSame(currentPlc) && !copies.contains(member)) {
                 movedMembers.push_back(member);
             }
         }
@@ -1364,12 +1652,25 @@ std::unordered_set<App::DocumentObject*> AssemblyObject::fixGroundedParts()
 {
     auto groundedParts = getGroundedParts();
 
+    // FreeCAD-CH (asm-patterns): the members of a rigid cluster (a rigid group, a pattern seed and
+    // its copies) share one solver body, which getGroundedParts grounds through each member. The body
+    // is fixed once, where it is (a member's placement times its offset's inverse): fixed at each
+    // member's own placement, it was pulled between them, and a grounded seed drifted at every solve.
+    std::unordered_set<ASMTPart*> fixedBodies;
     for (auto obj : groundedParts) {
         if (!obj) {
             continue;
         }
 
+        // Every grounded object (a part bundled onto another's body while dragging too)
         Base::Placement plc = getPlacementFromProp(obj, "Placement");
+        MbDPartData data = getMbDData(obj);
+        if (data.part && !fixedBodies.insert(data.part.get()).second) {
+            continue;
+        }
+        if (!data.offsetPlc.isIdentity()) {
+            plc = plc * data.offsetPlc.inverse();
+        }
         std::string str = obj->getFullName();
         fixGroundedPart(obj, plc, str);
     }
@@ -2370,30 +2671,95 @@ AssemblyObject::MbDPartData AssemblyObject::getMbDData(App::DocumentObject* part
         return it->second;
     }
 
+    // While dragging (bundleFixed), the parts held to start by Fixed joints go on its body, at their
+    // offsets from bodyPlc (the body's placement). FreeCAD-CH (asm-patterns): a part bundled so brings
+    // its rigid cluster along, and a cluster's members bundle their own Fixed partners: otherwise a
+    // part fastened to a pattern copy got a body of its own and no joint (bundled Fixed joints are
+    // not made), and dragged off its mate.
+    auto bundleFixedPartners = [&](App::DocumentObject* start,
+                                   const std::shared_ptr<ASMTPart>& body,
+                                   const Base::Placement& bodyPlc) {
+        auto visit = [&](App::DocumentObject* currentPart, auto& self) -> void {
+            std::vector<App::DocumentObject*> joints = getJointsOfPart(currentPart);
+            for (auto* joint : joints) {
+                JointType jointType = getJointType(joint);
+                if (jointType != JointType::Fixed) {
+                    continue;
+                }
+                App::DocumentObject* part1 = getMovingPartFromRef(joint, "Reference1");
+                App::DocumentObject* part2 = getMovingPartFromRef(joint, "Reference2");
+                App::DocumentObject* partToAdd = currentPart == part1 ? part2 : part1;
+
+                if (!partToAdd || objectPartMap.find(partToAdd) != objectPartMap.end()) {
+                    // already added
+                    continue;
+                }
+
+                Base::Placement plci = getPlacementFromProp(partToAdd, "Placement");
+                objectPartMap[partToAdd] = {body, bodyPlc.inverse() * plci};
+
+                if (const auto* members = getRigidMembers(partToAdd)) {
+                    for (auto* member : *members) {
+                        if (member && objectPartMap.find(member) == objectPartMap.end()) {
+                            objectPartMap[member]
+                                = {body, bodyPlc.inverse() * getPlacementFromProp(member, "Placement")};
+                            self(member, self);
+                        }
+                    }
+                }
+
+                // Recursively call for partToAdd
+                self(partToAdd, self);
+            }
+        };
+        visit(start, visit);
+    };
+
     // Associate objects that belong to an active rigid cluster.
     if (auto* rep = getRigidRepresentative(part)) {
         Base::Placement repPlc = getPlacementFromProp(rep, "Placement");
 
+        // FreeCAD-CH (asm-patterns): the cluster's body is the one a member already has (bundled
+        // with a fixed joint while dragging), at that member's placement times its offset's
+        // inverse; else a new one at the representative. The offsets are taken from that body:
+        // taken from the representative alone, a bundled cluster's members were offset wrongly or
+        // split onto two bodies.
         std::shared_ptr<ASMTPart> mbdPart;
-        const auto repMapped = objectPartMap.find(rep);
-        if (repMapped != objectPartMap.end()) {
-            mbdPart = repMapped->second.part;
+        Base::Placement bodyPlc = repPlc;
+        const auto* members = getRigidMembers(rep);
+        if (members) {
+            for (auto* member : *members) {
+                auto mapped = member ? objectPartMap.find(member) : objectPartMap.end();
+                if (mapped != objectPartMap.end() && mapped->second.part) {
+                    mbdPart = mapped->second.part;
+                    bodyPlc = getPlacementFromProp(member, "Placement")
+                        * mapped->second.offsetPlc.inverse();
+                    break;
+                }
+            }
         }
-        else {
+        if (!mbdPart) {
             std::string repName = rep->getFullName();
             mbdPart = makeMbdPart(repName, repPlc);
             mbdAssembly->addPart(mbdPart);
             objectPartMap[rep] = {mbdPart, Base::Placement()};
         }
 
-        if (const auto* members = getRigidMembers(rep)) {
+        if (members) {
             for (auto* member : *members) {
                 if (!member || objectPartMap.find(member) != objectPartMap.end()) {
                     continue;
                 }
 
                 Base::Placement memberPlc = getPlacementFromProp(member, "Placement");
-                objectPartMap[member] = {mbdPart, repPlc.inverse() * memberPlc};
+                objectPartMap[member] = {mbdPart, bodyPlc.inverse() * memberPlc};
+            }
+            if (bundleFixed) {
+                for (auto* member : *members) {
+                    if (member) {
+                        bundleFixedPartners(member, mbdPart, bodyPlc);
+                    }
+                }
             }
         }
 
@@ -2413,31 +2779,7 @@ AssemblyObject::MbDPartData AssemblyObject::getMbDData(App::DocumentObject* part
 
     // Associate other objects connected with fixed joints
     if (bundleFixed) {
-        auto addConnectedFixedParts = [&](App::DocumentObject* currentPart, auto& self) -> void {
-            std::vector<App::DocumentObject*> joints = getJointsOfPart(currentPart);
-            for (auto* joint : joints) {
-                JointType jointType = getJointType(joint);
-                if (jointType == JointType::Fixed) {
-                    App::DocumentObject* part1 = getMovingPartFromRef(joint, "Reference1");
-                    App::DocumentObject* part2 = getMovingPartFromRef(joint, "Reference2");
-                    App::DocumentObject* partToAdd = currentPart == part1 ? part2 : part1;
-
-                    if (objectPartMap.find(partToAdd) != objectPartMap.end()) {
-                        // already added
-                        continue;
-                    }
-
-                    Base::Placement plci = getPlacementFromProp(partToAdd, "Placement");
-                    MbDPartData partData = {mbdPart, plc.inverse() * plci};
-                    objectPartMap[partToAdd] = partData;  // Store the association
-
-                    // Recursively call for partToAdd
-                    self(partToAdd, self);
-                }
-            }
-        };
-
-        addConnectedFixedParts(part, addConnectedFixedParts);
+        bundleFixedPartners(part, mbdPart, plc);
     }
     return data;
 }

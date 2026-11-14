@@ -25,6 +25,7 @@
 #pragma once
 
 #include "DocumentObject.h"
+#include "PropertyStandard.h"
 
 namespace App
 {
@@ -36,8 +37,15 @@ class AppExport VarSet: public App::DocumentObject
     PROPERTY_HEADER_WITH_OVERRIDE(App::VarSet);
 
 public:
-    VarSet() = default;
+    VarSet();
     ~VarSet() override = default;
+
+    /** FreeCAD-CH (ops#723): the history position of each Part Studio variable of this set: the
+     * name of the row of its part studio's history the variable follows. A variable without an
+     * entry is at the start of the history, as every variable was before ops#723. Hidden; see
+     * App/VariablePosition.h
+     */
+    PropertyMap VariablePositions;
 
     const char* getViewProviderName() const override;
 };

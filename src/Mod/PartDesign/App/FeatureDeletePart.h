@@ -35,6 +35,16 @@ public:
     /// deleted there. Opens no transaction and doesn't recompute.
     static DeletePart* deletePart(Body* body);
 
+    /** A Body of a studio left with no solid feature (the feature that made its New part deleted,
+     * blind test F50): its other members (sketches, datums) go to another Body of the studio,
+     * where the studio's history has them, and the Body goes with its origin, as Onshape keeps the
+     * sketch, of no part, once the part is gone. The Body that takes them: the one whose member
+     * the first of them reads (a sketch on its face), else the studio's first other Body. Returns
+     * it, or null when nothing was done (a solid feature left, no studio, the studio's only
+     * Body). Opens no transaction and doesn't recompute.
+     */
+    static Body* removeEmptyPart(Body* body);
+
     /// The DeletePart, not suppressed, at or before @p body's Tip in its Group (the part is
     /// deleted at the bar), or null
     static DeletePart* deleterOf(const Body* body);

@@ -31,6 +31,17 @@ using namespace App;
 
 PROPERTY_SOURCE(App::VarSet, App::DocumentObject)
 
+VarSet::VarSet()
+{
+    ADD_PROPERTY_TYPE(
+        VariablePositions,
+        (),
+        "Base",
+        App::PropertyType(App::Prop_Hidden),
+        "The history position of each Part Studio variable: the row it follows (ops#723)"
+    );
+}
+
 const char* VarSet::getViewProviderName() const
 {
     return "Gui::ViewProviderVarSet";

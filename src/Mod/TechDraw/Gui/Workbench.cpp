@@ -197,6 +197,8 @@ Gui::MenuItem* Workbench::setupMenuBar() const
     // pages
     Gui::MenuItem* pages = new Gui::MenuItem;
     pages->setCommand("Page");
+    // Onshape's Create drawing (FreeCAD-CH ops#640, rank 62; TechDrawCreateDrawing.py)
+    *pages << "TechDraw_CreateDrawing";
     *pages << "TechDraw_PageDefault";
     *pages << "TechDraw_PageTemplate";
     *pages << "TechDraw_FillTemplateFields";

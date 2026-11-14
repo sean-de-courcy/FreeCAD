@@ -25,7 +25,14 @@
 
 #pragma once
 
+#include <string>
+
 #include <Mod/Sketcher/App/Constraint.h>
+
+namespace App
+{
+class DocumentObject;
+}
 
 namespace SketcherGui
 {
@@ -42,6 +49,11 @@ struct AutoConstraint
     Sketcher::ConstraintType Type;
     int GeoId;
     Sketcher::PointPos PosId;
+    /// FreeCAD-CH (ops#640, rank 18): a model vertex or edge the placement snapped to (ModelSnap).
+    /// GeoId is GeoUndef until the constraint is made, when the element is linked as external
+    /// geometry and GeoId becomes the link's (DrawSketchHandler::resolveModelAutoConstraint)
+    App::DocumentObject* ModelObject = nullptr;
+    std::string ModelSubName;
 };
 
 }  // namespace SketcherGui

@@ -187,8 +187,17 @@ class TestActiveObject(unittest.TestCase):
 
     def testBooleanActiveBodyUsesSinglePlacementPath(self):
         _, tools = self._createBooleanWithTwoTools()
-        self._nestInParts(tools[0], 3)
+        outerPart = self._nestInParts(tools[0], 3)
 
+        # FreeCAD-CH (ops#640, rank 59): under the Onshape keymap's typed tabs the top-level
+        # App::Part is a Part Studio of its own, shown in its own view (Part Studio 1's view, the
+        # Boolean's, doesn't show it, as in Onshape): the body is activated, and its paths
+        # counted, in that view
+        tabs = getattr(FreeCADGui, "DocumentTabs", None)
+        if tabs and tabs.isOn():
+            done, refusal = tabs.switchTo(self.doc, outerPart.Name)
+            self.assertTrue(done, refusal)
+            FreeCADGui.updateGui()
         FreeCADGui.activeView().setActiveObject("pdbody", tools[0])
 
         self.assertEqual(self._countActiveSceneGraphPaths(tools[0].ViewObject), 1)

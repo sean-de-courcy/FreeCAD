@@ -195,7 +195,7 @@ void GenericShapeMapper::init(const TopoShape& src, const TopoDS_Shape& dst)
             if (BRep_Tool::IsClosed(e)) {
                 // closed edge, one face is enough
                 TopoDS_Shape face
-                    = src.findAncestorShape(src.getSubShape(TopAbs_EDGE, idx), TopAbs_FACE);
+                    = src.findAncestorShape(src.findShape(TopAbs_EDGE, idx), TopAbs_FACE);
                 if (!face.IsNull()) {
                     this->insert(MappingStatus::Generated, face, dstFace);
                     found = true;
@@ -204,7 +204,7 @@ void GenericShapeMapper::init(const TopoShape& src, const TopoDS_Shape& dst)
                 continue;
             }
             for (auto& face :
-                 src.findAncestorsShapes(src.getSubShape(TopAbs_EDGE, idx), TopAbs_FACE)) {
+                 src.findAncestorsShapes(src.findShape(TopAbs_EDGE, idx), TopAbs_FACE)) {
                 int& cnt = map[face];
                 if (++cnt == 2) {
                     this->insert(MappingStatus::Generated, face, dstFace);
@@ -230,7 +230,7 @@ void GenericShapeMapper::init(const TopoShape& src, const TopoDS_Shape& dst)
 
         const int faces = src.countSubShapes(TopAbs_FACE);
         for (int index = 1; index <= faces; ++index) {
-            const TopoDS_Shape indexed = src.getSubShape(TopAbs_FACE, index);
+            const TopoDS_Shape indexed = src.findShape(TopAbs_FACE, index);
             // The face as the map holds it; the search's result doesn't depend on the map's order
             auto met = std::find_if(map.begin(), map.end(), [&indexed](const auto& entry) {
                 return entry.first.IsSame(indexed);

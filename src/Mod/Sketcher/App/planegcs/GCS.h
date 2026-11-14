@@ -24,6 +24,8 @@
 
 #pragma once
 
+#include <map>
+
 #include <Eigen/QR>
 
 #include "../../SketcherGlobal.h"
@@ -197,7 +199,16 @@ private:
         Eigen::MatrixXd& R,
         int constrNum,
         int rank,
-        int& nonredundantconstrNum
+        int& nonredundantconstrNum,
+        const std::vector<Constraint*>* blockConstraints = nullptr
+    );
+
+    bool diagnoseByBlocks(
+        Algorithm alg,
+        const Eigen::MatrixXd& J,
+        const std::map<int, int>& jacobianconstraintmap,
+        const GCS::VEC_pD& pdiagnoselist,
+        const std::map<int, int>& tagmultiplicity
     );
 
     void eliminateNonZerosOverPivotInUpperTriangularMatrix(Eigen::MatrixXd& R, int rank);
@@ -502,6 +513,25 @@ public:
     );
     int addConstraintP2CDistance(Point& p, Circle& c, double* distance, int tagId = 0, bool driving = true);
     int addConstraintArcLength(Arc& a, double* dist, int tagId, bool driving = true);
+    // FreeCAD-CH (sketch patterns): q = sum(weights_i * params_i) + constant
+    int addConstraintLinearSum(
+        double* q,
+        const std::vector<double*>& params,
+        const std::vector<double>& weights,
+        double constant,
+        int tagId,
+        bool driving = true
+    );
+    // FreeCAD-CH (sketch patterns): copy = pivot + R(k theta) (seed - pivot), both coordinates
+    int addConstraintPatternRotation(
+        Point& copy,
+        Point& seed,
+        Point& pivot,
+        double* theta,
+        double k,
+        int tagId,
+        bool driving = true
+    );
 
     // internal alignment constraints
     int addConstraintInternalAlignmentPoint2Ellipse(
@@ -601,12 +631,21 @@ public:
     // If there's only one, a signed value is returned.
     // Effectively, it calculates the error of a UI constraint
     double calculateConstraintErrorByTag(int tagId);
+    /// FreeCAD-CH (ops#656): every tag's error in one pass over the constraints (the root mean
+    /// square where a tag has several, as calculateConstraintErrorByTag gives it)
+    std::map<int, double> calculateConstraintErrorsByTag() const;
 
     void rescaleConstraint(int id, double coeff);
 
     void declareUnknowns(VEC_pD& params);
     void declareDrivenParams(VEC_pD& params);
     void initSolution(Algorithm alg = DogLeg);
+    /// FreeCAD-CH (ops#658): the next solve starts from the current parameters (a continuation's
+    /// steps), not from those of initSolution()
+    void startFromCurrent()
+    {
+        setReference();
+    }
 
     int solve(bool isFine = true, Algorithm alg = DogLeg, bool isRedundantsolving = false);
     int solve(VEC_pD& params, bool isFine = true, Algorithm alg = DogLeg, bool isRedundantsolving = false);

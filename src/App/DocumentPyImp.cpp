@@ -627,8 +627,8 @@ PyObject* DocumentPy::openTransaction(PyObject* args)
         return nullptr;
     }
 
-    getDocumentPtr()->openTransaction(cmd.c_str());
-    Py_Return;
+    // FreeCAD-CH (ops#640): the id, or 0 when refused (a lock, or transacting)
+    return Py::new_reference_to(Py::Long(getDocumentPtr()->openTransaction(cmd)));
 }
 
 PyObject* DocumentPy::abortTransaction(PyObject* args)
@@ -659,10 +659,12 @@ PyObject* DocumentPy::undo(PyObject* args)
     if (!PyArg_ParseTuple(args, "")) {
         return nullptr;
     }
+    // FreeCAD-CH (ops#640): whether it undid a step (refused while the step is locked)
+    bool done = false;
     if (getDocumentPtr()->getAvailableUndos()) {
-        getDocumentPtr()->undo();
+        done = getDocumentPtr()->undo();
     }
-    Py_Return;
+    return Py::new_reference_to(Py::Boolean(done));
 }
 
 PyObject* DocumentPy::redo(PyObject* args)
@@ -670,10 +672,38 @@ PyObject* DocumentPy::redo(PyObject* args)
     if (!PyArg_ParseTuple(args, "")) {
         return nullptr;
     }
+    // FreeCAD-CH (ops#640): whether it redid a step (refused while the step is locked)
+    bool done = false;
     if (getDocumentPtr()->getAvailableRedos()) {
-        getDocumentPtr()->redo();
+        done = getDocumentPtr()->redo();
     }
+    return Py::new_reference_to(Py::Boolean(done));
+}
+
+PyObject* DocumentPy::lockStep(PyObject* args)
+{
+    if (!PyArg_ParseTuple(args, "")) {
+        return nullptr;
+    }
+    getDocumentPtr()->lockStep();
     Py_Return;
+}
+
+PyObject* DocumentPy::unlockStep(PyObject* args)
+{
+    if (!PyArg_ParseTuple(args, "")) {
+        return nullptr;
+    }
+    getDocumentPtr()->unlockStep();
+    Py_Return;
+}
+
+PyObject* DocumentPy::isStepLocked(PyObject* args)
+{
+    if (!PyArg_ParseTuple(args, "")) {
+        return nullptr;
+    }
+    return Py::new_reference_to(Py::Boolean(getDocumentPtr()->isStepLocked()));
 }
 
 PyObject* DocumentPy::clearUndos(PyObject* args)
@@ -681,7 +711,11 @@ PyObject* DocumentPy::clearUndos(PyObject* args)
     if (!PyArg_ParseTuple(args, "")) {
         return nullptr;
     }
-    getDocumentPtr()->clearUndos();
+    // FreeCAD-CH (ops#640): step-locked, clearing would commit the open dialog's step behind it
+    // (the document's destructor and restore() still clear: no dialog survives them)
+    if (!getDocumentPtr()->isStepLocked()) {
+        getDocumentPtr()->clearUndos();
+    }
     Py_Return;
 }
 
@@ -1047,6 +1081,16 @@ Py::Boolean DocumentPy::getRecomputesFrozen() const
 void DocumentPy::setRecomputesFrozen(Py::Boolean arg)
 {
     getDocumentPtr()->setStatus(Document::Status::SkipRecompute, arg.isTrue());
+}
+
+Py::Boolean DocumentPy::getRegenerateOnCommit() const
+{
+    return {getDocumentPtr()->regeneratesOnCommit()};
+}
+
+void DocumentPy::setRegenerateOnCommit(Py::Boolean arg)
+{
+    getDocumentPtr()->setRegenerateOnCommit(arg.isTrue());
 }
 
 PyObject* DocumentPy::getTempFileName(PyObject* args)

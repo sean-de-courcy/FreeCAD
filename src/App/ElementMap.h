@@ -37,6 +37,8 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <string>
+#include <unordered_map>
 
 
 namespace Data
@@ -443,6 +445,20 @@ private:
     std::map<const char*, IndexedElements, CStringComp> indexedNames;
 
     std::map<MappedName, IndexedName, std::less<>> mappedNames;
+
+    /// For a colliding V2 name (its text around the duplicate count, and the count it came with):
+    /// how many counts from its first one are known to be taken. setElementName() starts its
+    /// search for a free count there instead of at the first one, which made n elements with one
+    /// name cost n^2 tries (ops#640: a sketch wire's unnamed vertices). Only additions keep it
+    /// true, so every removal from `mappedNames` clears it (forgetTakenCounts()).
+    std::unordered_map<std::string, std::size_t> takenDuplicateCounts;
+
+    void forgetTakenCounts()
+    {
+        if (!takenDuplicateCounts.empty()) {
+            takenDuplicateCounts.clear();
+        }
+    }
 
     // Held by value: maps are shared between shapes, so a pointer to one shape's field is
     // left null or dangling when that shape dies

@@ -1,0 +1,36 @@
+{
+ "approved": "coordinator c730, 11-11, ruling A; c749, 11-12 (ops#680, a4feaf1675 accepted in principle)",
+ "changes": {
+  "IndexToldGroups": {
+   "ArcChamfer.shape.area": {
+    "new": 1579.4838175901941,
+    "old": 1579.4838165449257,
+    "rel": 1e-09
+   },
+   "ArcChamfer.shape.volume": {
+    "new": 1642.9232022071121,
+    "old": 1642.9232066134891,
+    "rel": 1e-09
+   },
+   "Body.shape.area": {
+    "new": 1579.4838175901941,
+    "old": 1579.4838165449257,
+    "rel": 1e-09
+   },
+   "Body.shape.volume": {
+    "new": 1642.9232022071121,
+    "old": 1642.9232066134891,
+    "rel": 1e-09
+   },
+   "Pipe.shape.centre[2]": {
+    "new": 21.097887825875258,
+    "old": 21.09788782586391,
+    "rel": 1e-09
+   }
+  }
+ },
+ "format": 1,
+ "issue": "ops#640",
+ "label": "compat-change",
+ "why": "SC7: free-form faces' volume, area and centre integrated adaptively (the default integration was off on B-spline faces); a solid's centre and inertia readouts on such shapes at 1e-4 relative, the mass the accurate volume's; ops#680: a free-form solid's centre adaptive, about a point off the centre"
+}

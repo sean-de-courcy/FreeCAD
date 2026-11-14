@@ -164,6 +164,7 @@ MassPropertiesData CalculateMassProperties(
 
         const QString densityMaterialProperty = QStringLiteral("Density");
 
+        bool hasMaterial = false;
         if (part) {
             mat = part->ShapeMaterial.getValue();
         }
@@ -171,6 +172,7 @@ MassPropertiesData CalculateMassProperties(
             try {
                 if (mat.getName() != QStringLiteral("Default")) {
                     density = mat.getPhysicalQuantity(densityMaterialProperty).getValue();
+                    hasMaterial = density > 0.0;
                 }
             }
             catch (...) {
@@ -186,6 +188,10 @@ MassPropertiesData CalculateMassProperties(
         GProp_GProps volProps;
         BRepGProp::VolumeProperties(shape, volProps);
         globalVolumeProps.Add(volProps);
+        // a solid only: a face or a shell weighs nothing whatever its material
+        if (!hasMaterial && std::fabs(volProps.Mass()) > Base::Precision::Confusion()) {
+            ++data.partsWithoutMaterial;
+        }
 
         GProp_GProps surfProps;
         BRepGProp::SurfaceProperties(shape, surfProps);
@@ -212,6 +218,17 @@ MassPropertiesData CalculateMassProperties(
 
     data.cog = Base::convertTo<Base::Vector3d>(globalMassProps.CentreOfMass());
     data.cov = Base::convertTo<Base::Vector3d>(globalVolumeProps.CentreOfMass());
+
+    // FreeCAD-CH (ops#640, rank 16; hands-on D-3): a part with no material has no mass, so
+    // nothing that needs one is computed (Onshape leaves mass, centre of mass and inertia blank
+    // with "One or more parts do not have a material defined"), where it used to weigh the part
+    // as water (1000 kg/m^3); volume, surface area and the centre of volume stay
+    if (data.partsWithoutMaterial > 0) {
+        data.mass = Base::Quantity(0.0, Base::Unit::Mass);
+        data.density = Base::Quantity(0.0, Base::Unit::Density);
+        data.cog = Base::Vector3d();
+        return data;
+    }
 
 
     gp_Mat inertia = globalMassProps.MatrixOfInertia();

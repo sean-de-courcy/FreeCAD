@@ -37,6 +37,9 @@
 #include <ShapeFix_ShapeTolerance.hxx>
 #include <ShapeFix_Solid.hxx>
 #include <Precision.hxx>
+#include <TopExp.hxx>
+#include <TopTools_DataMapOfShapeListOfShape.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Wire.hxx>
@@ -68,20 +71,37 @@ namespace
 // The pipe's history, plus its caps (ops#26): OCCT reports the side faces and edges generated
 // from the profile's edges and vertices, but not the caps. As in a Pad, the start cap is the
 // profile face (modified: it keeps the profile's name), and the end cap is the profile moved
-// to the end of the sweep (projected).
+// to the end of the sweep (projected). The caps' edges and vertices follow the profile's the
+// same way, paired through the side faces and edges each profile element generated, as Pipe's
+// ends are (bindEnds, ops#351). Named from the side face they bound instead, they took in the
+// last turn's place among the turns (`4of5`), and a reference to the end cap's edge, the axis of
+// a thread's revolved cap, was lost when the height or the pitch changed the number of turns
+// (Onshape's cap follows those edits, SW7; ops#640).
 struct MapperPipeCaps: Part::MapperMaker
 {
     MapperPipeCaps(BRepOffsetAPI_MakePipe& pipe, const TopoDS_Shape& profile)
         : MapperMaker(pipe)
         , pipe(pipe)
         , profile(profile)
-    {}
+    {
+        TopTools_IndexedMapOfShape startElements;
+        TopTools_IndexedMapOfShape endElements;
+        TopExp::MapShapes(pipe.FirstShape(), startElements);
+        TopExp::MapShapes(pipe.LastShape(), endElements);
+        bindCap(startElements, nullptr, starts);
+        bindCap(endElements, &startElements, ends);
+    }
 
     const std::vector<TopoDS_Shape>& modified(const TopoDS_Shape& s) const override
     {
         MapperMaker::modified(s);
         if (_res.empty() && s.IsSame(profile)) {
             _res.push_back(pipe.FirstShape());
+        }
+        if (const TopTools_ListOfShape* elements = starts.Seek(s)) {
+            for (const TopoDS_Shape& element : *elements) {
+                _res.push_back(element);
+            }
         }
         return _res;
     }
@@ -92,11 +112,51 @@ struct MapperPipeCaps: Part::MapperMaker
         if (s.IsSame(profile)) {
             _res.push_back(pipe.LastShape());
         }
+        else if (const TopTools_ListOfShape* elements = ends.Seek(s)) {
+            for (const TopoDS_Shape& element : *elements) {
+                _res.push_back(element);
+            }
+        }
         return _res;
+    }
+
+    /// Binds each edge and vertex of the profile (in its order) to the elements of one cap,
+    /// \a capElements, that the side faces or edges it generated hold, leaving out \a skip's
+    void bindCap(
+        const TopTools_IndexedMapOfShape& capElements,
+        const TopTools_IndexedMapOfShape* skip,
+        TopTools_DataMapOfShapeListOfShape& bound
+    )
+    {
+        if (profile.IsNull()) {
+            return;
+        }
+        for (TopAbs_ShapeEnum type : {TopAbs_EDGE, TopAbs_VERTEX}) {
+            TopTools_IndexedMapOfShape elements;
+            TopExp::MapShapes(profile, type, elements);
+            for (int i = 1; i <= elements.Extent(); ++i) {
+                TopTools_IndexedMapOfShape candidates;
+                for (const TopoDS_Shape& side : pipe.Generated(elements(i))) {
+                    TopExp::MapShapes(side, type, candidates);
+                }
+                TopTools_ListOfShape found;
+                for (int j = 1; j <= candidates.Extent(); ++j) {
+                    if (capElements.Contains(candidates(j))
+                        && !(skip && skip->Contains(candidates(j)))) {
+                        found.Append(candidates(j));
+                    }
+                }
+                if (!found.IsEmpty()) {
+                    bound.Bind(elements(i), found);
+                }
+            }
+        }
     }
 
     BRepOffsetAPI_MakePipe& pipe;
     TopoDS_Shape profile;
+    TopTools_DataMapOfShapeListOfShape starts;
+    TopTools_DataMapOfShapeListOfShape ends;
 };
 }  // namespace
 
@@ -518,6 +578,22 @@ App::DocumentObjectExecReturn* Helix::execute()
             booleanInputCheck(),
             &booleanInputsValid
         );
+        // An Intersect that shares no volume with its base leaves the base as it was, healthy, with
+        // Onshape's info, as a Revolve's and an Extrude's (hands-on R7, ops#640 rank 20, H3)
+        if (getBooleanOperation() == BooleanOperation::Common
+            && (boolOp.isNull() || !boolOp.hasSubShape(TopAbs_SOLID))) {
+            if (auto doc = getDocument(); doc && !SiblingOf.getValue()) {
+                static const std::string text = "Selected tools and targets do not intersect";
+                const char* previous = doc->getWarningDescription(this);
+                doc->setWarning(
+                    this,
+                    previous && *previous ? std::string(previous) + "\n" + text : text
+                );
+            }
+            this->rawShape = TopoShape();
+            Shape.setValue(base);
+            return App::DocumentObject::StdReturn;
+        }
 
         if (!isSingleSolidRuleSatisfied(boolOp.getShape())) {
             return new App::DocumentObjectExecReturn(QT_TRANSLATE_NOOP(
@@ -834,8 +910,13 @@ void Helix::onChanged(const App::Property* prop)
     }
 
     // Reflect Operation property value to deprectated Outside
-    if (prop == &Operation && addSubType == Type::Subtractive) {
-        Outside.setValue(strcmp(Operation.getValueAsString(), "Common") == 0);
+    // by the new value: with every operation allowed (ops#640 rank 20) an Add set straight to
+    // Intersect was still additive here, and the restore made it a Remove
+    if (prop == &Operation) {
+        const char* operation = Operation.getValueAsString();
+        if (operation && strcmp(operation, "Union") != 0) {
+            Outside.setValue(strcmp(operation, "Common") == 0);
+        }
     }
 
     ProfileBased::onChanged(prop);
@@ -908,10 +989,13 @@ PROPERTY_SOURCE(PartDesign::AdditiveHelix, PartDesign::Helix)
 AdditiveHelix::AdditiveHelix()
 {
     defineAdditive();
+    // New / Add / Remove / Intersect on one Helix (FreeCAD-CH ops#640 rank 20)
+    allowAllOperations();
 }
 
 PROPERTY_SOURCE(PartDesign::SubtractiveHelix, PartDesign::Helix)
 SubtractiveHelix::SubtractiveHelix()
 {
     defineSubtractive();
+    allowAllOperations();
 }

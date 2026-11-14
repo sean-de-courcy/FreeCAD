@@ -550,6 +550,13 @@ void EditModeCoinManager::ParameterObserver::initParameters()
          [this](const std::string& param) { updateConstraintPresentationParameters(param); }},
         {"DimensionalStringFormat",
          [this](const std::string& param) { updateConstraintPresentationParameters(param); }},
+        // FreeCAD-CH (ops#640 polish P1): read where drawn (ViewProviderSketch::
+        // showConstraintsPreference()); a change only needs OnChange's redraw
+        {"ShowConstraints", [](const std::string&) {}},
+        // FreeCAD-CH (ops#640 polish P4): read in getPresentationString(), like the above
+        {"ShowExpressions", [](const std::string&) {}},
+        // FreeCAD-CH (ops#640 polish P1b): read in shownConstraints(), like ShowConstraints
+        {"ShowErrors", [](const std::string&) {}},
         {"ViewScalingFactor", [this](const std::string&) { Client.updateElementSizeParameters(); }},
         {"MarkerSize", [this](const std::string&) { Client.updateElementSizeParameters(); }},
         {"EditSketcherFontName", [this](const std::string&) { Client.updateElementSizeParameters(); }},
@@ -634,7 +641,7 @@ void EditModeCoinManager::ParameterObserver::initParameters()
          }},
         {"FullyConstraintElementColor",
          [this, drawingParameters = Client.drawingParameters](const std::string& param) {
-             updateColor(drawingParameters.FullyConstraintElementColor, param);
+             updateConstrainedColor(drawingParameters.FullyConstraintElementColor, param);
          }},
         {"FullyConstraintConstructionElementColor",
          [this, drawingParameters = Client.drawingParameters](const std::string& param) {
@@ -646,7 +653,7 @@ void EditModeCoinManager::ParameterObserver::initParameters()
          }},
         {"FullyConstraintElementColor",
          [this, drawingParameters = Client.drawingParameters](const std::string& param) {
-             updateColor(drawingParameters.FullyConstraintElementColor, param);
+             updateConstrainedColor(drawingParameters.FullyConstraintElementColor, param);
          }},
         {"InvalidSketchColor",
          [this, drawingParameters = Client.drawingParameters](const std::string& param) {
@@ -654,11 +661,11 @@ void EditModeCoinManager::ParameterObserver::initParameters()
          }},
         {"FullyConstrainedColor",
          [this, drawingParameters = Client.drawingParameters](const std::string& param) {
-             updateColor(drawingParameters.FullyConstrainedColor, param);
+             updateConstrainedColor(drawingParameters.FullyConstrainedColor, param);
          }},
         {"ConstrainedDimColor",
          [this, drawingParameters = Client.drawingParameters](const std::string& param) {
-             updateColor(drawingParameters.ConstrDimColor, param);
+             updateConstrainedColor(drawingParameters.ConstrDimColor, param);
          }},
         {"ConstrainedIcoColor",
          [this, drawingParameters = Client.drawingParameters](const std::string& param) {
@@ -670,7 +677,7 @@ void EditModeCoinManager::ParameterObserver::initParameters()
          }},
         {"ExprBasedConstrDimColor",
          [this, drawingParameters = Client.drawingParameters](const std::string& param) {
-             updateColor(drawingParameters.ExprBasedConstrDimColor, param);
+             updateConstrainedColor(drawingParameters.ExprBasedConstrDimColor, param);
          }},
         {"DeactivatedConstrDimColor",
          [this, drawingParameters = Client.drawingParameters](const std::string& param) {
@@ -881,6 +888,48 @@ void EditModeCoinManager::ParameterObserver::updateColor(SbColor& sbcolor, const
     color = hGrp->GetUnsigned(parametername.c_str(), color);
     sbcolor.setPackedValue((uint32_t)color, transparency);
 
+    Client.updateInventorColors();
+}
+
+void EditModeCoinManager::ParameterObserver::updateConstrainedColor(
+    SbColor& sbcolor,
+    const std::string& parametername
+)
+{
+    ParameterGrp::handle hGrp = App::GetApplication().GetParameterGroupByPath(
+        "User parameter:BaseApp/Preferences/View"
+    );
+    // two different defaults tell whether the parameter is set
+    if (hGrp->GetUnsigned(parametername.c_str(), 0) == hGrp->GetUnsigned(parametername.c_str(), 1)) {
+        updateColor(sbcolor, parametername);
+        return;
+    }
+
+    // the background as View3DSettings draws it: one colour, or the mean of the gradient's
+    auto unpack = [](unsigned long packed) {
+        SbColor color;
+        float transparency = 0.f;
+        color.setPackedValue(static_cast<uint32_t>(packed), transparency);
+        return color;
+    };
+    std::vector<SbColor> colors;
+    if (hGrp->GetBool("Gradient", true) || hGrp->GetBool("RadialGradient", false)) {
+        colors.push_back(unpack(hGrp->GetUnsigned("BackgroundColor2", 859006463UL)));
+        colors.push_back(unpack(hGrp->GetUnsigned("BackgroundColor3", 2880160255UL)));
+        if (hGrp->GetBool("UseBackgroundColorMid", false)) {
+            colors.push_back(unpack(hGrp->GetUnsigned("BackgroundColor4", 1869583359UL)));
+        }
+    }
+    else {
+        colors.push_back(unpack(hGrp->GetUnsigned("BackgroundColor", 3940932863UL)));
+    }
+    float luminance = 0.f;
+    for (const SbColor& color : colors) {
+        luminance += 0.299f * color[0] + 0.587f * color[1] + 0.114f * color[2];
+    }
+    luminance /= static_cast<float>(colors.size());
+
+    sbcolor = luminance > 0.5f ? SbColor(0.13f, 0.15f, 0.16f) : SbColor(0.95f, 0.95f, 0.96f);
     Client.updateInventorColors();
 }
 

@@ -133,12 +133,17 @@ protected:
         static int getWireDirection(const gp_Pln& plane, const TopoDS_Wire& w);
 
     private:
+        void addHoleWire(const TopoDS_Wire& w);
+
         gp_Pln myPlane;
         TopoDS_Face myFace;
         TopoDS_Face myFaceBound;
         TopoShape myTopoFace;
         TopoShape myTopoFaceBound;
         std::vector<WireInfo> myHoles;
+        /// The hole wires in myFace, as added, with their boxes: hitTest classifies against the
+        /// outer wire and only the holes whose box holds the point (ops#640)
+        std::vector<std::pair<TopoDS_Wire, Bnd_Box>> myHoleWires;
         Handle(Geom_Surface) myHPlane;
         std::unique_ptr<WireJoiner> myJoiner;
     };

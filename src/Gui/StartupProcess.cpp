@@ -29,12 +29,14 @@
 #endif
 
 #include <QApplication>
+#include <QGuiApplication>
 #include <QImageReader>
 #include <QLabel>
 #include <QOpenGLContext>
 #include <QOpenGLFunctions>
 #include <QProcess>
 #include <QStatusBar>
+#include <QStyleHints>
 #include <QWindow>
 
 #include <Inventor/SoDB.h>
@@ -372,6 +374,12 @@ void StartupProcess::applyFirstStartPack()
     }
 
     try {
+#if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
+        // FreeCAD-CH (ops#640, rank 84, W17): the theme follows Windows' app mode on a first
+        // start; the Onshape pack, applied after it, keeps its own view settings.
+        const bool dark = QGuiApplication::styleHints()->colorScheme() == Qt::ColorScheme::Dark;
+        Application::Instance->prefPackManager()->apply(dark ? "FreeCAD Dark" : "FreeCAD Light");
+#endif
         if (!Application::Instance->prefPackManager()->apply("FreeCAD-CH Onshape")) {
             Base::Console().warning("First start: the FreeCAD-CH Onshape pack was not applied\n");
         }

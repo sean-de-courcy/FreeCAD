@@ -3760,6 +3760,358 @@ class TestRevolve(unittest.TestCase):
             cube = Part.makeBox(1, 1, 1, V(x, y, spans / 2))
             self.assertAlmostEqual(shape.common(cube).Volume, inside, places=6, msg=(x, y))
 
+    def _tangentAxisBody(self, profile, base=None, setup=None):
+        """A Pad of `base` (default `profile`; sketch geometry on XY) 10 high, then a Revolution of
+        `profile` on the Pad's top (z = 10) by 45 degrees (or as `setup` sets it) about the
+        sketch's H axis, the line y = 0, z = 10, which the profile touches at one point,
+        (0, 0, 10), inside one edge."""
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        xy = self.Doc.getObject("XY_Plane")
+        pad_sketch = body.newObject("Sketcher::SketchObject", "PadProfile")
+        pad_sketch.AttachmentSupport = (xy, [""])
+        pad_sketch.MapMode = "FlatFace"
+        for geometry in (base or profile)():
+            pad_sketch.addGeometry(geometry, False)
+        self.Doc.recompute()
+        pad = body.newObject("PartDesign::Pad", "Pad")
+        pad.Profile = pad_sketch
+        pad.Length = 10
+        self.Doc.recompute()
+        sketch = body.newObject("Sketcher::SketchObject", "RevolveProfile")
+        sketch.AttachmentSupport = (xy, [""])
+        sketch.MapMode = "FlatFace"
+        sketch.AttachmentOffset = FreeCAD.Placement(FreeCAD.Vector(0, 0, 10), FreeCAD.Rotation())
+        for geometry in profile():
+            sketch.addGeometry(geometry, False)
+        self.Doc.recompute()
+        revolution = body.newObject("PartDesign::Revolution", "Revolution")
+        revolution.Profile = sketch
+        revolution.ReferenceAxis = (sketch, ["H_Axis"])
+        revolution.Angle = 45
+        revolution.Refine = False
+        if setup:
+            setup(revolution)
+        self.Doc.recompute()
+        return body, revolution
+
+    def _assertExactSolid(self, feature, volume, area=None, faces=None):
+        self.assertTrue(feature.isValid(), feature.getStatusString())
+        shape = feature.Shape
+        self.assertTrue(shape.isValid())
+        self.assertEqual(len(shape.Solids), 1)
+        try:
+            shape.check(True)  # the boolean checker: a pinch without a vertex is a self-intersection
+        except Exception as error:
+            self.fail("%s: %s" % (feature.Name, error))
+        self.assertAlmostEqual(shape.Volume, volume, places=4)
+        if area is not None:
+            self.assertAlmostEqual(shape.Area, area, places=4)
+        if faces is not None:
+            self.assertEqual(len(shape.Faces), faces)
+
+    def testRevolutionAboutAxisTangentToCircle(self):
+        """A circle revolved about a line tangent to it, added to a cylinder (P4, ops#640; Onshape
+        case RV1: one solid, V 1093.8233, A 594.609, F 4). The circle r 5 at (0, 5) touches the axis
+        at (0, 0, 10), where the revolved face pinches. Its start disc is the cylinder's top, so the
+        cylinder's side and bottom, the revolved face and the end disc remain; Pappus gives the
+        added volume and area (centroid and circle centre at 5 from the axis). A later Pocket, the
+        slab x 1..3 from z = 8 up, cuts the cylinder 2 deep and the revolved part wholly, each by
+        the circle's strip x 1..3 (its centroid also at 5 from the axis)."""
+        V = FreeCAD.Vector
+        body, revolution = self._tangentAxisBody(lambda: [Part.Circle(V(0, 5, 0), V(0, 0, 1), 5)])
+        r = 5
+        disc = math.pi * r * r
+        turn = math.pi / 4
+        volume = disc * 10 + disc * r * turn
+        area = 2 * math.pi * r * 10 + disc + 2 * math.pi * r * r * turn + disc
+        self._assertExactSolid(revolution, volume, area, faces=4)
+
+        def chord(x):
+            return x * math.sqrt(r * r - x * x) + r * r * math.asin(x / r)
+
+        strip = chord(3) - chord(1)
+        cut = body.newObject("Sketcher::SketchObject", "SlabProfile")
+        cut.AttachmentSupport = (self.Doc.getObject("XY_Plane"), [""])
+        cut.MapMode = "FlatFace"
+        cut.AttachmentOffset = FreeCAD.Placement(V(0, 0, 20), FreeCAD.Rotation())
+        corners = [V(1, -1, 0), V(3, -1, 0), V(3, 11, 0), V(1, 11, 0)]
+        for a, b in zip(corners, corners[1:] + corners[:1]):
+            cut.addGeometry(Part.LineSegment(a, b), False)
+        self.Doc.recompute()
+        pocket = body.newObject("PartDesign::Pocket", "Pocket")
+        pocket.Profile = cut
+        pocket.Length = 12
+        pocket.Refine = False
+        self.Doc.recompute()
+        self._assertExactSolid(pocket, volume - strip * 2 - strip * r * turn)
+
+    def testRevolutionAboutAxisTangentToArc(self):
+        """As the circle above, with a half disc whose arc touches the axis at its middle: the
+        touch point is inside an open edge (P4, ops#640). The half disc r 5 about (0, 5) lies on
+        the axis's side, its centroid at 5 - 4 r / (3 pi) from the axis."""
+        V = FreeCAD.Vector
+        r = 5
+
+        def half_disc():
+            arc = Part.ArcOfCircle(Part.Circle(V(0, r, 0), V(0, 0, 1), r), math.pi, 2 * math.pi)
+            return [arc, Part.LineSegment(V(r, r, 0), V(-r, r, 0))]
+
+        _, revolution = self._tangentAxisBody(half_disc)
+        half = math.pi * r * r / 2
+        centroid = r - 4 * r / (3 * math.pi)
+        self._assertExactSolid(revolution, half * 10 + half * centroid * math.pi / 4)
+
+    def _tangentCircleBothWays(self, setup):
+        """The tangent circle turned both ways from its plane (P4, ops#640). Turned as one
+        primitive from one end, the circle's own place lay inside the revolved face, on the base's
+        top, and the fuse came out wrong but up to date (Symmetric 90 on the cylinder: V 1343.05
+        for 1096.34). Here the base is the box x -6..6, y 0..11, z 0..10, whose top edge y = 0 is
+        the axis: the part turned below z = 10 lies wholly inside the box (its points are
+        (x, y cos t, 10 - y sin t) with x, y in the disc), so the result is the box plus the 45
+        degrees turned above it, by Pappus."""
+        V = FreeCAD.Vector
+        r = 5
+
+        def box():
+            corners = [V(-6, 0, 0), V(6, 0, 0), V(6, 11, 0), V(-6, 11, 0)]
+            return [Part.LineSegment(a, b) for a, b in zip(corners, corners[1:] + corners[:1])]
+
+        _, revolution = self._tangentAxisBody(
+            lambda: [Part.Circle(V(0, r, 0), V(0, 0, 1), r)], box, setup
+        )
+        self._assertExactSolid(revolution, 12 * 11 * 10 + math.pi * r * r * r * math.pi / 4)
+
+    def testRevolutionSymmetricAboutAxisTangentToCircle(self):
+        def setup(revolution):
+            revolution.SideType = "Symmetric"
+            revolution.Angle = 90
+
+        self._tangentCircleBothWays(setup)
+
+    def testRevolutionTwoSidesAboutAxisTangentToCircle(self):
+        def setup(revolution):
+            revolution.SideType = "Two sides"
+            revolution.Angle2 = 30
+
+        self._tangentCircleBothWays(setup)
+
+    def testRevolutionAboutAxisNearlyTangentToCircle(self):
+        """The circle 1e-8 short of the axis, inside the edge's tolerance, is as tangent (P4,
+        ops#640). Short of the axis by as little as 1e-15, the turn left a hole of that radius at
+        the pole and the solid came out empty; it is moved to cross the axis by 1e-10. The Pad's
+        circle stays tangent; the volume is RV1's within the gap's effect (about 1e-6)."""
+        V = FreeCAD.Vector
+        r = 5
+        _, revolution = self._tangentAxisBody(
+            lambda: [Part.Circle(V(0, r + 1e-8, 0), V(0, 0, 1), r)],
+            lambda: [Part.Circle(V(0, r, 0), V(0, 0, 1), r)],
+        )
+        disc = math.pi * r * r
+        self._assertExactSolid(revolution, disc * 10 + disc * r * math.pi / 4)
+
+    def _tangentCircleBothWaysAwayFromTheBase(self, setup):
+        """The tangent circle turned both ways, its base a Pad far from it: built as one primitive,
+        so its revolved face stays one face, as Onshape's (kernel-6 review T1: built as two sides
+        from the plane, the face came out in two, and a reference to it kept one half). The Pad
+        (r 2, 10 high) has 3 faces; the revolve adds its revolved face and two end discs."""
+        V = FreeCAD.Vector
+        r = 5
+        _, revolution = self._tangentAxisBody(
+            lambda: [Part.Circle(V(0, r, 0), V(0, 0, 1), r)],
+            lambda: [Part.Circle(V(50, 50, 0), V(0, 0, 1), 2)],
+            setup,
+        )
+        disc = math.pi * r * r
+        turned = math.radians(revolution.Angle.Value)
+        if revolution.SideType == "Two sides":
+            turned += math.radians(revolution.Angle2.Value)
+        self.assertTrue(revolution.isValid(), revolution.getStatusString())
+        shape = revolution.Shape
+        self.assertTrue(shape.isValid())
+        shape.check(True)
+        self.assertEqual(len(shape.Solids), 2)  # the Pad and the revolved solid, apart
+        self.assertAlmostEqual(shape.Volume, math.pi * 4 * 10 + disc * r * turned, places=4)
+        self.assertEqual(len(shape.Faces), 6)
+
+    def testRevolutionSymmetricAboutTangentAxisAwayFromTheBaseKeepsOneFace(self):
+        def setup(revolution):
+            revolution.SideType = "Symmetric"
+            revolution.Angle = 90
+
+        self._tangentCircleBothWaysAwayFromTheBase(setup)
+
+    def testRevolutionTwoSidesAboutTangentAxisAwayFromTheBaseKeepsOneFace(self):
+        def setup(revolution):
+            revolution.SideType = "Two sides"
+            revolution.Angle2 = 30
+
+        self._tangentCircleBothWaysAwayFromTheBase(setup)
+
+    def _aboutTheVAxis(self, revolution):
+        revolution.ReferenceAxis = (self.Doc.getObject("RevolveProfile"), ["V_Axis"])
+
+    def testRevolutionSymmetricAboutAxisTangentAtCircleSeam(self):
+        """The tangent circle with its seam vertex at the touch: the circle r 5 at (-5, 0) about the
+        sketch's V axis, x = 0 (a sketch circle's seam is at its +x point, here (0, 0)). The touch
+        then needed no vertex, and the profile wasn't seen as touching: Symmetric took the one
+        primitive and came out wrong but up to date (kernel-6 review T3: V 785.398 on the
+        cylinder, for 1096.34). As _tangentCircleBothWays, with the box x -11..0, y -6..6."""
+        V = FreeCAD.Vector
+        r = 5
+
+        def box():
+            corners = [V(-11, -6, 0), V(0, -6, 0), V(0, 6, 0), V(-11, 6, 0)]
+            return [Part.LineSegment(a, b) for a, b in zip(corners, corners[1:] + corners[:1])]
+
+        def setup(revolution):
+            self._aboutTheVAxis(revolution)
+            revolution.SideType = "Symmetric"
+            revolution.Angle = 90
+
+        _, revolution = self._tangentAxisBody(
+            lambda: [Part.Circle(V(-r, 0, 0), V(0, 0, 1), r)], box, setup
+        )
+        self._assertExactSolid(revolution, 11 * 12 * 10 + math.pi * r * r * r * math.pi / 4)
+
+    def testRevolutionNearlyTangentCircleSeamAtTouch(self):
+        """As testRevolutionAboutAxisNearlyTangentToCircle, with the circle's seam vertex at the
+        touch (about the V axis): the move across the axis was dropped there, and the feature
+        was Valid with an empty shape (kernel-6 review T4)."""
+        V = FreeCAD.Vector
+        r = 5
+        _, revolution = self._tangentAxisBody(
+            lambda: [Part.Circle(V(-r - 1e-8, 0, 0), V(0, 0, 1), r)],
+            lambda: [Part.Circle(V(-r, 0, 0), V(0, 0, 1), r)],
+            self._aboutTheVAxis,
+        )
+        disc = math.pi * r * r
+        self._assertExactSolid(revolution, disc * 10 + disc * r * math.pi / 4)
+
+    # The thread's depth. Designed values: wall r 100, pitch 2, a triangle 1 high and 0.5 deep, 1.75
+    # turns. The wall is large and the thread shallow on purpose: the check's fixed-point measure
+    # errs by a part of the flanks' terms (4.5e4 mm^3 here, growing with the wall's radius), and
+    # the change it has to see, the cap's material, shrinks with the depth squared
+    D = 0.5
+
+    def _threadStartCap(self, inner):
+        """A tube's thread, a triangle (1 high, D deep) swept by a helix of pitch 2 about Z on
+        the wall r 100 (outside it, or inside the bore), and the Revolution of the thread's start
+        face (the profile, on the XZ plane) 180 degrees about its edge on the wall: a thread end
+        rounded off as Onshape builds it (ops#640 replica, rb30). The wall cylinder passes through
+        the revolution's axis, which the cones' apexes touch."""
+        V = FreeCAD.Vector
+        D = self.D
+        R = 100.0
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        origin = {f.Role: f for f in body.Origin.OriginFeatures}
+        tube = body.newObject("Sketcher::SketchObject", "Tube")
+        tube.AttachmentSupport = [(origin["XY_Plane"], "")]
+        tube.MapMode = "FlatFace"
+        for radius in (R + 5, R) if inner else (R, R - 5):
+            tube.addGeometry(Part.Circle(V(0, 0, 0), V(0, 0, 1), radius))
+        pad = body.newObject("PartDesign::Pad", "Pad")
+        pad.Profile = tube
+        pad.Length = 6.0
+        profile = body.newObject("Sketcher::SketchObject", "Profile")
+        profile.AttachmentSupport = [(origin["XZ_Plane"], "")]
+        profile.MapMode = "FlatFace"
+        tip = R - D if inner else R + D
+        corners = [V(R, 1, 0), V(R, 2, 0), V(tip, 1.5, 0)]
+        for a, b in zip(corners, corners[1:] + corners[:1]):
+            profile.addGeometry(Part.LineSegment(a, b))
+        helix = body.newObject("PartDesign::AdditiveHelix", "Helix")
+        helix.Profile = profile
+        helix.ReferenceAxis = (origin["Z_Axis"], [""])
+        helix.Mode = "pitch-height-angle"
+        helix.Pitch = 2.0
+        helix.Height = 3.5  # 1.75 turns: the end face is not on the start plane
+        helix.Refine = True
+        self.Doc.recompute()
+        base = helix.Shape
+        self.assertTrue(base.isValid())
+        # the start face: the plane triangle with the wall edge (x = R, z 1..2)
+        capIndex = [
+            i
+            for i, f in enumerate(base.Faces)
+            if f.Surface.TypeId == "Part::GeomPlane"
+            and abs(f.Area - 0.5 * D) < 1e-6
+            and abs(f.CenterOfMass.y) < 1e-6
+        ]
+        self.assertEqual(len(capIndex), 1)
+        wallIndex = [
+            j
+            for j, e in enumerate(base.Edges)
+            if e.Curve.TypeId == "Part::GeomLine"
+            and abs(e.Length - 1) < 1e-6
+            and e.CenterOfMass.distanceToPoint(V(R, 0, 1.5)) < 1e-6
+        ]
+        self.assertEqual(len(wallIndex), 1)
+        revolution = body.newObject("PartDesign::Revolution", "Revolution")
+        revolution.Profile = (helix, ["Face%d" % (capIndex[0] + 1)])
+        revolution.ReferenceAxis = (helix, ["Edge%d" % (wallIndex[0] + 1)])
+        revolution.Angle = 180
+        revolution.Reversed = True
+        self.Doc.recompute()
+        return R, base, revolution
+
+    @staticmethod
+    def _capRevolvedInTheWall(R, inner):
+        """The volume of the revolved cap that lies in the wall: at distance rho from the axis on
+        the wall, the half turn from the cap is in the wall where cos t < -s rho / (2 R), s = 1 for
+        an outer thread (the cap points out of the wall), -1 for an inner one"""
+        s = -1 if inner else 1
+        D = TestRevolve.D
+        steps = 400
+        total = 0.0
+        for i in range(steps):
+            z = (i + 0.5) / steps
+            depth = D * (1 - abs(z - 0.5) / 0.5)
+            for j in range(steps):
+                rho = (j + 0.5) * depth / steps
+                turn = math.pi - math.acos(-s * rho / (2 * R))
+                total += rho * turn * (depth / steps) / steps
+        return total
+
+    def testThreadCapRevolvedOutwardBuildsAsOnshape(self):
+        """An outer thread's start face revolved outward, then into the wall: half the half
+        double-cone lies in the wall. The fuse was right (valid, the exact material added), but
+        the result check measured its volume change with OCCT's fixed-point integration over the
+        whole thread flanks and the wall it changed (terms of 4.5e4 mm^3), -0.595 for +0.0655, and
+        refused it: "adding material made the part smaller" (ops#640 replica, rb30)."""
+        R, base, revolution = self._threadStartCap(inner=False)
+        tool = revolution.AddSubShape
+        # outward: away from the thread, which runs on towards +y. A half turn's centre of mass
+        # lies D / pi off the axis
+        self.assertAlmostEqual(tool.CenterOfMass.y, -self.D / math.pi, places=5)
+        # a half turn of the triangle about its wall edge: two half cones, radius D, height 1/2 each
+        self.assertAlmostEqual(tool.Volume, math.pi * self.D * self.D / 6, places=5)
+        self.assertTrue(revolution.isValid(), revolution.getStatusString())
+        result = revolution.Shape
+        self.assertTrue(result.isValid())
+        self.assertEqual(len(result.Solids), 1)
+        added = tool.Volume - self._capRevolvedInTheWall(R, inner=False)
+        # half the tool and a little more, the wall curving away from it: to first order in D / R
+        self.assertAlmostEqual(
+            added, math.pi * self.D**2 / 12 + self.D**3 / (24 * R), delta=1e-6
+        )
+        self.assertAlmostEqual(result.cut(base).Volume, added, delta=1e-5)
+        self.assertLess(base.cut(result).Volume, 1e-6)
+
+    def testThreadCapRevolvedIntoTheThreadIsNeverWrong(self):
+        """An inner thread's start face revolved into the thread: the tool lies in the part, and
+        Onshape leaves it as it was. OCCT's fuse gives two solids, inside out; the feature stops
+        with an error, never with that solid (ops#640 replica, rb30; F2 of its diagnosis)."""
+        _, base, revolution = self._threadStartCap(inner=True)
+        self.assertAlmostEqual(revolution.AddSubShape.CenterOfMass.y, self.D / math.pi, places=5)
+        if revolution.isValid():
+            result = revolution.Shape
+            self.assertTrue(result.isValid())
+            self.assertEqual(len(result.Solids), 1)
+            self.assertLess(result.cut(base).Volume, 1e-5)
+            self.assertLess(base.cut(result).Volume, 1e-5)
+        else:
+            self.assertIn("geometry kernel", revolution.getStatusString())
+
     def tearDown(self):
         # closing doc
         FreeCAD.closeDocument("PartDesignTestRevolve")

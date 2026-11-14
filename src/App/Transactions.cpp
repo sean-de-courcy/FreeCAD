@@ -26,6 +26,7 @@
 #include <cassert>
 
 #include <atomic>
+#include <memory>
 #include <Base/Console.h>
 #include <Base/Reader.h>
 #include <Base/Writer.h>
@@ -35,6 +36,8 @@
 #include "private/DocumentP.h"
 #include "DocumentObject.h"
 #include "Property.h"
+#include "PropertyGeo.h"
+#include "PropertyLinks.h"
 
 
 FC_LOG_LEVEL_INIT("App", true, true)
@@ -133,6 +136,37 @@ int Transaction::getID() const
 bool Transaction::isEmpty() const
 {
     return _Objects.empty();
+}
+
+bool Transaction::changesInputs() const
+{
+    // First what needs no value read: an object added or removed answers at once, before a
+    // copied link's value (which may name that object) is saved for the comparison
+    for (const auto& [obj, to] : _Objects.get<0>()) {
+        if (to->changesInputs(obj, TransactionObject::InputCheck::Structure)) {
+            return true;
+        }
+    }
+    for (const auto& [obj, to] : _Objects.get<0>()) {
+        if (to->changesInputs(obj, TransactionObject::InputCheck::Values)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::vector<DocumentObject*> Transaction::inputChangedObjects() const
+{
+    std::vector<DocumentObject*> objects;
+    for (const auto& [obj, to] : _Objects.get<0>()) {
+        // Values aren't compared: a stacked step changed what it recorded (one that changed no
+        // input was dropped at its commit), and a copied link may name an object it removed
+        if (obj->isDerivedFrom<DocumentObject>()
+            && to->changesInputs(obj, TransactionObject::InputCheck::Recorded)) {
+            objects.push_back(const_cast<DocumentObject*>(static_cast<const DocumentObject*>(obj)));
+        }
+    }
+    return objects;
 }
 
 bool Transaction::hasObject(const TransactionalObject* Obj) const
@@ -1105,6 +1139,119 @@ void TransactionObject::changeDocOrGroup(const Property* pcProp)
     }
     auto dynamic = pcProp->getContainer()->getDynamicPropertyData(pcProp);
     _DocOrGroupMap[key] = {name, dynamic.group, dynamic.doc};
+}
+
+namespace
+{
+// FreeCAD-CH (ops#640): a property a recompute writes, not one the user sets, for the no-op test
+// at commit (item 8). Output alone is not enough: it means "changing it touches nothing", and user
+// inputs carry it (Body::Tip, which a roll-back bar move writes; Label; a Part Studio's history
+// rank): those are inputs. Results are:
+// - NoModify (Visibility) and Transient properties;
+// - Output and ReadOnly together (static or at runtime: _Body, _PassedThrough, FullyConstrained);
+// - the shape of a parametric Part feature (PropertyPartShape: a dialog's live preview rewrites
+//   it, and its Save() text holds counters, not the geometry). Not the Shape of a plain
+//   Part::Feature (an import, a script's shape: there it is the input), nor a mesh or a point
+//   cloud, edited in place by their workbenches' commands.
+bool isResult(const TransactionalObject* pcObj, const Property& prop)
+{
+    if (prop.testStatus(Property::NoModify) || prop.testStatus(Property::Transient)
+        || prop.testStatus(Property::PropTransient)) {
+        return true;
+    }
+    const bool output = prop.testStatus(Property::Output) || prop.testStatus(Property::PropOutput);
+    const bool readOnly = prop.testStatus(Property::ReadOnly)
+        || prop.testStatus(Property::PropReadOnly);
+    if (output && readOnly) {
+        return true;
+    }
+    // Looked up until Part is loaded (a bad type: no shape is then a result)
+    static Base::Type partShape;
+    static Base::Type plainPartFeature;
+    if (partShape.isBad()) {
+        partShape = Base::Type::fromName("Part::PropertyPartShape");
+        plainPartFeature = Base::Type::fromName("Part::Feature");
+    }
+    return !partShape.isBad() && prop.getTypeId().isDerivedFrom(partShape)
+        && (!pcObj || pcObj->getTypeId() != plainPartFeature);
+}
+
+// Geometry data that is an input (a mesh, points, a plain Part::Feature's shape) is not compared:
+// its Save() text names a file, and isSame() would call two meshes of equal size the same
+bool isComparable(const Property& prop)
+{
+    return !prop.isDerivedFrom<PropertyComplexGeoData>();
+}
+
+// Whether the live property holds the value its transaction copy recorded. The copy isn't
+// always of the live property's type (PropertyFloat::Copy() makes a PropertyFloat of a
+// PropertyLength, and isSame() checks the type), so a copy of the live property is compared with
+// it: both come from the same Copy(). A link recorded is a change (as PropertyLinkBase::isSame()
+// answers for every link): what it names doesn't hold all it saves (the naming solver's records
+// of a reference: a guess accepted changes no name, TestNamingSolver), and an expression
+// container's links don't tell two expressions on one object apart, while a
+// rename of what they name rewrites them in place before the record (VarSet's renameProperty in
+// another document), so the step that clears the stale Redo stack stays
+bool holdsRecorded(const Property& live, const Property& recorded)
+{
+    if (live.isDerivedFrom<PropertyLinkBase>()) {
+        return false;
+    }
+    std::unique_ptr<Property> now(live.Copy());
+    if (!now || now->getTypeId() != recorded.getTypeId()) {
+        return false;
+    }
+    return now->isSame(recorded);
+}
+}  // namespace
+
+bool TransactionObject::changesInputs(const TransactionalObject* pcObj, InputCheck check) const
+{
+    if (status != Chn || !_DocOrGroupMap.empty()) {
+        return true;  // added or removed, or a documentation or group changed
+    }
+    for (const auto& [key, data] : _PropChangeMap) {
+        (void)key;
+        if (data.target || !data.nameOrig.empty() || data.added) {
+            return true;  // moved or renamed
+        }
+        if (!data.property) {
+            if (data.propertyOrig) {
+                return true;  // added in the transaction
+            }
+            continue;
+        }
+        if (!data.propertyOrig) {
+            return true;
+        }
+        // getPropertyName() is safe with a destroyed property (TransactionObject::applyChnPass)
+        const char* name = pcObj->getPropertyName(data.propertyOrig);
+        if (!name || data.propertyOrig->getTypeId() != data.propertyType
+            || (!data.name.empty() && data.name != name)) {
+            return true;  // removed (or re-created under its name)
+        }
+        if (isResult(pcObj, *data.property)) {
+            continue;
+        }
+        if (check == InputCheck::Recorded) {
+            return true;  // an input property recorded
+        }
+        if (check == InputCheck::Structure) {
+            continue;  // a value change: the Values check
+        }
+        if (!isComparable(*data.property)) {
+            return true;
+        }
+        try {
+            if (!holdsRecorded(*data.propertyOrig, *data.property)) {
+                return true;
+            }
+        }
+        catch (...) {
+            return true;
+        }
+    }
+    return false;
 }
 
 unsigned int TransactionObject::getMemSize() const

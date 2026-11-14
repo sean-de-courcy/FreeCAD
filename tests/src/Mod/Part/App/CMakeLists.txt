@@ -4,6 +4,7 @@ add_executable(Part_tests_run
         Attacher.cpp
         AttachExtension.cpp
         BRepMesh.cpp
+        ChamferChain.cpp
         FaceMakerBullseye.cpp
         FaceMakerUnified.cpp
         FeatureChamfer.cpp
@@ -27,6 +28,7 @@ add_executable(Part_tests_run
         PartTestHelpers.cpp
         PreviewExtension.cpp
         PropertyTopoShape.cpp
+        RollingBallBlend.cpp
         TopoDS_Shape.cpp
         TopoShape.cpp
         TopoShapeCache.cpp

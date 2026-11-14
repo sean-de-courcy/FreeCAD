@@ -334,13 +334,13 @@ class TaskAssemblyCreateBom(QtCore.QObject):
     def eventFilter(self, watched, event):
         if self.form is not None and watched == self.form.columnList:
             if event.type() == QtCore.QEvent.ShortcutOverride:
-                if event.key() == QtCore.Qt.Key_Delete:
+                if UtilsAssembly.isDeleteKey(event):  # Backspace too on the Mac
                     event.accept()  # Accept the event only if the key is Delete
                     return True  # Indicate that the event has been handled
                 return False
 
             elif event.type() == QtCore.QEvent.KeyPress:
-                if event.key() == QtCore.Qt.Key_Delete:
+                if UtilsAssembly.isDeleteKey(event):  # Backspace too on the Mac
                     selected_indexes = self.form.columnList.selectedIndexes()
                     items_to_remove = []
 

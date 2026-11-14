@@ -47,6 +47,13 @@ DlgSettingsDocumentImp::DlgSettingsDocumentImp(QWidget* parent)
 
     ui->prefSaveTransaction->hide();
     ui->prefDiscardTransaction->hide();
+    // FreeCAD-CH (ops#640, regen-design section 5, F5): one regeneration at a time, on the GUI
+    // thread; the async worker stays reachable only through the parameter (Mod/Test/GuiDocument.py
+    // sets it), so the page neither shows nor writes it
+    ui->prefEnableAsyncRecompute->hide();
+    // FreeCAD-CH (ops#640, slice A1): every save writes its author, so "Set on save" is gone; the
+    // author field's tooltip says what a save writes
+    ui->prefSetAuthorOnSave->hide();
 
     QString tip = QStringLiteral(
                       "<html><head/><body><p>%1</p>"
@@ -151,13 +158,11 @@ void DlgSettingsDocumentImp::saveSettings()
     ui->prefLicenseType->onSave();
     ui->prefLicenseUrl->onSave();
     ui->prefAuthor->onSave();
-    ui->prefSetAuthorOnSave->onSave();
     ui->prefCompany->onSave();
     ui->prefRecovery->onSave();
     ui->prefAutoSaveEnabled->onSave();
     ui->prefAutoSaveTimeout->onSave();
     ui->prefCanAbortRecompute->onSave();
-    ui->prefEnableAsyncRecompute->onSave();
 
     int timeout = ui->prefAutoSaveTimeout->value();
     if (!ui->prefAutoSaveEnabled->isChecked()) {
@@ -187,13 +192,11 @@ void DlgSettingsDocumentImp::loadSettings()
     ui->prefLicenseType->onRestore();
     ui->prefLicenseUrl->onRestore();
     ui->prefAuthor->onRestore();
-    ui->prefSetAuthorOnSave->onRestore();
     ui->prefCompany->onRestore();
     ui->prefRecovery->onRestore();
     ui->prefAutoSaveEnabled->onRestore();
     ui->prefAutoSaveTimeout->onRestore();
     ui->prefCanAbortRecompute->onRestore();
-    ui->prefEnableAsyncRecompute->onRestore();
 }
 
 /**

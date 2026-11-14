@@ -41,12 +41,33 @@ from SketcherTests.TestSketchMissingExternal import (
     TestSketchFaceLinkPairingNoSolver,
     TestSketchFaceLinkPairing4m,
 )
+from SketcherTests.TestSketchD4Solve import TestSketchDatumAtScale, TestSketchAngleCycle  # ops#656 D4
 from SketcherTests.TestSketchExternalTypes import TestSketchExternalTypes
+from SketcherTests.TestSketchExternalTypes import TestSketchImplicitExternals  # ops#634
 from SketcherTests.TestSketchCarbonCopyElements import TestSketchCarbonCopyElements
 from SketcherTests.TestSketchCarbonCopyElements import TestCarbonCopySelfReference
 from SketcherTests.TestSketchCarbonCopyElements import TestCarbonCopyFlipped
 from SketcherTests.TestSketchCarbonCopyElements import TestCarbonCopyFlippedInAMovedSketch
 from SketcherTests.TestSketchCarbonCopyElements import TestCarbonCopyFlippedInATiltedSketch
+from SketcherTests.TestSketchCornerSteps import TestSketchCornerSteps  # FreeCAD-CH, ops#640
+from SketcherTests.TestSketchTrimSplit import TestSketchTrimSplit  # FreeCAD-CH, ops#656
+from SketcherTests.TestSketchTrimSplitAttacks import TestSketchTrimSplitAttacks  # FreeCAD-CH, ops#656
+from SketcherTests.TestSketchDxf import TestDxfReader, TestDxfFitting, TestDxfExport  # FreeCAD-CH, DXF lane
+from SketcherTests.TestSketchDxf import TestDxfSkepticCases, TestDxfReviewCases  # FreeCAD-CH, DXF lane
+from SketcherTests.TestSketchTrimSplit import TestSketchRepeatedConstraints  # FreeCAD-CH, ops#656
+from SketcherTests.TestSketchTrimSplit import TestSketchArcMidpoint  # FreeCAD-CH, ops#656
+from SketcherTests.TestSketchPierce import TestSketchPierce  # FreeCAD-CH, Onshape's Pierce
+from SketcherTests.TestSketchExtend import (  # FreeCAD-CH, Onshape's Extend, Trim, Mirror
+    TestSketchExtend,
+    TestSketchTrimBounds,
+    TestSketchMirrorLinked,
+)
+from SketcherTests.TestSketchConflicts import TestSketchConflicts  # FreeCAD-CH, ops#640
+from SketcherTests.TestSketchLadder import TestSketchLadder  # FreeCAD-CH, ops#656 D4 row 1
+from SketcherTests.TestSketchPattern import (  # FreeCAD-CH, Onshape's sketch patterns
+    TestSketchCircularPattern,
+    TestSketchLinearPattern,
+)
 
 # Path and PartDesign tests use these functions that used to live here
 # but moved to SketcherTests/TestSketcherSolver.py

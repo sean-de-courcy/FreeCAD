@@ -950,9 +950,14 @@ def pickedWrongSet(stored, verdict, rows):
     (a guess rule's, a continuation, or a geometry tier's: tier2, tier3, index), is
     `guessed-wrong` whatever the consumer computes (fork PR 256 verification, M1). Only kinds in
     GUESS_KINDS make a right pick `guessed`: a geometry pick among an expected break's candidates
-    stays partial. A guess the policy rejected picked nothing."""
+    stays partial. A guess the policy rejected picked nothing. Nor is the silent `equivalent`
+    record a pick (SW20, naming-design.md's amendment): it marks an attachment the solver resolved
+    to one of a split face's pieces that all give the consumer one result, so that it can return
+    to the whole face, and holds the same piece it would hold without the record; it is scored
+    by geometry like any resolution (`equivalent` when the piece isn't the expected one)."""
     picks = [e for e in rows
-             if e.get("guess_kind") not in (None, "", "rejected") and e.get("status") != "broken"]
+             if e.get("guess_kind") not in (None, "", "rejected", "equivalent")
+             and e.get("status") != "broken"]
     if stored == "wrong" and picks and verdict not in ("wrong", "guessed-wrong"):
         return "guessed-wrong"
     return verdict

@@ -23,6 +23,8 @@
  ****************************************************************************/
 
 
+#include <algorithm>
+
 #include <Base/Interpreter.h>
 
 #include "AutoTransaction.h"
@@ -208,17 +210,36 @@ bool Application::closeActiveTransaction(TransactionCloseMode mode, int id)
         _globalTransactionID = 0;
     }
 
-    TransactionSignaller signaller(abort, false);
+    {
+        TransactionSignaller signaller(abort, false);
 
-    for (auto& doc : docsToPoke) {
-        if (abort) {
-            doc->_abortTransaction();
+        for (auto& doc : docsToPoke) {
+            if (abort) {
+                doc->_abortTransaction();
+            }
+            else {
+                doc->_commitTransaction();
+            }
         }
-        else {
-            doc->_commitTransaction();
+        currentlyClosingID = 0;
+    }
+
+    // FreeCAD-CH (ops#640): the closed step regenerates (Onshape regenerates the Part Studio on
+    // every edit), after currentlyClosingID is cleared (a commit during the regeneration isn't
+    // dropped) and the close is signalled; an abort too, since it restores values and leaves them
+    // touched. Not inside another close (a document's implicit commit, whose own document isn't
+    // poked here). Synchronous; the regeneration opens no transaction (nothing is booked, and
+    // the global one went above), so the Redo stack stays.
+    if (!TransactionSignaller::isActive()) {
+        for (auto doc : docsToPoke) {
+            bool alive = std::any_of(DocMap.begin(), DocMap.end(), [doc](const auto& entry) {
+                return entry.second == doc;
+            });
+            if (alive) {
+                doc->regenerateAfterTransaction();
+            }
         }
     }
-    currentlyClosingID = 0;
 
     return true;
 }

@@ -15,11 +15,61 @@
   </property>
   <layout class="QVBoxLayout" name="verticalLayout">
    <item>
+    <layout class="QHBoxLayout" name="typeLayout">
+     <item>
+      <widget class="QPushButton" name="buttonUnion">
+       <property name="text">
+        <string>Union</string>
+       </property>
+       <property name="checkable">
+        <bool>true</bool>
+       </property>
+       <property name="autoExclusive">
+        <bool>true</bool>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QPushButton" name="buttonSubtract">
+       <property name="text">
+        <string>Subtract</string>
+       </property>
+       <property name="checkable">
+        <bool>true</bool>
+       </property>
+       <property name="autoExclusive">
+        <bool>true</bool>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QPushButton" name="buttonIntersect">
+       <property name="text">
+        <string>Intersect</string>
+       </property>
+       <property name="checkable">
+        <bool>true</bool>
+       </property>
+       <property name="autoExclusive">
+        <bool>true</bool>
+       </property>
+      </widget>
+     </item>
+    </layout>
+   </item>
+   <item>
+    <widget class="QLabel" name="labelTools">
+     <property name="text">
+      <string>Tools</string>
+     </property>
+    </widget>
+   </item>
+   <item>
     <layout class="QHBoxLayout" name="horizontalLayout">
      <item>
       <widget class="QToolButton" name="buttonBodyAdd">
        <property name="text">
-        <string>Add Body</string>
+        <string>Add part</string>
        </property>
        <property name="checkable">
         <bool>true</bool>
@@ -29,7 +79,7 @@
      <item>
       <widget class="QToolButton" name="buttonBodyRemove">
        <property name="text">
-        <string>Remove Body</string>
+        <string>Remove part</string>
        </property>
        <property name="checkable">
         <bool>true</bool>
@@ -42,31 +92,57 @@
     <widget class="QListWidget" name="listWidgetBodies"/>
    </item>
    <item>
-    <widget class="QComboBox" name="comboType">
-     <item>
-      <property name="text">
-       <string>Fuse</string>
-      </property>
-     </item>
-     <item>
-      <property name="text">
-       <string>Cut</string>
-      </property>
-     </item>
-     <item>
-      <property name="text">
-       <string>Common</string>
-      </property>
-     </item>
+    <widget class="QLabel" name="labelTargets">
+     <property name="text">
+      <string>Targets</string>
+     </property>
+    </widget>
+   </item>
+   <item>
+    <widget class="QLineEdit" name="targetsField">
+     <property name="readOnly">
+      <bool>true</bool>
+     </property>
+     <property name="toolTip">
+      <string>The part the tools are subtracted from: the part this Boolean is in</string>
+     </property>
+    </widget>
+   </item>
+   <item>
+    <widget class="QCheckBox" name="checkOffset">
+     <property name="enabled">
+      <bool>false</bool>
+     </property>
+     <property name="toolTip">
+      <string>Offset is not available yet</string>
+     </property>
+     <property name="text">
+      <string>Offset</string>
+     </property>
+    </widget>
+   </item>
+   <item>
+    <widget class="QCheckBox" name="checkKeepTools">
+     <property name="toolTip">
+      <string>Keep the tool parts; off, the Boolean consumes them</string>
+     </property>
+     <property name="text">
+      <string>Keep tools</string>
+     </property>
     </widget>
    </item>
   </layout>
  </widget>
  <tabstops>
+  <tabstop>buttonUnion</tabstop>
+  <tabstop>buttonSubtract</tabstop>
+  <tabstop>buttonIntersect</tabstop>
   <tabstop>buttonBodyAdd</tabstop>
   <tabstop>buttonBodyRemove</tabstop>
   <tabstop>listWidgetBodies</tabstop>
-  <tabstop>comboType</tabstop>
+  <tabstop>targetsField</tabstop>
+  <tabstop>checkOffset</tabstop>
+  <tabstop>checkKeepTools</tabstop>
  </tabstops>
  <resources/>
  <connections/>

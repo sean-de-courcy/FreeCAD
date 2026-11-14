@@ -1,0 +1,20 @@
+# TestThickenObliqueLeg (fix/thicken-horn-torus) fails on Windows at its fixture: bore() gives 3 non-plane
+# faces where Linux gives 4 (the bend is not split in two). With the count relaxed, the leg's direct piece
+# misses its Steiner volume by 5 % there, on 68309c2092 as on 44ab785de0 (the same numbers to 1e-13).
+# Linux passes all five. Never run by CI before (the class was not registered). Remove this file when
+# ops#753 makes the fixture and the piece hold on Windows.
+
+issue: ops#753
+
+reason: the oblique-leg fixture gives 3 bore faces for 4 on Windows ("3 != 4"), on the base branch too
+cli  PartDesignTests.TestSolidOps.TestThickenObliqueLeg.testARightOffsetIsKept                 windows
+cli  PartDesignTests.TestSolidOps.TestThickenObliqueLeg.testAWrongOffsetIsRebuilt              windows
+cli  PartDesignTests.TestSolidOps.TestThickenObliqueLeg.testAWrongPieceThatCantBeRebuiltFails  windows
+cli  PartDesignTests.TestSolidOps.TestThickenObliqueLeg.testDirectPieceIsExact                 windows
+cli  PartDesignTests.TestSolidOps.TestThickenObliqueLeg.testHornBendWithAVShapedLegEnd         windows
+
+# TestThickenSeamLeg's trigger test asserts that OCC's offset of the seam leg (0.75, 0.75) is invalid. On macOS's
+# OCC (feat/patterns-finish 0b9bf5a852, 11-14) it is valid, one solid of 6 faces, volume 1884.955594 for the exact
+# 1884.955592: the guards it keeps visible are moot there, the other seven tests of the class pass. Host-dependent OCC.
+reason: macOS's OCC builds the seam leg's offset right, so the "OCC gets it wrong" trigger fails ("True is not false")
+cli  PartDesignTests.TestSolidOps.TestThickenSeamLeg.testOffsetOfTheSeamLegIsInvalid           macos

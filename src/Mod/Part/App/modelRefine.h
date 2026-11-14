@@ -248,9 +248,16 @@ public:
 #endif
     const TopTools_ListOfShape& Modified(const TopoDS_Shape& S) override;
     Standard_Boolean IsDeleted(const TopoDS_Shape& S) override;
+    // A compound's shells whose face uniter failed are kept as they were, so the compound
+    // refines in part; this says whether any was (rehearsal 5, rb43)
+    bool skippedShells() const
+    {
+        return mySkippedShells;
+    }
 
 private:
     void LogModifications(const ModelRefine::FaceUniter& uniter);
+    bool mySkippedShells = false;
 
 protected:
     TopTools_DataMapOfShapeListOfShape myModified;

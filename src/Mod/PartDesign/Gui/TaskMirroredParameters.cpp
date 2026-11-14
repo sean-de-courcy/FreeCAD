@@ -36,6 +36,7 @@
 #include <Gui/Selection/Selection.h>
 #include <Gui/ViewProviderCoordinateSystem.h>
 #include <Mod/PartDesign/App/Body.h>
+#include <Mod/Part/App/Part2DObject.h>
 #include <Mod/PartDesign/App/FeatureMirrored.h>
 
 #include "ui_TaskMirroredParameters.h"
@@ -96,6 +97,9 @@ void TaskMirroredParameters::setupParameterUI(QWidget* widget)
             auto vpOrigin = static_cast<ViewProviderCoordinateSystem*>(
                 Gui::Application::Instance->getViewProvider(origin)
             );
+            // FreeCAD-CH (ops#640, rank 52): a new part studio's planes are shown through the same
+            // temporary visibility; they are shown again when the dialog closes
+            setProperty("studioPlanes", vpOrigin->isTemporaryVisibility());
             vpOrigin->setTemporaryVisibility(Gui::DatumElement::Planes);
         }
         catch (const Base::Exception& ex) {
@@ -147,6 +151,11 @@ void TaskMirroredParameters::onSelectionChanged(const Gui::SelectionChanges& msg
     getReferencedSelection(pcMirrored, msg, selObj, mirrorPlanes);
     if (!selObj) {
         return;
+    }
+    // A sketch region (InternalFaceN, which the gate takes) is the sketch's plane: the sketch
+    // without a sub, its normal (selection parity SQ16, as Onshape's Mirror plane takes a region)
+    if (selObj->isDerivedFrom<Part::Part2DObject>()) {
+        mirrorPlanes = {std::string()};
     }
 
     if (selectionMode == SelectionMode::Reference || selObj->isDerivedFrom<App::Plane>()) {
@@ -260,6 +269,11 @@ TaskMirroredParameters::~TaskMirroredParameters()
                 Gui::Application::Instance->getViewProvider(origin)
             );
             vpOrigin->resetTemporaryVisibility();
+            // The studio's planes stay (ops#640, rank 52)
+            if (property("studioPlanes").toBool()) {
+                vpOrigin->setTemporaryVisibility(Gui::DatumElement::Planes);
+                vpOrigin->setPlaneLabelVisibility(true);
+            }
         }
     }
     catch (const Base::Exception& ex) {

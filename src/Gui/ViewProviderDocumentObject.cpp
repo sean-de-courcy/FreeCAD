@@ -30,6 +30,7 @@
 #include <Inventor/details/SoDetail.h>
 #include <Inventor/misc/SoChildList.h>
 #include <Inventor/nodes/SoSeparator.h>
+#include <Inventor/nodes/SoSwitch.h>
 
 
 #include <App/Document.h>
@@ -53,6 +54,38 @@
 FC_LOG_LEVEL_INIT("Gui", true, true)
 
 using namespace Gui;
+
+namespace
+{
+
+/** FreeCAD-CH (ops#654 P3a): a 3D child shown outside its parent's mode switch, so while the
+ * parent is hidden: the active switch among root's children (other than modeSwitch) whose active
+ * child is a group holding childRoot, and that group; nulls when there is none. PartDesign's Body
+ * in a part studio shows its sketches and datums so, as Onshape's sketches and planes belong to
+ * the studio and stay shown when their part is hidden (ViewProviderBody.cpp, updateStudioShown)
+ */
+std::pair<SoSwitch*, SoGroup*> shownOutsideSwitch(SoGroup* root, const SoNode* modeSwitch, const SoNode* childRoot)
+{
+    for (int i = 0, count = root ? root->getNumChildren() : 0; i < count; ++i) {
+        SoNode* node = root->getChild(i);
+        if (node == modeSwitch || !node->isOfType(SoSwitch::getClassTypeId())) {
+            continue;
+        }
+        auto shown = static_cast<SoSwitch*>(node);
+        int which = shown->whichChild.getValue();
+        if (which < 0 || which >= shown->getNumChildren()) {
+            continue;
+        }
+        SoNode* active = shown->getChild(which);
+        if (active->isOfType(SoGroup::getClassTypeId())
+            && static_cast<SoGroup*>(active)->findChild(childRoot) >= 0) {
+            return {shown, static_cast<SoGroup*>(active)};
+        }
+    }
+    return {nullptr, nullptr};
+}
+
+}  // namespace
 
 
 PROPERTY_SOURCE(Gui::ViewProviderDocumentObject, Gui::ViewProvider)
@@ -289,6 +322,11 @@ void ViewProviderDocumentObject::startDefaultEditMode()
 {
     Gui::Document* document = this->getDocument();
     if (document) {
+        // FreeCAD-CH (ops#640): beside another feature's open dialog, accept it first; when
+        // it stays, edit nothing (the status message says why)
+        if (!document->acceptOpenStep()) {
+            return;
+        }
         QString text = QObject::tr("Edit %1").arg(QString::fromUtf8(getObject()->Label.getValue()));
         document->openCommand(text.toUtf8());  // Command is opened here and individual dialogs have
                                                // to close it
@@ -727,18 +765,37 @@ bool ViewProviderDocumentObject::getElementPicked(const SoPickedPoint* pp, std::
     }
 
     auto childRoot = getChildRoot();
+    SoPath* path = pp ? pp->getPath() : nullptr;
     int idx;
+    ViewProviderDocumentObject* vp = nullptr;
     if (!childRoot || (idx = pcModeSwitch->whichChild.getValue()) < 0
         || pcModeSwitch->getChild(idx) != childRoot) {
-        return ViewProvider::getElementPicked(pp, subname);
+        // FreeCAD-CH (ops#654 P3a): or a 3D child shown outside the mode switch, the path going
+        // root, switch, group, child (shownOutsideSwitch)
+        int at = childRoot && path ? path->findNode(pcRoot) : -1;
+        if (at >= 0 && at + 3 < path->getLength()) {
+            SoNode* node = path->getNode(at + 3);
+            auto shown = shownOutsideSwitch(pcRoot, pcModeSwitch, node);
+            if (shown.first && shown.first == path->getNode(at + 1)
+                && shown.second == path->getNode(at + 2)) {
+                vp = getDocument()->getViewProvider(node);
+                auto children = vp ? claimChildren3D() : std::vector<App::DocumentObject*>();
+                if (vp && std::ranges::find(children, vp->getObject()) == children.end()) {
+                    vp = nullptr;
+                }
+            }
+        }
+        if (!vp) {
+            return ViewProvider::getElementPicked(pp, subname);
+        }
     }
-
-    SoPath* path = pp->getPath();
-    idx = path->findNode(childRoot);
-    if (idx < 0 || idx + 1 >= path->getLength()) {
-        return false;
+    else {
+        idx = path ? path->findNode(childRoot) : -1;
+        if (idx < 0 || idx + 1 >= path->getLength()) {
+            return false;
+        }
+        vp = getDocument()->getViewProvider(path->getNode(idx + 1));
     }
-    auto vp = getDocument()->getViewProvider(path->getNode(idx + 1));
     if (!vp) {
         return false;
     }
@@ -800,10 +857,25 @@ bool ViewProviderDocumentObject::getDetailPath(
     }
     else {
         auto idx = pcModeSwitch->whichChild.getValue();
-        if (idx < 0 || pcModeSwitch->getChild(idx) != childRoot) {
-            return false;
+        if (idx >= 0 && pcModeSwitch->getChild(idx) == childRoot) {
+            path->append(childRoot);
         }
-        path->append(childRoot);
+        else {
+            // FreeCAD-CH (ops#654 P3a): or a 3D child shown outside the mode switch: the path
+            // goes root, switch, group (shownOutsideSwitch) in place of root, mode switch
+            auto shown = shownOutsideSwitch(pcRoot, pcModeSwitch, vp->getRoot());
+            if (!shown.first) {
+                return false;
+            }
+            if (path->getLength() && path->getTail() == pcModeSwitch) {
+                path->truncate(path->getLength() - 1);
+            }
+            if (!path->getLength() || path->getTail() != pcRoot) {
+                return false;
+            }
+            path->append(shown.first);
+            path->append(shown.second);
+        }
     }
     bool ret = false;
     if (path->getLength()) {

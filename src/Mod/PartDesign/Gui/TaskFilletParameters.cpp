@@ -64,6 +64,7 @@ TaskFilletParameters::TaskFilletParameters(ViewProviderDressUp* DressUpView, QWi
     bool useAllEdges = pcFillet->UseAllEdges.getValue();
     ui->checkBoxUseAllEdges->setChecked(useAllEdges);
     baseField->setEnabled(!useAllEdges);
+    ui->checkBoxTangentPropagation->setChecked(pcFillet->TangentPropagation.getValue());
     double r = pcFillet->Radius.getValue();
 
     ui->filletRadius->setUnit(Base::Unit::Length);
@@ -71,8 +72,10 @@ TaskFilletParameters::TaskFilletParameters(ViewProviderDressUp* DressUpView, QWi
     ui->filletRadius->setMinimum(0);
     ui->filletRadius->selectNumber();
     ui->filletRadius->bind(pcFillet->Radius);
-    // A new fillet's edges field takes the focus when the dialog opens (Q2)
-    if (!pcFillet->Base.getSubValues().empty()) {
+    // A new fillet's edges field takes the focus when the dialog opens (Q2), and keeps it
+    // after its first pick placed it (ops#640 rank 14) and in an edit (round 8); the radius
+    // takes it while the field is off (Use all edges)
+    if ((!pcFillet->Base.getSubValues().empty() && !armsBaseOnOpen()) || useAllEdges) {
         QMetaObject::invokeMethod(ui->filletRadius, "setFocus", Qt::QueuedConnection);
     }
 
@@ -83,6 +86,8 @@ TaskFilletParameters::TaskFilletParameters(ViewProviderDressUp* DressUpView, QWi
         this, &TaskFilletParameters::onLengthChanged);
     connect(ui->checkBoxUseAllEdges, &QToolButton::toggled,
         this, &TaskFilletParameters::onCheckBoxUseAllEdgesToggled);
+    connect(ui->checkBoxTangentPropagation, &QCheckBox::toggled,
+        this, &TaskFilletParameters::onTangentPropagationToggled);
     // clang-format on
 
     createAddAllEdgesAction();
@@ -122,6 +127,18 @@ void TaskFilletParameters::onCheckBoxUseAllEdgesToggled(bool checked)
 void TaskFilletParameters::onBaseChanged()
 {
     setGizmoPositions();
+}
+
+void TaskFilletParameters::onTangentPropagationToggled(bool checked)
+{
+    if (auto fillet = getObject<PartDesign::Fillet>()) {
+        disarmFields();
+        setupTransaction();
+        fillet->TangentPropagation.setValue(checked);
+        fillet->recomputeFeature();
+        // hide the fillet if there was a computation error
+        hideOnError();
+    }
 }
 
 void TaskFilletParameters::onLengthChanged(double len)
