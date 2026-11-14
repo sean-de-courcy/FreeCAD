@@ -229,3 +229,4 @@ from PartDesignTests.TestConfigurations import TestConfigurations  # ops#671
 from PartDesignTests.Compat.TestCompatCorpus import TestCompatCorpus
 from PartDesignTests.Compat.TestCompatRecord import TestCompatRecord  # ops#343
 from PartDesignTests.Compat.TestCompatRecord import TestCompatDeltas, TestCompatNamesMeasure  # ops#640
+from PartDesignTests.Compat.TestCompatRecord import TestCompatReopenBoxGap  # ops#785

@@ -144,9 +144,48 @@ def unexpectedDeltas(name, stem, record, changes):
                 for prop in value:
                     if (kind, "props", prop) not in OPENED_DELTA_ALLOWED:
                         lines.append(f"{stem}#{obj}.{prop} ({kind}) differs at the reopen")
+            elif field == "shape" and optimalBoxGapOnly(record["objects"][obj].get("shape"), value):
+                continue
             elif (kind, field) not in OPENED_DELTA_ALLOWED:
                 lines.append(f"{stem}#{obj}.{field} ({kind}) differs at the reopen")
     return lines
+
+
+# OCCT's optimal bounding box (`optimalBoundingBox(False, False)`, CompatRecord's `box`) of a
+# curved face is not exact: on a side no edge bounds, it lands up to the shape's tolerance
+# (Precision::Confusion, 1e-7 mm) beyond the surface, and which sides do depends on how the same
+# shape is held (its location, whether it was read back from the file). ops#785: Windows'
+# RevolveFreeFormProfile, whose torus face's box is x [-7.0000001, 7] live and [-7.0000001,
+# 7.0000001] reopened, with volume, area, centre and counts equal. So a reopened shape that
+# differs from the saved one in its box alone, by no more than this, is the same shape.
+OPTIMAL_BOX_GAP = 2e-7  # mm: the 1e-7 of a face's tolerance, with room for rounding
+
+
+def _sameValue(a, b):
+    """Plain record values equal, floats at the tight "open" tolerance (CompatRecord.TOLERANCE)."""
+    rel, floor = CompatRecord.TOLERANCE["open"]
+    if isinstance(a, bool) or isinstance(b, bool):
+        return a == b
+    if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+        return abs(a - b) <= max(floor, rel * max(abs(a), abs(b)))
+    if isinstance(a, (list, tuple)) and isinstance(b, (list, tuple)):
+        return len(a) == len(b) and all(_sameValue(x, y) for x, y in zip(a, b))
+    if isinstance(a, dict) and isinstance(b, dict):
+        return a.keys() == b.keys() and all(_sameValue(a[k], b[k]) for k in a)
+    return a == b
+
+
+def optimalBoxGapOnly(saved, reopened):
+    """Whether a shape entry reopened differs from the saved one only in its box, each coordinate
+    within OPTIMAL_BOX_GAP (see there): every other field equal at the "open" tolerance."""
+    if not isinstance(saved, dict) or not isinstance(reopened, dict):
+        return False
+    if saved.keys() != reopened.keys() or "box" not in saved:
+        return False
+    if not all(_sameValue(saved[k], reopened[k]) for k in saved if k != "box"):
+        return False
+    old, new = saved["box"], reopened["box"]
+    return len(old) == len(new) == 6 and all(abs(x - y) <= OPTIMAL_BOX_GAP for x, y in zip(old, new))
 
 
 def _closeAll(docs):
