@@ -274,9 +274,29 @@ class CorpusRules(unittest.TestCase):
 
     def testAllowedAndAcceptedPerConfiguration(self):
         """R3-2 and H2: an allowed set comes from the case's ALLOWED now, not an old entry; ALLOWED
-        and ACCEPTED are keyed by reference and configuration."""
+        and ACCEPTED are keyed by reference and configuration. The rules of the Windows ledger:
+        on macOS `expected` is Windows' and a run writes only its override (ops#770), so the
+        platform is set; the macOS form is checked at the end."""
+        from unittest import mock
+
         from PartDesignTests.Scenarios import corpus
 
+        with mock.patch.object(corpus, "platform", lambda: "win32"):
+            self.allowedAndAccepted(corpus)
+        with mock.patch.object(corpus, "platform", lambda: "macos"):
+            class Case(harness.Scenario):
+                CLASSES, AXES, TIER, REFS = ("A",), ("M1",), "G", ("r",)
+                ALLOWED = {}
+
+            outcome = corpus.Outcome("broken", {"expect": "face"})
+            # macOS keeps Windows' allowed set and adds no override for a verdict inside it
+            entry = corpus.entryFor(Case, "r", "V2s", outcome, {"expected": ["correct", "broken"]})
+            self.assertEqual(entry["expected"], ["correct", "broken"])
+            self.assertNotIn("macos", entry)
+            entry = corpus.entryFor(Case, "r", "V2s", outcome, {"expected": "correct"})
+            self.assertEqual((entry["expected"], entry["macos"]), ("correct", "broken"))
+
+    def allowedAndAccepted(self, corpus):
         class Case(harness.Scenario):
             CLASSES, AXES, TIER, REFS = ("A",), ("M1",), "G", ("r",)
             ACCEPTED = {"r|V2": "decision 58"}

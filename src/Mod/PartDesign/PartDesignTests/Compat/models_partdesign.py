@@ -686,6 +686,79 @@ def IndexToldGroups(make):
     }
 
 
+def bossTops(shape, z):
+    """The (x, y) centres of the shape's 6 x 6 planar faces facing +z at height z, sorted."""
+    return sorted(
+        (round(f.CenterOfMass.x, 6), round(f.CenterOfMass.y, 6))
+        for f in shape.Faces
+        if isinstance(f.Surface, Part.Plane)
+        and abs(f.CenterOfMass.z - z) < 1e-6
+        and abs(f.Area - 36) < 1e-6
+    )
+
+
+def FacePatternCentered(make):
+    """Face patterns with Centered and a second direction (ops#655, ops#640; Onshape's rule,
+    notes/patterns-design.md section 10: Centered counts per side, the seed included, so count n
+    makes 2n - 1 instances along that direction).
+
+    Two Bodies, each a 60 x 30 x 10 plate (x -30..30, y 0..30) with a 6 x 6 boss, 5 high, at its
+    centre (x -3..3, y 12..18), patterned by its faces (the boss's top and four sides):
+    - `Row`: a face linear pattern along the X axis, spacing 15, count 2, Centered: three bosses,
+      centres x -15, 0, 15 at y 15;
+    - `Grid`: the same along X, and a second direction along the Y axis, spacing 10, count 2,
+      Centered2: a 3 x 3 grid, centres x -15, 0, 15 by y 5, 15, 25 (the bosses 4 apart in y)."""
+    doc = make("FacePatternCentered")
+    plate = 60 * 30 * 10
+    boss = 6 * 6 * 5
+    expected = {
+        "Row": [(x, 15) for x in (-15, 0, 15)],
+        "Grid": sorted((x, y) for x in (-15, 0, 15) for y in (5, 15, 25)),
+    }
+    volumes = {}
+    for name, centres in expected.items():
+        body = newBody(doc, name + "Body")
+        pad = block(body, -30, 0, 30, 30, 10, name + "Plate")
+        doc.recompute()
+        top = faceWhere(pad.Shape, planeFacing(TOP, V(0, 0, 10)))
+        seed = m.pad(
+            body,
+            attachedSketch(body, name + "BossSketch", (pad, top), m.rectangle(-3, 12, 3, 18)),
+            5,
+            name + "Boss",
+        )
+        doc.recompute()
+        picks = [
+            f"Face{i + 1}"
+            for i, f in enumerate(seed.Shape.Faces)
+            if -3 - 1e-6 <= f.CenterOfMass.x <= 3 + 1e-6
+            and 12 - 1e-6 <= f.CenterOfMass.y <= 18 + 1e-6
+            and 10 + 1e-3 <= f.CenterOfMass.z <= 15 + 1e-6
+        ]
+        if len(picks) != 5:
+            raise AssertionError(f"{name}: {len(picks)} boss faces, expected 5")
+        pattern = body.newObject("PartDesign::FaceLinearPattern", name)
+        pattern.Base = (seed, picks)
+        pattern.Direction = (plane(body, "X_Axis"), [""])
+        pattern.Mode = "Spacing"
+        pattern.Offset = 15
+        pattern.Occurrences = 2
+        pattern.Centered = True
+        if name == "Grid":
+            pattern.Direction2 = (plane(body, "Y_Axis"), [""])
+            pattern.Mode2 = "Spacing"
+            pattern.Offset2 = 10
+            pattern.Occurrences2 = 2
+            pattern.Centered2 = True
+        body.Tip = pattern
+        doc.recompute()
+        found = bossTops(pattern.Shape, 15)
+        if found != sorted(centres):
+            raise AssertionError(f"{name}: boss tops at {found}, expected {sorted(centres)}")
+        volumes[name] = plate + len(centres) * boss
+    return {"volumes": volumes}
+
+
 MODELS = [
     RevolutionGroove,
     SidedVariants,
@@ -699,4 +772,5 @@ MODELS = [
     BodyFromFeature,
     Binders,
     IndexToldGroups,
+    FacePatternCentered,
 ]
