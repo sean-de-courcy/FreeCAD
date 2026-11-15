@@ -52,6 +52,15 @@ PartDesignExport bool isDressUpFailure(const std::string& what);
 // FeatureDressUp.cpp (FreeCAD-CH ops#654 T3; declared where used)
 PartDesignExport bool dressUpReapplying(Part::TopoShape& base, std::vector<Part::TopoShape>& edges);
 PartDesignExport void dressUpReapplied(const Part::TopoShape& result);
+// ops#796 (FeatureDressUp.cpp): a studio step takes what its owner's try built
+PartDesignExport void dressUpReappliedFrom(const Part::TopoShape& raw,
+                                           const Part::TopoShape& result,
+                                           bool plain);
+PartDesignExport bool studioDressUpTake(const DressUp* step,
+                                        const Part::TopoShape& base,
+                                        const std::vector<Part::TopoShape>& edges,
+                                        Part::TopoShape& raw,
+                                        Part::TopoShape& refined);
 // FeatureDressUp.cpp (FreeCAD-CH ops#654 P8a; declared where used)
 PartDesignExport App::DocumentObjectExecReturn* studioDressUpOwnerRun(DressUp* owner);
 PartDesignExport bool studioDressUpStepPassesThrough(DressUp* step);
@@ -167,6 +176,19 @@ App::DocumentObjectExecReturn* Fillet::build()
     if (!reapplying) {
         this->positionByBaseFeature();
     }
+    // ops#796: a studio step's owner built it already, on this base and these edges
+    if (Part::TopoShape raw, refined;
+        !reapplying && StudioOwner.getValue() && studioDressUpTake(this, baseShape, edges, raw, refined)) {
+        this->rawShape = raw;
+        if (!isSingleSolidRuleSatisfied(refined.getShape())) {
+            return new App::DocumentObjectExecReturn(QT_TRANSLATE_NOOP(
+                "Exception",
+                "Result has multiple solids: enable 'Allow Compound' in the active body."
+            ));
+        }
+        this->Shape.setValue(getSolid(refined));
+        return App::DocumentObject::StdReturn;
+    }
 
     try {
         TopoShape shape = makeTopoShape();
@@ -262,7 +284,7 @@ App::DocumentObjectExecReturn* Fillet::build()
         }
         // store shape before refinement
         if (reapplying) {
-            dressUpReapplied(refineShapeIfActive(shape));
+            dressUpReappliedFrom(shape, refineShapeIfActive(shape), !recorder.built());
             return App::DocumentObject::StdReturn;
         }
         this->rawShape = shape;
