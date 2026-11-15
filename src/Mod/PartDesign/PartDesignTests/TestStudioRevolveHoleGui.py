@@ -161,6 +161,84 @@ class TestStudioRevolveHoleGui(StudioDialog, unittest.TestCase):
         self.assertAlmostEqual(self.volume("A"), QA - math.pi * 80 * 3 / 4, places=3)
         self.assertAlmostEqual(self.volume("B"), QA, places=4)
 
+    def testNewSketchOnAFaceAfterReopenTakesTheFacesPart(self):
+        """ops#793: the two-box studio saved, closed and reopened (no part is active then). A's
+        top face selected, New Sketch: the sketch goes in A with no "Active Body Required"
+        question (Onshape asks nothing: a sketch on a face is the face's part's), and a Pocket of
+        a 4 x 4 square on it, 3 deep, cuts A: A = QA - 48 (the walk found the question, and the
+        pocket after answering it failed "No merge scope selected")."""
+        import os
+        import tempfile
+
+        from PySide import QtCore
+
+        path = os.path.join(tempfile.mkdtemp(prefix="i793"), "two.FCStd")
+        self.doc.saveAs(path)
+        App.closeDocument(self.doc.Name)
+        pump(0.3)
+        self.doc = App.openDocument(path)
+        self.studio = self.doc.getObject("S")
+        self.list = PartDesign.studioList(self.studio, True)
+        Gui.activateWorkbench("PartDesignWorkbench")
+        App.setActiveDocument(self.doc.Name)
+        Gui.setActiveDocument(self.doc.Name)
+        pump(0.5)
+        view = Gui.getDocument(self.doc.Name).ActiveView
+        self.assertIsNone(view.getActiveObject("pdbody"), "a part is active after the reopen")
+        asked = []
+
+        def watch():
+            w = QtWidgets.QApplication.activeModalWidget()
+            if w is not None:
+                asked.append(w.windowTitle() or type(w).__name__)
+                w.reject()
+
+        timer = QtCore.QTimer()
+        timer.timeout.connect(watch)
+        timer.start(100)
+        try:
+            a = self.body("A")
+            top = [i for i, f in enumerate(a.Shape.Faces, 1)
+                   if abs(f.BoundBox.ZMin - 10) < 1e-9 and abs(f.BoundBox.ZMax - 10) < 1e-9][0]
+            Gui.Selection.clearSelection()
+            Gui.Selection.addSelection(self.doc.Name, "S", "A.Face%d" % top)
+            before = set(self.objects())
+            Gui.runCommand("PartDesign_NewSketch")
+            pump(0.8)
+        finally:
+            timer.stop()
+        self.assertEqual(asked, [], "a question before the sketch")
+        sketches = [self.doc.getObject(n) for n in set(self.objects()) - before
+                    if self.doc.getObject(n).TypeId == "Sketcher::SketchObject"]
+        self.assertEqual(len(sketches), 1, "no sketch made")
+        sk = sketches[0]
+        self.assertIn(sk, a.Group, "the sketch isn't in the face's part")
+        sk.addGeometry([Part.LineSegment(p, q) for p, q in zip(
+            [V(5, 5, 0), V(9, 5, 0), V(9, 9, 0), V(5, 9, 0)],
+            [V(9, 5, 0), V(9, 9, 0), V(5, 9, 0), V(5, 5, 0)])], False)
+        Gui.ActiveDocument.resetEdit()
+        self.doc.recompute()
+        pump(0.3)
+        Gui.Selection.clearSelection()
+        Gui.Selection.addSelection(self.doc.Name, sk.Name)
+        before = set(self.objects())
+        Gui.runCommand("PartDesign_Pocket")
+        self.waitForPanel()
+        made = [self.doc.getObject(n) for n in set(self.objects()) - before
+                if self.doc.getObject(n).TypeId == "PartDesign::Pocket"
+                and not getattr(self.doc.getObject(n), "StudioOwner", None)]
+        self.assertEqual(len(made), 1, [o.Name for o in made])
+        owner = made[0]
+        length = self.visible(QtWidgets.QWidget, "lengthEdit")
+        self.assertIsNotNone(length, "no length box")
+        length.setProperty("rawValue", 3.0)
+        pump(0.3)
+        self.close(ok=True)
+        self.doc.recompute()
+        self.assertTrue(owner.isValid(), owner.getStatusString())
+        self.assertAlmostEqual(self.volume("A"), QA - 48, places=4)
+        self.assertAlmostEqual(self.volume("B"), QA, places=4)
+
     # ------------------------------------------------------- the per-Body path's freeze
     def testThroughAllInABodyWithoutBaseReturns(self):
         """The per-Body path (a studio with no list and StudioListOnFirstUse off, the test hook):
