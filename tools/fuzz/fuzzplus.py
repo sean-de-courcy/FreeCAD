@@ -10,6 +10,12 @@
 # the edited document / only in the fresh build (a template pick) / both differ);
 # BEYOND (a 1e-6 jitter of the vector changes the fresh result: a case boundary); SILENT (V or A differs, no error).
 #
+# The fresh build (FUZZ_FRESHMODE): jump (default) builds the template at its defaults, with the live document's own
+# step-0 picks, and jumps to the state in one edit and one recompute: a LOUD_FRESH is then a real path dependence (ops#843).
+# scratch builds the template at the state's values (re-picking edges there): its LOUD_FRESH is mostly pick noise.
+# Undo history is keyed by unique transaction names (App caps its stack at 20 without a GUI). Suppress steps avoid the
+# ops#592 state (a live pattern whose originals are all suppressed keeps a stale shape).
+#
 # Run: FUZZ_SEED=<n> FUZZ_STEPS=<n> [FUZZ_HEAL=1] [FUZZ_OUT=<dir>] FreeCADCmd tools/fuzz/fuzzplus.py
 #   writes <out>/<tag>.jsonl and .sum. FUZZ_STOP=<k> saves the document after step k. FUZZ_FRESH=0 skips the fresh check.
 import os, json, random, time, traceback
@@ -26,6 +32,7 @@ STOP = int(os.environ.get("FUZZ_STOP", "0"))
 TAG = os.environ.get("FUZZ_TAG", "plus%d" % SEED)
 HEAL = os.environ.get("FUZZ_HEAL") == "1"
 FRESH = os.environ.get("FUZZ_FRESH", "1") != "0"
+FRESHMODE = os.environ.get("FUZZ_FRESHMODE", "jump")   # jump | scratch (see freshBuild)
 STOPAT = set(x for x in os.environ.get("FUZZ_STOPAT", "").split(",") if x)   # e.g. SILENT,LOUD: end the seed at the first one
 SAVED = [0]
 LOG = open("%s/%s.jsonl" % (OUT, TAG), "w", buffering=1)
@@ -489,13 +496,47 @@ def jitter(state, eps, rng):
     return s
 
 
+def jumpTo(d, st, state):
+    """FUZZ_FRESHMODE=jump: from the default build (the live document's own step-0 picks), every value, variant and
+    property of state in one edit and one recompute"""
+    for n in SPECS:
+        sk = d.getObject(n)
+        pre = n + "."
+        want = {k[len(pre):]: x for k, x in state["vals"].items() if k.startswith(pre)}
+        var = state["variants"].get(n, "")
+        if var != sketchVariant(sk):
+            sk.deleteAllGeometry()
+            drawSketch(sk, want, var)
+            continue
+        cur = sketchVals(sk)
+        for k, x in want.items():
+            if k in cur and abs(cur[k] - x) > 1e-12:
+                sk.setDatum(datumKey(sk, k), App.Units.Quantity("%.12g mm" % x))
+    for k, x in state["props"].items():
+        n, key = k.split(".", 1)
+        o = d.getObject(n)
+        if o is not None:
+            setattr(o, key, x)
+    d.recompute()
+    return st.applyStructure(state)
+
+
 def freshBuild(state):
-    """the state built into a new document with no edit history: (signature, note, seconds)"""
+    """the state built into a new document with no edit history: (signature, note, seconds).
+    FUZZ_FRESHMODE=scratch builds the template at the state's values (the picks follow those values, so a pick can
+    differ from the live document's: LOUD_FRESH noise); jump (the default) builds at the defaults and jumps to the state
+    in one edit, so the picks are the live document's and any difference is the edit path's (ops#640, scout 2)"""
     t0 = time.perf_counter()
     d = App.newDocument("Fresh")
     try:
-        st = Studio(d, state).build()
-        note = st.applyStructure(state)
+        if FRESHMODE == "scratch":
+            st = Studio(d, state).build()
+            note = st.applyStructure(state)
+        else:
+            st = Studio(d).build()
+            PartDesign.studioList(d, True)
+            d.recompute()
+            note = jumpTo(d, st, state)
         return signature(d), note, time.perf_counter() - t0
     finally:
         App.closeDocument(d.Name)
@@ -590,10 +631,18 @@ def stepSuppress(doc, rng):
     feats = [o for o in body.Group if o.isDerivedFrom("PartDesign::Feature") and o.Name != "Base"]
     sup = [o for o in feats if getattr(o, "Suppressed", False)]
     # unsuppress more often when several are off, so the model stays mostly whole
-    if sup and rng.random() < min(0.8, 0.3 * len(sup)):
-        o = rng.choice(sup); on = False
+    offn = {y.Name for y in sup}
+    back = [x for x in sup if not (getattr(x, "Originals", None) and all(q.Name in offn for q in x.Originals))]   # ops#592
+    if back and rng.random() < min(0.8, 0.3 * len(sup)):
+        o = rng.choice(back); on = False
     else:
-        o = rng.choice([x for x in feats if not getattr(x, "Suppressed", False)]); on = True
+        # never leave a live pattern with all its originals suppressed: that is ops#592 (filed, deferred), whose stale
+        # shape would turn every later comparison of the seed into noise
+        def orphans(x):
+            off = {y.Name for y in sup} | {x.Name}
+            return any(not getattr(p, "Suppressed", False) and p.Name not in off and getattr(p, "Originals", None)
+                       and all(q.Name in off for q in p.Originals) for p in feats)
+        o = rng.choice([x for x in feats if not getattr(x, "Suppressed", False) and not orphans(x)]); on = True
     PartDesign.studioSuppress(o, on)
     return "%s %s" % ("suppress" if on else "unsuppress", o.Name)
 
@@ -607,9 +656,16 @@ def stepDelete(doc, rng):
     return "delete %s" % n
 
 
+TSEQ = [0]
+
+
 def transact(doc, fn, *a):
-    u0 = doc.UndoCount
-    doc.openTransaction("fuzz")
+    """one GUI-style transaction; returns (what, recompute seconds, the transaction's name if it was committed, else
+    None). App caps its undo stack at 20 without a GUI (Document::setMaxUndoStackSize, not exposed to Python), so
+    UndoCount stops growing at the cap: a commit is found by its unique name in UndoNames instead."""
+    TSEQ[0] += 1
+    name = "fuzz%d" % TSEQ[0]
+    doc.openTransaction(name)
     try:
         what = fn(doc, *a)
         t0 = time.perf_counter(); doc.recompute(); dt = time.perf_counter() - t0
@@ -617,7 +673,7 @@ def transact(doc, fn, *a):
         doc.abortTransaction()
         raise
     doc.commitTransaction()
-    return what, dt, doc.UndoCount > u0
+    return what, dt, name if name in list(doc.UndoNames) else None
 
 
 def main():
@@ -638,7 +694,9 @@ def main():
         r, _s = freshCheck(doc, sig0, params, 0)
         rec0.update(r)
     emit(**rec0)
-    hist = [sig0]
+    hist = {"build": sig0}   # transaction name -> the signature after it ("build": before any)
+    top = sig0                 # the signature of the current state
+    ncommit = 0
     tally = Counter(); times = []; fails = 0
     base_err = sig0["errors"]
     names = [k for k, _w in KINDS]; weights = [w for _k, w in KINDS]
@@ -646,27 +704,31 @@ def main():
         kind = rng.choices(names, weights)[0]
         r2 = random.Random(rng.random())
         rec = dict(step=k, kind=kind)
-        before = hist[-1]
+        before = top
         try:
             if kind == "undo":
-                depth = min(r2.randint(1, 10), len(hist) - 1, doc.UndoCount)
-                if depth < 1:
-                    rec["what"] = "undo: nothing to undo"; emit(**rec); continue
+                unames = list(doc.UndoNames)   # the most recent first
+                # undoing d steps leaves unames[d] on top, or the build when the stack held every commit
+                depth = min(r2.randint(1, 10), doc.UndoCount)
+                tgt = unames[depth] if depth < len(unames) else ("build" if ncommit == len(unames) else None)
+                if depth < 1 or tgt is None or tgt not in hist or unames[0] not in hist:
+                    rec["what"] = "undo: nothing to undo" if depth < 1 else "undo: target not recorded"
+                    rec["undo_names"] = unames[:depth + 1]; emit(**rec); continue
                 for _ in range(depth):
                     doc.undo()
                 doc.recompute()
                 s_u = signature(doc)
-                du = compare(s_u, hist[-1 - depth])
+                du = compare(s_u, hist[tgt])
                 for _ in range(depth):
                     doc.redo()
                 doc.recompute()
                 s_r = signature(doc)
-                dr = compare(s_r, hist[-1])
-                rec.update(what="undo %d + redo %d" % (depth, depth), undo_diffs=du, redo_diffs=dr)
+                dr = compare(s_r, top)
+                rec.update(what="undo %d + redo %d" % (depth, depth), undo_diffs=du, redo_diffs=dr, undo_to=tgt)
                 if du or dr:
                     fails += 1; tally["undo_fail"] += 1
-                    rec["undo_matches"] = [len(hist) - 1 - i for i, h in enumerate(hist) if not compare(s_u, h)]   # depth that would match
-                    rec["undo_count"] = doc.UndoCount; rec["hist_len"] = len(hist)
+                    rec["undo_matches"] = [n for n, h in hist.items() if not compare(s_u, h)]   # the states that would match
+                    rec["undo_count"] = doc.UndoCount; rec["undo_names"] = unames[:depth + 1]
                     doc.saveAs("%s/%s-fail%d.FCStd" % (OUT, TAG, k))
                 emit(**rec); continue
             fn = {"param": lambda d: stepParam(d, r2, params), "move": lambda d: stepMove(d, r2),
@@ -713,9 +775,17 @@ def main():
                     fails += 1; tally["undo_back_fail"] += 1
             except Exception as e:
                 rec["undo_exc"] = "%s: %s" % (type(e).__name__, e); fails += 1
-        elif committed and inc is not None:
-            hist.append(inc)
-            hist = hist[-12:]
+        elif committed:
+            ncommit += 1
+            if inc is None:
+                try:
+                    inc = signature(doc)
+                except Exception:
+                    inc = None
+            if inc is not None:
+                hist[committed] = inc; top = inc
+                live = set(doc.UndoNames) | {"build"}
+                hist = {n: h for n, h in hist.items() if n in live}
         if HEAL:
             base_err = signature(doc)["errors"]
         emit(**rec)
