@@ -971,7 +971,25 @@ int SketchObject::setDatum(int ConstrId, double Datum)
     if (err)
         this->Constraints.getValues()[ConstrId]->setValue(oldDatum);// newVals is a shell now
 
-    return err;
+    // FreeCAD-CH (ops#857): solve()'s codes overlap setDatum's own (-1 a bad index or a
+    // constraint without a datum, -2 a bad datum, -4 negative, -5 zero), so a solve that fails
+    // was told as "Invalid constraint index". Its codes go out as their own.
+    switch (err) {
+        case 0:
+            return 0;
+        case -1:
+            return -7;  // the solver did not converge
+        case -2:
+            return -8;  // redundant constraints that do not hold
+        case -3:
+            return -3;  // conflicting constraints
+        case -4:
+            return -10;  // over-constrained
+        case -5:
+            return -9;  // malformed constraints
+        default:
+            return -7;
+    }
 }
 double SketchObject::getDatum(int ConstrId) const
 {

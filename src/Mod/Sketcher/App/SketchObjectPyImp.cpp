@@ -1190,6 +1190,20 @@ PyObject* SketchObjectPy::setDatum(PyObject* args)
         else if (err == -6) {
             str << "Cannot set the datum because of invalid geometry";
         }
+        // FreeCAD-CH (ops#857): the solve's own failures (SketchObject::setDatum)
+        else if (err == -7) {
+            str << "The sketch could not be solved with the datum " << Quantity.getUserString()
+                << " for the constraint with index " << Index;
+        }
+        else if (err == -8) {
+            str << "Cannot set the datum because the sketch contains redundant constraints";
+        }
+        else if (err == -9) {
+            str << "Cannot set the datum because the sketch contains malformed constraints";
+        }
+        else if (err == -10) {
+            str << "Cannot set the datum because the sketch is over-constrained";
+        }
         else {
             str << "Unexpected problem at setting datum " << Quantity.getUserString()
                 << " for the constraint with index " << Index;
