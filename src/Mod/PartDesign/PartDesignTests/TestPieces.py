@@ -1158,6 +1158,66 @@ class TestPieces(unittest.TestCase):
         self.assertEqual(c.StudioPartId, c.Name)
         self.assertEqual(list(chamfer.State), ["Up-to-date"])
 
+    # ------------------------------------------------------------ nothing to make (ops#796)
+    def recomputedDuring(self, fn):
+        names = []
+
+        class Observer:
+            def slotRecomputedObject(self, obj):
+                names.append(obj.Name)
+
+        observer = Observer()
+        App.addDocumentObserver(observer)
+        try:
+            result = fn()
+        finally:
+            App.removeDocumentObserver(observer)
+        return result, names
+
+    def testCommandWithNothingToMakeComputesNothing(self):
+        # A blind pocket 10 x 6 x 4 inside the bar (x 10..20, y 2..8, z 6..10) splits nothing:
+        # the command (a dialog's OK) recomputes nothing and leaves no step of its own, as an
+        # edit's OK must not compute the history again (ops#796)
+        self.studio()
+        e = self.pocket("E", ((10, 2, 20, 8),), ("P",), length=4)
+        p = self.doc.getObject("P")
+        self.assertValid(e, self.step(e, self.doc.getObject("P")))
+        self.assertVolume(p, 100 * 10 * 10 - 10 * 6 * 4)
+        undo = self.doc.UndoCount
+        made, names = self.recomputedDuring(lambda: self.command(e))
+        self.assertEqual(list(made), [])
+        self.assertEqual(names, [])
+        self.assertEqual(self.doc.UndoCount, undo)
+        self.assertVolume(p, 100 * 10 * 10 - 10 * 6 * 4)
+        self.assertValid(e, self.step(e, self.doc.getObject("P")))
+
+    def testCommandAfterAnUncomputedEditComputesIt(self):
+        # The same pocket deepened to 6 without a recompute (a value written outside the dialog):
+        # the command computes it, as before (ops#796's shortcut needs a computed entry)
+        self.studio()
+        e = self.pocket("E", ((10, 2, 20, 8),), ("P",), length=4)
+        e.Length = 6
+        made, names = self.recomputedDuring(lambda: self.command(e))
+        self.assertEqual(list(made), [])
+        self.assertIn(e.Name, names)
+        self.assertVolume(self.doc.getObject("P"), 100 * 10 * 10 - 10 * 6 * 6)
+        self.assertValid(e, self.step(e, self.doc.getObject("P")))
+
+    def testCommandAfterAnEditThatSplitsMakesThePieces(self):
+        # The slot across the bar, 4 deep first (one solid: nothing to make), then deepened
+        # through it: computed, it fails (two pieces, no parts yet), so the command doesn't take
+        # the shortcut and makes them (3000 and 6900)
+        self.studio()
+        e = self.pocket("E", (SLOT,), ("P",), length=4)
+        self.assertEqual(list(self.command(e)), [])
+        self.doc.openTransaction("deepen")
+        e.Length = 11
+        self.doc.commitTransaction()
+        self.doc.recompute()
+        left, right = self.leftRight(list(self.command(e)))
+        self.assertVolume(left, 3000)
+        self.assertVolume(right, 6900)
+
 
 class TestStudioUndo(unittest.TestCase):
     """ops#654 10.15: the resync after a recompute outside any transaction records into the undo
