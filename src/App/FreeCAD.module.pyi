@@ -192,6 +192,22 @@ def writeRecoverySnapshotToTransientDir(
     """Write one recovery snapshot for a document into its transient directory."""
     ...
 
+def presence(path: str, /) -> list[dict]:
+    """Who else has the document at path open (FreeCAD-CH presence markers in the team folder).
+
+    Each entry is a dict with file, user, host, pid, time and path (the marker file). Fresh markers
+    of other computers or processes only; this computer's markers of processes that are gone are
+    removed on the way."""
+    ...
+
+def presenceMessage(path: str, /) -> str:
+    """The sentence the GUI shows for presence(path), or an empty string."""
+    ...
+
+def refreshPresence() -> None:
+    """Write or refresh this process's presence markers now (the GUI does it every minute)."""
+    ...
+
 def teamFolderProblem() -> str:
     """What is wrong with the team folder setup (FreeCAD-CH), or an empty string."""
     ...
