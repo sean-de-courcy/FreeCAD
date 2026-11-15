@@ -21,7 +21,7 @@ import FreeCADGui as Gui
 import PartDesign
 from PySide import QtCore, QtWidgets
 
-from PartDesignTests.TestExpressionFieldsGui import pump, taskButton, waitFor
+from PartDesignTests.TestExpressionFieldsGui import pump, taskButton, typeDesignedLength, waitFor
 from PartDesignTests.TestStudio import edgeAt, faceAt, pad, sketch, xyPlane
 from PartDesignTests.TestStudioList import newStudio
 
@@ -108,6 +108,8 @@ class StudioDialog:
         before = set(self.objects())
         Gui.runCommand(command)
         self.waitForPanel()
+        if profile is not None:
+            typeDesignedLength(command)
         made = [
             self.doc.getObject(n)
             for n in set(self.objects()) - before

@@ -14,7 +14,7 @@ from PySide import QtCore, QtWidgets
 from PySide6 import QtTest
 
 from PartDesignTests.Scenarios import models
-from PartDesignTests.TestExpressionFieldsGui import pump, taskButton, waitFor
+from PartDesignTests.TestExpressionFieldsGui import pump, taskButton, typeDesignedLength, waitFor
 from PartDesignTests.TestStudio import faceAt, pad, rect, sketch, xyPlane
 
 V = App.Vector
@@ -281,9 +281,10 @@ class ResultBoxGuiCase(unittest.TestCase):
         self.body, self.base, self.lidSk = body, base, lidSk
         return body
 
-    def runCommand(self, command, *selection, index=None):
+    def runCommand(self, command, *selection, index=None, designedLength=True):
         """The command (tool `index` of a group) with self.body active and `selection`
-        selected; waits for its panel."""
+        selected; waits for its panel. With a selection and designedLength, a Pad or Pocket
+        gets the model's length typed (typeDesignedLength)."""
         Gui.getDocument(self.doc.Name).ActiveView.setActiveObject("pdbody", self.body)
         Gui.Selection.clearSelection()
         for obj in selection:
@@ -293,6 +294,8 @@ class ResultBoxGuiCase(unittest.TestCase):
         else:
             Gui.runCommand(command, index)
         self.waitForPanel()
+        if selection and designedLength:
+            typeDesignedLength(command)
 
     def waitForPanel(self):
         self.assertTrue(waitFor(lambda: Gui.Control.activeDialog()), "no task dialog")

@@ -20,10 +20,11 @@
   panel under the Onshape keymap (J2); a pattern's dialog title is its name, red in error (J16).
 
 Designed geometry: the Enclosure 40 x 40 x 10 at the origin (16000) with its lid sketch (30 x 30 on
-its top; a pad's default length is 10: 9000 more), and a part "Panel" 20 x 20 x 10 at x 60..80
-(4000), apart from it. A sketch on the Enclosure's XY plane padded 10 from z 0: a 20 x 10
-rectangle at x 70..90 overlaps Panel only (Panel then 4000 + 10 x 10 x 10 = 5000); one at x 30..70
-overlaps both (a new part of 40 x 10 x 10 = 4000); one at x 100..110 touches nothing (1000)."""
+its top; a pad opens at Onshape's 25 mm (gaps3 row 15): 22500 more), and a part "Panel" 20 x 20 x 10
+at x 60..80 (4000), apart from it. A sketch on the Enclosure's XY plane padded 25 from z 0: a 20 x 10
+rectangle at x 70..90 overlaps Panel only (Panel then 4000 + 20 x 10 x 25 - 10 x 10 x 10 = 8000); one
+at x 30..70 overlaps both (a new part of 40 x 10 x 25 = 10000); one at x 100..110 touches nothing
+(2500). These tests don't type a length (an opening move restarts the edit)."""
 
 import unittest
 
@@ -38,11 +39,15 @@ from PartDesignTests.TestStudio import pad, sketch, xyPlane
 from PartDesignTests.TestCrossBodyGui import siblingEraPath  # ops#654 list on first use
 
 ENCLOSURE = 16000
-LID = ENCLOSURE + 9000
+LID = ENCLOSURE + 22500
 PANEL = 4000
 
 
 class DialogFlowCase(ResultBoxGuiCase):
+    def runCommand(self, command, *selection, index=None, designedLength=False):
+        """As ResultBoxGuiCase's, typing no length: Onshape's 25 mm opening (module docstring)."""
+        return super().runCommand(command, *selection, index=index, designedLength=designedLength)
+
     def parts(self):
         self.enclosure()
         self.panel = self.part("Panel", (60, 0, 80, 20), 0)
@@ -90,7 +95,7 @@ class TestOpeningOperationGui(DialogFlowCase):
     @siblingEraPath
     def testASketchOnAPartFaceOpensAsAdd(self):
         """The lid sketch on the Enclosure's top: the pad stays in the Enclosure, Add to
-        Enclosure; OK: the Enclosure 25000, Panel 4000, no new part."""
+        Enclosure; OK: the Enclosure 38500, Panel 4000, no new part."""
         self.parts()
         bodies = self.bodyNames()
         lid = self.newPad(self.lidSk)
@@ -104,7 +109,7 @@ class TestOpeningOperationGui(DialogFlowCase):
     @siblingEraPath
     def testAPlaneSketchOverOnePartOpensAsAddToIt(self):
         """A plane sketch at x 70..90, in the Enclosure, overlapping Panel only: the pad and its
-        sketch go into Panel, Add to Panel; OK: Panel 5000, the Enclosure 16000, no new part."""
+        sketch go into Panel, Add to Panel; OK: Panel 8000, the Enclosure 16000, no new part."""
         self.parts()
         planeSk = self.planeSketch((70, 5, 90, 15))
         bodies = self.bodyNames()
@@ -115,13 +120,13 @@ class TestOpeningOperationGui(DialogFlowCase):
         self.close(ok=True)
         self.assertEqual(self.newBodies(bodies), [])
         self.assertTrue(made.isValid(), made.getStatusString())
-        self.assertAlmostEqual(self.panel.Shape.Volume, PANEL + 1000, places=3)
+        self.assertAlmostEqual(self.panel.Shape.Volume, PANEL + 4000, places=3)
         self.assertAlmostEqual(self.body.Shape.Volume, ENCLOSURE, places=3)
 
     @siblingEraPath
     def testAPlaneSketchOverTwoPartsOpensAsNew(self):
         """A plane sketch at x 30..70 overlapping the Enclosure and Panel: New, a part of its own
-        (A-1 (c): neither is merged); OK: the new part 4000, the others as they were."""
+        (A-1 (c): neither is merged); OK: the new part 10000, the others as they were."""
         self.parts()
         planeSk = self.planeSketch((30, 5, 70, 15))
         bodies = self.bodyNames()
@@ -130,13 +135,13 @@ class TestOpeningOperationGui(DialogFlowCase):
         self.assertIs(made.getParentGeoFeatureGroup(), part)
         self.assertEqual(self.combo().currentText(), "New")
         self.close(ok=True)
-        self.assertAlmostEqual(part.Shape.Volume, 4000, places=3)
+        self.assertAlmostEqual(part.Shape.Volume, 10000, places=3)
         self.assertAlmostEqual(self.body.Shape.Volume, ENCLOSURE, places=3)
         self.assertAlmostEqual(self.panel.Shape.Volume, PANEL, places=3)
 
     @siblingEraPath
     def testAPlaneSketchTouchingNothingOpensAsNew(self):
-        """A plane sketch at x 100..110 touching no part: New; OK: the new part 1000."""
+        """A plane sketch at x 100..110 touching no part: New; OK: the new part 2500."""
         self.parts()
         planeSk = self.planeSketch((100, 0, 110, 10))
         bodies = self.bodyNames()
@@ -145,8 +150,47 @@ class TestOpeningOperationGui(DialogFlowCase):
         self.assertIs(made.getParentGeoFeatureGroup(), part)
         self.assertEqual(self.combo().currentText(), "New")
         self.close(ok=True)
-        self.assertAlmostEqual(part.Shape.Volume, 1000, places=3)
+        self.assertAlmostEqual(part.Shape.Volume, 2500, places=3)
         self.assertAlmostEqual(self.body.Shape.Volume, ENCLOSURE, places=3)
+
+    def openOnTheLid(self, command):
+        """`command` on the lid sketch with the Enclosure active, nothing typed; the new feature."""
+        before = {o.Name for o in self.doc.Objects}
+        Gui.getDocument(self.doc.Name).ActiveView.setActiveObject("pdbody", self.body)
+        Gui.Selection.clearSelection()
+        Gui.Selection.addSelection(self.doc.Name, self.lidSk.Name)
+        Gui.runCommand(command)
+        self.waitForPanel()
+        [made] = [
+            o
+            for o in self.doc.Objects
+            if o.Name not in before and o.isDerivedFrom("PartDesign::FeatureAddSub")
+        ]
+        return made
+
+    @siblingEraPath
+    def testAnExtrudeOpensAt25mm(self):
+        """gaps3 row 15 (Onshape oracle 24, G3-1): Extrude on the lid sketch opens Blind at 25 mm,
+        as Onshape's; OK: the Enclosure gains the 30 x 30 x 25 lid (16000 + 22500)."""
+        self.enclosure()
+        made = self.openOnTheLid("PartDesign_Pad")
+        self.assertEqual(made.Type, "Length")
+        self.assertAlmostEqual(made.Length.Value, 25, places=6)
+        self.close(ok=True)
+        self.assertAlmostEqual(made.Length.Value, 25, places=6)
+        self.assertAlmostEqual(self.body.Shape.Volume, ENCLOSURE + 22500, places=3)
+
+    @siblingEraPath
+    def testAnExtrudeRemoveOpensAt25mm(self):
+        """gaps3 row 15: Extrude (remove) on the lid sketch opens Blind at 25 mm, as Extrude; OK:
+        it cuts through the 10 high Enclosure, 30 x 30 x 10 out (16000 - 9000)."""
+        self.enclosure()
+        made = self.openOnTheLid("PartDesign_Pocket")
+        self.assertEqual(made.Type, "Length")
+        self.assertAlmostEqual(made.Length.Value, 25, places=6)
+        self.close(ok=True)
+        self.assertAlmostEqual(made.Length.Value, 25, places=6)
+        self.assertAlmostEqual(self.body.Shape.Volume, ENCLOSURE - 9000, places=3)
 
     @siblingEraPath
     def testCancelTakesTheOpeningMoveBack(self):
@@ -170,7 +214,7 @@ class TestOpeningOperationGui(DialogFlowCase):
     def testTheFirstProfilePickedDecides(self):
         """Nothing selected, Pad: the pad starts in the Enclosure with its Profile field armed;
         the plane sketch over Panel picked: the edit restarts with the pad in Panel, Add to
-        Panel; OK: Panel 5000."""
+        Panel; OK: Panel 8000."""
         self.parts()
         planeSk = self.planeSketch((70, 5, 90, 15))
         made = self.newPad()
@@ -187,7 +231,7 @@ class TestOpeningOperationGui(DialogFlowCase):
             "the edit didn't restart on the moved pad",
         )
         self.close(ok=True)
-        self.assertAlmostEqual(self.panel.Shape.Volume, PANEL + 1000, places=3)
+        self.assertAlmostEqual(self.panel.Shape.Volume, PANEL + 4000, places=3)
 
 
 class TestDialogKeysGui(DialogFlowCase):
@@ -195,7 +239,7 @@ class TestDialogKeysGui(DialogFlowCase):
 
     def testEnterOnACheckBoxAccepts(self):
         """The lid pad's dialog, the focus on its Reversed check box: Enter accepts the dialog;
-        the box isn't toggled (the Enclosure 25000)."""
+        the box isn't toggled (the Enclosure 38500)."""
         self.enclosure()
         lid = self.newPad(self.lidSk)
         box = self.visible(QtWidgets.QCheckBox, "checkBoxReversed")
@@ -330,7 +374,7 @@ class TestAnotherToolGui(DialogFlowCase):
     @siblingEraPath
     def testAPreselectedProfileIsInput(self):
         """The lid pad's dialog (its profile preselected, nothing else given), then Pad with
-        nothing selected: the lid pad is committed (the Enclosure 25000)."""
+        nothing selected: the lid pad is committed (the Enclosure 38500)."""
         self.enclosure()
         lid = self.newPad(self.lidSk)
         self.newPad()
