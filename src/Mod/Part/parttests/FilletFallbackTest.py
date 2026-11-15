@@ -1547,6 +1547,22 @@ class FilledRecessTest(unittest.TestCase):
         self.assertEqual(len(feature.Shape.Faces), 14)
         self.assertAlmostEqual(feature.Shape.Volume, base.Volume + added, delta=1e-6)
 
+    def testConcaveRoundRolledOnAtOrPastTheCornersRadius(self):
+        # ops#757: at r >= the corner's R1 10, OCCT's fillet returned an invalid shape that the
+        # limited validity check passed, so the exact construction was never asked. The round
+        # rolls on over the r 10 round's tangent edge onto the wall x 0 as at r 6.5: its section
+        # over z 4..10 is the r 10 round from the crease to (0, -10), the wall x 0 down to the
+        # ball's touch, the ball's arc (centre (r, -1 - sqrt((15 + r)^2 - (19 - r)^2))) and the
+        # ring back to the crease; 6 times its area (work/nudge/s47.py, plan())
+        base, ends, _, _ = rounded_ring_corner()
+        for r, added in ((10.0, 553.869536), (12.0, 668.123999), (16.0, 882.173238)):
+            with self.subTest(r=r):
+                feature, _ = dressed_in_a_body(self.doc, "Fillet", base, ends, r)
+                self.assertTrue(feature.isValid(), feature.getStatusString())
+                self.assertTrue(feature.Shape.isValid())
+                self.assertEqual(len(feature.Shape.Faces), 14)
+                self.assertAlmostEqual(feature.Shape.Volume, base.Volume + added, delta=1e-5)
+
     def testConcaveRoundRolledOnOntoAStepFillsNothing(self):
         # rounded_ring_corner(step=True): the rolled round's flat bottom (z 4) lands on the step's
         # top, a floor in the plane of the edge's end face (the ring's underside) beside the wall
