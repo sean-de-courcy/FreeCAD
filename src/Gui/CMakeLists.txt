@@ -1174,6 +1174,7 @@ SET(Widget_CPP_SRCS
     ComboLinks.cpp
     FileDialog.cpp
     MainWindow.cpp
+    DocumentPresenceGui.cpp
     MainWindowPy.cpp
     NotificationBox.cpp
     NotificationArea.cpp
@@ -1206,6 +1207,7 @@ SET(Widget_HPP_SRCS
     FileDialog.h
     FileDialogInternal.h
     MainWindow.h
+    DocumentPresenceGui.h
     MainWindowPy.h
     NotificationBox.h
     NotificationArea.h
