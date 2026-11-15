@@ -69,11 +69,10 @@ class TestAssemblyPatterns(AssemblyTestBase):
 
     def edgeAlong(self, shape, direction):
         """The name of shape's straight edge through its origin along direction (local geometry);
-        the pattern goes the edge's way (its tangent, AssemblyPattern.axisOfShape), so self.alongX
-        is that way"""
+        the pattern goes from the edge's first vertex to its last, so self.alongX is that way"""
         for i, edge in enumerate(shape.Edges):
             p0, p1 = edge.Vertexes[0].Point, edge.Vertexes[-1].Point
-            along = AssemblyPattern.axisOfShape(edge)[1]
+            along = (p1 - p0).normalize()
             if min(p0.Length, p1.Length) < 1e-9 and abs(abs(along.dot(direction)) - 1) < 1e-12:
                 self.alongX = along
                 return f"Edge{i + 1}"
@@ -127,7 +126,7 @@ class TestAssemblyPatterns(AssemblyTestBase):
         return pattern
 
     def localXY(self):
-        """The plate's X and Y edge directions in its own frame (the edges' way)"""
+        """The plate's X and Y edge directions in its own frame (first vertex to last)"""
         self.edgeAlong(self.plateSrc.Shape, Y)
         along = self.alongX
         self.edgeAlong(self.plateSrc.Shape, X)
@@ -357,10 +356,11 @@ class TestAssemblyPatterns(AssemblyTestBase):
         for copy in pattern.Instances:
             self.assertPlacement(copy, before[copy.Name], "a copy after the solve")
 
-    def test_shortened_direction_edge_keeps_its_way(self):
-        """ops#832 (Onshape fact AW4): a pocket that only shortens the direction's edge keeps the
-        pattern's direction and spacing (the copies don't jump to the seed's other side); a pocket
-        that splits the edge in two puts the pattern in error, and nothing moves"""
+    def test_direction_edge_keeps_its_way(self):
+        """ops#832 (Onshape fact AW4): edits that leave the direction's edge on its line keep the
+        pattern's way and spacing, although they can turn the edge's storage order: a pocket in a
+        face beside the edge, a pocket that shortens it, and the same after save and reopen. A
+        pocket that splits the edge in two is said (Onshape: ERROR), and nothing moves."""
         body = self.doc.addObject("PartDesign::Body", "Blk")
         box = body.newObject("PartDesign::AdditiveBox", "BlkBox")
         box.Length, box.Width, box.Height = 20, 20, 10
@@ -369,20 +369,20 @@ class TestAssemblyPatterns(AssemblyTestBase):
         ground = self.jointgroup.newObject("App::FeaturePython", "GroundedBlk")
         JointObject.GroundedJoint(ground, rail)
         edge = self.edgeAlong(body.Shape, X)  # the bottom front edge, y 0, z 0
-        self.assertTrue(self.alongX.isEqual(X, 1e-12), f"the box's X edge goes {self.alongX}")
+        way = App.Vector(self.alongX)  # the way the pattern takes first (+x or -x)
         self.doc.recompute()
         pattern = AssemblyPattern.makePattern(self.assembly, "Linear", [self.seed], (rail, [edge]))
         pattern.Count, pattern.Distance = 3, 25.0
         self.doc.recompute()
-        self.assertLinear(pattern, self.seed, 3, 25.0, X)
+        self.assertLinear(pattern, self.seed, 3, 25.0, way)
 
-        def pocket(lo, hi):
-            """A full-width pocket 3 deep at the bottom over x lo..hi"""
-            cut = body.newObject("PartDesign::SubtractiveBox", "BlkPocket")
-            cut.Length, cut.Width, cut.Height = hi - lo, 20, 3
-            cut.Placement = App.Placement(App.Vector(lo, 0, 0), App.Rotation())
+        def cut(name, lo, length, y0, width, height):
+            """A pocket of the box at the bottom: x lo..lo+length, y y0..y0+width, z 0..height"""
+            tool = body.newObject("PartDesign::SubtractiveBox", name)
+            tool.Length, tool.Width, tool.Height = length, width, height
+            tool.Placement = App.Placement(App.Vector(lo, y0, 0), App.Rotation())
             self.doc.recompute()
-            return cut
+            return tool
 
         def xEdges():
             """The x extents of the body's edges on y 0, z 0"""
@@ -393,23 +393,46 @@ class TestAssemblyPatterns(AssemblyTestBase):
                     spans.append(tuple(sorted(round(p.x, 6) for p in ends)))
             return sorted(spans)
 
-        # Shortened: the edge is x 0..10 now, still +x, and the copies stay (closed form)
-        cut = pocket(10, 20)
+        def check(what):
+            self.assertEqual(self.assembly.solve(), 0, what)
+            self.assertNotIn("Invalid", pattern.State, what)
+            self.assertLinear(pattern, self.seed, 3, 25.0, way)
+
+        # A strip out of the bottom face's back half: the edge itself is untouched (review r1)
+        cut("BlkStrip", 0, 20, 10, 10, 2)
+        self.assertEqual(xEdges(), [(0.0, 20.0)])
+        check("a pocket beside the edge")
+        # Shortened: the edge is x 0..10 now, on the same line
+        pocket = cut("BlkPocket", 10, 10, 0, 20, 3)
         self.assertEqual(xEdges(), [(0.0, 10.0)])
-        self.assertEqual(self.assembly.solve(), 0)
-        self.assertNotIn("Invalid", pattern.State)
-        self.assertLinear(pattern, self.seed, 3, 25.0, X)
-        before = {c.Name: c.Placement for c in pattern.Instances}
-        # Split: x 0..6 and 14..20, two edges for one: loud, and nothing moves
-        cut.Length = 8
-        cut.Placement = App.Placement(App.Vector(6, 0, 0), App.Rotation())
-        self.doc.recompute()
-        self.assertEqual(xEdges(), [(0.0, 6.0), (14.0, 20.0)])
-        self.assembly.solve()
-        # Onshape goes ERROR; here the reference follows one half with a warning: said, not silent
-        self.assertTrue({"Invalid", "Warning"} & set(pattern.State), f"the split is silent: {pattern.State}")
-        for copy in pattern.Instances:
-            self.assertPlacement(copy, before[copy.Name], "a copy after the split")
+        check("the edge shortened")
+        # Saved and reopened: the way kept is the one saved, not the edge's order read afresh
+        folder = tempfile.mkdtemp()
+        try:
+            path = os.path.join(folder, "direction.FCStd")
+            self.doc.saveAs(path)
+            names = pattern.Name, self.seed.Name, body.Name, self.assembly.Name
+            App.closeDocument(self.doc.Name)
+            self.doc = App.openDocument(path)
+            pattern, self.seed, body, self.assembly = (self.doc.getObject(n) for n in names)
+            pattern.Distance = 30.0
+            self.doc.recompute()
+            pattern.Distance = 25.0
+            self.doc.recompute()
+            self.assertLinear(pattern, self.seed, 3, 25.0, way)
+            # Split: x 0..6 and 14..20, two edges for one: said, and nothing moves
+            before = {c.Name: c.Placement for c in pattern.Instances}
+            pocket = self.doc.getObject("BlkPocket")
+            pocket.Length = 8
+            pocket.Placement = App.Placement(App.Vector(6, 0, 0), App.Rotation())
+            self.doc.recompute()
+            self.assertEqual(xEdges(), [(0.0, 6.0), (14.0, 20.0)])
+            # Onshape goes ERROR; here the reference follows one half with a warning, or is lost
+            self.assertTrue({"Invalid", "Warning"} & set(pattern.State), f"the split is silent: {pattern.State}")
+            for copy in pattern.Instances:
+                self.assertPlacement(copy, before[copy.Name], "a copy after the split")
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
 
     def test_delete_and_suppress(self):
         """A copy deleted by hand comes back; the seed deleted takes its copies; suppressing removes
