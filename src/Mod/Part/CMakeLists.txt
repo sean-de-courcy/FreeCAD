@@ -94,6 +94,7 @@ set(Part_tests
     parttests/ElementReferenceTest.py
     parttests/FilletFallbackTest.py
     parttests/GTransformKeepsPlanesTest.py
+    parttests/FlatFaceAxesTest.py
     parttests/KernelBudgetTest.py
     parttests/ReferenceFingerprintTest.py
     parttests/InternNamesTest.py
