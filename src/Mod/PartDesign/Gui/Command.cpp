@@ -291,8 +291,8 @@ CmdPartDesignPlane::CmdPartDesignPlane()
 {
     sAppModule = "PartDesign";
     sGroup = QT_TR_NOOP("PartDesign");
-    sMenuText = QT_TR_NOOP("Datum Plane");
-    sToolTipText = QT_TR_NOOP("Creates a new datum plane");
+    sMenuText = QT_TR_NOOP("Plane");  // FreeCAD-CH (ops#796): Onshape's word
+    sToolTipText = QT_TR_NOOP("Creates a new plane");
     sWhatsThis = "PartDesign_Plane";
     sStatusTip = sToolTipText;
     sPixmap = "PartDesign_Plane";
@@ -749,7 +749,7 @@ CmdPartDesignNewSketch::CmdPartDesignNewSketch()
 {
     sAppModule = "PartDesign";
     sGroup = QT_TR_NOOP("PartDesign");
-    sMenuText = QT_TR_NOOP("New Sketch");
+    sMenuText = QT_TR_NOOP("Sketch");  // FreeCAD-CH (ops#796): Onshape's word
     sToolTipText = QT_TR_NOOP("Creates a new sketch");
     sWhatsThis = "PartDesign_NewSketch";
     sStatusTip = sToolTipText;
@@ -2425,7 +2425,7 @@ CmdPartDesignGroove::CmdPartDesignGroove()
 {
     sAppModule = "PartDesign";
     sGroup = QT_TR_NOOP("PartDesign");
-    sMenuText = QT_TR_NOOP("Groove");
+    sMenuText = QT_TR_NOOP("Revolve (remove)");  // FreeCAD-CH (ops#796): Onshape's word
     sToolTipText = QT_TR_NOOP(
         "Revolves the sketch or profile around a line or axis and removes it from the body"
     );
@@ -2480,7 +2480,7 @@ CmdPartDesignAdditivePipe::CmdPartDesignAdditivePipe()
 {
     sAppModule = "PartDesign";
     sGroup = QT_TR_NOOP("PartDesign");
-    sMenuText = QT_TR_NOOP("Additive Pipe");
+    sMenuText = QT_TR_NOOP("Sweep");  // FreeCAD-CH (ops#796): Onshape's word
     sToolTipText = QT_TR_NOOP(
         "Sweeps the selected sketch or profile along a path and adds it to the body"
     );
@@ -2533,7 +2533,7 @@ CmdPartDesignSubtractivePipe::CmdPartDesignSubtractivePipe()
 {
     sAppModule = "PartDesign";
     sGroup = QT_TR_NOOP("PartDesign");
-    sMenuText = QT_TR_NOOP("Subtractive Pipe");
+    sMenuText = QT_TR_NOOP("Sweep (remove)");  // FreeCAD-CH (ops#796): Onshape's word
     sToolTipText = QT_TR_NOOP(
         "Sweeps the selected sketch or profile along a path and removes it from the body"
     );
@@ -2586,7 +2586,7 @@ CmdPartDesignAdditiveLoft::CmdPartDesignAdditiveLoft()
 {
     sAppModule = "PartDesign";
     sGroup = QT_TR_NOOP("PartDesign");
-    sMenuText = QT_TR_NOOP("Additive Loft");
+    sMenuText = QT_TR_NOOP("Loft");  // FreeCAD-CH (ops#796): Onshape's word
     sToolTipText = QT_TR_NOOP(
         "Lofts the selected sketch or profile through one or more sections and adds it to the body"
     );
@@ -2638,7 +2638,7 @@ CmdPartDesignSubtractiveLoft::CmdPartDesignSubtractiveLoft()
 {
     sAppModule = "PartDesign";
     sGroup = QT_TR_NOOP("PartDesign");
-    sMenuText = QT_TR_NOOP("Subtractive Loft");
+    sMenuText = QT_TR_NOOP("Loft (remove)");  // FreeCAD-CH (ops#796): Onshape's word
     sToolTipText
         = QT_TR_NOOP("Lofts the selected sketch or profile through one or more sections and removes it from the body");
     sWhatsThis = "PartDesign_SubtractiveLoft";
@@ -3410,8 +3410,8 @@ CmdPartDesignDefeaturing::CmdPartDesignDefeaturing()
 {
     sAppModule = "PartDesign";
     sGroup = QT_TR_NOOP("PartDesign");
-    sMenuText = QT_TR_NOOP("Defeaturing");
-    sToolTipText = QT_TR_NOOP("Removes selected faces from a solid");
+    sMenuText = QT_TR_NOOP("Delete face");  // FreeCAD-CH (ops#796): Onshape's word
+    sToolTipText = QT_TR_NOOP("Deletes the selected faces and heals the part");
     sWhatsThis = "PartDesign_Defeaturing";
     sStatusTip = sToolTipText;
     sPixmap = "PartDesign_Defeaturing";
@@ -4436,7 +4436,7 @@ CmdPartDesignBoolean::CmdPartDesignBoolean()
 {
     sAppModule = "PartDesign";
     sGroup = QT_TR_NOOP("PartDesign");
-    sMenuText = QT_TR_NOOP("Boolean Operation");
+    sMenuText = QT_TR_NOOP("Boolean");  // FreeCAD-CH (ops#796): Onshape's word
     sToolTipText = QT_TR_NOOP(
         "Applies boolean operations with the selected objects and the active body"
     );
@@ -4713,7 +4713,7 @@ CmdPartDesignSplit::CmdPartDesignSplit()
 {
     sAppModule = "PartDesign";
     sGroup = QT_TR_NOOP("PartDesign");
-    sMenuText = QT_TR_NOOP("Split Part");
+    sMenuText = QT_TR_NOOP("Split");  // FreeCAD-CH (ops#796): Onshape's word
     sToolTipText = QT_TR_NOOP(
         "Splits a part in two by a plane: select the part and an origin plane, a datum plane or "
         "a planar face. The part keeps one side, a new part the other"

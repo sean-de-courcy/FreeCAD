@@ -40,15 +40,15 @@ using namespace Gui;
 /* TRANSLATOR PartDesignGui::TaskPocketParameters */
 
 TaskPocketParameters::TaskPocketParameters(ViewProviderPocket* PocketView, QWidget* parent, bool newObj)
-    : TaskExtrudeParameters(PocketView, parent, "PartDesign_Pocket", tr("Pocket Parameters"))
+    : TaskExtrudeParameters(PocketView, parent, "PartDesign_Pocket", tr("Extrude (remove) Parameters"))
 {
     ui->offsetEdit->setToolTip(
-        tr("Offset from the selected face at which the pocket will end on side 1")
+        tr("Offset from the selected face at which the extrude ends on side 1")
     );
     ui->offsetEdit2->setToolTip(
-        tr("Offset from the selected face at which the pocket will end on side 2")
+        tr("Offset from the selected face at which the extrude ends on side 2")
     );
-    ui->checkBoxReversed->setToolTip(tr("Reverses pocket direction"));
+    ui->checkBoxReversed->setToolTip(tr("Extrudes in the opposite direction"));
 
     // set the history path
     ui->lengthEdit->setEntryName(QByteArray("Length"));

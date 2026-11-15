@@ -3020,7 +3020,7 @@ CmdSketcherCircularPattern::CmdSketcherCircularPattern()
 {
     sAppModule = "Sketcher";
     sGroup = "Sketcher";
-    sMenuText = QT_TR_NOOP("Circular Pattern");
+    sMenuText = QT_TR_NOOP("Circular pattern");  // FreeCAD-CH (ops#796): Onshape's case
     sToolTipText = QT_TR_NOOP(
         "Patterns the picked geometry about a pivot point: the copies follow the seed, and the "
         "count and angle stay editable"
@@ -3049,7 +3049,7 @@ CmdSketcherLinearPattern::CmdSketcherLinearPattern()
 {
     sAppModule = "Sketcher";
     sGroup = "Sketcher";
-    sMenuText = QT_TR_NOOP("Linear Pattern");
+    sMenuText = QT_TR_NOOP("Linear pattern");  // FreeCAD-CH (ops#796): Onshape's case
     sToolTipText = QT_TR_NOOP(
         "Patterns the picked geometry along one or two direction lines: the copies follow the "
         "seed, and the counts stay editable"

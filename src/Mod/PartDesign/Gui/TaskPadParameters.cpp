@@ -40,11 +40,11 @@ using namespace Gui;
 /* TRANSLATOR PartDesignGui::TaskPadParameters */
 
 TaskPadParameters::TaskPadParameters(ViewProviderPad* PadView, QWidget* parent, bool newObj)
-    : TaskExtrudeParameters(PadView, parent, "PartDesign_Pad", tr("Pad Parameters"))
+    : TaskExtrudeParameters(PadView, parent, "PartDesign_Pad", tr("Extrude Parameters"))
 {
-    ui->offsetEdit->setToolTip(tr("Offset the pad from the face at which the pad will end on side 1"));
-    ui->offsetEdit2->setToolTip(tr("Offset the pad from the face at which the pad will end on side 2"));
-    ui->checkBoxReversed->setToolTip(tr("Reverses pad direction"));
+    ui->offsetEdit->setToolTip(tr("Offset of the extrude from the face at which it ends on side 1"));
+    ui->offsetEdit2->setToolTip(tr("Offset of the extrude from the face at which it ends on side 2"));
+    ui->checkBoxReversed->setToolTip(tr("Extrudes in the opposite direction"));
 
     // set the history path
     ui->lengthEdit->setEntryName(QByteArray("Length"));

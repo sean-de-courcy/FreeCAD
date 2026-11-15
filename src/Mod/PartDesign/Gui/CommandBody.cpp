@@ -171,8 +171,8 @@ CmdPartDesignBody::CmdPartDesignBody()
 {
     sAppModule = "PartDesign";
     sGroup = QT_TR_NOOP("PartDesign");
-    sMenuText = QT_TR_NOOP("New Body");
-    sToolTipText = QT_TR_NOOP("Creates a new body and activates it");
+    sMenuText = QT_TR_NOOP("New part");  // FreeCAD-CH (ops#796): a body is a part, "Part N"
+    sToolTipText = QT_TR_NOOP("Creates a new part and activates it");
     sWhatsThis = "PartDesign_Body";
     sStatusTip = sToolTipText;
     sPixmap = "PartDesign_Body";

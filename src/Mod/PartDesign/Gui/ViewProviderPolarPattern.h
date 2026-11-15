@@ -38,7 +38,7 @@ class PartDesignGuiExport ViewProviderPolarPattern: public ViewProviderTransform
 public:
     ViewProviderPolarPattern()
     {
-        menuName = tr("Polar Pattern Parameters");
+        menuName = tr("Circular Pattern Parameters");
         sPixmap = "PartDesign_PolarPattern.svg";
     }
 
