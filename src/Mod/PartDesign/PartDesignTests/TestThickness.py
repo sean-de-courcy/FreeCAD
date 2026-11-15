@@ -1050,17 +1050,19 @@ class TestThickness(unittest.TestCase):
         rising 0.5 per mm: OCCT's offset runs the cavity flat under the step, the roof as
         thin as the step is high there. Radius 3, rising 0.2 per mm: the step is all within
         the wall, the cavity is the plain block's 36 x 56 x 8, but OCCT's offset leaves the
-        top's offset face untrimmed, a wedge of 376 mm^3 across the cavity. Both are refused
+        top's offset face untrimmed, a wedge of 376 mm^3 across the cavity (19 mm^3 in a
+        16 x 20 block, rising 0.5 per mm). All are refused
         (ops#811, the reviews' finds): the step's top is held up to 2 from the open face's
-        edge, along the arc of its foot too, and no face of the cavity may run on far from
-        the face it is the offset of. Where a kernel builds either, a roof is left under the
-        large step and nothing under the small one."""
+        edge, along the arc of its foot too, and a face meeting the open face at a vertex
+        and along no edge, as these tops do at the wall, is refused outright. Where a kernel
+        builds one, a roof is left under the large step and nothing under the small ones."""
         V = FreeCAD.Vector
-        for radius, rise, least, most in (
-            (15, 0.5, 0, 36 * 56 * 8 - 100),
-            (3, 0.2, 36 * 56 * 8 - 1e-3, 36 * 56 * 8 + 1e-3),
+        for radius, rise, length, width, least, most in (
+            (15, 0.5, 40, 60, 0, 36 * 56 * 8 - 100),
+            (3, 0.2, 40, 60, 36 * 56 * 8 - 1e-3, 36 * 56 * 8 + 1e-3),
+            (3, 0.5, 16, 20, 12 * 16 * 8 - 1e-3, 12 * 16 * 8 + 1e-3),
         ):
-            with self.subTest(radius=radius):
+            with self.subTest(radius=radius, width=width):
                 half = Part.makeCylinder(radius, 40, V(0, 0, 10)).common(
                     Part.makeBox(radius, 2 * radius, 40, V(0, -radius, 10))
                 )
@@ -1071,13 +1073,15 @@ class TestThickness(unittest.TestCase):
                     )
                 ).extrude(V(0, 0, -40))
                 solid = (
-                    Part.makeBox(40, 60, 10, V(0, -30, 0)).fuse(half.common(under)).removeSplitter()
+                    Part.makeBox(length, width, 10, V(0, -width / 2, 0))
+                    .fuse(half.common(under))
+                    .removeSplitter()
                 )
                 self.assertTrue(solid.isValid())
                 opened = [
                     face
                     for face in solid.Faces
-                    if abs(face.CenterOfMass.z - 10) < 1e-3 and face.Area > 1000
+                    if abs(face.CenterOfMass.z - 10) < 1e-3 and face.Area > length * width / 2
                 ]
                 self.assertEqual(len(opened), 1)
                 for join in (0, 2):
