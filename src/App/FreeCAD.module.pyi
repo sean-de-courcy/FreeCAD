@@ -192,6 +192,10 @@ def writeRecoverySnapshotToTransientDir(
     """Write one recovery snapshot for a document into its transient directory."""
     ...
 
+def teamFolderProblem() -> str:
+    """What is wrong with the team folder setup (FreeCAD-CH), or an empty string."""
+    ...
+
 # Document queries and observers
 def activeDocument() -> Document | None:
     """Return the current active document, if any."""
