@@ -786,3 +786,70 @@ class TestOnshapeNavigationGui(unittest.TestCase):
         finally:
             restoreString(VIEW, "NavigationStyle", saved)
             pump()
+
+
+class TestNaviCubeMenuGui(unittest.TestCase):
+    """Onshape's view cube menu (onshape-facts GB16, gaps3 row 23): Isometric, Dimetric,
+    Trimetric, "Orient normal to sketch on edit" (a check item) and Section view"""
+
+    SKETCHER = "User parameter:BaseApp/Preferences/Mod/Sketcher/General"
+
+    def setUp(self):
+        self.doc = App.newDocument("TestNaviCubeMenu")
+        Gui.ActiveDocument = Gui.getDocument(self.doc.Name)
+        pump()
+        self.viewer = Gui.ActiveDocument.ActiveView.getViewer()
+        self.viewer.setEnabledNaviCube(True)
+        pump(100)
+        group = App.ParamGet(self.SKETCHER)
+        self.saved = group.GetBool("OrientViewOnEdit", False) if "OrientViewOnEdit" in group.GetBools() else None
+
+    def tearDown(self):
+        group = App.ParamGet(self.SKETCHER)
+        if self.saved is None:
+            group.RemBool("OrientViewOnEdit")
+        else:
+            group.SetBool("OrientViewOnEdit", self.saved)
+        App.closeDocument(self.doc.Name)
+        pump()
+
+    def menuNames(self):
+        menus = Gui.getMainWindow().findChildren(QtWidgets.QMenu, "NaviCube_Menu")
+        self.assertTrue(menus, "no view cube menu")
+        return [a.objectName() for a in menus[-1].actions()]
+
+    def testMenuHasOnshapesItems(self):
+        names = self.menuNames()
+        for name in ("Std_ViewIsometric", "Std_ViewDimetric", "Std_ViewTrimetric", "Std_OrientViewOnEdit", "Std_SectionView"):
+            self.assertIn(name, names)
+        # the three standard views in Onshape's order
+        self.assertEqual(
+            names[names.index("Std_ViewIsometric") : names.index("Std_ViewIsometric") + 3],
+            ["Std_ViewIsometric", "Std_ViewDimetric", "Std_ViewTrimetric"],
+        )
+
+    def testOrientOnEditToggleIsThePreference(self):
+        group = App.ParamGet(self.SKETCHER)
+        group.SetBool("OrientViewOnEdit", False)
+        Gui.runCommand("Std_OrientViewOnEdit", 1)
+        self.assertTrue(group.GetBool("OrientViewOnEdit", False))
+        Gui.runCommand("Std_OrientViewOnEdit", 0)
+        self.assertFalse(group.GetBool("OrientViewOnEdit", True))
+        # the check mark follows the preference set elsewhere (the Sketcher's settings page)
+        group.SetBool("OrientViewOnEdit", True)
+        pump(1200)  # the commands' update timer
+        menus = Gui.getMainWindow().findChildren(QtWidgets.QMenu, "NaviCube_Menu")
+        action = [a for a in menus[-1].actions() if a.objectName() == "Std_OrientViewOnEdit"][0]
+        self.assertTrue(action.isCheckable())
+        self.assertTrue(action.isChecked())
+
+    def testDimetricAndTrimetricTurnTheView(self):
+        view = Gui.ActiveDocument.ActiveView
+        view.setAnimationEnabled(False)
+        view.viewIsometric()
+        pump()
+        iso = view.getCameraOrientation()
+        for name in ("Std_ViewDimetric", "Std_ViewTrimetric"):
+            Gui.runCommand(name)
+            pump(100)
+            self.assertFalse(sameRotation(view.getCameraOrientation(), iso), name)

@@ -53,6 +53,7 @@
 #include <QMenu>
 #include <QPainterPath>
 
+#include <App/Application.h>
 #include <Base/Color.h>
 #include <Base/Tools.h>
 #include "NaviCube.h"
@@ -1421,6 +1422,49 @@ Gui::Action* NaviCubeDraggableCmd::createAction()
     return pcAction;
 }
 
+// FreeCAD-CH (gaps3 row 23): Onshape's view cube menu has "Orient normal to sketch on edit", the
+// Sketcher's OrientViewOnEdit preference as a check item
+DEF_STD_CMD_AC(StdCmdOrientViewOnEdit)
+
+static ParameterGrp::handle orientViewOnEditGroup()
+{
+    return App::GetApplication().GetParameterGroupByPath(
+        "User parameter:BaseApp/Preferences/Mod/Sketcher/General"
+    );
+}
+
+StdCmdOrientViewOnEdit::StdCmdOrientViewOnEdit()
+    : Command("Std_OrientViewOnEdit")
+{
+    sGroup = "Standard-View";
+    sMenuText = QT_TR_NOOP("Orient Normal to Sketch on Edit");
+    sToolTipText = QT_TR_NOOP("Turns the view normal to a sketch when its edit starts");
+    sWhatsThis = "Std_OrientViewOnEdit";
+    sStatusTip = sToolTipText;
+    eType = 0;
+}
+void StdCmdOrientViewOnEdit::activated(int iMsg)
+{
+    orientViewOnEditGroup()->SetBool("OrientViewOnEdit", iMsg == 1);
+}
+bool StdCmdOrientViewOnEdit::isActive()
+{
+    if (_pcAction) {
+        bool on = orientViewOnEditGroup()->GetBool("OrientViewOnEdit", false);
+        if (_pcAction->isChecked() != on) {
+            _pcAction->setChecked(on);
+        }
+    }
+    return true;
+}
+Gui::Action* StdCmdOrientViewOnEdit::createAction()
+{
+    Gui::Action* pcAction = Command::createAction();
+    pcAction->setCheckable(true);
+    pcAction->setChecked(orientViewOnEditGroup()->GetBool("OrientViewOnEdit", false));
+    return pcAction;
+}
+
 
 QMenu* NaviCubeImplementation::createNaviCubeMenu()
 {
@@ -1432,6 +1476,9 @@ QMenu* NaviCubeImplementation::createNaviCubeMenu()
     if (init) {
         init = false;
         rcCmdMgr.addCommand(new NaviCubeDraggableCmd);
+        if (!rcCmdMgr.getCommandByName("Std_OrientViewOnEdit")) {
+            rcCmdMgr.addCommand(new StdCmdOrientViewOnEdit);
+        }
     }
 
     vector<string> menuCommands = NaviCubeImplementation::commands;
@@ -1440,7 +1487,11 @@ QMenu* NaviCubeImplementation::createNaviCubeMenu()
         menuCommands.emplace_back("Std_PerspectiveCamera");
         menuCommands.emplace_back("Std_ViewBoxZoom");
         menuCommands.emplace_back("Separator");
+        // FreeCAD-CH (gaps3 row 23): Onshape's cube menu also has Dimetric, Trimetric, the
+        // orient-on-edit toggle and Section view
         menuCommands.emplace_back("Std_ViewIsometric");
+        menuCommands.emplace_back("Std_ViewDimetric");
+        menuCommands.emplace_back("Std_ViewTrimetric");
         menuCommands.emplace_back("Separator");
         menuCommands.emplace_back("Std_ViewFitAll");
         menuCommands.emplace_back("Std_ViewFitSelection");
@@ -1448,6 +1499,9 @@ QMenu* NaviCubeImplementation::createNaviCubeMenu()
         menuCommands.emplace_back("Separator");
         menuCommands.emplace_back("Std_SaveNamedView");
         menuCommands.emplace_back("Std_NamedViews");
+        menuCommands.emplace_back("Separator");
+        menuCommands.emplace_back("Std_OrientViewOnEdit");
+        menuCommands.emplace_back("Std_SectionView");
         menuCommands.emplace_back("Separator");
         menuCommands.emplace_back("NaviCubeDraggableCmd");
     }
