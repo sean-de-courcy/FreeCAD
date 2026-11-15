@@ -170,8 +170,8 @@ def keptSense(fp, key, obj, sub, axis):
     # The frame of the object that owns the element, every placement along the path left out:
     # a part turned inside a sub-assembly (or a nested link) turns the way with it (review r2)
     try:
-        owner, _parent, mapped, element = obj.resolve(sub)
-        element = mapped or element
+        # (the object, its parent, its name under the parent, the element)
+        owner, _parent, _child, element = obj.resolve(sub)
         owner = owner.getLinkedObject(True) if owner is not None and element else None
         local = axisOfShape(Part.getShape(owner, element, needSubElement=True, transform=False))
         path = owner.Name
