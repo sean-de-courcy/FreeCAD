@@ -851,6 +851,22 @@ class TestStudioOwner(unittest.TestCase):
                 self.membersBefore(boss, between)
                 self.assertFalse(boss.isValid(), "the boss went up to a cone a pocket removed")
 
+    def testUpToConeFaceWithAWedgeRemovedDoesNotComeBack(self):
+        """A pocket x 4..6.5, y 4..6 cuts a wedge out of the cone's -x side, where its seam may
+        lie: a boss in the wedge fails; one under what is left ends on the cone."""
+        for centre, inside in (((5.4, 5), True), ((7, 3.4), False), ((8.6, 5), False)):
+            with self.subTest(centre=centre):
+                self.tearDown()
+                self.setUp()
+                boss, tool = self.coneAndBoss(centre, 0.2)
+                self.assertTrue(boss.isValid(), boss.getStatusString())
+                self.membersBefore(boss, (self.slotAcross((4, 4, 6.5, 6), 14, 4),))
+                if inside:
+                    self.assertFalse(boss.isValid(), "the boss went up to a cut-away cone")
+                else:
+                    self.assertTrue(boss.isValid(), boss.getStatusString())
+                    self.assertAlmostEqual(boss.AddSubShape.Volume, tool, places=3)
+
     def testUpToFaceAfterAnOutwardThicknessWithItsOuterFaceRemoved(self):
         """An outward Thickness, then a pocket z 14.5..15 over the whole top: nothing faces as
         picked where Step's top was, only the cavity's ceiling facing down: the boss fails."""
