@@ -150,6 +150,7 @@ void DlgSettingsDocumentImp::saveSettings()
     ui->prefAddLogo->onSave();
     ui->prefSaveBackupFiles->onSave();
     ui->prefCountBackupFiles->onSave();
+    ui->prefTeamFolder->onSave();
     ui->prefSaveBackupExtension->onSave();
     ui->prefSaveBackupDateFormat->onSave();
     ui->prefDisableVersionCheckOnSave->onSave();
@@ -184,6 +185,7 @@ void DlgSettingsDocumentImp::loadSettings()
     ui->prefAddLogo->onRestore();
     ui->prefSaveBackupFiles->onRestore();
     ui->prefCountBackupFiles->onRestore();
+    ui->prefTeamFolder->onRestore();
     ui->prefSaveBackupExtension->onRestore();
     ui->prefSaveBackupDateFormat->onRestore();
     ui->prefDisableVersionCheckOnSave->onRestore();

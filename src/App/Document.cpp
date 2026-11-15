@@ -83,6 +83,7 @@
 #include "Application.h"
 #include "AutoTransaction.h"
 #include "BackupPolicy.h"
+#include "TeamFolder.h"
 #include "ProjectFile.h"
 #include "ElementSolverBatch.h"
 #include "ElementSolverEdits.h"
@@ -4078,6 +4079,11 @@ bool Document::saveToFile(const char* filename) const
                           ->GetBool("CreateBackupFiles", true);
         if (!backup) {
             count_bak = -1;
+        }
+        // FreeCAD-CH (ops#640, folder sync item 2): inside the team folder the backups are
+        // local-only (its ignore list), and they are the net against an overwrite: keep five
+        else if (TeamFolder::contains(fn)) {
+            count_bak = std::max(count_bak, TeamFolder::backupsKept);
         }
         bool useFCBakExtension =
             GetApplication()

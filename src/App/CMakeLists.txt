@@ -157,6 +157,7 @@ SOURCE_GROUP("Pyi" FILES ${FreeCADApp_Pyi_SRCS})
 SET(Document_CPP_SRCS
     Annotation.cpp
     BackupPolicy.cpp
+    TeamFolder.cpp
     Document.cpp
     RecoverySnapshot.cpp
     DocumentObject.cpp
@@ -221,6 +222,7 @@ SET(Document_CPP_SRCS
 SET(Document_HPP_SRCS
     Annotation.h
     BackupPolicy.h
+    TeamFolder.h
     Document.h
     RecoverySnapshot.h
     DepEdge.h
