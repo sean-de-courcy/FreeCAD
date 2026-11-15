@@ -6638,28 +6638,64 @@ TopoShape& TopoShape::makeElementThickSolid(
         remFace.Append(face.getShape());
     }
     // On a worker under the feature's time limit (kernel safety S1)
-    auto mkThickPtr = std::make_shared<BRepOffsetAPI_MakeThickSolid>();
+    auto build = [&shape, &remFace, offset, tol, offsetMode, selfInter, join](bool withIntersection) {
+        auto maker = std::make_shared<BRepOffsetAPI_MakeThickSolid>();
+        KernelBudget::run(
+            "The thickness",
+            [maker, base = shape.getShape(), remFace, offset, tol, offsetMode, withIntersection, selfInter, join](
+                const Message_ProgressRange& range
+            ) {
+                maker->MakeThickSolidByJoin(
+                    base,
+                    remFace,
+                    offset,
+                    tol,
+                    BRepOffset_Mode(offsetMode),
+                    withIntersection ? Standard_True : Standard_False,
+                    selfInter ? Standard_True : Standard_False,
+                    GeomAbs_JoinType(join),
+                    Standard_False,
+                    range
+                );
+            },
+            KernelBudget::Inputs::Shared
+        );
+        return maker;
+    };
+    // OCCT can hand back the solid as it was, valid and without a cavity (the Intersection join
+    // with a hole near a side wall; the intersecting mode with a hole's wall tangent to one; an
+    // open face that is a piece of a plane beside a step). From the intersecting mode that is
+    // never taken for the shell, and from the plain one it is a reason to try the other
+    // (ops#795); where both give it, it is still returned, as before.
+    auto volumeOf = [](const TopoDS_Shape& solid) {
+        GProp_GProps props;
+        BRepGProp::VolumeProperties(solid, props);
+        return props.Mass();
+    };
+    const double volumeBefore = volumeOf(shape.getShape());
+    auto unchanged = [&volumeOf, volumeBefore](BRepOffsetAPI_MakeThickSolid& maker) {
+        return maker.IsDone() && !maker.Shape().IsNull()
+            && std::fabs(volumeOf(maker.Shape()) - volumeBefore) <= 1e-7 * std::fabs(volumeBefore);
+    };
+    auto built = [&unchanged](BRepOffsetAPI_MakeThickSolid& maker) {
+        return maker.IsDone() && !maker.Shape().IsNull() && !unchanged(maker)
+            && KernelBudget::checkValid(maker.Shape());
+    };
+    auto mkThickPtr = build(intersection);
+    // Offset faces that are not neighbours can meet: the wall around a hole reaches the shell's
+    // side wall once the hole is closer to it than its radius and twice the thickness. OCCT
+    // trims each offset face only by its neighbours unless told to intersect them all, and then
+    // returns an invalid shell or none (ops#795). That mode is tried where the plain one fails;
+    // where it fails too, the plain mode's failure is the one reported.
+    const bool fallsApart = !mkThickPtr->IsDone()
+        && mkThickPtr->MakeOffset().Error() == BRepOffset_NotConnectedShell;
+    if (!intersection && !fallsApart && !built(*mkThickPtr)) {
+        auto withAll = build(true);
+        if (built(*withAll)) {
+            mkThickPtr = withAll;
+        }
+    }
     BRepOffsetAPI_MakeThickSolid& mkThick = *mkThickPtr;
-    KernelBudget::run(
-        "The thickness",
-        [mkThickPtr, base = shape.getShape(), remFace, offset, tol, offsetMode, intersection, selfInter, join](
-            const Message_ProgressRange& range
-        ) {
-            mkThickPtr->MakeThickSolidByJoin(
-                base,
-                remFace,
-                offset,
-                tol,
-                BRepOffset_Mode(offsetMode),
-                intersection ? Standard_True : Standard_False,
-                selfInter ? Standard_True : Standard_False,
-                GeomAbs_JoinType(join),
-                Standard_False,
-                range
-            );
-        },
-        KernelBudget::Inputs::Shared
-    );
     // Only where OCCT refuses for the kept faces falling apart: every shell OCCT builds stays
     // its own (ops#640, F46).
     if (!mkThick.IsDone() && mkThick.MakeOffset().Error() == BRepOffset_NotConnectedShell) {
