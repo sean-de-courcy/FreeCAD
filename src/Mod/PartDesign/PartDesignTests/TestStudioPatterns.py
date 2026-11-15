@@ -494,6 +494,130 @@ class TestStudioPatterns(unittest.TestCase):
         self.assertValid(hole, lp)
         self.assertTipVolume(80 * 50 * 10 + math.pi * 12**2 * 20 - 2 * self.hole(10))
 
+    # ------------------------------------------------------------------------------- Hole features (ops#805)
+    # A Hole made as the Hole command makes it starts from the part's surface (Onshape's default).
+    # Reapply off, a pattern copies it (Onshape copies a feature's result) where every instance
+    # keeps the hole's profile plane, the same side up; one moved along its axis is refused.
+    def drill(self, z=10.0, scope=("P",), **values):
+        """A Hole owner: d6 (r3) at (10, 10), flat-bottomed, sketched on the plane z."""
+        sk = studioSketch(self.doc, self.S, "DrillSk", z=z, circles=((10, 10, HOLE_R),))
+        values.setdefault("DepthType", "Dimension")
+        values.setdefault("Depth", 5)
+        hole = makeOwner(
+            self.doc, self.S, "Hole", "Drill", sk, scope,
+            Diameter=2 * HOLE_R, DrillPoint="Flat", Refine=True, **values
+        )
+        self.assertEqual(hole.StartType, "Part")
+        return hole
+
+    def testHoleFromThePartIsCopied(self):
+        """A blind hole 5 deep on the plate's top, patterned 20 along x, 3: three holes."""
+        self.plate()
+        hole = self.drill()
+        lp = linear(self.part(), "LP", [hole], X_AXIS, 40, 3)
+        self.doc.recompute()
+        self.assertValid(hole, lp)
+        self.assertTipVolume(60 * 20 * 10 - 3 * self.hole(5))
+
+    def testHoleSketchedAboveThePartStartsAtItsSurface(self):
+        """Sketched at z 15, 5 above the plate: each copy starts at the plate's top (z 10), as the
+        seed does, and ends at z 5."""
+        self.plate()
+        hole = self.drill(z=15)
+        lp = linear(self.part(), "LP", [hole], X_AXIS, 40, 3)
+        self.doc.recompute()
+        self.assertValid(hole, lp)
+        self.assertTipVolume(60 * 20 * 10 - 3 * self.hole(5))
+        tip = self.tipShape()
+        self.assertFalse(tip.isInside(V(50, 10, 6), 1e-6, True))
+        self.assertTrue(tip.isInside(V(50, 10, 4), 1e-6, True))
+
+    def testHoleFromThePartPolarAboutItsAxisDirection(self):
+        """On the disc r20, a polar pattern of 4 about z (parallel to the hole): each instance keeps
+        the profile plane, so four holes."""
+        self.studio((("R", 20, 10),))
+        hole = self.drill(scope=("R",))
+        pp = polar(self.part("R"), "PP", [hole], 4)
+        self.doc.recompute()
+        self.assertValid(hole, pp)
+        self.assertTipVolume(math.pi * 20**2 * 10 - 4 * self.hole(5), name="R")
+
+    def testHoleFromThePartMovedAlongItsAxisIsRefused(self):
+        """Patterned 2 along z: an instance computed there would meet the part at another depth,
+        so copies are refused, with Reapply named."""
+        self.plate()
+        hole = self.drill()
+        lp = linear(self.part(), "LP", [hole], Z_AXIS, 2, 2)
+        self.doc.recompute()
+        self.assertValid(hole)
+        self.assertRefused(lp, "Drill", "part's surface", "Reapply")
+
+    def testThroughAllHoleFromThePartIsCopied(self):
+        """A Through all hole patterned along x: every copy spans the plate."""
+        self.plate()
+        hole = self.drill(DepthType="ThroughAll")
+        lp = linear(self.part(), "LP", [hole], X_AXIS, 40, 3)
+        self.doc.recompute()
+        self.assertValid(hole, lp)
+        self.assertTipVolume(60 * 20 * 10 - 3 * self.hole(10))
+
+    def testThroughAllHoleNotSpanningIsRefused(self):
+        """A Through all hole on a plate raised to z 20 over x 40..60: the copy at x 50 starts at
+        z 10, inside the block, so it is refused."""
+        self.plate()
+        p = self.part()
+        pad(p, "Raised", sketch(p, "RaisedSk", xyPlane(p), (40, 0, 60, 20), z=10), 10)
+        PartDesign.studioReconcile(studioList(self.doc))
+        self.doc.recompute()
+        hole = self.drill(DepthType="ThroughAll")
+        lp = linear(p, "LP", [hole], X_AXIS, 40, 3)
+        self.doc.recompute()
+        self.assertValid(hole)
+        self.assertRefused(lp, "Drill", "Through all", "Reapply")
+
+    def testThroughAllHoleWithItsDrillPointBesideABossIsCopied(self):
+        """ops#640 F2's plate and boss (80 x 50 x 10, a boss r12 at the origin up to z 30), and a
+        Through all Hole as the Hole command makes it, with its 118 deg drill point, r3 at (-28, 15),
+        patterned 26 along x: the copy at (-2, 15) clears the boss. The pointed end has no flat face,
+        so the start's disc is the footprint, not the box around the copy, which reaches the boss."""
+        self.plate(rect=(-40, -25, 40, 25))
+        p = self.part()
+        boss = circleSketch(p, "BossSk", 12)
+        boss.AttachmentOffset = App.Placement(V(0, 0, 10), App.Rotation())
+        pad(p, "Boss", boss, 20)
+        PartDesign.studioReconcile(studioList(self.doc))
+        self.doc.recompute()
+        sk = studioSketch(self.doc, self.S, "DrillSk", z=10, circles=((-28, 15, HOLE_R),))
+        hole = makeOwner(
+            self.doc, self.S, "Hole", "Drill", sk, ("P",),
+            Diameter=2 * HOLE_R, DepthType="ThroughAll", Refine=True
+        )
+        self.assertEqual(hole.DrillPoint, "Angled")
+        lp = linear(p, "LP", [hole], X_AXIS, 26, 2)
+        self.doc.recompute()
+        self.assertValid(hole, lp)
+        self.assertTipVolume(80 * 50 * 10 + math.pi * 12**2 * 20 - 2 * self.hole(10))
+
+    def testTaperedThroughAllHoleIsRefused(self):
+        """A Through all Hole tapered 89.5 deg (a steeper taper closes its cone within the through-all
+        length): its copy's walls don't run along the axis, so the span rule can't vouch for it."""
+        self.plate()
+        hole = self.drill(DepthType="ThroughAll", Tapered=True, TaperedAngle=89.5)
+        lp = linear(self.part(), "LP", [hole], X_AXIS, 40, 3)
+        self.doc.recompute()
+        self.assertValid(hole)
+        self.assertRefused(lp, "Drill", "Through all", "Reapply")
+
+    def testHoleUpToNextStillReRunsWithReapplyOff(self):
+        """Up to next is re-run per instance with Reapply off too (oracle 9, R2): three holes
+        through the plate."""
+        self.plate()
+        hole = self.drill(DepthType="UpToFirst")
+        lp = linear(self.part(), "LP", [hole], X_AXIS, 40, 3)
+        self.doc.recompute()
+        self.assertValid(hole, lp)
+        self.assertTipVolume(60 * 20 * 10 - 3 * self.hole(10))
+
     # ------------------------------------------------------------------------------- patterns of patterns
     def mirrorStudio(self):
         """A plate x -30..30, y -30..30, z 0..5, a 6 x 6 x 5 boss at (2..8, 2..8), and Mir1, the
