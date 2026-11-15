@@ -573,7 +573,8 @@ class FilletEdgesDeleteNearStep(Scenario):
 
 
 class StepDeletedFacesMerge(Scenario):
-    """A block (0..20 x 0..10 x 0..10); a step, 0.5 high, padded on the back half of its top
+    """A block (0..20 x 0..10 x 0..10); a step, 2 high (0.5 until ops#811: lower than the
+    thickness's wall, which is no shell and now fails), padded on the back half of its top
     (y 5..10), which leaves the front half (y 0..5) as a piece of the block's top face; a
     thickness, 1 inward, with that piece as its open face. The step is deleted (its Base goes
     to the block, as FilletDeleteNearStep's): the top is one face again, the front half's
@@ -597,7 +598,7 @@ class StepDeletedFacesMerge(Scenario):
         profile = m.sketch(doc, "Profile", m.rectangle(0, 0, 20, 10), body)
         m.pad(body, profile, 10)
         stepSketch = m.sketch(doc, "StepSketch", m.rectangle(0, 5, 20, 10), body, z=10)
-        step = m.pad(body, stepSketch, 0.5, name="Step")
+        step = m.pad(body, stepSketch, 2, name="Step")
         doc.recompute()
         thickness = body.newObject("PartDesign::Thickness", "Thickness")
         thickness.Base = (step, self.names(step, self.topFace()))
