@@ -4647,7 +4647,9 @@ class RoundOnASplineLidEndingInAHoleTest(unittest.TestCase):
         return body, body.makeFillet(self.radius, edges)
 
     def testTheEndsInAHoleAreFound(self):
-        for hole in (4.0, 6.0):
+        # 2.0 (ops#779): the ball gets 0.5 clear, less than two spacings, and the arc passes the
+        # hole's axis, where the foot on the far wall read as clear all along the round
+        for hole in (2.0, 4.0, 6.0):
             with self.subTest(hole=hole):
                 body, shape = self.rounded(hole)
                 self.assertTrue(shape.isValid())
@@ -5138,3 +5140,146 @@ class TangentLineStepTest(unittest.TestCase):
         shape = body.makeFillet(1.0, rim)
         self.assertTrue(shape.isValid())
         self.assertAlmostEqual(body.Volume - shape.Volume, slot_rim_removed(1.0), delta=1e-6)
+
+
+def bent_block(turn, reflex=False, length=10.0, height=5.0):
+    """A prism whose front wall turns by `turn` degrees at the origin, to the inside (a convex
+    corner in plan) or, reflex, to the outside. The two top edges of the front, each `length`
+    long, meet at (0, 0, height); each ends on a wall square to it."""
+    a = math.radians(turn) * (-1 if reflex else 1)
+    along = V(math.cos(a), math.sin(a), 0)
+    square = V(-math.sin(a), math.cos(a), 0)
+    end = along * length
+    outline = [V(-length, 0, 0), V(0, 0, 0), end, end + square * 15, V(-length, 20, 0)]
+    shape = Part.Face(Part.makePolygon(outline + outline[:1])).extrude(V(0, 0, height))
+    top = [
+        e
+        for e in shape.Edges
+        if abs(e.BoundBox.ZMin - height) < 1e-9
+        and any(v.Point.distanceToPoint(V(0, 0, height)) < 1e-9 for v in e.Vertexes)
+    ]
+    top.sort(key=lambda e: e.CenterOfMass.x)
+    return shape, top
+
+
+def bent_removed(turn, size, reflex=False, length=10.0, chamfer=False):
+    """What a round r (or a chamfer c) of both top edges of bent_block() removes. At the depth h
+    the section loses a strip of width d along both edges, meeting in a mitre at the corner: the
+    area 2 L d - d^2 tan(turn / 2) (plus, at a reflex corner). d = r - sqrt(r^2 - (r - h)^2) for
+    the round, c - h for the chamfer, integrated over the depth."""
+    first = size * size / 2 if chamfer else size * size * (1 - math.pi / 4)
+    second = size**3 / 3 if chamfer else size**3 * (5 / 3 - math.pi / 2)
+    corner = math.tan(math.radians(turn) / 2) * second
+    return 2 * length * first + (corner if reflex else -corner)
+
+
+class KinkedContourTest(unittest.TestCase):
+    """ops#762, the root cause: OCCT 8.0.1 carries a fillet's or chamfer's contour on past a vertex
+    wherever the faces at the vertex's other edges meet within 0.1 rad (5.73 degrees), whatever the
+    two edges' own directions. Each edge's strip then ends in a cross-section at the vertex and the
+    wedge between the cross-sections is closed with planes: a valid solid with a tooth at the
+    corner, short of the mitre by up to 2 % of the removed volume here, with no error. From 0.1 rad
+    on OCCT builds the mitre itself. Onshape mitres both."""
+
+    def testARoundOverASlightCornerMitres(self):
+        for turn in (5.0, 3.0, 1.0):
+            for reflex in (False, True):
+                with self.subTest(turn=turn, reflex=reflex):
+                    shape, top = bent_block(turn, reflex)
+                    self.assertEqual(len(top), 2)
+                    result = shape.makeFillet(1.0, top)
+                    self.assertTrue(result.isValid())
+                    self.assertEqual(len(result.Solids), 1)
+                    self.assertAlmostEqual(
+                        shape.Volume - result.Volume, bent_removed(turn, 1.0, reflex), delta=1e-6
+                    )
+
+    def testAChamferOverASlightCornerMitres(self):
+        for turn in (5.0, 3.0, 1.0):
+            for reflex in (False, True):
+                with self.subTest(turn=turn, reflex=reflex):
+                    shape, top = bent_block(turn, reflex)
+                    result = shape.makeChamfer(1.0, top)
+                    self.assertTrue(result.isValid())
+                    self.assertEqual(len(result.Solids), 1)
+                    self.assertAlmostEqual(
+                        shape.Volume - result.Volume,
+                        bent_removed(turn, 1.0, reflex, chamfer=True),
+                        delta=1e-6,
+                    )
+
+    def testFromOcctsOwnLimitOnAsBefore(self):
+        # Control: at 6 degrees OCCT ends its contours at the corner and mitres them itself
+        shape, top = bent_block(6.0)
+        result = shape.makeFillet(1.0, top)
+        self.assertTrue(result.isValid())
+        self.assertAlmostEqual(shape.Volume - result.Volume, bent_removed(6.0, 1.0), delta=1e-5)
+
+    def testATangentChainIsStillOne(self):
+        # Control: a turn below OCCT's own tangency (0.01 rad) stays a tangent chain, as before:
+        # picking one edge rounds both
+        shape, top = bent_block(0.3)
+        one = shape.makeFillet(1.0, top[:1])
+        both = shape.makeFillet(1.0, top)
+        self.assertTrue(one.isValid())
+        self.assertAlmostEqual(one.Volume, both.Volume, delta=1e-9)
+
+    def testOneEdgeOfTheCornerRunsStraightOn(self):
+        # One edge picked: the round does not carry on past the corner (Onshape's propagation
+        # doesn't either); it runs straight on and leaves the body where the wall turns away,
+        # as OCCT's does from 0.1 rad on. Past the corner it takes the wedge between the wall
+        # and the strip: d^2 / (2 tan(turn)) at each depth (r 0.5: the wedge, r / tan(turn) long,
+        # ends before the second edge does)
+        r = 0.5
+        for turn in (5.0, 3.0, 6.0):
+            with self.subTest(turn=turn):
+                shape, top = bent_block(turn)
+                result = shape.makeFillet(r, top[:1])
+                self.assertTrue(result.isValid())
+                self.assertEqual(len(result.Solids), 1)
+                self.assertLess(r / math.tan(math.radians(turn)), 10)
+                expected = 10 * r * r * (1 - math.pi / 4) + r**3 * (5 / 3 - math.pi / 2) / (
+                    2 * math.tan(math.radians(turn))
+                )
+                self.assertAlmostEqual(shape.Volume - result.Volume, expected, delta=1e-5)
+
+    def testAPolygonsRimMitresAtEveryCorner(self):
+        # The issue's model: OCCT's contours close round the rim from 63 sides on
+        for sides in (63, 100):
+            with self.subTest(sides=sides):
+                shape, rim = VolumeSignTest.prism(sides)
+                self.assertEqual(len(rim), sides)
+                result = shape.makeFillet(0.2, rim)
+                self.assertTrue(result.isValid())
+                self.assertEqual(len(result.Faces), 2 * sides + 2)
+                self.assertAlmostEqual(
+                    shape.Volume - result.Volume, VolumeSignTest.removed(sides, 0.2), delta=1e-6
+                )
+                chamfered = shape.makeChamfer(0.2, rim)
+                self.assertTrue(chamfered.isValid())
+                expected = sides * 2.0 * 0.02 - sides * math.tan(math.pi / sides) * 0.008 / 3
+                self.assertAlmostEqual(shape.Volume - chamfered.Volume, expected, delta=1e-6)
+
+    def testTwoRadiiOverTheCornerAreRefused(self):
+        # Part::Fillet with a radius per edge runs OCCT's maker alone: it fails, never the tooth
+        shape, top = bent_block(5.0)
+        doc = FreeCAD.newDocument("KinkedContourTest")
+        try:
+            base = doc.addObject("Part::Feature", "Base")
+            base.Shape = shape
+            fillet = doc.addObject("Part::Fillet", "Fillet")
+            fillet.Base = base
+            picked = [i for i, e in enumerate(shape.Edges, 1) if any(e.isSame(x) for x in top)]
+            self.assertEqual(len(picked), 2)
+            fillet.Edges = [(picked[0], 1.0, 1.0), (picked[1], 0.5, 0.5)]
+            doc.recompute()
+            self.assertFalse(fillet.isValid())
+            self.assertIn("slight corner", fillet.getStatusString())
+            fillet.Edges = [(picked[0], 1.0, 1.0), (picked[1], 1.0, 1.0)]
+            doc.recompute()
+            self.assertTrue(fillet.isValid())
+            self.assertAlmostEqual(
+                shape.Volume - fillet.Shape.Volume, bent_removed(5.0, 1.0), delta=1e-6
+            )
+        finally:
+            FreeCAD.closeDocument(doc.Name)
