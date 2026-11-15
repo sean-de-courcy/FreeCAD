@@ -3,6 +3,8 @@
 // Pieces and leftovers become parts at command time (FreeCAD-CH ops#654, P6p,
 // notes/parts-design.md 10.12).
 
+#include <deque>
+#include <mutex>
 #include <algorithm>
 #include <iterator>
 #include <map>
@@ -51,11 +53,48 @@ PartDesignExport const char* studioOperationOf(const App::DocumentObject* owner)
 /// than its inputs, so they share a face or overlap; an edge or a vertex in common is no join
 /// (Onshape M2, R9 S1). The one contact test of an Add's merge, its leftovers and the dialog's
 /// pre-fill (declared where used)
+namespace
+{
+bool solidsJoin(const TopoDS_Shape& a, const TopoDS_Shape& b);
+}
+
 PartDesignExport bool studioSolidsJoin(const TopoDS_Shape& a, const TopoDS_Shape& b)
 {
     if (a.IsNull() || b.IsNull()) {
         return false;
     }
+    // ops#796: the last answers, by the two shapes themselves (kept here, so an address is never
+    // another shape's). One recompute asks the same pair two or three times (the owner's
+    // leftovers, its step's merge, the piece command), each a distance and a fuse
+    struct Asked
+    {
+        TopoDS_Shape a;
+        TopoDS_Shape b;
+        bool joins;
+    };
+    static std::mutex mutex;
+    static std::deque<Asked> asked;
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        for (const auto& one : asked) {
+            if (one.a.IsEqual(a) && one.b.IsEqual(b)) {
+                return one.joins;
+            }
+        }
+    }
+    const bool joins = solidsJoin(a, b);
+    std::lock_guard<std::mutex> lock(mutex);
+    asked.push_back({a, b, joins});
+    if (asked.size() > 32) {
+        asked.pop_front();
+    }
+    return joins;
+}
+
+namespace
+{
+bool solidsJoin(const TopoDS_Shape& a, const TopoDS_Shape& b)
+{
     BRepExtrema_DistShapeShape distance(a, b);
     if (!distance.IsDone() || distance.Value() > Precision::Confusion()) {
         return false;
@@ -78,6 +117,7 @@ PartDesignExport bool studioSolidsJoin(const TopoDS_Shape& a, const TopoDS_Shape
         return false;
     }
 }
+}  // namespace
 
 namespace
 {
