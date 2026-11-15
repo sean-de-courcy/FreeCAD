@@ -5572,6 +5572,33 @@ static std::vector<SolveOutcome> solveOwnerInFrame(const SolveInput& input)
             }
             return madeBy[k] > 0;
         };
+        // Whether the old element's maker built nothing of the target (ops#824): no element of
+        // the pool has it in its lineage. A dress-up whose Base a reorder put before the
+        // feature that made its picks (a chamfer of a draft's top edges moved above the draft)
+        // solves on a base the maker never touched. Found on first use.
+        int makerInTarget = -1;
+        auto makerAbsent = [&]() {
+            if (maker.empty()) {
+                return false;
+            }
+            if (makerInTarget < 0) {
+                // Either sign of the tag (tagNumber()): a Body's later feature names its elements
+                // `-<ID>`, and `<ID>` once the feature before it is gone (prd2eson-r5 F1)
+                const std::string other =
+                    maker.front() == '-' ? maker.substr(1) : "-" + maker;
+                makerInTarget = 0;
+                for (std::size_t k = 0; makerInTarget == 0 && k < pool.elements.size(); ++k) {
+                    const auto& names = pool.elements[k].names;
+                    makerInTarget = fromMaker(static_cast<int>(k))
+                            || std::any_of(names.begin(), names.end(), [&](const auto& n) {
+                                   return NameAncestry::hasLineageTag(n, other);
+                               })
+                        ? 1
+                        : 0;
+                }
+            }
+            return makerInTarget == 0;
+        };
         std::vector<std::string> flatNames;
         std::vector<int> flatElements;
         std::vector<std::string> otherNames;
@@ -6224,6 +6251,31 @@ static std::vector<SolveOutcome> solveOwnerInFrame(const SolveInput& input)
         // Tiers 2 and 3 and the IDX source, for a reference with a saved fingerprint.
         const ElementFingerprint* saved = savedFingerprint(members);
         state.saved = saved;
+        // placeVerdict() on \a saved, without the sides where the maker built nothing of the
+        // target (makerAbsent(), ops#824) and the pick shares ancestry with the old element (the
+        // boss's top edge and a draft's, which the draft named from the boss's faces). The
+        // sides the record saved are the maker's (the draft's tilted faces), so other sides there
+        // only say that the maker isn't there, not that another element is. An element of a
+        // feature that replaced the maker from another sketch (a rim padded again larger, its
+        // inner edge where the old outer one was) shares nothing with it: its sides still break
+        // it. The marks are judged as before.
+        auto verdictOf = [&](const ElementFingerprint& pick,
+                             const std::vector<std::string>& names,
+                             bool lostSource,
+                             std::string* why) {
+            PlaceVerdict verdict =
+                placeVerdict(*saved, pick, names, oldName, lostSource, input.tolerances, why);
+            if (verdict == PlaceVerdict::OtherSide && makerAbsent()
+                && std::any_of(names.begin(), names.end(), [&](const auto& n) {
+                       return ancestry.overlap(oldName, n) > 0;
+                   })) {
+                ElementFingerprint sideless = *saved;
+                sideless.sides.clear();
+                verdict =
+                    placeVerdict(sideless, pick, names, oldName, lostSource, input.tolerances, why);
+            }
+            return verdict;
+        };
         auto intrinsicSurvivors = [&](const std::vector<int>& positions) {
             std::vector<int> agree;
             for (int k : positions) {
@@ -6595,13 +6647,10 @@ static std::vector<SolveOutcome> solveOwnerInFrame(const SolveInput& input)
                                 input.continuationDistance)) {
                 return PlaceVerdict::Unjudged;
             }
-            return placeVerdict(*saved,
-                                fingerprintOf(pool.elements[position]),
-                                pool.elements[position].names,
-                                oldName,
-                                lostOldSource(position),
-                                input.tolerances,
-                                &why);
+            return verdictOf(fingerprintOf(pool.elements[position]),
+                             pool.elements[position].names,
+                             lostOldSource(position),
+                             &why);
         };
         // The record's verdict applied to a single pick at \a position, chosen among \a rest: true
         // if the entry broke (another element at the old place: other sides, or a source that was
@@ -6693,6 +6742,7 @@ static std::vector<SolveOutcome> solveOwnerInFrame(const SolveInput& input)
                 return false;
             }
             std::string why;
+            // verdictAt() with ops#824's sideless verdict: newer than `integration`'s rules here
             const PlaceVerdict verdict = verdictAt(position, why);
             return !reach
                 || (verdict != PlaceVerdict::OtherSide && verdict != PlaceVerdict::WasThere
