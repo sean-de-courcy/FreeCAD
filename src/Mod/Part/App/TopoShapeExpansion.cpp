@@ -119,6 +119,7 @@
 #include <BRepPrimAPI_MakePrism.hxx>
 #include <BRepProj_Projection.hxx>
 #include <BRepTools_WireExplorer.hxx>
+#include <GCPnts_QuasiUniformDeflection.hxx>
 #include <Geom2d_Curve.hxx>
 #include <Geom2dAdaptor_Curve.hxx>
 #include <BndLib_Add2dCurve.hxx>
@@ -6625,9 +6626,9 @@ TopoShape makeThickSolidByGroups(
 // that distance is no measure: beside a step the cavity runs under the wall within the
 // thickness of its foot, in Onshape's shell too, and under a step exactly as high as the
 // thickness it passes the wall's foot altogether. So a face touching a removed face is held
-// only where it lies farther than the thickness from that face's edges. And the cavity must
-// open through each removed face (OCCT's offset can come back as a fragment of it). Anything
-// else returns a null shape.
+// only where it lies farther than the thickness from that face's edges, measured along the
+// removed face's normal and across it. And the cavity must open through each removed face
+// (OCCT's offset can come back as a fragment of it). Anything else returns a null shape.
 
 // BRepOffsetAPI_MakeOffsetShape's join algorithm with an offset of their own for some faces
 class OffsetShapeWithFaceOffsets: public BRepOffsetAPI_MakeOffsetShape
@@ -6758,50 +6759,80 @@ TopoShape makeThickSolidByFaceOffsets(
             }
         }
         // Every kept face keeps its wall. A face touching a removed face is held only where it
-        // is farther than the thickness from that face's edges: outside a box along each
-        // straight edge, and the box of any other edge, grown by the thickness.
+        // is farther than the thickness from that face's edges: outside boxes along each edge
+        // (along its chords, where it is curved), as wide as twice the thickness across the
+        // removed face and along its normal. Along the normal that is the measure: the removed
+        // face's surface runs on under a wall rising from it, and the wall is nearer to it
+        // than the thickness only where it is nearer to that surface.
         struct Around
         {
             TopoDS_Shape solid;
             Bnd_Box box;
         };
         std::vector<Around> aroundOpenings;
-        TopTools_MapOfShape openingEdges;
         for (TopTools_ListIteratorOfListOfShape it(remFace); it.More(); it.Next()) {
-            for (TopExp_Explorer xp(it.Value(), TopAbs_EDGE); xp.More(); xp.Next()) {
+            const TopoDS_Face face = TopoDS::Face(it.Value());
+            const BRepAdaptor_Surface surface(face);
+            for (TopExp_Explorer xp(face, TopAbs_EDGE); xp.More(); xp.Next()) {
                 const TopoDS_Edge edge = TopoDS::Edge(xp.Current());
-                if (BRep_Tool::Degenerated(edge) || !openingEdges.Add(edge)) {
+                if (BRep_Tool::Degenerated(edge)) {
                     continue;
                 }
-                Around around;
                 const BRepAdaptor_Curve curve(edge);
-                const gp_Pnt from = curve.Value(curve.FirstParameter());
-                const gp_Pnt to = curve.Value(curve.LastParameter());
-                if (curve.GetType() == GeomAbs_Line && from.Distance(to) > Precision::Confusion()) {
-                    const gp_Ax2 along(from, gp_Dir(gp_Vec(from, to)));
-                    const gp_Pnt corner = from.Translated(
-                        -thickness
-                        * (gp_Vec(along.Direction()) + gp_Vec(along.XDirection())
-                           + gp_Vec(along.YDirection()))
-                    );
-                    around.solid = BRepPrimAPI_MakeBox(
-                                       gp_Ax2(corner, along.Direction(), along.XDirection()),
-                                       2 * thickness,
-                                       2 * thickness,
-                                       from.Distance(to) + 2 * thickness
-                    ).Shape();
-                }
-                else {
-                    Bnd_Box box;
-                    BRepBndLib::AddOptimal(edge, box, Standard_False, Standard_False);
-                    if (box.IsVoid()) {
+                const bool straight = curve.GetType() == GeomAbs_Line;
+                const double sag = straight ? 0.0 : 0.1 * thickness;
+                std::vector<double> at {curve.FirstParameter(), curve.LastParameter()};
+                if (!straight) {
+                    GCPnts_QuasiUniformDeflection chords(curve, sag);
+                    if (!chords.IsDone() || chords.NbPoints() < 2) {
                         return {};
                     }
-                    box.Enlarge(thickness);
-                    around.solid = BRepPrimAPI_MakeBox(box.CornerMin(), box.CornerMax()).Shape();
+                    at.clear();
+                    for (int i = 1; i <= chords.NbPoints(); ++i) {
+                        at.push_back(chords.Parameter(i));
+                    }
                 }
-                BRepBndLib::Add(around.solid, around.box, Standard_False);
-                aroundOpenings.push_back(around);
+                double first = 0.0;
+                double last = 0.0;
+                Handle(Geom2d_Curve) onFace = BRep_Tool::CurveOnSurface(edge, face, first, last);
+                if (onFace.IsNull()) {
+                    return {};
+                }
+                const double half = thickness + sag;
+                for (std::size_t i = 0; i + 1 < at.size(); ++i) {
+                    const gp_Pnt from = curve.Value(at[i]);
+                    const gp_Pnt to = curve.Value(at[i + 1]);
+                    if (from.Distance(to) <= Precision::Confusion()) {
+                        continue;
+                    }
+                    const gp_Dir along(gp_Vec(from, to));
+                    // the removed face's normal at the chord's middle
+                    const gp_Pnt2d uv = onFace->Value((at[i] + at[i + 1]) / 2);
+                    gp_Pnt point;
+                    gp_Vec du;
+                    gp_Vec dv;
+                    surface.D1(uv.X(), uv.Y(), point, du, dv);
+                    const gp_Vec normal = du.Crossed(dv);
+                    if (normal.Magnitude() <= gp::Resolution()
+                        || normal.IsParallel(gp_Vec(along), Precision::Angular())) {
+                        return {};
+                    }
+                    const gp_Ax2 axes(from, along, gp_Dir(normal));
+                    const gp_Pnt corner = from.Translated(
+                        -half
+                        * (gp_Vec(axes.Direction()) + gp_Vec(axes.XDirection())
+                           + gp_Vec(axes.YDirection()))
+                    );
+                    Around around;
+                    around.solid = BRepPrimAPI_MakeBox(
+                                       gp_Ax2(corner, axes.Direction(), axes.XDirection()),
+                                       2 * half,
+                                       2 * half,
+                                       from.Distance(to) + 2 * half
+                    ).Shape();
+                    BRepBndLib::Add(around.solid, around.box, Standard_False);
+                    aroundOpenings.push_back(around);
+                }
             }
         }
         struct CavityFace
