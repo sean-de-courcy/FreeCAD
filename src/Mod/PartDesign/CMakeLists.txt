@@ -69,6 +69,7 @@ set(PartDesign_TestScripts
     PartDesignTests/TestMultiTransform.py
     PartDesignTests/TestPatternRules.py
     PartDesignTests/TestDraftRules.py
+    PartDesignTests/TestDraftSplitNaming.py
     PartDesignTests/TestHoleDepth.py
     PartDesignTests/TestBoolean.py
     PartDesignTests/TestBaseFeature.py
