@@ -284,6 +284,30 @@ PartExport bool preferConstruction(
     const Request& request
 );
 
+/** Whether a fillet's contact line on a face next to a selected edge runs along part of that face's
+ * own boundary, and on across the face beyond it (ops#806): a step in the face exactly at the
+ * round's tangent line, as a rib in a slot whose top is level with the rim round's lower tangent
+ * line. OCCT 8.0.1's fillet walks along that boundary there and can read an edge's curve that is
+ * not set (BRepBlend_SurfRstConstRad::Values): the process dies with SIGSEGV, which no handler on
+ * the budget's worker thread can turn into an error. The construction is for exactly this case (a
+ * new edge landing on an existing one), so the fillet runs it alone, without OCCT, and fails with
+ * an error where it refuses.
+ *
+ * Only lines between planes and circles between a plane and their cylinder are read (analyse());
+ * the contact line is the section's end on the face swept along the edge. A boundary that covers
+ * the whole contact line (a face exactly as wide as the round, which OCCT builds or refuses
+ * cleanly) does not count. Reads only plain shapes, as construct(). False for a chamfer, a
+ * variable radius, and when an edge can't be analysed.
+ *
+ * @param where If not null and the answer is true, receives where, for the error message
+ */
+PartExport bool contactOnPartOfAnEdge(
+    const TopoDS_Shape& base,
+    const std::vector<TopoDS_Shape>& edges,
+    const Request& request,
+    std::string* where = nullptr
+);
+
 /// Names a construction as through the fillet's own history (op), from base, into result
 PartExport void finish(
     TopoShape& result,
