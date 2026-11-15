@@ -79,6 +79,48 @@ def report():
         out.write("decimals=%d\n" % units.GetInt("Decimals", -1))
         view = FreeCAD.ParamGet("User parameter:BaseApp/Preferences/View")
         out.write("orbit=%d\n" % view.GetInt("OrbitStyle", -1))
+        # ops#796, the visual pass: the colours, and what the main window shows
+        out.write("selection=%d\n" % view.GetUnsigned("SelectionColor", 0))
+        out.write("highlight=%d\n" % view.GetUnsigned("HighlightColor", 0))
+        out.write("theme=" + FreeCAD.ParamGet("User parameter:BaseApp/Preferences/MainWindow").GetString("Theme") + "\n")
+        out.write("shape=%d\n" % view.GetUnsigned("DefaultShapeColor", 0))
+        sketcher = FreeCAD.ParamGet("User parameter:BaseApp/Preferences/Mod/Sketcher")
+        out.write("hideUnits=%d\n" % sketcher.GetBool("HideUnits", False))
+        overlay = FreeCAD.ParamGet("User parameter:BaseApp/MainWindow/DockWindows/OverlayLeft")
+        out.write("dialogWidth=%d\n" % overlay.GetInt("Width", -1))
+        try:
+            import FreeCADGui
+            from PySide import QtWidgets
+
+            mw = FreeCADGui.getMainWindow()
+
+            def inComboView(widget):
+                parent = widget.parentWidget()
+                while parent is not None:
+                    if parent.metaObject().className() == "Gui::DockWnd::ComboView":
+                        return True
+                    parent = parent.parentWidget()
+                return False
+
+            props = [
+                w
+                for w in mw.findChildren(QtWidgets.QWidget)
+                if w.metaObject().className() == "Gui::PropertyView"
+            ]
+            out.write("comboProps=%s\n" % ",".join(str(not w.isHidden()) for w in props if inComboView(w)))
+            docks = {d.objectName(): d for d in mw.findChildren(QtWidgets.QDockWidget)}
+            prop = docks.get("Property view")
+            out.write("propertyDock=%s\n" % ("none" if prop is None else prop.toggleViewAction().isChecked()))
+            variables = docks.get("Variables")
+            out.write("variablesDock=%s\n" % ("none" if variables is None else variables.toggleViewAction().isChecked()))
+            labels = [
+                w
+                for w in mw.statusBar().findChildren(QtWidgets.QPushButton)
+                if w.metaObject().className().endswith("DimensionWidget")
+            ]
+            out.write("sizeLabel=%s\n" % ",".join(str(not w.isHidden()) for w in labels))
+        except Exception as error:  # noqa: BLE001  reported, not raised: the probe must exit
+            out.write("widgets=error: %s\n" % error)
     if os.name == "nt":
         import ctypes
         from ctypes import wintypes
@@ -460,6 +502,29 @@ class TestOnshapeStudioGui(unittest.TestCase):
         # rank 90 (hands-on R12b): Onshape's plain right-drag is a free trackball, so the pack
         # sets the free orbit (4, RoundedArcball) over a turntable; Alt+right-drag keeps Z up
         self.assertEqual(self.probe.get("orbit"), "4", "the pack's orbit is not the free one")
+
+    def testFirstStartLooksLikeOnshape(self):
+        """ops#796, the visual pass against Onshape: on a new settings folder the pack gives
+        Onshape's orange selection (0xFFA90A) and hover (0xFFC685), sketch dimensions without
+        units, a 320 px feature dialog, no property pane under the Model panel's lists (the
+        separate Property View panel exists, hidden, so View > Panels still reaches it), the
+        Variables panel closed, and no view size in the status bar. The light theme also gives
+        Onshape's blue-grey part (0xA6CFE8); the dark theme keeps its own part colour."""
+        self.runOnNewHome()
+        probe = self.probe
+        self.assertNotIn("widgets", probe, probe.get("widgets"))
+        self.assertEqual(probe.get("selection"), str(0xFFA90AFF))
+        self.assertEqual(probe.get("highlight"), str(0xFFC685FF))
+        self.assertEqual(probe.get("hideUnits"), "1")
+        self.assertEqual(probe.get("dialogWidth"), "320")
+        self.assertEqual(probe.get("comboProps"), "False", "the Model panel still shows properties")
+        self.assertEqual(probe.get("propertyDock"), "False", "Property View missing or shown")
+        self.assertEqual(probe.get("variablesDock"), "False", "the Variables panel is open")
+        self.assertEqual(probe.get("sizeLabel"), "False", "the status bar shows the view size")
+        if probe.get("theme") == "FreeCAD Light":
+            self.assertEqual(probe.get("shape"), str(0xA6CFE8FF))
+        elif probe.get("theme") == "FreeCAD Dark":
+            self.assertEqual(probe.get("shape"), str(0x727980FF))
 
     def testFirstStartLeavesAnExistingUserCfgAlone(self):
         """A settings folder with a user.cfg keeps its own navigation style."""

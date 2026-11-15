@@ -24,6 +24,8 @@
 #include <QGridLayout>
 #include <QSplitter>
 
+#include <App/Application.h>
+
 #include "ComboView.h"
 #include "PropertyView.h"
 #include "Tree.h"
@@ -55,6 +57,16 @@ ComboView::ComboView(Gui::Document* pcDocument, QWidget* parent)
     // property view
     prop = new PropertyView(this);
     splitter->addWidget(prop);
+
+    // FreeCAD-CH (ops#796): Onshape has no property pane under its lists. When the separate
+    // Property View panel is enabled (the "FreeCAD-CH Onshape" pack enables it, hidden, so it
+    // stays in View > Panels), the Model panel shows only the lists.
+    auto hGrp = App::GetApplication().GetParameterGroupByPath(
+        "User parameter:BaseApp/Preferences/DockWindows/PropertyView"
+    );
+    if (hGrp->GetBool("Enabled", false)) {
+        prop->hide();
+    }
 }
 
 ComboView::~ComboView() = default;
