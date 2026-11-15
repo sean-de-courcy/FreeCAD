@@ -123,8 +123,23 @@ public:
      * that edge once the pad's sketch has an edge more. Sections after the first must be equal,
      * or \a name's further ones its own split's. A name is not made from pieces of itself, and
      * a plain piece of \a oldName isn't either.
+     *
+     * With \a keptVertices (ops#852) a sketch's vertex (`{g1v2, g2v1};_;<sketch>;SKT;0;V;0;SRC;_`,
+     * named after the edge ends that meet there, its reference IDs) also stands for the old one when it keeps at
+     * least one of its edge ends: Sketcher's split leaves the edge's id on the first piece, so
+     * the vertex at the old end becomes `{g2v1, g5v2}` without moving. The names alone can't
+     * tell that vertex from the split point (`{g1v2, g5v1}`, which keeps the other end), and a
+     * corner cut off by a new line leaves the same two names. So each such vertex accepted is
+     * added to \a keptVertices (its section), and the caller takes the answer only when every
+     * element it finds this way names the same vertices: the usual case, since a pad joins the
+     * faces beside a collinear split point and no edge is made there. On false \a keptVertices
+     * may hold entries of the failed comparison.
      */
-    static bool isMadeFromPiecesOf(std::string_view name, std::string_view oldName);
+    static bool isMadeFromPiecesOf(
+        std::string_view name,
+        std::string_view oldName,
+        std::vector<std::string>* keptVertices = nullptr
+    );
 
     /** True if \a a and \a b are single sections naming the same element of a source shape by
      * its index (the IDX flag, e.g. `Face6;_;<tag>;MKR;0;F;0;IDX,SRC;_`): equal in every field

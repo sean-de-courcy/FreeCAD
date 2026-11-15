@@ -894,6 +894,48 @@ std::vector<std::string> matchesOf(const Part::TopoShape& shape, const std::stri
             break;
         }
     }
+    if (!out.empty()) {
+        return out;
+    }
+    // ops#852: none by the names above. An element made from a sketch vertex that keeps one of
+    // the picked one's edge ends (Sketcher's split renames the vertex at the split edge's end),
+    // taken only when every element found so names the same vertices: two vertices that each
+    // keep an end (a corner cut off by a new line) are not told apart by names, and the pick is
+    // then not found
+    std::vector<std::string> vertices;
+    for (const char* type : {"Edge", "Face"}) {
+        const int count = static_cast<int>(
+            shape.countSubShapes(type[0] == 'E' ? TopAbs_EDGE : TopAbs_FACE)
+        );
+        for (int i = 1; i <= count; ++i) {
+            const auto indexed = Data::IndexedName::fromConst(type, i);
+            for (const auto& [name, sids] : shape.getElementMappedNames(indexed)) {
+                std::vector<std::string> kept;
+                if (!Data::NameAncestry::isMadeFromPiecesOf(
+                        table.toPlain(name.toString()),
+                        pick,
+                        &kept
+                    )) {
+                    continue;
+                }
+                std::ranges::sort(kept);
+                if (out.empty()) {
+                    vertices = kept;
+                }
+                else if (kept != vertices) {
+                    return {};
+                }
+                out.push_back(
+                    Data::ComplexGeoData::elementMapPrefix() + name.toString() + "."
+                    + indexed.toString()
+                );
+                break;
+            }
+        }
+        if (!out.empty()) {
+            break;
+        }
+    }
     return out;
 }
 
