@@ -1199,9 +1199,24 @@ class TestPieces(unittest.TestCase):
         e.Length = 6
         made, names = self.recomputedDuring(lambda: self.command(e))
         self.assertEqual(list(made), [])
-        self.assertIn(e.Name, names)
+        self.assertEqual(names.count(e.Name), 1)
         self.assertVolume(self.doc.getObject("P"), 100 * 10 * 10 - 10 * 6 * 6)
         self.assertValid(e, self.step(e, self.doc.getObject("P")))
+
+    def testCommandAfterAnUncomputedEditBeforeTheEntryMakesThePieces(self):
+        # A slot through the bar from y -20 to 9, which leaves a bridge 1 wide (one solid), then
+        # its sketch moved 2 along y without a recompute: the entry itself is computed, but what
+        # it reads is not, and computed the slot crosses the bar. The command makes the pieces,
+        # 3000 and 6900 (review r1 F1)
+        self.studio()
+        e = self.pocket("E", ((30, -20, 31, 9),), ("P",), length=11)
+        self.assertEqual(len(self.doc.getObject("P").Shape.Solids), 1)
+        self.assertEqual(list(self.command(e)), [])
+        sk = e.Profile[0] if isinstance(e.Profile, tuple) else e.Profile
+        sk.Placement = App.Placement(sk.Placement.Base + V(0, 2, 0), App.Rotation())
+        left, right = self.leftRight(list(self.command(e)))
+        self.assertVolume(left, 3000)
+        self.assertVolume(right, 6900)
 
     def testCommandAfterAnEditThatSplitsMakesThePieces(self):
         # The slot across the bar, 4 deep first (one solid: nothing to make), then deepened
