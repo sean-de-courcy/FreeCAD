@@ -12,6 +12,10 @@
 #include <vector>
 
 #include <BRepAdaptor_Surface.hxx>
+#include <BRepBuilderAPI_MakeFace.hxx>
+#include <BRepTools.hxx>
+#include <Bnd_Box2d.hxx>
+#include <gp_Pnt2d.hxx>
 #include <BRep_Tool.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
 #include <BRepLProp_SLProps.hxx>
@@ -293,6 +297,8 @@ Part::TopoShape studioElementAt(
             return shape;
         }
     }
+    // The same-name hit faces away: unless a descendant faces as picked, fail loudly below
+    unsigned away = lastShape.getIndexedName(mapped) ? 1 : 0;
     // What became of it. A feature that changes the element renames it, and the new name's
     // history names the old one in full (un-hashed), as the old name's own history does under its
     // own tag: an element of the last solid that linked doesn't have, with the picked name among
@@ -318,7 +324,6 @@ Part::TopoShape studioElementAt(
         }
     }
     std::vector<Part::TopoShape> found;
-    unsigned away = 0;
     const char* type = picked.getType();
     const unsigned count = lastShape.countSubElements(type);
     for (unsigned i = 1; i <= count; ++i) {
@@ -373,6 +378,35 @@ Part::TopoShape studioElementAt(
             *why = "The face '" + element + "' of '" + linked->Label.getValue() + "' is "
                 + std::to_string(faces.size())
                 + " different faces before this feature: select the one to go up to";
+        }
+        return {};
+    }
+    // Pieces of one curved surface: a piece is not extended as a plane is, so one face on that
+    // surface over all the pieces' parameter ranges stands for them (Onshape UT2 keeps them all)
+    if (found.size() > 1 && !isPlanarFace(found.front().getShape())) {
+        Bnd_Box2d range;
+        for (const auto& piece : found) {
+            double u0, u1, v0, v1;
+            BRepTools::UVBounds(TopoDS::Face(piece.getShape()), u0, u1, v0, v1);
+            range.Add(gp_Pnt2d(u0, v0));
+            range.Add(gp_Pnt2d(u1, v1));
+        }
+        double u0, v0, u1, v1;
+        range.Get(u0, v0, u1, v1);
+        TopLoc_Location location;
+        const TopoDS_Face first = TopoDS::Face(found.front().getShape());
+        const Handle(Geom_Surface) surface = BRep_Tool::Surface(first, location);
+        BRepBuilderAPI_MakeFace make(surface, u0, u1, v0, v1, Precision::Confusion());
+        if (make.IsDone()) {
+            TopoDS_Face whole = make.Face();
+            whole.Location(location);
+            whole.Orientation(first.Orientation());
+            return Part::TopoShape(whole);
+        }
+        if (why) {
+            *why = "The face '" + element + "' of '" + linked->Label.getValue() + "' is split in "
+                + std::to_string(found.size())
+                + " pieces before this feature: select the piece to go up to";
         }
         return {};
     }
