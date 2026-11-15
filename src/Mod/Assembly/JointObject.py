@@ -171,6 +171,15 @@ def getContext(obj):
 # - A vertex name: For faces and edges, we need to specify which vertex of said face/edge to use
 # Both element names hold the full path to the object.
 # From these a placement is computed. It is relative to the Object.
+
+def isMissingReference(ref):
+    """FreeCAD-CH (ops#640 A11, ops#827): a pick whose face or edge is gone ("?" in its element name)"""
+    return ref is not None and len(ref) == 2 and len(ref[1]) != 0 and ref[1][0].find("?") != -1
+
+
+def hasMissingReference(joint):
+    return any(isMissingReference(getattr(joint, n, None)) for n in ("Reference1", "Reference2"))
+
 class Joint:
     def __init__(self, joint, type_index):
         joint.Proxy = self
@@ -282,6 +291,21 @@ class Joint:
                 ),
                 locked=True,
             )
+
+        # FreeCAD-CH (ops#826): the references are stored grounded-first (ensureUnconnectedIsSecondRef)
+        # but the offset keeps the picks' order, Onshape's (MO1): first pick = second pick x offset
+        if not hasattr(joint, "PicksSwapped"):
+            joint.addProperty(
+                "App::PropertyBool",
+                "PicksSwapped",
+                "Joint Connector 2",
+                QT_TRANSLATE_NOOP(
+                    "App::Property",
+                    "Reference1 is the second pick: the offset is taken in the order the parts were picked",
+                ),
+                locked=True,
+            )
+            joint.setPropertyStatus("PicksSwapped", ["Hidden"])
 
         # FreeCAD-CH (ops#683, design C2): Onshape's Reorient secondary axis, quarter turns about the
         # second connector's Z taken before the flip and the offset (Offset2's rotation is the
@@ -822,6 +846,10 @@ class Joint:
             return
 
         if prop == "Offset1" or prop == "Offset2" or prop == "Reorient":
+            # FreeCAD-CH (ops#827; Onshape B3): a mate whose pick is gone drives nothing; its offset
+            # edited moves no part (preSolve placed the part from the missing pick's fallback)
+            if hasMissingReference(joint):
+                return
             self.updateJCSPlacements(joint)
 
             presolved = joint.JointType in JointUsingPreSolve and self.preSolve(joint, False)
@@ -849,7 +877,7 @@ class Joint:
             ("Reference2", translate("Assembly", "second pick")),
         ):
             ref = getattr(joint, propName, None)
-            if ref is not None and len(ref) == 2 and len(ref[1]) != 0 and ref[1][0].find("?") != -1:
+            if isMissingReference(ref):
                 raise Exception(missingReferenceMessage(joint, ref, which))
 
         self.updateJCSPlacements(joint)
@@ -939,8 +967,15 @@ class Joint:
         offset = joint.Offset2
         if joint.JointType in JointUsingPreSolve and self.isPoseFlipped(joint, plc2, reorient, offset):
             flip = App.Placement(App.Vector(), App.Rotation(App.Vector(1, 0, 0), 180))
-            return reorient * flip * offset * flip
-        return reorient * offset
+            rel = reorient * flip * offset * flip
+        else:
+            rel = reorient * offset
+        # FreeCAD-CH (ops#826; oracle 26, MO1): Onshape's relation holds between the picks, whatever
+        # part is grounded. Reference1 is the second pick when the references were swapped, so the
+        # stored pair needs the inverse: first pick = second pick x rel, i.e. Reference1 = Reference2 x rel^-1
+        if getattr(joint, "PicksSwapped", False):
+            return rel.inverse()
+        return rel
 
     def isPoseFlipped(self, joint, plc2, reorient, offset):
         """Whether the parts sit with the first connector's Z against the second's (Flip primary)"""
@@ -1129,6 +1164,10 @@ class Joint:
             det1 = joint.Detach1
             joint.Detach1 = joint.Detach2
             joint.Detach2 = det1
+
+            # FreeCAD-CH (ops#826): the offset stays in pick order (secondOffset inverts it)
+            if hasattr(joint, "PicksSwapped"):
+                joint.PicksSwapped = not joint.PicksSwapped
 
             if activeTask and activeTask.joint == joint:
                 # FreeCAD-CH (ops#772): the picks are selected already. Selected again (under

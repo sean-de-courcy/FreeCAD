@@ -47,6 +47,8 @@ from AssemblyTests.TestFreeInstances import TestFreeInstances  # FreeCAD-CH, ops
 from AssemblyTests.TestMateAfterEdits import (  # FreeCAD-CH, ops#683 C5
     TestMateAfterEdits,
     TestMateFaceGone,
+    TestMateOffsetPickOrder,  # ops#826
+    TestRedMateOffset,  # ops#827
 )
 from AssemblyTests.TestOnshapeConnectors import TestOnshapeConnectors  # FreeCAD-CH, ops#683
 
@@ -69,6 +71,8 @@ True if TestAssemblyPatterns else False
 True if TestFreeInstances else False
 True if TestMateAfterEdits else False
 True if TestMateFaceGone else False
+True if TestMateOffsetPickOrder else False
+True if TestRedMateOffset else False
 True if TestOnshapeConnectors else False
 
 from AssemblyTests.TestRigidCachePointers import (  # FreeCAD-CH, ops#778
