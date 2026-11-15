@@ -24,6 +24,10 @@ from AssemblyTests.TestFastenedPickOrderGui import TestFastenedPickOrderGui  # o
 
 True if TestFastenedPickOrderGui else False
 
+from AssemblyTests.TestUndoRegenerateGui import TestUndoRegenerateGui  # ops#800
+
+True if TestUndoRegenerateGui else False
+
 from AssemblyTests.TestOnshapeAssembliesGui import (  # ops#640, ops#651
     TestSeveralAssembliesGui,
     TestJointErrorsGui,

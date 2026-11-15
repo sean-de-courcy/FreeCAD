@@ -1702,9 +1702,20 @@ void Gui::updateRegenerationHold(const App::Document* closingStep)
     // An edit document whose edit was refused has no view provider in edit (ops#599 r1c R1c-a).
     // An edit that holds its step (a feature dialog, the step lock) needs no hold: its document
     // commits nothing else while it is open.
+    //
+    // FreeCAD-CH (ops#800): nor does an assembly's edit. It is where the user works in the assembly
+    // (its tab), with no backup that a Cancel restores, so its document regenerates after each
+    // commit, undo and redo, as Onshape's assembly does (oracle 25, UD1: an undone mate deletion
+    // comes back solved at once). By type name: the Assembly module isn't linked here, and its
+    // type is unknown (bad) until it loads.
     const auto editing = app->editDocuments();
-    const bool held = std::ranges::any_of(editing, [](Gui::Document* doc) {
-        return doc->getEditViewProvider() != nullptr && !doc->getDocument()->isStepLocked();
+    const Base::Type assemblyEdit = Base::Type::fromName("AssemblyGui::ViewProviderAssembly");
+    const bool held = std::ranges::any_of(editing, [&](Gui::Document* doc) {
+        const ViewProvider* vp = doc->getEditViewProvider();
+        if (!vp || doc->getDocument()->isStepLocked()) {
+            return false;
+        }
+        return assemblyEdit.isBad() || !vp->getTypeId().isDerivedFrom(assemblyEdit);
     });
     auto holds = [&](App::Document* doc) {
         return held && app->getDocument(doc) && doc != closingStep && !doc->isStepLocked();
