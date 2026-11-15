@@ -24,8 +24,8 @@
 ops#806).
 
 A rib that ends flush with a plate's top face and reaches into the plate is fused in two steps:
-the fusion cuts the top face along the rib's outline (the piece is named `<top>|...;FUS;...;MOD`;
-a face that is only trimmed keeps its name), then the refine merges the piece, the rib's top and
+the fusion cuts the top face along the rib's outline (the piece is named
+`<top>|...;FUS;...;MOD`; a face that is only trimmed keeps its name), then the refine merges the piece, the rib's top and
 the strips between them into one face. That face kept only the piece's names, so every element a
 later feature generated on it was named from the piece: a boss's junction edge with the plate, far from the rib and unchanged, got another name
 when the rib was inserted before the boss, and a fillet on it lost its edge.
@@ -132,14 +132,16 @@ class TestRefineWholeNames(unittest.TestCase):
         self.assertEqual(len(found), 1, "the boss's junction circle is one edge")
         return self.names(boss, found[0])
 
-    def rib(self, height, halfLength):
-        """The top face's and the junction edge's names at the boss, without and with the rib"""
+    def rib(self, height, halfLength, groove=False):
+        """The top face's and the junction edge's names at the boss, without and with the rib;
+        with `groove`, a full-width groove first cuts the top face in two for good"""
         self.plate()
+        if groove:
+            self.feature("Pocket", "Groove", self.sketch("GrooveSk", TOP, [(5, -25, 9, 25)]), 3)
         slot = self.feature("Pocket", "Slot", self.sketch("SlotSk", TOP, [(16, -4, 36, 4)]), 3)
         # The boss starts inside the plate: its cylinder cuts the top face (a fusion's edge)
         boss = self.feature("Pad", "Boss", self.sketch("BossSk", 5, circle=(60, 0, 12)), 25)
         before = (self.names(boss, self.topAt(boss, 60, 20)), self.junction(boss))
-        self.assertEqual(len(before[0]), 1)
         ribSketch = self.sketch("RibSk", TOP - 3, [(25, -halfLength, 27, halfLength)])
         rib = self.feature("Pad", "Rib", ribSketch, height)
         self.insertAfter([ribSketch, rib], slot)
@@ -156,6 +158,16 @@ class TestRefineWholeNames(unittest.TestCase):
         self.assertEqual(after[0][0], before[0][0], "the top face is named as before, first")
         # The piece's name stays on the face, for references made to it
         self.assertTrue(any(n.startswith(before[0][0] + "|") for n in after[0][1:]), after[0])
+        self.assertEqual(after[1], before[1], "the junction edge keeps its name")
+
+    def testFlushRibOnATopCutByAGrooveKeepsTheFarJunctionEdge(self):
+        """The top face is a piece already (a groove's, the other piece far away): the rib's
+        fusion cuts that piece, the refine makes it whole, and it stays first, before the
+        rib's top (review r2)"""
+        before, after, rib = self.rib(3, 5, groove=True)
+        self.assertEqual(self.topAt(rib, 26, 0), self.topAt(rib, 60, 20), "the rib's top merged")
+        self.assertNotEqual(self.topAt(rib, 2, 0), self.topAt(rib, 60, 20), "the groove's cut stays")
+        self.assertEqual(after[0][0], before[0][0], "the top's piece is named as before, first")
         self.assertEqual(after[1], before[1], "the junction edge keeps its name")
 
     def testFlushRibFittingTheSlotKeepsTheFarJunctionEdge(self):
