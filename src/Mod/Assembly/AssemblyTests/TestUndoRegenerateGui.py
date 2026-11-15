@@ -15,7 +15,8 @@ import AssemblyPattern
 import JointObject
 from AssemblyTests.TestOnshapeAssembliesGui import AssembliesGuiBase, pump, tabsOn, waitFor
 
-SOLVED = App.Placement(App.Vector(-20, -30, 0), App.Rotation())
+# The peg is picked first: its top = the base top x offset (ops#826, oracle 26 MO1)
+SOLVED = App.Placement(App.Vector(20, 30, 0), App.Rotation())
 STALE = ("Touched", "Invalid")
 
 

@@ -915,10 +915,12 @@ class Joint:
                     self.updateJCSPlacements(joint)
 
             if joint.JointType in JointUsingPreSolve:
-                # FreeCAD-CH (ops#640, design C1): a new Fastened mate is unflipped whatever the
-                # parts' positions, as Onshape's (GC-B1); Flip primary axis flips it. Before, the
-                # closer of the two directions was taken, so parts already facing came out flipped.
-                self.preSolve(joint, unflipped=joint.JointType == "Fixed")
+                # FreeCAD-CH (ops#838; oracle 26, AR6, U1, U2): a new Fastened mate keeps the pose
+                # closest to the parts' current one, as Onshape's UI does: an upright Pin's bottom
+                # picked onto a top face seats upright, a Pin turned over first ends hanging. (Design
+                # C1 had made it always unflipped, read from GC-B1, where the closer pose is unflipped;
+                # REST-made mates, MO1, are unflipped, but nobody makes mates by REST.)
+                self.preSolve(joint)
             elif joint.JointType in JointParallelForbidden:
                 self.preventParallel(joint)
 
@@ -982,8 +984,16 @@ class Joint:
         turns = int(getattr(joint, "Reorient", 0)) % 4
         reorient = App.Placement(App.Vector(), App.Rotation(App.Vector(0, 0, 1), 90 * turns))
         offset = joint.Offset2
+        swapped = getattr(joint, "PicksSwapped", False)
         if joint.JointType in JointUsingPreSolve and self.isPoseFlipped(joint, plc2, reorient, offset):
             flip = App.Placement(App.Vector(), App.Rotation(App.Vector(1, 0, 0), 180))
+            # The solve keeps Reference1 x Flip = Reference2 x this. Not swapped, Reference1 is the
+            # first pick: this = Reorient x Flip x offset x Flip. Swapped, Reference2 is the first
+            # pick: Reference2 = Reference1 x Reorient x Flip x offset, so this is the inverse of
+            # Flip x Reorient x Flip x offset (ops#838: a flipped pose, Pin picked first, offset +3
+            # put the Pin 3 above Blk, Onshape's UI 3 into it, AR6).
+            if swapped:
+                return (flip * reorient * flip * offset).inverse()
             rel = reorient * flip * offset * flip
         else:
             rel = reorient * offset

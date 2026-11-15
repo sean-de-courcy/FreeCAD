@@ -427,6 +427,60 @@ class TestMateOffsetPickOrder(MateEditsBase):
         self.assertNear(self.above(self.c), V(0, 0, 3), "C then A, after the reopen")
 
 
+class TestMateSeatsAsOnshapeUI(MateEditsBase):
+    """ops#838 (oracle 26, AR6, U1, U2): a new Fastened mate keeps the pose closest to the parts'
+    current one, as Onshape's UI does. A (20 x 20 x 10) grounded; B (10 x 10 x 20) upright at x 60.
+    B's bottom-face centre fastened onto A's top-face centre: B sits upright on A (bottom z 10), in
+    either pick order. Offset Z +3: B's bottom goes 3 into A (z 7), in either pick order. B turned
+    over first (its bottom facing up): B ends hanging, its bottom on A's top, its body below it."""
+
+    def build(self, bFirst, turned=False, offset=0):
+        self.bodyA, _ = self.studio("PartA", 20, 20, 10)
+        self.bodyB, _ = self.studio("PartB", 10, 10, 20)
+        self.asm = self.assembly()
+        self.a = self.instance(self.asm, "A", self.bodyA)
+        self.b = self.instance(self.asm, "B", self.bodyB, V(60, 0, 0))
+        if turned:
+            self.b.Placement = App.Placement(V(60, 0, 20), App.Rotation(V(1, 0, 0), 180))
+        self.doc.recompute()
+        self.ground(self.a)
+        topA = self.topFace(self.bodyA.Shape, 10)
+        bottomB = self.element(
+            self.bodyB.Shape,
+            "Face",
+            lambda f: f.Surface.TypeId == "Part::GeomPlane" and abs(f.CenterOfMass.z) < 1e-6 and f.normalAt(0, 0).z < -0.5,
+        )
+        if bFirst:
+            joint = self.fastened(self.b, (bottomB, bottomB), self.a, (topA, topA))
+        else:
+            joint = self.fastened(self.a, (topA, topA), self.b, (bottomB, bottomB))
+        if offset:
+            joint.Offset2 = App.Placement(V(0, 0, offset), App.Rotation())
+        self.doc.recompute()
+        self.asm.solve()
+        self.doc.recompute()
+        self.assertTrue(joint.isValid(), joint.getStatusString())
+        return joint
+
+    def again(self):
+        App.closeDocument(self.doc.Name)
+        self.doc = App.newDocument(self.__class__.__name__)
+
+    def testUprightSeatsUprightAndTheOffsetGoesIn(self):
+        for bFirst in (True, False):
+            for offset, z in ((0, 10), (3, 7)):
+                with self.subTest(bFirst=bFirst, offset=offset):
+                    self.build(bFirst, offset=offset)
+                    self.assertNear(self.b.Placement.multVec(V(5, 5, 0)), V(10, 10, z), "B's bottom centre")
+                    self.assertNear(self.b.Placement.Rotation.multVec(V(0, 0, 1)), V(0, 0, 1), "B upright")
+                    self.again()
+
+    def testTurnedOverEndsHanging(self):
+        self.build(True, turned=True)
+        self.assertNear(self.b.Placement.multVec(V(5, 5, 0)), V(10, 10, 10), "B's bottom centre")
+        self.assertNear(self.b.Placement.Rotation.multVec(V(0, 0, 1)), V(0, 0, -1), "B hanging")
+
+
 class TestRedMateOffset(MateEditsBase):
     """ops#827 (Onshape B3): a mate whose pick is gone is in error and drives nothing; editing its
     offset (as one does while repairing it) moves no part. Before, each edit moved the part on from

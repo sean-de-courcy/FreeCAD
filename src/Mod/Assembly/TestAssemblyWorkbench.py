@@ -49,6 +49,7 @@ from AssemblyTests.TestMateAfterEdits import (  # FreeCAD-CH, ops#683 C5
     TestMateFaceGone,
     TestMateOffsetPickOrder,  # ops#826
     TestRedMateOffset,  # ops#827
+    TestMateSeatsAsOnshapeUI,  # ops#838
 )
 from AssemblyTests.TestOnshapeConnectors import TestOnshapeConnectors  # FreeCAD-CH, ops#683
 
@@ -73,6 +74,7 @@ True if TestMateAfterEdits else False
 True if TestMateFaceGone else False
 True if TestMateOffsetPickOrder else False
 True if TestRedMateOffset else False
+True if TestMateSeatsAsOnshapeUI else False
 True if TestOnshapeConnectors else False
 
 from AssemblyTests.TestRigidCachePointers import (  # FreeCAD-CH, ops#778
