@@ -1290,6 +1290,78 @@ class TestPieces(unittest.TestCase):
         self.assertVolume(left, 3000)
         self.assertVolume(right, 6900)
 
+    # ------------------------------------------------- one pass with pieces made (ops#796)
+    def testCommandOnAComputedSplitComputesNothing(self):
+        # The slot across the bar (x 30..31), its pieces parts (3000 and 6900): the command
+        # again (an OK that changed nothing) makes nothing and computes nothing
+        e, made = self.slotSplit()
+        left, right = self.leftRight(list(made))
+        bodies = sorted(o.Name for o in self.doc.Objects if o.TypeId == "PartDesign::Body")
+        again, names = self.recomputedDuring(lambda: self.command(e))
+        self.assertEqual(list(again), [])
+        self.assertEqual(names, [])
+        self.assertEqual(
+            sorted(o.Name for o in self.doc.Objects if o.TypeId == "PartDesign::Body"), bodies
+        )
+        self.assertVolume(left, 3000)
+        self.assertVolume(right, 6900)
+        self.assertValid(e, left, right)
+
+    def testCommandAfterAComputedEditOfASplitComputesNothing(self):
+        # The slot moved 5 along x and computed (a dialog's OK computes before the command):
+        # the pieces follow, 3500 and 6400, the same parts, and the command computes nothing more
+        e, made = self.slotSplit()
+        left, right = self.leftRight(list(made))
+        ids = (left.StudioPartId, right.StudioPartId)
+        self.moveSketch(e, 5)
+        self.assertVolume(left, 3500)
+        self.assertVolume(right, 6400)
+        again, names = self.recomputedDuring(lambda: self.command(e))
+        self.assertEqual(list(again), [])
+        self.assertEqual(names, [])
+        self.assertEqual((left.StudioPartId, right.StudioPartId), ids)
+        self.assertVolume(left, 3500)
+        self.assertVolume(right, 6400)
+        self.assertValid(e, left, right)
+
+    def testCommandAfterAnUncomputedEditOfASplitComputesOnce(self):
+        # The same move without a recompute (a row moved, a suppression, a value written
+        # outside a dialog): the command computes each object once, and the pieces follow
+        e, made = self.slotSplit()
+        left, right = self.leftRight(list(made))
+        sk = e.Profile[0] if isinstance(e.Profile, tuple) else e.Profile
+        sk.Placement = App.Placement(sk.Placement.Base + V(5, 0, 0), App.Rotation())
+        again, names = self.recomputedDuring(lambda: self.command(e))
+        self.assertEqual(list(again), [])
+        self.assertIn(e.Name, names)
+        repeated = sorted(n for n in set(names) if names.count(n) > 1)
+        self.assertEqual(repeated, [])
+        self.assertVolume(left, 3500)
+        self.assertVolume(right, 6400)
+        self.assertValid(e, left, right)
+
+    def testCommandOnASplitWithAnEditBeforeItStillMakesThePieces(self):
+        # Two slots, x 30..31 and x 60..61, the second one 4 deep at first (no split of its
+        # own). The first one's pieces are parts. The second deepened through the bar and
+        # computed: it fails (the right piece in two, no parts yet), and the command makes
+        # them: 3000, 2900 and 3900
+        self.studio()
+        e = self.pocket("E", (SLOT,), ("P",))
+        left, right = self.leftRight(list(self.command(e)))
+        f = self.pocket("F", ((60, -1, 61, 11),), (right.StudioPartId,), length=4)
+        self.assertVolume(right, 6900 - 1 * 10 * 4)
+        self.assertEqual(list(self.command(f)), [])
+        again, names = self.recomputedDuring(lambda: self.command(e))
+        self.assertEqual((list(again), names), ([], []))
+        self.doc.openTransaction("deepen")
+        f.Length = 11
+        self.doc.commitTransaction()
+        self.doc.recompute()
+        made = list(self.command(f))
+        self.assertEqual(len(made), 2)
+        volumes = sorted(round(b.Shape.Volume, 3) for b in self.live())
+        self.assertEqual(volumes, [2900.0, 3000.0, 3900.0])
+
 
 class TestStudioUndo(unittest.TestCase):
     """ops#654 10.15: the resync after a recompute outside any transaction records into the undo

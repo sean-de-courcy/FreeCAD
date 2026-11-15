@@ -100,6 +100,8 @@ namespace Gui
 {
 /// FreeCAD-CH (ops#640): defined and explained in Gui/Document.cpp (not in Document.h)
 GuiExport bool editStartedUnchanged(const App::Document* doc);
+/// FreeCAD-CH (ops#796): defined and explained in Gui/Document.cpp (not in Document.h)
+GuiExport bool editStartedComputed(const App::Document* doc, const App::DocumentObject* obj);
 }  // namespace Gui
 
 namespace PartDesign
@@ -469,6 +471,7 @@ public:
     void record(const App::DocumentObject& obj, const App::Property& prop);
     void track(const App::DocumentObject& obj, const App::Property& prop);
     bool leftUnchanged() const;
+    bool holdsOriginals() const;
     bool restartable() const;
     void seal();
     void clear();
@@ -653,6 +656,18 @@ bool DialogHistory::leftUnchanged() const
             && other->getTransactionID(true, 0) == id) {
             return false;
         }
+    }
+    return holdsOriginals();
+}
+
+/** FreeCAD-CH (ops#796): whether every input the dialog's step changed holds its first value
+ * again, or none changed: the feature computed before the dialog is still what its values give.
+ * Only for a pristine step (leftUnchanged()) */
+bool DialogHistory::holdsOriginals() const
+{
+    App::Document* doc = document();
+    if (!doc || !pristine) {
+        return false;
     }
     return std::ranges::all_of(originals, [doc](const Change& change) {
         App::DocumentObject* obj = doc->getObject(change.object.c_str());
@@ -1053,6 +1068,17 @@ bool dialogLeftUnchanged(const App::Document* doc)
     }
     history->seal();
     return history->leftUnchanged();
+}
+
+// Whether the dialog's inputs are all as they were when it opened (DialogHistory::holdsOriginals)
+bool dialogHoldsOriginals(const App::Document* doc)
+{
+    DialogHistory* history = doc ? findHistory(doc->getName()) : nullptr;
+    if (!history) {
+        return false;
+    }
+    history->seal();
+    return history->holdsOriginals();
 }
 
 // The dialog's OK or Cancel: its history ends
@@ -3229,12 +3255,43 @@ bool TaskDlgFeatureParameters::accept()
     // The pieces' step (P6p), open while they are made: a refusal aborts it
     bool piecesStep = false;
     try {
+        // FreeCAD-CH (ops#796): what waited for a recompute before the panels wrote their
+        // values (below)
+        std::set<App::DocumentObject*> touchedBefore;
+        for (auto obj : feature->getDocument()->getObjects()) {
+            if (obj->isTouched() || obj->mustExecute() > 0) {
+                touchedBefore.insert(obj);
+            }
+        }
         // Iterate over parameter dialogs and apply all parameters from them, the Result box last
         forEachParameters([&isUpdateBlocked](TaskFeatureParameters* param) {
             param->saveHistory();
             param->apply();
             isUpdateBlocked |= param->isUpdateBlocked();
         });
+        // FreeCAD-CH (ops#796): an OK that changed nothing computes nothing. The panels write
+        // every value again at OK, the same ones included, and a write touches its object: with
+        // every input of the dialog's step holding the value it had when the dialog opened,
+        // what those writes touched is as it was computed
+        const bool unchanged = !isUpdateBlocked && dialogHoldsOriginals(feature->getDocument());
+        if (unchanged) {
+            for (auto obj : feature->getDocument()->getObjects()) {
+                if (!touchedBefore.count(obj) && (obj->isTouched() || obj->mustExecute() > 0)) {
+                    obj->purgeTouched();
+                }
+            }
+            // The feature itself is touched since the dialog opened: by its preview, computed
+            // alone at every change. Computed when the edit started and with its first values
+            // again, it is computed once more alone (a value written back after its last
+            // preview) and is then what it was: nothing after it has to follow
+            if ((feature->isTouched() || feature->mustExecute() > 0) && feature->isValid()
+                && Gui::editStartedComputed(feature->getDocument(), feature)) {
+                feature->recomputeFeature();
+                if (feature->isValid()) {
+                    feature->purgeTouched();
+                }
+            }
+        }
         // Make sure the feature is what we are expecting
         // Should be fine but you never know...
         if (!feature->isDerivedFrom<PartDesign::Feature>()) {
@@ -3279,7 +3336,20 @@ bool TaskDlgFeatureParameters::accept()
         // property editor, a macro, an expression) was not computed with it: recompute it, or
         // the purge below keeps its stale result and error (ops#640 F3)
         const bool stale = feature->isTouched() || feature->mustExecute() > 0;
-        if (isUpdateBlocked || stale || PartDesign::isStudioOwner(feature)) {
+        // FreeCAD-CH (ops#796): the feature was computed here whatever its state (or its readers touched), which
+        // wrote its results anew and so computed the whole history after it: not after an OK
+        // that changed nothing, with the feature and its steps computed
+        const bool computed = unchanged && !stale
+            && std::ranges::none_of(
+                PartDesign::StudioList::stepsOf(feature),
+                [](const App::DocumentObject* step) {
+                    return step->isTouched() || step->mustExecute() > 0;
+                }
+            );
+        if (computed) {
+            // nothing to compute
+        }
+        else if (isUpdateBlocked || stale || PartDesign::isStudioOwner(feature)) {
             Gui::cmdAppDocument(feature, "recompute()");
         }
         else {
