@@ -538,6 +538,120 @@ class TestMultiTransform(unittest.TestCase):
         # the boss and its three images across the YZ and XZ planes
         self.assertAlmostEqual(body.Shape.Volume, 4000 + 4 * 125 + 32, places=6)
 
+    def patternOfTheBoss(self, body, boss):
+        """A LinearPattern of the boss, 2 along Y at 10 (a copy at y 2..7), made the Body's Tip."""
+        body.Tip = boss
+        pattern = body.newObject("PartDesign::LinearPattern", "LinearPattern")
+        pattern.Originals = [boss]
+        pattern.Direction = (self.Doc.Y_Axis, [""])
+        pattern.Length = 10
+        pattern.Occurrences = 2
+        body.Tip = pattern
+        return pattern
+
+    def testPatternOfASuppressedOriginalPassesItsBase(self):
+        """The boss patterned before the cap, then the boss suppressed: the pattern fails in
+        Onshape's words (oracle 9j, U7), its base passes through, and the Body is the block and
+        the cap; unsuppressed, the boss and its copy come back (ops#592: the pattern stayed Valid
+        on its old shape, the boss's copy in the Body)."""
+        body, boss, cap = self.bossedBlock()
+        pattern = self.patternOfTheBoss(body, boss)
+        body.Tip = cap
+        self.Doc.recompute()
+        self.assertEqual(cap.BaseFeature, pattern)
+        self.assertAlmostEqual(body.Shape.Volume, 4000 + 2 * 125 + 32, places=6)
+
+        boss.Suppressed = True
+        self.Doc.recompute()
+        self.assertFalse(pattern.isValid())
+        self.assertIn("do not create any geometry", pattern.getStatusString())
+        self.assertAlmostEqual(cap.Shape.Volume, 4000 + 32, places=6)
+        self.assertAlmostEqual(body.Shape.Volume, 4000 + 32, places=6)
+
+        boss.Suppressed = False
+        self.Doc.recompute()
+        self.assertChainValid(body, [boss, pattern, cap])
+        self.assertAlmostEqual(body.Shape.Volume, 4000 + 2 * 125 + 32, places=6)
+
+    def testPatternOfASuppressedOriginalAtTheTip(self):
+        """The same with the pattern last, the Body's Tip: the Body is the plain block."""
+        body, boss, cap = self.bossedBlock()
+        cap.Suppressed = True
+        pattern = self.patternOfTheBoss(body, boss)
+        self.Doc.recompute()
+        self.assertEqual(body.Tip, pattern)
+        self.assertAlmostEqual(body.Shape.Volume, 4000 + 2 * 125, places=6)
+        boss.Suppressed = True
+        self.Doc.recompute()
+        self.assertFalse(pattern.isValid())
+        self.assertAlmostEqual(body.Shape.Volume, 4000, places=6)
+
+    def testPatternOfNothingAtTheTipShowsItsBase(self):
+        """The boss patterned last, the Body's Tip, then its original taken away, emptied in the
+        dialog or deleted as the GUI deletes it: the pattern fails, and the Body is the plain block
+        (ops#594: the Body kept the pattern's old shape, the boss and its copy)."""
+        for how in ("emptied", "deleted"):
+            with self.subTest(how=how):
+                body, boss, cap = self.bossedBlock()
+                cap.Suppressed = True
+                pattern = self.patternOfTheBoss(body, boss)
+                self.Doc.recompute()
+                self.assertAlmostEqual(body.Shape.Volume, 4000 + 2 * 125, places=6)
+                if how == "emptied":
+                    pattern.Originals = []
+                    self.Doc.recompute()
+                    expected = 4000 + 125  # the boss stays, its copy goes
+                else:
+                    self.Doc.removeObject(boss.Name)
+                    self.Doc.recompute()
+                    expected = 4000
+                self.assertFalse(pattern.isValid())
+                self.assertEqual(body.Tip, pattern)
+                self.assertAlmostEqual(body.Shape.Volume, expected, places=6)
+
+    def testConvertingAPatternMovesTheSketchesOnItsFaces(self):
+        """A Mirrored of the boss (its copy at x -8..-3) and a sketch on the copy's top face, z 15;
+        the Mirrored is converted to a MultiTransform as the command does, then the boss is made 8
+        high: the sketch is on the MultiTransform's top face, z 18 (ops#595: it stayed on the
+        Mirrored, a step whose shape no longer changes, at z 15, Valid)."""
+        body, boss, cap = self.bossedBlock()
+        cap.Suppressed = True
+        body.Tip = boss
+        mirrored = body.newObject("PartDesign::Mirrored", "Mirrored")
+        mirrored.Originals = [boss]
+        mirrored.MirrorPlane = (self.Doc.YZ_Plane, [""])
+        body.Tip = mirrored
+        self.Doc.recompute()
+        top = None
+        for i, face in enumerate(mirrored.Shape.Faces):
+            centre = face.CenterOfMass
+            if abs(centre.z - 15) < 1e-6 and abs(centre.x + 5.5) < 1e-6:
+                top = f"Face{i + 1}"
+        self.assertIsNotNone(top)
+        sketch = body.newObject("Sketcher::SketchObject", "OnCopy")
+        sketch.AttachmentSupport = (mirrored, [top])
+        sketch.MapMode = "FlatFace"
+        self.Doc.recompute()
+        self.assertAlmostEqual(sketch.Placement.Base.z, 15, places=6)
+
+        body.Tip = boss
+        multi = body.newObject("PartDesign::MultiTransform", "MultiTransform")
+        multi.Originals = mirrored.Originals
+        multi.TransformMode = mirrored.TransformMode
+        multi.BaseFeature = mirrored.BaseFeature
+        multi.Transformations = [mirrored]
+        mirrored.Originals = []
+        self.Doc.recompute()
+        body.Tip = multi
+        self.Doc.recompute()
+        self.assertEqual(sketch.AttachmentSupport[0][0], multi)
+
+        boss.Length = 8
+        self.Doc.recompute()
+        self.assertTrue(sketch.isValid(), sketch.getStatusString())
+        self.assertAlmostEqual(sketch.Placement.Base.z, 18, places=6)
+        self.assertAlmostEqual(body.Shape.Volume, 4000 + 2 * 200, places=6)
+
     def tearDown(self):
         # closing doc
         FreeCAD.closeDocument("PartDesignTestMultiTransform")
