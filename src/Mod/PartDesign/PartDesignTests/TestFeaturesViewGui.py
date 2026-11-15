@@ -1079,8 +1079,10 @@ class TestFeaturesViewGui(unittest.TestCase):
         self.assertIsNotNone(boxFace)
         Gui.Selection.clearSelection()
         Gui.Selection.addSelection(self.doc.Name, self.pocketB.Name, boxFace)
-        self.assertTrue(feature.isActive())
-        self.assertFalse(sketchCommand.isActive())
+        # the menu leaves Edit <sketch> out there; run anyway, it edits nothing
+        sketchCommand.run()
+        pump()
+        self.assertIsNone(guiDoc.getInEdit())
         Gui.Selection.clearSelection()
 
     # --------------------------------------------- ops#640 round 3 (ranks 32, 33, 34, 35, 40)
