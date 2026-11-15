@@ -1892,6 +1892,42 @@ class LostStepTest(unittest.TestCase):
             with self.subTest(kind=kind, height=25):
                 self.assertBuilds(kind, 5, "one", 25.0)
 
+    def testDistanceAngleChamferAHairShortOfTheStep(self):
+        # ops#622: a distance-angle chamfer had no lost-material check. At 45 degrees it is the
+        # equal distance chamfer of 5, a hair short of the step: OCCT drops the step. At 30 and 60
+        # degrees its other distance is 5 tan(a) or 5 / tan(a), with the walls that far in plus d:
+        # either way the step (a boss above y = inset) must stay whole, or the feature fails
+        for angle in (45.0, 30.0, 60.0):
+            for d in (1e-9, 1e-7, 5e-7):
+                for which in ("four", "one"):
+                    reach = 5 * max(math.tan(math.radians(angle)), 1 / math.tan(math.radians(angle)))
+                    inset = 5 + d if angle == 45.0 else reach + d
+                    with self.subTest(angle=angle, d=d, which=which):
+                        doc = FreeCAD.newDocument("LostStepDA")
+                        try:
+                            feature, base = stepped_body(doc, "Chamfer", 5, inset, which)
+                            feature.ChamferType = "Distance and Angle"
+                            feature.Angle = angle
+                            doc.recompute()
+                            if not feature.isValid():
+                                self.assertKeptOrFails(feature, None)
+                                continue
+                            self.assertTrue(feature.Shape.isValid())
+                            walls = (
+                                (inset, inset, 40 - inset, 40 - inset)
+                                if which == "four"
+                                else (5, inset, 35, 35)
+                            )
+                            boss = Part.makeBox(
+                                walls[2] - walls[0], walls[3] - walls[1], 10,
+                                V(walls[0], walls[1], 10),
+                            )
+                            self.assertAlmostEqual(
+                                feature.Shape.common(boss).Volume, boss.Volume, delta=1e-4
+                            )
+                        finally:
+                            FreeCAD.closeDocument(doc.Name)
+
     def testPartFeaturesAHairShortOfTheStep(self):
         # Part::Fillet and Part::Chamfer on the Body's shape, with one size (the exact
         # construction's route) and with a size per edge (OCCT's maker alone)
