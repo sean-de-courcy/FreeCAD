@@ -656,6 +656,26 @@ class BodyReorderBase:
         self.assertEqual(self.parked(sketch), [])
         self.assertBody(BLOCK + PAD2 - HOLE2)
 
+    def testASetAsideSketchDoesNotRunAgain(self):
+        """ops#796: the sketch moved above the block, its support set aside. It fails without
+        running, once: the next recompute has nothing to run. It kept the frames of the support
+        it had, which differ from none at every recompute, so it ran again each time and
+        everything after it with it. Moved back, it heals."""
+        block, pad2, sketch, hole = self.onPad2()
+        self.body.reorderObject([sketch], block, False)
+        self.recompute()
+        self.assertFalse(sketch.isValid())
+        self.assertFalse(sketch.MustExecute)
+        self.assertEqual(self.doc.recompute(), 0)
+        self.assertEqual([o.Name for o in self.doc.Objects if "Touched" in o.State], [])
+        self.assertBody(BLOCK + PAD2)
+
+        self.body.reorderObject([sketch], pad2, True)
+        self.recompute()
+        self.assertValid(sketch, hole)
+        self.assertBody(BLOCK + PAD2 - HOLE2)
+        self.assertEqual(self.doc.recompute(), 0)
+
     def testMoveAboveAFaceTheBaseHolds(self):
         """The sketch on the block's side face, which Pad2 doesn't touch: moved above Pad2, the
         support is found on the block (the same face) and everything computes; moved back, it is

@@ -267,18 +267,27 @@ class CommandGuard
 public:
     explicit CommandGuard(const App::DocumentObject* entry)
         : previous(commandEntry)
+        , previousSilenced(commandSilenced)
     {
         commandEntry = entry;
+        commandSilenced = false;
     }
     ~CommandGuard()
     {
         commandEntry = previous;
+        commandSilenced = previousSilenced;
+    }
+    /// Whether the flag kept a check of the entry quiet since the guard was set (ops#796)
+    static bool silenced()
+    {
+        return commandSilenced;
     }
     CommandGuard(const CommandGuard&) = delete;
     CommandGuard& operator=(const CommandGuard&) = delete;
 
 private:
     const App::DocumentObject* previous;
+    bool previousSilenced;
 };
 
 bool isDefaultName(const std::string& label)
@@ -970,10 +979,9 @@ std::vector<Body*> makePieces(App::DocumentObject* entry, std::string* why)
     bool silenced = false;
     if (!settled()) {
         CommandGuard guard(entry);
-        commandSilenced = false;
         touchAll();
         doc->recompute({}, /*force=*/true);
-        silenced = commandSilenced;
+        silenced = CommandGuard::silenced();
     }
     // Whether the command made, deleted or retired something: only then, or after a silenced
     // check, the entry and its steps are computed again

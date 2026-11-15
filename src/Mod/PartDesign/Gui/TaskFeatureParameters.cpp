@@ -456,6 +456,10 @@ public:
      * Gui::editStartedUnchanged()), and no object came or went. */
     std::vector<Change> originals;
     bool pristine = true;
+    /// FreeCAD-CH (ops#796): something other than the feature was computed while an input held
+    /// another value than its first (a restart of the edit, the Final view's tail): what follows
+    /// the feature may be built on that value, so first values again don't mean nothing changed
+    bool othersComputed = false;
     bool linkChanged = false;  // a link among the originals: App's no-op rule keeps the step
     QPointer<Gui::TaskView::TaskDialog> dialog;
     QPointer<QAction> undoAction;
@@ -472,6 +476,7 @@ public:
     void track(const App::DocumentObject& obj, const App::Property& prop);
     bool leftUnchanged() const;
     bool holdsOriginals() const;
+    bool tracks(const App::DocumentObject* obj) const;
     bool restartable() const;
     void seal();
     void clear();
@@ -658,6 +663,14 @@ bool DialogHistory::leftUnchanged() const
         }
     }
     return holdsOriginals();
+}
+
+bool DialogHistory::tracks(const App::DocumentObject* obj) const
+{
+    const char* name = obj ? obj->getNameInDocument() : nullptr;
+    return name && std::ranges::any_of(originals, [name](const Change& change) {
+        return change.object == name;
+    });
 }
 
 /** FreeCAD-CH (ops#796): whether every input the dialog's step changed holds its first value
@@ -1033,6 +1046,16 @@ void attachDialogHistory(Gui::TaskView::TaskDialog* dlg, App::DocumentObject* fe
             }
         }
     };
+    // FreeCAD-CH (ops#796): another object computed while an input holds another value
+    history->connections.emplace_back(doc->signalRecomputedObject.connect(
+        [name](const App::DocumentObject& obj) {
+            DialogHistory* found = findHistory(name);
+            if (found && !found->othersComputed && obj.getNameInDocument()
+                && found->feature != obj.getNameInDocument() && !found->holdsOriginals()) {
+                found->othersComputed = true;
+            }
+        }
+    ));
     history->connections.emplace_back(doc->signalNewObject.connect(structural));
     history->connections.emplace_back(doc->signalDeletedObject.connect(structural));
     history->updateActions();
@@ -1054,6 +1077,11 @@ void detachDialogHistory(const Gui::TaskView::TaskDialog* dlg)
         if (history->open) {
             history->seal();
         }
+        // FreeCAD-CH (ops#796): the history's own restart ends the edit and starts it again:
+        // with another value than the first, the edit's end computes what follows on it
+        if (historyRestart && !history->holdsOriginals()) {
+            history->othersComputed = true;
+        }
         history->dialog = nullptr;
         return !historyRestart;
     });
@@ -1071,6 +1099,7 @@ bool dialogLeftUnchanged(const App::Document* doc)
 }
 
 // Whether the dialog's inputs are all as they were when it opened (DialogHistory::holdsOriginals)
+// and nothing but the feature was computed on other values meanwhile
 bool dialogHoldsOriginals(const App::Document* doc)
 {
     DialogHistory* history = doc ? findHistory(doc->getName()) : nullptr;
@@ -1078,7 +1107,14 @@ bool dialogHoldsOriginals(const App::Document* doc)
         return false;
     }
     history->seal();
-    return history->holdsOriginals();
+    return !history->othersComputed && history->holdsOriginals();
+}
+
+// Whether the dialog's step changed a property of obj, to the same value or another
+bool dialogTracks(const App::Document* doc, const App::DocumentObject* obj)
+{
+    DialogHistory* history = doc ? findHistory(doc->getName()) : nullptr;
+    return history && history->tracks(obj);
 }
 
 // The dialog's OK or Cancel: its history ends
@@ -3273,10 +3309,35 @@ bool TaskDlgFeatureParameters::accept()
         // every value again at OK, the same ones included, and a write touches its object: with
         // every input of the dialog's step holding the value it had when the dialog opened,
         // what those writes touched is as it was computed
-        const bool unchanged = !isUpdateBlocked && dialogHoldsOriginals(feature->getDocument());
+        // Computed when the edit started: the feature, what it reads, however far, and the
+        // containers that place it (an input that waited then still does, and the feature
+        // must not be taken for computed on it)
+        const auto startedComputed = [feature]() {
+            const App::Document* document = feature->getDocument();
+            std::vector<App::DocumentObject*> read {feature};
+            try {
+                for (auto in : feature->getOutListRecursive()) {
+                    read.push_back(in);
+                }
+            }
+            catch (const Base::Exception&) {
+                return false;  // a cycle
+            }
+            for (App::DocumentObject* holder = PartDesign::Body::findBodyOf(feature); holder;
+                 holder = App::Part::getPartOfObject(holder, /*recursive=*/false)) {
+                read.push_back(holder);
+            }
+            return std::ranges::all_of(read, [document](const App::DocumentObject* obj) {
+                return Gui::editStartedComputed(document, obj);
+            });
+        };
+        const bool unchanged = !isUpdateBlocked && dialogHoldsOriginals(feature->getDocument())
+            && startedComputed();
         if (unchanged) {
+            // Only an object the step wrote to: a touch of another kind stays
             for (auto obj : feature->getDocument()->getObjects()) {
-                if (!touchedBefore.count(obj) && (obj->isTouched() || obj->mustExecute() > 0)) {
+                if (!touchedBefore.count(obj) && (obj->isTouched() || obj->mustExecute() > 0)
+                    && dialogTracks(feature->getDocument(), obj)) {
                     obj->purgeTouched();
                 }
             }
@@ -3284,8 +3345,7 @@ bool TaskDlgFeatureParameters::accept()
             // alone at every change. Computed when the edit started and with its first values
             // again, it is computed once more alone (a value written back after its last
             // preview) and is then what it was: nothing after it has to follow
-            if ((feature->isTouched() || feature->mustExecute() > 0) && feature->isValid()
-                && Gui::editStartedComputed(feature->getDocument(), feature)) {
+            if ((feature->isTouched() || feature->mustExecute() > 0) && feature->isValid()) {
                 feature->recomputeFeature();
                 if (feature->isValid()) {
                     feature->purgeTouched();
@@ -3347,7 +3407,9 @@ bool TaskDlgFeatureParameters::accept()
                 }
             );
         if (computed) {
-            // nothing to compute
+            // What else waits (a reader the Final view's tail touched): nothing after the
+            // feature when nothing does
+            Gui::cmdAppDocument(feature->getDocument(), "recompute()");
         }
         else if (isUpdateBlocked || stale || PartDesign::isStudioOwner(feature)) {
             Gui::cmdAppDocument(feature, "recompute()");
