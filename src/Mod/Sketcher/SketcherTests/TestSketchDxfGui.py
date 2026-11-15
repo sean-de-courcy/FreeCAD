@@ -61,6 +61,56 @@ class TestSketchDxfGui(unittest.TestCase):
         self.doc.undo()
         self.assertEqual(len(self.sketch.Geometry), 0)
 
+    def test_insert_dialog_defaults_are_onshapes(self):
+        """Onshape's Insert (DX1-DX4): the Units field is shown and applies even when the file
+        states units, starting at the document's unit; "Use file origin position" is off; Block is
+        off, and a Block choice stored by an earlier build is reset once"""
+        p = FreeCAD.ParamGet(SketcherDxfGui.PARAMS)
+        saved = {
+            "Block": (p.GetBool("Block", True), "Bool"),
+            "UseFileOrigin": (p.GetBool("UseFileOrigin", False), "Bool"),
+            SketcherDxfGui.BLOCK_RESET: (p.GetBool(SketcherDxfGui.BLOCK_RESET, False), "Bool"),
+        }
+        system = self.doc.UnitSystem
+        try:
+            # an earlier build's user: Block stored on, never reset
+            p.SetBool("Block", True)
+            p.RemBool(SketcherDxfGui.BLOCK_RESET)
+            p.RemBool("UseFileOrigin")
+            # a document in an inch unit system
+            inch = [
+                s
+                for s in self.doc.getEnumerationsOfProperty("UnitSystem")
+                if (setattr(self.doc, "UnitSystem", s) or SketcherDxfGui.document_units(self.doc)) == "in"
+            ]
+            self.assertTrue(inch, "no inch unit system")
+            self.doc.UnitSystem = inch[0]
+            ents = T._lwrect(10.0, 20.0, 50.0, 40.0)
+            path = T.write(self.dir, "rect.dxf", T.dxf_text(ents, insunits=4))  # the file says mm
+            dlg = SketcherDxfGui.InsertDialog(SketcherDxf.read(path), path, self.doc)
+            v = dlg.values()
+            dlg.d.deleteLater()
+            self.assertEqual(v["units"], "in")
+            self.assertEqual(v["origin"], "centre")
+            self.assertEqual(v["hold"], "free")
+            self.assertTrue(p.GetBool(SketcherDxfGui.BLOCK_RESET, False))
+            # a Block chosen after the reset is kept
+            p.SetBool("Block", True)
+            dlg = SketcherDxfGui.InsertDialog(SketcherDxf.read(path), path, self.doc)
+            self.assertEqual(dlg.values()["hold"], "block")
+            dlg.d.deleteLater()
+            # the defaults' insert: centred, in inches, no constraints
+            rep = SketcherDxfGui.insert_into(self.sketch, path, v)
+            self.assertEqual(self.sketch.ConstraintCount, 0)
+            bb = self.sketch.Shape.BoundBox
+            for got, want in ((bb.XMin, -508.0), (bb.XMax, 508.0), (bb.YMin, -254.0), (bb.YMax, 254.0)):
+                self.assertAlmostEqual(got, want, 6)
+            self.assertEqual(rep.units, "in")
+        finally:
+            self.doc.UnitSystem = system
+            for k, (val, _) in saved.items():
+                p.SetBool(k, val)
+
     def test_export_targets(self):
         box = self.doc.addObject("Part::Box", "Box")
         cyl = self.doc.addObject("Part::Cylinder", "Cyl")
