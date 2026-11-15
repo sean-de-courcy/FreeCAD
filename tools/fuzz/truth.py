@@ -88,8 +88,20 @@ class Builder:
         PartDesign.studioInsert(s, -1)
         return s
 
-    def feat(self, kind, name, **props):
-        if kind in self.PATTERNS:
+    OWNABLE = ("Pad", "Pocket", "Hole", "Revolution", "Groove")
+
+    def feat(self, kind, name, owner=None, **props):
+        # The GUI makes these studio owners (outside every Body, in the studio's list, Command.cpp
+        # prepareStudioOwner) once the studio has a solid: TRUTH_OWNER=1 (default) builds them so; 0 keeps them Body
+        # members (the in-Body path, ops#844). A pattern's originals stay Body members (owner=False).
+        if owner is None:
+            owner = os.environ.get("TRUTH_OWNER", "1") == "1"
+        if owner and kind in self.OWNABLE and not self.body.Shape.isNull():
+            f = self.doc.addObject("PartDesign::" + kind, name)
+            f.StudioScope = [self.body.StudioPartId or self.body.Name]
+            for k, x in props.items():
+                setattr(f, k, x)
+        elif kind in self.PATTERNS:
             f = self.doc.addObject("PartDesign::" + kind, name)
             for k, x in props.items():
                 setattr(f, k, x)
@@ -183,10 +195,10 @@ class T2:
         s = b.sk("PlateSk"); rect(s, "A", -p["a"] / 2, -p["b"] / 2, p["a"], p["b"])
         plate = b.feat("Pad", "Plate", Profile=s, Length=p["t"])
         s = b.sk("RowSk", z=p["t"]); rect(s, "P", p["x0"], p["y0"], p["w"], p["h"])
-        pk = b.feat("Pocket", "RowPocket", Profile=s, Length=p["d"])
+        pk = b.feat("Pocket", "RowPocket", owner=False, Profile=s, Length=p["d"])
         b.feat("LinearPattern", "RowPat", Originals=[pk], Direction=(o[0], [""]), Length=p["L"], Occurrences=p["m"])
         s = b.sk("HoleSk", z=p["t"]); circle(s, "H", p["R"], 0, p["rh"])
-        hole = b.feat("Pocket", "Hole", Profile=s, Type="ThroughAll")
+        hole = b.feat("Pocket", "Hole", owner=False, Profile=s, Type="ThroughAll")
         b.feat("PolarPattern", "HolePat", Originals=[hole], Axis=(o[2], [""]), Angle=360, Occurrences=p["n"])
         return plate
 
@@ -237,7 +249,7 @@ class T3:
         s = b.sk("PlateSk"); rect(s, "A", -p["a"] / 2, -p["b"] / 2, p["a"], p["b"])
         plate = b.feat("Pad", "Plate", Profile=s, Length=p["t"])
         s = b.sk("BossSk", z=p["t"]); circle(s, "B", p["cx"], p["cy"], p["r"])
-        boss = b.feat("Pad", "Boss", Profile=s, Length=p["h"])
+        boss = b.feat("Pad", "Boss", owner=False, Profile=s, Length=p["h"])
         b.feat("Mirrored", "MirBoss", Originals=[boss], MirrorPlane=(o[5], [""]))
         return plate
 
@@ -356,7 +368,8 @@ class T7:
         groove = b.feat("Pocket", "Groove", Profile=s, Length=p["gd"])
         PartDesign.studioSuppress(groove, True); b.doc.recompute()
         s = b.sk("BossSk", z=t); circle(s, "B", p["cx"], p["cy"], p["r"])
-        b.feat("Pad", "Boss", Profile=s, Type="UpToFace", UpToFace=(step, [faceAt(step.Shape, t + hs, p["sx"])]))
+        src = step if step.isDerivedFrom("PartDesign::Feature") and b.body.hasObject(step) else b.body   # an owner: the part's face, as the GUI picks it
+        b.feat("Pad", "Boss", Profile=s, Type="UpToFace", UpToFace=(src, [faceAt(src.Shape, t + hs, p["sx"])]))
         s = b.sk("NextSk", z=p["zn"]); rect(s, "N", p["nx"], p["ny"], p["nw"], p["nh"])
         b.feat("Pad", "Next", Profile=s, Type="UpToFirst", Reversed=True)
         s = b.sk("HoleSk"); circle(s, "H", p["hx"], p["hy"], p["rh"])
@@ -411,7 +424,7 @@ class T7:
             mar += [gx - sx, a - gx - gw, hs - gd, ivGap(nx, nx + nw, gx, gx + gw),
                     circRectGap(hx, hy, rh, gx, -1e6, gx + gw, 1e6)]
         H = top if hx > sx else t
-        Ll = max(0.0, min(nx + nw, sx) - nx); Lh = nw - Ll
+        Ll = max(0.0, min(nx + nw, sx) - nx); Lh = max(0.0, nx + nw - max(nx, sx))
         hl, hh = zn - t, zn - top
         h0 = hl if nx < sx else hh; h1 = hl if nx + nw < sx else hh
         straddle = Ll > 0 and Lh > 0
