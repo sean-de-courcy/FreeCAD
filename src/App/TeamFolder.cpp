@@ -60,6 +60,24 @@ std::vector<std::string> readLines(const fs::path& file, bool& exists, bool& end
     return lines;
 }
 
+// Why `team` can't be the team folder, or an empty string (review F1, F3: a relative path would
+// follow the working directory, a file is not a folder)
+std::string unusable(const std::string& team)
+{
+    const fs::path root = Base::FileInfo::stringToPath(team);
+    std::error_code error;
+    if (!root.is_absolute()) {
+        return "'" + team + "' is not an absolute folder path";
+    }
+    if (!fs::exists(root, error)) {
+        return "'" + team + "' does not exist";
+    }
+    if (!fs::is_directory(root, error)) {
+        return "'" + team + "' is not a folder";
+    }
+    return {};
+}
+
 bool hasLine(const std::vector<std::string>& lines, const std::string& wanted)
 {
     return std::find(lines.begin(), lines.end(), wanted) != lines.end();
@@ -148,6 +166,9 @@ bool contains(const std::string& path)
         return false;
     }
     const fs::path teamPath = Base::FileInfo::stringToPath(team);
+    if (!teamPath.is_absolute()) {
+        return false;
+    }
     std::error_code error;
     fs::path current = fs::absolute(Base::FileInfo::stringToPath(path), error);
     if (error) {
@@ -168,11 +189,11 @@ bool contains(const std::string& path)
 
 std::string apply(const std::string& team)
 {
-    const fs::path root = Base::FileInfo::stringToPath(team);
-    std::error_code error;
-    if (!fs::is_directory(root, error)) {
-        return "the folder '" + team + "' does not exist";
+    const std::string why = unusable(team);
+    if (!why.empty()) {
+        return why;
     }
+    const fs::path root = Base::FileInfo::stringToPath(team);
     if (!appendMissing(root / ".stglobalignore",
                        ignorePatterns(),
                        "// FreeCAD-CH: files that stay on the computer that made them "
@@ -192,22 +213,24 @@ std::string problem()
         return "The team folder is not set (Preferences, Document): backups and temporary files "
                "would sync to the other computers.";
     }
-    const fs::path root = Base::FileInfo::stringToPath(team);
-    std::error_code error;
-    if (!fs::is_directory(root, error)) {
-        return "The team folder '" + team + "' does not exist.";
+    const std::string why = unusable(team);
+    if (!why.empty()) {
+        return "The team folder " + why + ".";
     }
+    const fs::path root = Base::FileInfo::stringToPath(team);
     bool exists = false;
     bool endsInNewline = true;
     if (!hasLine(readLines(root / ".stignore", exists, endsInNewline), includeLine)) {
         return "The team folder's .stignore no longer includes .stglobalignore: backups and "
-               "temporary files would sync. Set the team folder again to restore it.";
+               "temporary files would sync. FreeCAD-CH restores it at its next start, or when "
+               "the team folder is set again.";
     }
     const auto global = readLines(root / ".stglobalignore", exists, endsInNewline);
     for (const auto& pattern : ignorePatterns()) {
         if (!hasLine(global, pattern)) {
             return "The team folder's .stglobalignore lost the line '" + pattern
-                + "'. Set the team folder again to restore it.";
+                + "'. FreeCAD-CH restores it at its next start, or when the team folder is set "
+                  "again.";
         }
     }
     return {};
