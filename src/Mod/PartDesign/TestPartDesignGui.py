@@ -54,6 +54,7 @@ from PartDesignTests.TestDressUpDeleteKeyGui import TestDressUpDeleteKeyGui
 from PartDesignTests.TestReferenceFieldGui import TestReferenceFieldGui
 from PartDesignTests.TestTreeItemsGui import TestTreeItemsGui
 from PartDesignTests.TestForkKeymapGui import TestForkKeymapGui
+from PartDesignTests.TestEnterInPickListGui import TestEnterInPickListGui
 from PartDesignTests.TestTaskStatusGui import TestTaskStatusGui
 from PartDesignTests.TestProblemNavigationGui import TestProblemNavigationGui
 from PartDesignTests.TestCrossBodyGui import TestCrossBodyGui
