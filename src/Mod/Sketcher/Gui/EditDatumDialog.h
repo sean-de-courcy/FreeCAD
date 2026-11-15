@@ -135,8 +135,8 @@ private:
     std::string initialText;
     /// The text showKeptText put in the field (keptExpression's typed text).
     std::string keptShownText;
-    /// The field's text as typed, or as put there by this class; liveTextValid false: the
-    /// widget's own text counts (after a context menu, or the formula editor's OK or Reset).
+    /// The field's text as typed, or as put there by this class; liveTextValid false after the
+    /// formula editor's OK or Reset.
     std::string liveText;
     bool liveTextValid {true};
 
@@ -157,8 +157,9 @@ private:
     /// When `field` is the kept text unchanged, puts keptExpression back in the engine as it was
     /// and returns true (ops#684 review F2: not re-read as typed text).
     bool restoreKeptExpression(const std::string& field);
-    /// The field's text, trimmed: liveText, or the widget's text (ops#684).
-    std::string fieldText() const;
+    /// Whether liveText means what the field shows, to its display precision (ops#684 review
+    /// R1/R2): only then is it kept or compared; otherwise the field's value applies, as before.
+    bool liveTextShown() const;
     /// Applies valueEdit's value to the constraint in the open transaction. Throws on failure.
     void applyValue();
     /// applyValue for the popup; on failure, shows the reason in the field and returns false.
