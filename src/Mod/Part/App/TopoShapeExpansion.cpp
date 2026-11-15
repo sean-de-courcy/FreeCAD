@@ -6629,8 +6629,9 @@ TopoShape makeThickSolidByGroups(
 // only where it lies farther than the thickness from that face's edges, measured along the
 // removed face's normal and across it. And the cavity must open through each removed face
 // (OCCT's offset can come back as a fragment of it), and each of its faces must lie by the
-// kept face it is the offset of (OCCT can leave one untrimmed across the cavity). Anything
-// else returns a null shape.
+// kept face it is the offset of (OCCT can leave one untrimmed across the cavity). A kept face
+// meeting a removed face at a vertex only is refused before anything is built. Anything else
+// returns a null shape.
 
 // BRepOffsetAPI_MakeOffsetShape's join algorithm with an offset of their own for some faces
 class OffsetShapeWithFaceOffsets: public BRepOffsetAPI_MakeOffsetShape
@@ -6698,6 +6699,32 @@ TopoShape makeThickSolidByFaceOffsets(
                 }
                 for (TopTools_ListIteratorOfListOfShape face(*touching); face.More(); face.Next()) {
                     besideRemoved.Add(face.Value());
+                }
+            }
+        }
+        // A kept face that meets a removed face at a vertex and along no edge (the tilted top
+        // of a step that comes down to the open face's level at one corner, or at the wall
+        // behind a half-round step) is where OCCT's offset comes back as a fragment or leaves
+        // that face's offset untrimmed across the cavity, a wedge of material under the open
+        // face. The checks below catch the large cases only, so this is refused outright.
+        {
+            TopTools_IndexedDataMapOfShapeListOfShape edgeFaces;
+            TopExp::MapShapesAndAncestors(shape.getShape(), TopAbs_EDGE, TopAbs_FACE, edgeFaces);
+            TopTools_MapOfShape byEdge;
+            for (TopTools_ListIteratorOfListOfShape it(remFace); it.More(); it.Next()) {
+                for (TopExp_Explorer xp(it.Value(), TopAbs_EDGE); xp.More(); xp.Next()) {
+                    const TopTools_ListOfShape* sharing = edgeFaces.Seek(xp.Current());
+                    if (!sharing) {
+                        continue;
+                    }
+                    for (TopTools_ListIteratorOfListOfShape face(*sharing); face.More(); face.Next()) {
+                        byEdge.Add(face.Value());
+                    }
+                }
+            }
+            for (TopTools_MapIteratorOfMapOfShape it(besideRemoved); it.More(); it.Next()) {
+                if (!byEdge.Contains(it.Key())) {
+                    return {};
                 }
             }
         }
