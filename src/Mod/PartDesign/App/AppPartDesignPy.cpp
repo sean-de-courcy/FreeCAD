@@ -2569,6 +2569,17 @@ private:
                 studio->getExtensionByType<App::GroupExtension>()->addObject(body);
             }
             std::string label;
+            // With unique labels (the default) the document's labels are taken, as nameNewPart
+            // takes them: a label another studio has would be renamed by the document
+            if (!App::GetApplication()
+                     .GetParameterGroupByPath("User parameter:BaseApp/Preferences/Document")
+                     ->GetBool("DuplicateLabels", false)) {
+                for (auto obj : doc->getObjects()) {
+                    if (obj != body) {
+                        labels.insert(obj->Label.getValue());
+                    }
+                }
+            }
             for (int n = 1; label.empty() || labels.count(label); ++n) {
                 label = "Part " + std::to_string(n);
             }
