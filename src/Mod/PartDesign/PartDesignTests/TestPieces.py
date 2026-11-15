@@ -1218,6 +1218,19 @@ class TestPieces(unittest.TestCase):
         self.assertVolume(left, 3000)
         self.assertVolume(right, 6900)
 
+    def testCommandAfterAnUncomputedMoveOfThePartMakesThePieces(self):
+        # The same slot and bridge, then the part itself moved 2 against y without a recompute:
+        # the step is placed in its part's frame, which no link of its tells. The command makes
+        # the pieces, 3000 and 6900 (review r2)
+        self.studio()
+        e = self.pocket("E", ((30, -20, 31, 9),), ("P",), length=11)
+        self.assertEqual(list(self.command(e)), [])
+        p = self.doc.getObject("P")
+        p.Placement = App.Placement(V(0, -2, 0), App.Rotation())
+        left, right = self.leftRight(list(self.command(e)))
+        self.assertVolume(left, 3000)
+        self.assertVolume(right, 6900)
+
     def testCommandAfterAnEditThatSplitsMakesThePieces(self):
         # The slot across the bar, 4 deep first (one solid: nothing to make), then deepened
         # through it: computed, it fails (two pieces, no parts yet), so the command doesn't take
