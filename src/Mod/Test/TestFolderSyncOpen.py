@@ -91,6 +91,49 @@ class TestOneFileOneDocument(unittest.TestCase):
         self.assertEqual(linked.Document.Name, a.Name)
         self.assertEqual(linked.Name, "Marker")
 
+    def linker(self, name, spelling):
+        """Saves `name`.FCStd beside the folder, linking A's Marker with A open as `spelling`."""
+        a = FreeCAD.openDocument(self.path(spelling, "A.FCStd"))
+        doc = FreeCAD.newDocument(name)
+        doc.saveAs(self.path(name + ".FCStd"))
+        doc.addObject("App::Link", "Link").LinkedObject = a.getObject("Marker")
+        doc.recompute()
+        doc.save()
+        FreeCAD.closeDocument(doc.Name)
+        FreeCAD.closeDocument(a.Name)
+
+    def testSavingAKeepsLinksOfBothSpellings(self):
+        """B links A as `parts/A.FCStd`, C as `Parts/A.FCStd`. With A, B and C open, saving A keeps
+        both links on A's Marker (the link of the other spelling is not detached)."""
+        self.needsCaseInsensitive()
+        self.linker("SpellB", "parts")
+        self.linker("SpellC", "Parts")
+        a = FreeCAD.openDocument(self.path("Parts", "A.FCStd"))
+        b = FreeCAD.openDocument(self.path("SpellB.FCStd"))
+        c = FreeCAD.openDocument(self.path("SpellC.FCStd"))
+        self.assertEqual(sorted(self.opened()), sorted([a.Name, b.Name, c.Name]))
+        a.save()
+        for doc in (b, c):
+            linked = doc.getObject("Link").LinkedObject
+            self.assertIsNotNone(linked, doc.Name)
+            self.assertEqual(linked.Document.Name, a.Name, doc.Name)
+
+    def testReopeningAInAnotherCaseAttaches(self):
+        """B links A as `parts/A.FCStd`. B opens (A with it), A closes, A opens again as
+        `Parts/A.FCStd`: B's link attaches to that A."""
+        self.needsCaseInsensitive()
+        self.linker("SpellB", "parts")
+        b = FreeCAD.openDocument(self.path("SpellB.FCStd"))
+        others = [name for name in self.opened() if name != b.Name]
+        self.assertEqual(len(others), 1, "B's link opened A")
+        FreeCAD.closeDocument(others[0])
+        self.assertIsNone(b.getObject("Link").LinkedObject)
+        a = FreeCAD.openDocument(self.path("Parts", "A.FCStd"))
+        self.assertEqual(sorted(self.opened()), sorted([a.Name, b.Name]))
+        linked = b.getObject("Link").LinkedObject
+        self.assertIsNotNone(linked)
+        self.assertEqual(linked.Document.Name, a.Name)
+
 
 if __name__ == "__main__":
     unittest.main()
