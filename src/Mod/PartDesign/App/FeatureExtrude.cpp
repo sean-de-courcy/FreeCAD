@@ -1116,12 +1116,26 @@ std::optional<gp_Ax1> upToPlaneForBlindSide(
     }
     TopoShape shape;
     try {
-        shape = Part::Feature::getTopoShape(
+        // A studio owner's face: as the part has it just before the owner, as the side
+        // itself reads it (ProfileBased::getUpToFaceFromLinkSub(), ops#848)
+        std::string why;
+        shape = studioElementAt(
+            freecad_cast<App::DocumentObject*>(link.getContainer()),
             ref,
-            Part::ShapeOption::NeedSubElement | Part::ShapeOption::ResolveLink
-                | Part::ShapeOption::Transform,
-            subs.front().c_str()
+            subs.front(),
+            &why
         );
+        if (!why.empty()) {
+            return std::nullopt;
+        }
+        if (shape.isNull()) {
+            shape = Part::Feature::getTopoShape(
+                ref,
+                Part::ShapeOption::NeedSubElement | Part::ShapeOption::ResolveLink
+                    | Part::ShapeOption::Transform,
+                subs.front().c_str()
+            );
+        }
     }
     catch (const Base::Exception&) {
         return std::nullopt;

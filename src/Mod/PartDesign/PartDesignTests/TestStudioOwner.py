@@ -594,6 +594,107 @@ class TestStudioOwner(unittest.TestCase):
         z = p.z - (n.x * (2 - p.x) + n.y * (5 - p.y)) / n.z
         self.assertAlmostEqual(boss.AddSubShape.Volume, math.pi * (z - 10), places=3)
 
+    # More of ops#848, review round 3. draftBefore() puts features between Step and Boss, whose link
+    # stays on Step's top face; tiltedTopAt() is the tilted face's plane height over a point.
+    def draftBefore(self, between=()):
+        """Step and Boss, then `between` (callables making Body members of A from Step's step)
+        and a 10 degree Draft of the top about its x = 6 edge, all moved before Boss."""
+        step, boss = self.stepAndBoss()
+        a = self.doc.getObject("A")
+        made = self.step(step, "A")
+        last = made
+        added = []
+        for make in between:
+            last = make(a, last)
+            added.append(last)
+            self.doc.recompute()
+        side = next(
+            f"Face{i}"
+            for i, f in enumerate(last.Shape.Faces, 1)
+            if abs(f.normalAt(0, 0).x + 1) < 1e-9 and abs(f.CenterOfMass.x - 6) < 1e-6
+        )
+        edge = next(
+            f"Edge{i}"
+            for i, e in enumerate(last.Shape.Edges, 1)
+            if len(e.Vertexes) == 2
+            and abs(e.Vertexes[0].Point.x - e.Vertexes[1].Point.x) > 1
+            and abs(e.Vertexes[0].Point.y) < 1e-6 and abs(e.Vertexes[1].Point.y) < 1e-6
+            and abs(e.Vertexes[0].Point.z - 14) < 1e-6 and abs(e.Vertexes[1].Point.z - 14) < 1e-6
+        )
+        tops = [
+            f"Face{i}"
+            for i, f in enumerate(last.Shape.Faces, 1)
+            if abs(f.normalAt(0, 0).z - 1) < 1e-9 and abs(f.CenterOfMass.z - 14) < 1e-6
+        ]
+        draft = a.newObject("PartDesign::Draft", "Draft")
+        draft.Base = (last, [tops[0]])
+        draft.Angle = 10
+        draft.NeutralPlane = (last, [side])
+        draft.PullDirection = (last, [edge])
+        added.append(draft)
+        self.doc.openTransaction("adopt")
+        PartDesign.studioReconcile(studioList(self.doc))
+        for obj in added:
+            entries = [o.Name for o in studioList(self.doc).Entries]
+            PartDesign.studioMove(obj, entries.index("Boss"))
+        self.doc.commitTransaction()
+        self.doc.recompute()
+        self.assertTrue(draft.isValid(), draft.getStatusString())
+        self.assertIs(boss.UpToFace[0], made)
+        return boss, draft
+
+    def tiltedTopAt(self, draft, x, y):
+        tilted = [
+            f for f in draft.Shape.Faces
+            if 0.01 < abs(f.normalAt(0, 0).x) < 0.99 and f.normalAt(0, 0).z > 0.5
+        ]
+        self.assertEqual(len(tilted), 1, "the Draft tilted no face, or several")
+        n, p = tilted[0].normalAt(0, 0), tilted[0].CenterOfMass
+        return p.z - (n.x * (x - p.x) + n.y * (y - p.y)) / n.z
+
+    def testUpToFaceFollowsADraftOfAnEllipseProfile(self):
+        """A profile with an edge that is no line or circle takes the blind-side path
+        (upToPlaneForBlindSide): it reads the same face, so the boss (an ellipse 1.5 x 1 at
+        (2, 5)) ends on the tilted plane too, 1.5 pi (z(2, 5) - 10)."""
+        boss, draft = self.draftBefore()
+        sk = self.doc.getObject("BossSk")
+        sk.delGeometry(0)
+        sk.addGeometry(Part.Ellipse(V(2, 5, 0), 1.5, 1.0))
+        self.doc.recompute()
+        z = self.tiltedTopAt(draft, 2, 5)
+        self.assertTrue(boss.isValid(), boss.getStatusString())
+        self.assertAlmostEqual(boss.AddSubShape.Volume, 1.5 * math.pi * (z - 10), places=3)
+
+    def testUpToFaceIsNotAThicknesssInnerFace(self):
+        """A Thickness between Step and the Draft makes an inner face from the top face, facing
+        the other way: the boss goes up to the tilted outer face, never to the inner one."""
+
+        def thickness(a, last):
+            thick = a.newObject("PartDesign::Thickness", "Thick")
+            thick.Base = (last, [faceAt(last, 0, -1)])
+            thick.Value = 1
+            thick.Reversed = True
+            return thick
+
+        boss, draft = self.draftBefore((thickness,))
+        z = self.tiltedTopAt(draft, 2, 5)
+        self.assertTrue(boss.isValid(), boss.getStatusString())
+        self.assertAlmostEqual(boss.AddSubShape.Volume, math.pi * (z - 10), places=3)
+
+    def testUpToFaceSplitIntoDifferentFacesFails(self):
+        """A slot splits the top face in two and the Draft tilts one piece: neither is the face
+        (Onshape would hold both, UT2, on two planes): the boss fails and says so."""
+
+        def slot(a, last):
+            pocket = a.newObject("PartDesign::Pocket", "Slot")
+            pocket.Profile = sketch(a, "SlotSk", xyPlane(a), (7.5, -1, 8.5, 11), z=14)
+            pocket.Length = 2
+            return pocket
+
+        boss, draft = self.draftBefore((slot,))
+        self.assertFalse(boss.isValid())
+        self.assertIn("different faces", boss.getStatusString())
+
     # A whole part as the stop (ops#846), TestOnshapeEndTypes' ring in a studio: Ring, a Revolution
     # owner on A, revolves the rectangle x 2..5, z 0..10 of the XZ plane about Z up to part W (the
     # box x -10..0, y 0..10, z -5..15): counterclockwise W's face x = 0 comes first, at 90 degrees,
