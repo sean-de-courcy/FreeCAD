@@ -343,6 +343,113 @@ class TestThickness(unittest.TestCase):
         self.assertAlmostEqual(thickness.Shape.Volume, 2424.0, places=6)
         self.assertEqual(len(thickness.Shape.Faces), 11)
 
+    def _plateWithHoles(self, holes, join="Arc", t=1.5):
+        """A 120 x 80 x 10 plate with through holes of diameter 6 at the (x, y) of <holes>, and
+        a Thickness of <t> inwards removing its bottom face. Returns the feature and the shell
+        defined geometrically: the plate without the block that leaves walls of <t> at the sides
+        and the top, where that block in turn leaves a wall of <t> around each hole."""
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        base = body.newObject("PartDesign::AdditiveBox", "Plate")
+        base.Length, base.Width, base.Height = 120, 80, 10
+        plate = Part.makeBox(120, 80, 10)
+        cavity = Part.makeBox(120 - 2 * t, 80 - 2 * t, 10 - t, FreeCAD.Vector(t, t, 0))
+        for x, y in holes:
+            base = body.newObject("PartDesign::SubtractiveCylinder", "Hole")
+            base.Radius, base.Height = 3, 10
+            base.Placement.Base = FreeCAD.Vector(x, y, 0)
+            plate = plate.cut(Part.makeCylinder(3, 10, FreeCAD.Vector(x, y, 0)))
+            cavity = cavity.cut(Part.makeCylinder(3 + t, 10, FreeCAD.Vector(x, y, 0)))
+        self.Doc.recompute()
+        self.assertAlmostEqual(base.Shape.Volume, plate.Volume, places=6)
+        bottom = [
+            "Face" + str(i)
+            for i, face in enumerate(base.Shape.Faces, 1)
+            if isinstance(face.Surface, Part.Plane) and abs(face.CenterOfMass.z) < 1e-7
+        ]
+        self.assertEqual(len(bottom), 1)
+        thickness = body.newObject("PartDesign::Thickness", "Thickness")
+        thickness.Base = (base, bottom)
+        thickness.Value = t
+        thickness.Join = join
+        self.Doc.recompute()
+        return thickness, plate.cut(cavity)
+
+    def _assertShell(self, thickness, expected):
+        self.assertTrue(thickness.isValid(), thickness.getStatusString())
+        shape = thickness.Shape
+        self.assertTrue(shape.isValid())
+        self.assertEqual(len(shape.Solids), 1)
+        self.assertLess(abs(shape.Volume - expected.Volume), 1e-6 * expected.Volume)
+        self.assertLess(shape.cut(expected).Volume + expected.cut(shape).Volume, 1e-4)
+
+    def testShellOfAPlateWithAHoleNearItsWall(self):
+        """A hole 5 from the plate's side: the wall of 1.5 around it (radius 4.5) runs into the
+        side's wall, 3.5 from the hole's axis. The shell builds, the two walls merged (ops#795;
+        OCCT's plain mode returns an invalid shell there, or none with the Intersection join)."""
+        for join in ("Arc", "Intersection"):
+            with self.subTest(join=join):
+                thickness, expected = self._plateWithHoles([(60, 5)], join)
+                # the hole's wall less its segment beyond the side wall's inner plane
+                segment = 4.5**2 * math.acos(3.5 / 4.5) - 3.5 * math.sqrt(4.5**2 - 3.5**2)
+                volume = (
+                    (120 * 80 * 10 - 117 * 77 * 8.5)
+                    + (math.pi * (4.5**2 - 3**2) - segment) * 8.5
+                    - math.pi * 3**2 * 1.5
+                )
+                self.assertAlmostEqual(expected.Volume, volume, places=6)
+                self._assertShell(thickness, expected)
+                self.assertFalse(thickness.Intersection)
+                FreeCAD.closeDocument(self.Doc.Name)
+                self.Doc = FreeCAD.newDocument("PartDesignTestThickness")
+
+    def testShellOfAPlateWithHolesNearACornerAndEachOther(self):
+        """A hole 5 from two sides, two holes 8 apart (their walls of radius 4.5 overlap) and a
+        row of three along a side: each builds as the walls merged (ops#795)."""
+        for holes in ([(5, 5)], [(60, 40), (68, 40)], [(10, 5), (22, 5), (34, 5)]):
+            with self.subTest(holes=holes):
+                thickness, expected = self._plateWithHoles(holes)
+                self._assertShell(thickness, expected)
+                FreeCAD.closeDocument(self.Doc.Name)
+                self.Doc = FreeCAD.newDocument("PartDesignTestThickness")
+
+    def testShellOfAPlateWithAHoleApartUnchanged(self):
+        """A hole whose wall stays clear of the sides is OCCT's plain shell, as before:
+        19681.503 mm^3 mid-plate, and the same 6.5 from a side (clear by 0.5)."""
+        for y in (40, 6.5):
+            with self.subTest(y=y):
+                thickness, expected = self._plateWithHoles([(60, y)])
+                self._assertShell(thickness, expected)
+                self.assertAlmostEqual(
+                    thickness.Shape.Volume,
+                    (120 * 80 * 10 - 117 * 77 * 8.5)
+                    + math.pi * (4.5**2 - 3**2) * 8.5
+                    - math.pi * 3**2 * 1.5,
+                    places=5,
+                )
+                self.assertEqual(len(thickness.Shape.Faces), 14)
+                FreeCAD.closeDocument(self.Doc.Name)
+                self.Doc = FreeCAD.newDocument("PartDesignTestThickness")
+
+    def testShellRefusalsSayWhatHelps(self):
+        """Where no mode of OCCT's builds the shell, the feature fails and says what helps. With
+        OCCT 8.0.1 on Windows all three fail: the Intersection join with the hole 5 from two
+        sides, and a hole's wall tangent to the side's wall (6 from the side) with either join
+        (the intersecting mode returns the plate as it was there, which is never taken for the
+        shell, ops#795). Where a kernel builds one, it is the shell."""
+        for holes, join in (
+            ([(5, 5)], "Intersection"),
+            ([(60, 6)], "Arc"),
+            ([(60, 6)], "Intersection"),
+        ):
+            with self.subTest(holes=holes, join=join):
+                thickness, expected = self._plateWithHoles(holes, join)
+                if thickness.isValid():
+                    self._assertShell(thickness, expected)
+                else:
+                    self.assertIn("opposite direction", thickness.getStatusString())
+                FreeCAD.closeDocument(self.Doc.Name)
+                self.Doc = FreeCAD.newDocument("PartDesignTestThickness")
+
     def tearDown(self):
         # closing doc
         FreeCAD.closeDocument("PartDesignTestThickness")
