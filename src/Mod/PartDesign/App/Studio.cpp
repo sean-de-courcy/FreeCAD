@@ -26,6 +26,8 @@
 #include <App/MappedElement.h>
 #include <Base/Console.h>
 #include <Base/Exception.h>
+#include <Mod/Part/App/DatumFeature.h>
+#include <Mod/Part/App/Part2DObject.h>
 #include <Mod/Part/App/PartFeature.h>
 
 #include <BRepAdaptor_Curve.hxx>
@@ -388,8 +390,12 @@ std::vector<App::DocumentObject*> entryReads(
     // the entry computes on what it reads now, so those reads count as the entry's too (s37d5:
     // a hole dropped above the chamfer whose face its sketch is on made a cycle that every
     // recompute ran twice). Its own reads are its own entry's when it is one
-    auto ownInput = [own](const App::DocumentObject* obj) {
-        return own && obj != own && Body::findBodyOf(obj) == own && !Body::isSolidFeature(obj);
+    // A studio owner (a hole of the part studio) is in no Body: its sketch is in one, so the sketch
+    // is found by its kind, read by the entry itself
+    auto ownInput = [&](const App::DocumentObject* obj) {
+        return obj != own && !Body::isSolidFeature(obj)
+            && (obj->isDerivedFrom<Part::Part2DObject>() || obj->isDerivedFrom<Part::Datum>()
+                || (own && Body::findBodyOf(obj) == own));
     };
     while (!readers.empty()) {
         App::DocumentObject* reader = readers.back();
@@ -412,12 +418,12 @@ std::vector<App::DocumentObject*> entryReads(
                         via->push_back(reader);
                     }
                 }
-                if (read == obj && ownInput(obj)) {
+                if (read == obj && reader == entry && ownInput(obj)) {
                     readers.push_back(obj);
                 }
                 continue;
             }
-            if (ownInput(obj)) {
+            if (reader == entry && ownInput(obj)) {
                 readers.push_back(obj);
                 continue;
             }
