@@ -433,9 +433,8 @@ void EditDatumDialog::setupValueEdit(QString& title, QString& label)
             liveTextValid = true;
         });
     }
-    // A context menu can put a history value in (setText, no textEdited): the widget's text then
-    // counts, as before ops#684.
-    valueEdit->installEventFilter(this);
+    // Anything else that writes the text (a step, a history value: setText, no textEdited) is
+    // caught by liveTextShown.
     QObject::connect(valueEdit, &Gui::QuantitySpinBox::showFormulaDialog, this, [this](bool shown) {
         auto* formula = shown && valueEdit ? visibleFormulaEditor(valueEdit) : nullptr;
         if (!formula) {
@@ -460,12 +459,58 @@ void EditDatumDialog::setupValueEdit(QString& title, QString& label)
     });
 }
 
-std::string EditDatumDialog::fieldText() const
+bool EditDatumDialog::liveTextShown() const
 {
-    if (liveTextValid || !valueEdit) {
-        return liveText;
+    // The guard of ops#684 review R1/R2: liveText counts only while it means what the field shows,
+    // to the field's display precision (`(1/8) in` shown as `0.13 in`). Otherwise (a step by the
+    // arrows or the wheel, a history value from the context menu, the formula editor's OK or
+    // Reset) the field's value is applied as a plain value, as before ops#684.
+    if (!liveTextValid || !valueEdit || liveText.empty()) {
+        return false;
     }
-    return valueEdit->text().trimmed().toStdString();
+    const std::string shown = valueEdit->text().trimmed().toStdString();
+    if (shown == liveText) {
+        return true;
+    }
+    static const std::regex number(R"([+-]?(?:\d+\.?(\d*)|\.(\d+))(?:[eE][+-]?\d+)?)");
+    std::smatch match;
+    if (!std::regex_search(shown, match, number)) {
+        return false;
+    }
+    const std::size_t decimals = match[1].matched ? match[1].length() : match[2].length();
+    const double shownNumber = std::stod(match[0].str());
+    try {
+        auto valueOf = [this](const std::string& text) {
+            App::ExpressionPtr result
+                = App::ExpressionParser::parse(sketch, text.c_str())->eval();
+            auto* value = freecad_cast<App::NumberExpression*>(result.get());
+            if (!value) {
+                throw Base::ValueError("no number");
+            }
+            return value->getQuantity();
+        };
+        const Base::Quantity shownQuantity = valueOf(shown);
+        Base::Quantity typed = valueOf(liveText);
+        if (shownNumber == 0.0 || shownQuantity.isDimensionless()) {
+            return false;
+        }
+        // A bare number is in the field's unit (as keptLengthText and the field read it)
+        const double factor = shownQuantity.getValue() / shownNumber;
+        if (typed.isDimensionless()) {
+            typed = Base::Quantity(typed.getValue() * factor, shownQuantity.getUnit());
+        }
+        if (typed.getUnit() != shownQuantity.getUnit()) {
+            return false;
+        }
+        const double halfStep = 0.5 * std::pow(10.0, -static_cast<double>(decimals)) * std::abs(factor);
+        return std::abs(typed.getValue() - shownQuantity.getValue()) <= halfStep * (1.0 + 1e-9);
+    }
+    catch (const Base::Exception&) {
+        return false;
+    }
+    catch (const std::exception&) {
+        return false;
+    }
 }
 
 void EditDatumDialog::showKeptText()
@@ -801,10 +846,6 @@ int EditDatumDialog::execInPlace(bool hasNext, bool hasPrevious)
 
 bool EditDatumDialog::eventFilter(QObject* watched, QEvent* event)
 {
-    if (event->type() == QEvent::ContextMenu && valueEdit && watched == valueEdit) {
-        liveTextValid = false;  // a history value may come in by setText (see setupValueEdit)
-        return QObject::eventFilter(watched, event);
-    }
     if (!inPlacePopup
         || (event->type() != QEvent::KeyPress && event->type() != QEvent::KeyRelease
             && event->type() != QEvent::ShortcutOverride)) {
@@ -883,7 +924,8 @@ void EditDatumDialog::applyValue()
         expr = sketch->getExpression(sketch->Constraints.createPath(ConstrNbr)).expression;
     }
     const bool fromEditor = expr != nullptr;
-    if (!fromEditor && restoreKeptExpression(fieldText())) {
+    const bool typedShown = liveTextShown();
+    if (!fromEditor && typedShown && restoreKeptExpression(liveText)) {
         valueEdit->pushToHistory();
         return;
     }
@@ -945,7 +987,8 @@ void EditDatumDialog::applyValue()
         return;
     }
 
-    if (const std::string kept = keptLengthText(fieldText()); !kept.empty()) {
+    if (const std::string kept = typedShown ? keptLengthText(liveText) : std::string();
+        !kept.empty()) {
         valueEdit->pushToHistory();
         applyKeptText(kept);
         return;
@@ -962,7 +1005,7 @@ void EditDatumDialog::applyValue()
     }
 
     if (isLengthDimension(Constr) && !keptExpression
-        && fieldText() == initialText) {
+        && typedShown && liveText == initialText) {
         // The proposed value, unchanged: the length as it is, not as the field rounds it
         // (0.39 in for 10 mm at two decimals), as Onshape stores it at full precision (GS1).
         newQuant = Base::Quantity(Constr->getValue(), Base::Unit::Length);
@@ -1052,11 +1095,11 @@ void EditDatumDialog::accepted()
                 if (ui_ins_datum->labelEdit->hasExpression()) {
                     ui_ins_datum->labelEdit->apply();
                 }
-                else if (restoreKeptExpression(fieldText())) {
+                else if (liveTextShown() && restoreKeptExpression(liveText)) {
                     // unchanged kept text: the expression as it was (ops#684 review F2)
                 }
                 else if (const std::string kept
-                         = keptLengthText(fieldText());
+                         = liveTextShown() ? keptLengthText(liveText) : std::string();
                          !kept.empty()) {
                     applyKeptText(kept);  // ops#684, as in applyValue
                 }
