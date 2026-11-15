@@ -2392,16 +2392,24 @@ TEST_F(FilletFallbackTest, refusesAnEndFaceThatDoesNotCoverTheTool)
     EXPECT_TRUE(exact(dressUp(base, {front, back}, fillet(2)), 2740 - 2 * filletSection(2) * 30));
 }
 
-TEST_F(FilletFallbackTest, refusesANearlyStraightContinuation)
+TEST_F(FilletFallbackTest, roundsOverANearlyStraightContinuation)
 {
     // The front bends by a small angle at x = 30: OCCT's contour runs on along the bent edge,
-    // and builds a second round there below the limit. The construction stops at the selected
-    // edge, so it must not build the dress-up at the limit
+    // and its maker fails at the limit. Since ops#762 the dress-up builds there as Onshape does
+    // (Part's KinkedContourTest): one picked edge runs straight on past a slight corner, and
+    // below 0.01 rad (a tangent chain) the round goes on along the bent edge. Either way the
+    // part before the bend, x 0..30, is the straight round's section. The construction at the
+    // limit, fed OCCT's contour, still refuses it: the dress-up does not take that road
     for (double angle : {0.005, 0.05, 0.1}) {
         TopoShape base(bentFront(angle), 1L);
         TopoShape front = edgeBetween(base, {0, 0, 20}, {30, 0, 20});
         ASSERT_TRUE(occtFilletFails(base, {front}, 4, 4));
-        EXPECT_TRUE(throwsOcctsError([&] { dressUp(base, {front}, fillet(4)); })) << angle;
+        TopoShape result = dressUp(base, {front}, fillet(4));
+        ASSERT_TRUE(result.isValid()) << angle;
+        EXPECT_EQ(count(result.getShape(), TopAbs_SOLID), 1) << angle;
+        EXPECT_LT(volume(result.getShape()), volume(base.getShape())) << angle;
+        BRepAlgoAPI_Common straight(result.getShape(), box(30, 4, 20));
+        EXPECT_NEAR(volume(straight.Shape()), 30 * (4 * 20 - filletSection(4)), 1e-6) << angle;
         // The reason: the contour, as the hook reads it after Add()
         BRepFilletAPI_MakeFillet maker(base.getShape());
         maker.Add(4, TopoDS::Edge(front.getShape()));
