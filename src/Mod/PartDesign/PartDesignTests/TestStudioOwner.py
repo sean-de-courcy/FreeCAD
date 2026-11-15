@@ -695,6 +695,105 @@ class TestStudioOwner(unittest.TestCase):
         self.assertFalse(boss.isValid())
         self.assertIn("different faces", boss.getStatusString())
 
+    # ops#848 review of feb29dff80: pieces of one face, curved faces, an outward Thickness.
+    def membersBefore(self, boss, between):
+        """`between` (callables making Body members of A from the last one, starting at the
+        feature boss links) moved before boss; boss's link stays where it was."""
+        a = self.doc.getObject("A")
+        last = boss.UpToFace[0]
+        added = []
+        for make in between:
+            last = make(a, last)
+            profile = getattr(last, "Profile", None)
+            if profile and profile[0] in a.Group:
+                added.append(profile[0])  # its sketch goes first
+            added.append(last)
+            self.doc.recompute()
+        self.doc.openTransaction("adopt")
+        PartDesign.studioReconcile(studioList(self.doc))
+        for obj in added:
+            entries = [o.Name for o in studioList(self.doc).Entries]
+            PartDesign.studioMove(obj, entries.index(boss.Name))
+        self.doc.commitTransaction()
+        self.doc.recompute()
+        for obj in added:
+            self.assertTrue(obj.isValid(), obj.getStatusString())
+        return added
+
+    @staticmethod
+    def slotAcross(rect, z, length):
+        def slot(a, last):
+            pocket = a.newObject("PartDesign::Pocket", "Slot")
+            pocket.Profile = sketch(a, "SlotSk", xyPlane(a), rect, z=z)
+            pocket.Length = length
+            return pocket
+
+        return slot
+
+    def testUpToFaceSplitIntoCoplanarPiecesIsTheFace(self):
+        """A slot x 7.5..8.5 splits Step's top in two, both on z = 14 (Onshape UT2 keeps both):
+        the boss still ends on z = 14, pi 4."""
+        _, boss = self.stepAndBoss()
+        self.membersBefore(boss, (self.slotAcross((7.5, -1, 8.5, 11), 14, 2),))
+        self.assertTrue(boss.isValid(), boss.getStatusString())
+        self.assertAlmostEqual(boss.AddSubShape.Volume, math.pi * 4, places=3)
+
+    def cylinderAndBoss(self):
+        """Step, a Pad owner on A of the circle r 2 about the line x = 8, z = 10 along y (0..10),
+        and Boss, a circle r 0.5 at (8, 3) on A's top padded up to Step's cylinder face: its tool
+        is the boss cylinder within the step's, from z = 10."""
+        stepSk = studioSketch(self.doc, self.studio, "StepSk", circles=((8, 10, 2),))
+        stepSk.Placement = App.Placement(V(0, 10, 0), App.Rotation(V(1, 0, 0), 90))
+        step = makeOwner(self.doc, self.studio, "Pad", "Step", stepSk, ("A",), Length=10)
+        self.doc.recompute()
+        self.assertTrue(step.isValid(), step.getStatusString())
+        made = self.step(step, "A")
+        cyl = next(
+            f"Face{i}" for i, f in enumerate(made.Shape.Faces, 1)
+            if f.Surface.__class__.__name__ == "Cylinder"
+        )  # fmt: skip
+        bossSk = studioSketch(self.doc, self.studio, "BossSk", z=10, circles=((8, 3, 0.5),))
+        boss = makeOwner(self.doc, self.studio, "Pad", "Boss", bossSk, ("A",), Type="UpToFace")
+        boss.UpToFace = (made, [cyl])
+        self.doc.recompute()
+        tool = Part.makeCylinder(0.5, 5, V(8, 3, 10)).common(
+            Part.makeCylinder(2, 10, V(8, 10, 10), V(0, -1, 0))
+        )
+        return boss, tool.Volume
+
+    def testUpToCylinderFace(self):
+        boss, tool = self.cylinderAndBoss()
+        self.assertTrue(boss.isValid(), boss.getStatusString())
+        self.assertAlmostEqual(boss.AddSubShape.Volume, tool, places=3)
+
+    def testUpToCylinderFaceSplitByASlotIsTheFace(self):
+        """A slot y 7..7.5 through the step's cylinder splits its face in two pieces of one
+        cylinder: they are the face still, and the boss (under the piece y < 7) ends on it."""
+        boss, tool = self.cylinderAndBoss()
+        self.membersBefore(boss, (self.slotAcross((5, 7, 11, 7.5), 14, 4.5),))
+        made = self.doc.getObject("Slot")
+        pieces = [f for f in made.Shape.Faces if f.Surface.__class__.__name__ == "Cylinder"]
+        self.assertEqual(len(pieces), 2, "the slot split no cylinder face")
+        self.assertTrue(boss.isValid(), boss.getStatusString())
+        self.assertAlmostEqual(boss.AddSubShape.Volume, tool, places=3)
+
+    def testUpToFaceAfterAnOutwardThickness(self):
+        """An outward Thickness of A (Reversed False, no Draft) between Step and Boss: Step's top
+        is the cavity's ceiling at z = 14, facing down, and the outer top z = 15 faces as picked:
+        the boss goes up to z = 15, pi 5."""
+
+        def thickness(a, last):
+            thick = a.newObject("PartDesign::Thickness", "Thick")
+            thick.Base = (last, [faceAt(last, 0, -1)])
+            thick.Value = 1
+            thick.Reversed = False
+            return thick
+
+        _, boss = self.stepAndBoss()
+        self.membersBefore(boss, (thickness,))
+        self.assertTrue(boss.isValid(), boss.getStatusString())
+        self.assertAlmostEqual(boss.AddSubShape.Volume, math.pi * 5, places=3)
+
     # A whole part as the stop (ops#846), TestOnshapeEndTypes' ring in a studio: Ring, a Revolution
     # owner on A, revolves the rectangle x 2..5, z 0..10 of the XZ plane about Z up to part W (the
     # box x -10..0, y 0..10, z -5..15): counterclockwise W's face x = 0 comes first, at 90 degrees,
