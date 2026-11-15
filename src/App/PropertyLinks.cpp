@@ -1055,6 +1055,44 @@ static bool keepWorld(const Data::ElementFingerprint& old, Data::ElementFingerpr
     return true;
 }
 
+// keepWorld()'s converse, for a record held by a solve (ops#833): `held`, kept as it was, takes
+// the world of `fresh`, each object's flags as `fresh` has them (one it doesn't list keeps its
+// own). True if that changed `held`. A partial record (only the suppressed listed) is left as it
+// was: it can't tell an unlisted object from an unsuppressed one.
+static bool takeWorld(const Data::ElementFingerprint& fresh, Data::ElementFingerprint& held)
+{
+    using Mark = Data::ElementFingerprint::Mark;
+    if (fresh.marksPartial || held.marksPartial) {
+        return false;
+    }
+    std::vector<Mark> marks;
+    for (const auto& mark : held.marks) {
+        bool flagged = false;
+        bool unflagged = false;
+        for (const auto& now : fresh.marks) {
+            if (now.tag == mark.tag) {
+                (now.suppressed ? flagged : unflagged) = true;
+            }
+        }
+        if (!flagged && !unflagged) {
+            marks.push_back(mark);
+            continue;
+        }
+        if (flagged) {
+            marks.push_back({mark.tag, mark.mark, true});
+        }
+        if (unflagged) {
+            marks.push_back({mark.tag, mark.mark, false});
+        }
+    }
+    sortMarks(marks);
+    if (marks == held.marks) {
+        return false;
+    }
+    held.marks = std::move(marks);
+    return true;
+}
+
 // _getElementFingerprint(), and the objects the marks are taken from in \a closureOut (if given):
 // the reference's object and the element's holder first (ops#564)
 static std::string elementFingerprint(App::DocumentObject* feature,
@@ -1340,6 +1378,17 @@ bool PropertyLinkBase::_updateElementFingerprints(App::DocumentObject* feature,
                 _HeldFingerprints.insert(this);
                 FC_LOG("record held while its target is to be recomputed: " << propertyName(this)
                                                                              << " " << subs[i]);
+                // Judged by a solve (feature given), the record takes the world it was judged
+                // in now (ops#833): the take at the end of the recompute is a setter's, which
+                // keeps the record's world, so a suppression the solve already judged would
+                // read as a switch at the next solve and veto a move made after it. Only the
+                // marks' flags change; the rest stays held.
+                if (feature) {
+                    auto held = old;
+                    if (takeWorld(Data::ElementFingerprint::fromString(text), held)) {
+                        fingerprints[i] = held.toString();
+                    }
+                }
                 continue;
             }
         }
