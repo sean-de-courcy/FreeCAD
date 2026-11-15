@@ -2356,7 +2356,8 @@ App::DocumentObjectExecReturn* Hole::execute()
                 // HoleCutDiameter was calculated.
             }
 
-            if (holeCutRadius < radius) {
+            // FreeCAD-CH (ops#847): a cut as wide as the hole errs too, as in Onshape
+            if (holeCutRadius <= radius + Precision::Confusion()) {
                 return new App::DocumentObjectExecReturn(
                     QT_TRANSLATE_NOOP("Exception", "Hole error: Hole cut diameter too small")
                 );
