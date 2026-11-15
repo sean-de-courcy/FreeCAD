@@ -70,6 +70,7 @@ SET(AssemblyTests_SRCS
     AssemblyTests/TestConnectorPointsGui.py
     AssemblyTests/TestSnapModeGui.py
     AssemblyTests/TestFastenedPickOrderGui.py
+    AssemblyTests/TestJointDialogWrappersGui.py
     AssemblyTests/TestSimulationExport.py
     AssemblyTests/TestVariantLinks.py
     AssemblyTests/TestOnshapeAssemblies.py

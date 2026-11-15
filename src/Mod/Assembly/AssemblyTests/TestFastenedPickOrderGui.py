@@ -101,22 +101,8 @@ class TestFastenedPickOrderGui(unittest.TestCase):
         self.doc.recompute()
 
     def openFastened(self):
-        """The Fastened dialog. In a full TestAssemblyWorkbenchGui run, opening it sometimes meets
-        a stale PySide wrapper left by an earlier class ("Signal source has been deleted",
-        ops#790): then the half-made dialog is dropped (its transaction aborted) and it opens
-        once more."""
-        for attempt in (1, 2):
-            try:
-                CommandCreateJoint.activateJoint(0)
-                return
-            except RuntimeError as error:
-                if attempt == 2 or "Signal source has been deleted" not in str(error):
-                    raise
-                JointObject.activeTask = None
-                if Gui.Control.activeDialog():
-                    Gui.Control.closeDialog()
-                Gui.ActiveDocument.abortCommand()
-                settle()
+        """The Fastened dialog (no retry since ops#790: the UI loader drops a stale wrapper)."""
+        CommandCreateJoint.activateJoint(0)
 
     def mate(self, first, second):
         """Opens the Fastened dialog in assembly edit and picks `first`, then `second`, as the
