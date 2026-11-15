@@ -466,6 +466,65 @@ TEST(NameAncestry, madeFromPiecesOfTheSameSources)
     EXPECT_FALSE(NameAncestry::isMadeFromPiecesOf(generated({after, cylinder}, 8, "FUS", 'E'), junction));
 }
 
+// ops#852: a pad's corner edge is named after the sketch vertex it is extruded from, and the
+// vertex after the edge ends that meet there. Sketcher's split leaves the id on the first piece,
+// so the vertex at the split edge's end is renamed.
+TEST(NameAncestry, sketchVertexThatKeepsAnEdgeEnd)
+{
+    const auto corner = generated({sketchVertex({"g1v2", "g2v1"})}, 6, "XTR", 'E');
+    const auto cornerAfter = generated({sketchVertex({"g2v1", "g5v2"})}, 6, "XTR", 'E');
+    const auto splitPoint = generated({sketchVertex({"g1v2", "g5v1"})}, 6, "XTR", 'E');
+    const auto otherCorner = generated({sketchVertex({"g2v2", "g3v1"})}, 6, "XTR", 'E');
+
+    //   only where the caller asks
+    EXPECT_FALSE(NameAncestry::isMadeFromPiecesOf(cornerAfter, corner));
+    std::vector<std::string> kept;
+    EXPECT_TRUE(NameAncestry::isMadeFromPiecesOf(cornerAfter, corner, &kept));
+    EXPECT_EQ(kept, std::vector<std::string> {sketchVertex({"g2v1", "g5v2"})});
+    //   and back, the split undone
+    EXPECT_TRUE(NameAncestry::isMadeFromPiecesOf(corner, cornerAfter, &kept));
+    //   the split point keeps the other end: the caller tells them apart by what was kept
+    kept.clear();
+    EXPECT_TRUE(NameAncestry::isMadeFromPiecesOf(splitPoint, corner, &kept));
+    EXPECT_EQ(kept, std::vector<std::string> {sketchVertex({"g1v2", "g5v1"})});
+    //   a vertex with none of its ends, the same name, another sketch, another maker
+    EXPECT_FALSE(NameAncestry::isMadeFromPiecesOf(otherCorner, corner, &kept));
+    EXPECT_FALSE(NameAncestry::isMadeFromPiecesOf(corner, corner, &kept));
+    EXPECT_FALSE(
+        NameAncestry::isMadeFromPiecesOf(
+            generated({sketchVertex({"g2v1", "g5v2"}, 9)}, 6, "XTR", 'E'),
+            corner,
+            &kept
+        )
+    );
+    EXPECT_FALSE(
+        NameAncestry::isMadeFromPiecesOf(
+            generated({sketchVertex({"g2v1", "g5v2"})}, 7, "XTR", 'E'),
+            corner,
+            &kept
+        )
+    );
+    //   an end more or less at the vertex (a third line drawn to the corner)
+    EXPECT_TRUE(
+        NameAncestry::isMadeFromPiecesOf(
+            generated({sketchVertex({"g1v2", "g2v1", "g6v1"})}, 6, "XTR", 'E'),
+            corner,
+            &kept
+        )
+    );
+    //   a split of the corner edge by a later feature, and a sketch edge is no vertex
+    kept.clear();
+    EXPECT_TRUE(NameAncestry::isMadeFromPiecesOf(piece(cornerAfter, 14, "CUT", 0, 'E'), corner, &kept));
+    EXPECT_EQ(kept.size(), 1U);
+    EXPECT_FALSE(
+        NameAncestry::isMadeFromPiecesOf(
+            generated({sketchEdge(5)}, 6, "XTR", 'F'),
+            generated({sketchEdge(1)}, 6, "XTR", 'F'),
+            &kept
+        )
+    );
+}
+
 // ops#849: a pad's caps are named after its whole profile, so a sketch edge split in two renames
 // them, and with them every edge a later cut makes in them.
 TEST(NameAncestry, madeFromAnEditedProfile)

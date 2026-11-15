@@ -71,6 +71,8 @@ constexpr const char* patternInstanceOpCode = "TRF";
 // profile shares (FaceMaker), so an edit that adds or removes such an edge renames the face,
 // although it is the same one (ops#849).
 constexpr const char* profileFaceOpCode = "FAC";
+// A sketch's own elements (Part::OpCodes::Sketch)
+constexpr const char* sketchOpCode = "SKT";
 
 // The op code of a boundary section, `_;_;<object>;EXT;<i>;<type>;0;_;_` (Part's
 // OpCodes::External, ops#56): the element came from another document through the object (a
@@ -986,7 +988,11 @@ bool NameAncestry::isPieceOf(std::string_view name, std::string_view oldName)
     return true;
 }
 
-bool NameAncestry::isMadeFromPiecesOf(std::string_view name, std::string_view oldName)
+bool NameAncestry::isMadeFromPiecesOf(
+    std::string_view name,
+    std::string_view oldName,
+    std::vector<std::string>* keptVertices
+)
 {
     const auto sections = splitSections(name);
     const auto oldSections = splitSections(oldName);
@@ -1010,6 +1016,24 @@ bool NameAncestry::isMadeFromPiecesOf(std::string_view name, std::string_view ol
     }
     const DecodedMappedSection& made = decodeSection(sections.front());
     const DecodedMappedSection& old = decodeSection(oldSections.front());
+    // A sketch vertex, named after the edge ends that meet there (its reference IDs), that
+    // keeps one of the old one's ends (ops#852; only where the caller asks, since it must check
+    // that no other vertex does)
+    if (keptVertices && old.opCode == sketchOpCode && old.elementType == 'V') {
+        if (made.iterationTag != old.iterationTag || made.opCode != old.opCode
+            || made.elementType != old.elementType || made.index != old.index
+            || made.linkedNames != old.linkedNames || sortedFlags(made) != sortedFlags(old)
+            || made.duplicateCount != old.duplicateCount
+            || made.connectedElements != old.connectedElements
+            || std::ranges::none_of(made.referenceIDs, [&old](const std::string& end) {
+                   return end != Data::EMPTY_VALUE
+                       && std::ranges::find(old.referenceIDs, end) != old.referenceIDs.end();
+               })) {
+            return false;
+        }
+        keptVertices->emplace_back(sections.front());
+        return true;
+    }
     if (made.iterationTag != old.iterationTag || made.opCode != old.opCode
         || made.elementType != old.elementType || made.index != old.index
         || old.linkedNames.empty() || made.linkedNames.empty()
@@ -1069,7 +1093,7 @@ bool NameAncestry::isMadeFromPiecesOf(std::string_view name, std::string_view ol
         for (std::size_t j = 0; j < old.linkedNames.size() && !found; ++j) {
             if (!taken[j]
                 && (isPieceOf(*linked, old.linkedNames[j])
-                    || isMadeFromPiecesOf(*linked, old.linkedNames[j]))) {
+                    || isMadeFromPiecesOf(*linked, old.linkedNames[j], keptVertices))) {
                 taken[j] = found = true;
             }
         }
