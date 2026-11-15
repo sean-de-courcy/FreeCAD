@@ -886,6 +886,9 @@ class Joint:
         # current selection is a vector of strings like "Assembly.Assembly1.Assembly2.Body.Pad.Edge16" including both what selection return as obj_name and obj_sub
         assembly = self.getAssembly(joint)
         isAssembly = assembly.Type == "Assembly"
+        # FreeCAD-CH (ops#826): the stored pair before this call (saved with the joint)
+        name = lambda ref: ref[0].Name if ref and ref[0] is not None else None
+        prev1, prev2 = name(getattr(joint, "Reference1", None)), name(getattr(joint, "Reference2", None))
 
         if len(refs) >= 1:
             joint.Reference1 = refs[0]
@@ -895,9 +898,21 @@ class Joint:
             self.partMovedByPresolved = None
 
         if len(refs) >= 2:
+            # FreeCAD-CH (ops#826): which part is the first pick, the offset's order (MO1). The same
+            # two parts again (the panel holds them in stored order after a swap, ops#772): the
+            # first pick stays; a new pick: the first entry is the earlier pick.
+            firstPick = name(refs[0])
+            if prev1 and prev2 and prev1 != prev2 and {prev1, prev2} == {name(refs[0]), name(refs[1])}:
+                firstPick = prev2 if getattr(joint, "PicksSwapped", False) else prev1
             joint.Reference2 = refs[1]
 
             self.ensureUnconnectedIsSecondRef(joint)
+            if hasattr(joint, "PicksSwapped"):
+                swapped = name(joint.Reference1) != firstPick
+                if joint.PicksSwapped != swapped:
+                    joint.PicksSwapped = swapped
+                    # the connectors were placed (on Reference2's change) with the old order
+                    self.updateJCSPlacements(joint)
 
             if joint.JointType in JointUsingPreSolve:
                 # FreeCAD-CH (ops#640, design C1): a new Fastened mate is unflipped whatever the
@@ -913,6 +928,8 @@ class Joint:
                 self.updateJCSPlacements(joint)
 
         else:
+            if getattr(joint, "PicksSwapped", False):
+                joint.PicksSwapped = False  # one pick left: it is the first (ops#826)
             joint.Reference2 = None
             joint.Placement2 = App.Placement()
             if isAssembly:
@@ -1157,17 +1174,13 @@ class Joint:
             joint.Placement1 = joint.Placement2
             joint.Placement2 = plc1
 
-            off1 = joint.Offset1
-            joint.Offset1 = joint.Offset2
-            joint.Offset2 = off1
+            # FreeCAD-CH (ops#826): the offsets stay: they are in pick order, which PicksSwapped
+            # records (setJointConnectors) and secondOffset applies. Swapped with the references,
+            # an offset typed before a re-pick went to the hidden Offset1.
 
             det1 = joint.Detach1
             joint.Detach1 = joint.Detach2
             joint.Detach2 = det1
-
-            # FreeCAD-CH (ops#826): the offset stays in pick order (secondOffset inverts it)
-            if hasattr(joint, "PicksSwapped"):
-                joint.PicksSwapped = not joint.PicksSwapped
 
             if activeTask and activeTask.joint == joint:
                 # FreeCAD-CH (ops#772): the picks are selected already. Selected again (under
