@@ -6705,9 +6705,31 @@ TopoShape& TopoShape::makeElementThickSolid(
     // keeps sharp corners anyway (oracle 25, SL1), so there the Intersection join is built
     // instead. Inward, or where that fails too, the Arc join's failure is the one reported.
     if (offset > 0 && join == JoinType::arc && !fallsApart && !built(*mkThickPtr)) {
+        // The Intersection join extends curved neighbours instead of rounding them: its result is
+        // taken only where it stays within the solid's box grown by the thickness.
+        // Both boxes from the geometry alone (no display mesh, no tolerances), the margin the
+        // thickness and a relative slack.
+        auto boxOf = [](const TopoDS_Shape& solid) {
+            Bnd_Box box;
+            BRepBndLib::AddOptimal(solid, box, Standard_False, Standard_False);
+            return box;
+        };
+        const Bnd_Box before = boxOf(shape.getShape());
+        const double margin = offset + std::max(1e-4 * offset, 10 * tol);
+        auto within = [&boxOf, &before, margin](const TopoDS_Shape& solid) {
+            const Bnd_Box box = boxOf(solid);
+            if (box.IsVoid() || before.IsVoid()) {
+                return false;
+            }
+            double x0, y0, z0, x1, y1, z1, X0, Y0, Z0, X1, Y1, Z1;
+            box.Get(x0, y0, z0, x1, y1, z1);
+            before.Get(X0, Y0, Z0, X1, Y1, Z1);
+            return x0 >= X0 - margin && y0 >= Y0 - margin && z0 >= Z0 - margin
+                && x1 <= X1 + margin && y1 <= Y1 + margin && z1 <= Z1 + margin;
+        };
         for (bool withIntersection : {intersection, !intersection}) {
             auto sharp = build(withIntersection, JoinType::intersection);
-            if (built(*sharp)) {
+            if (built(*sharp) && within(sharp->Shape())) {
                 mkThickPtr = sharp;
                 break;
             }
