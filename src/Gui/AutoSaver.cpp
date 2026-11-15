@@ -138,6 +138,10 @@ void AutoSaver::flushPendingSave(const QString& documentName)
     if (it == saverMap.end()) {
         return;
     }
+    // ops#769: a slow retry after a transaction waits for the user's pause like the timer's
+    if (it->second->dirty && postponeUntilPause(*it->second)) {
+        return;
+    }
 
     try {
         saveDocument(it->first, *it->second);
@@ -160,6 +164,7 @@ void AutoSaver::setTimeout(int ms)
             killTimer(it.second->soonTimerId);
             it.second->soonTimerId = 0;
             it.second->soonPending = false;
+            it.second->waitingForPause.invalidate();
         }
         int id = timeout > 0 ? startTimer(timeout) : 0;
         it.second->timerId = id;
@@ -208,6 +213,37 @@ int AutoSaver::soonDelay(const AutoSaveProperty& saver) const
     const double scaled = seconds * 1000.0 * SoonPassFactor;
     const int delay = scaled > SoonPassMinimum ? static_cast<int>(scaled) : SoonPassMinimum;
     return std::min(delay, timeout);
+}
+
+bool AutoSaver::postponeUntilPause(AutoSaveProperty& saver)
+{
+    const double slowAbove = App::GetApplication()
+                                 .GetParameterGroupByPath(
+                                     "User parameter:BaseApp/Preferences/Document"
+                                 )
+                                 ->GetFloat("AutoSaveSoonIdleAbove", SlowSoonPass);
+    const qint64 idle = sinceInput.elapsed();
+    // A pass that has waited a whole timeout saves anyway: a user who never pauses still gets
+    // a snapshot at worst every two timeouts
+    const bool waitedEnough = saver.waitingForPause.isValid()
+        && saver.waitingForPause.elapsed() >= std::max<qint64>(timeout, IdleWindow);
+    if (expectedSeconds(saver) < slowAbove || idle >= IdleWindow || waitedEnough) {
+        saver.waitingForPause.invalidate();
+        return false;
+    }
+    if (!saver.waitingForPause.isValid()) {
+        saver.waitingForPause.start();
+    }
+    // The user is at work: once they pause
+    if (saver.soonTimerId > 0) {
+        killTimer(saver.soonTimerId);
+    }
+    saver.soonTimerId = startTimer(static_cast<int>(IdleWindow - idle) + 50);
+    saver.soonPending = saver.soonTimerId > 0;
+    if (!saver.soonPending) {
+        saver.waitingForPause.invalidate();
+    }
+    return saver.soonPending;
 }
 
 void AutoSaver::startSoonPass(const std::string& name)
@@ -319,19 +355,13 @@ void AutoSaver::timerEvent(QTimerEvent* event)
             auto* gdoc = Gui::Application::Instance
                 ? Gui::Application::Instance->getDocument(it.first.c_str())
                 : nullptr;
-            if (!gdoc || !gdoc->isModified()) {
+            // A timer pass waiting for a pause (ops#769) saves what the timer would have
+            const bool timerPass = it.second->waitingForPause.isValid();
+            if (!it.second->dirty || (!timerPass && (!gdoc || !gdoc->isModified()))) {
+                it.second->waitingForPause.invalidate();
                 break;
             }
-            const double slowAbove = App::GetApplication()
-                                         .GetParameterGroupByPath(
-                                             "User parameter:BaseApp/Preferences/Document"
-                                         )
-                                         ->GetFloat("AutoSaveSoonIdleAbove", SlowSoonPass);
-            const qint64 idle = sinceInput.elapsed();
-            if (expectedSeconds(*it.second) >= slowAbove && idle < IdleWindow) {
-                // The user is at work: once they pause
-                it.second->soonTimerId = startTimer(static_cast<int>(IdleWindow - idle) + 50);
-                it.second->soonPending = it.second->soonTimerId > 0;
+            if (postponeUntilPause(*it.second)) {
                 break;
             }
             try {
@@ -343,6 +373,11 @@ void AutoSaver::timerEvent(QTimerEvent* event)
             break;
         }
         if (it.second->timerId == id) {
+            // ops#769: the timer's pass of a large document waits for a pause in the user's input
+            // too, and then runs as the soon pass
+            if (it.second->dirty && postponeUntilPause(*it.second)) {
+                break;
+            }
             try {
                 saveDocument(it.first, *it.second);
                 break;
