@@ -376,15 +376,23 @@ using PlannedReads = std::unordered_map<const App::DocumentObject*, std::vector<
 std::vector<App::DocumentObject*> entryReads(
     App::DocumentObject* entry,
     const std::unordered_map<const App::DocumentObject*, std::size_t>& place,
-    const PlannedReads& planned = {}
+    const PlannedReads& planned = {},
+    std::vector<App::DocumentObject*>* via = nullptr
 )
 {
     std::vector<App::DocumentObject*> found;
     const Body* own = Body::findBodyOf(entry);
     std::unordered_set<const App::DocumentObject*> seen {entry};
-    std::vector<const App::DocumentObject*> readers {entry};
+    std::vector<App::DocumentObject*> readers {entry};
+    // A sketch or datum of the entry's own Body that it reads (its profile), an entry or not:
+    // the entry computes on what it reads now, so those reads count as the entry's too (s37d5:
+    // a hole dropped above the chamfer whose face its sketch is on made a cycle that every
+    // recompute ran twice). Its own reads are its own entry's when it is one
+    auto ownInput = [own](const App::DocumentObject* obj) {
+        return own && obj != own && Body::findBodyOf(obj) == own && !Body::isSolidFeature(obj);
+    };
     while (!readers.empty()) {
-        const App::DocumentObject* reader = readers.back();
+        App::DocumentObject* reader = readers.back();
         readers.pop_back();
         auto it = planned.find(reader);
         for (auto obj : it != planned.end() ? it->second : linkReads(reader, /*picksOnly=*/true)) {
@@ -400,7 +408,17 @@ std::vector<App::DocumentObject*> entryReads(
                 const bool ownSolid = own && Body::findBodyOf(read) == own && Body::isSolidFeature(read);
                 if (read != entry && !ownSolid) {
                     found.push_back(read);
+                    if (via) {
+                        via->push_back(reader);
+                    }
                 }
+                if (read == obj && ownInput(obj)) {
+                    readers.push_back(obj);
+                }
+                continue;
+            }
+            if (ownInput(obj)) {
+                readers.push_back(obj);
                 continue;
             }
             if (Body::findBodyOf(obj) || obj->isDerivedFrom<Part::BodyBase>()
@@ -418,6 +436,8 @@ std::vector<App::DocumentObject*> entryReads(
 struct RefusedRead
 {
     App::DocumentObject* reader = nullptr;
+    /// The object whose link reads read: reader, or a sketch or datum of its Body it reads
+    App::DocumentObject* linker = nullptr;
     App::DocumentObject* read = nullptr;
     /// The refusal's text; empty: nothing is broken
     std::string text;
@@ -435,22 +455,28 @@ RefusedRead orderRefusal(const std::vector<App::DocumentObject*>& order,
         place.emplace(order[i], i);
     }
     for (std::size_t i = 0; i < order.size(); ++i) {
-        App::DocumentObject* reader = order[i];
-        for (auto read : entryReads(reader, place, planned)) {
+        App::DocumentObject* entry = order[i];
+        std::vector<App::DocumentObject*> via;
+        const auto reads = entryReads(entry, place, planned, &via);
+        for (std::size_t k = 0; k < reads.size(); ++k) {
+            App::DocumentObject* read = reads[k];
+            App::DocumentObject* reader = entry;
             if (place.at(read) < i || (!moved.count(reader) && !moved.count(read))) {
                 continue;
             }
+            // The object whose link reads it: the entry, or its sketch (retraced in its place)
+            App::DocumentObject* linker = via[k];
             const Body* readerBody = Body::findBodyOf(reader);
             const Body* readBody = Body::findBodyOf(read);
             if (moved.count(reader)) {
                 const std::string of =
                     readBody && readBody != readerBody ? " of " + quotedLabel(readBody) : "";
-                return {reader, read, quotedLabel(reader) + " uses " + quotedLabel(read) + of
+                return {reader, linker, read, quotedLabel(reader) + " uses " + quotedLabel(read) + of
                     + ": it can't go above it"};
             }
             const std::string of =
                 readerBody && readerBody != readBody ? " of " + quotedLabel(readerBody) : "";
-            return {reader, read,
+            return {reader, linker, read,
                     quotedLabel(reader) + of + " uses " + quotedLabel(read) + ": it can't go below it"};
         }
     }
@@ -1418,7 +1444,7 @@ bool moveStudioEntries(StudioList* list,
             break;
         }
         // One trace per reader: a read still broken after it is read another way
-        if (planned.count(broken.reader)) {
+        if (planned.count(broken.linker)) {
             return refuse(broken.text);
         }
         std::unordered_set<const App::DocumentObject*> earlier;
@@ -1428,12 +1454,13 @@ bool moveStudioEntries(StudioList* list,
             }
             earlier.insert(obj);
         }
-        const auto plan = retraceRead(broken.reader, broken.read, earlier);
+        // The entry's sketch is read at the entry's place: traced there
+        const auto plan = retraceRead(broken.linker, broken.read, earlier);
         if (plan.empty()) {
             return refuse(broken.text);
         }
         // What it reads once traced: its picks with read replaced by the earlier members
-        auto reads = linkReads(broken.reader, /*picksOnly=*/true);
+        auto reads = linkReads(broken.linker, /*picksOnly=*/true);
         std::erase(reads, broken.read);
         for (const auto& retrace : plan) {
             auto path = retrace.sub.find('.') == std::string::npos
@@ -1441,7 +1468,7 @@ bool moveStudioEntries(StudioList* list,
                 : retrace.top->getSubObjectList(retrace.sub.c_str());
             reads.push_back(!path.empty() && path.back() ? path.back() : retrace.top);
         }
-        planned[broken.reader] = std::move(reads);
+        planned[broken.linker] = std::move(reads);
         retraces.insert(retraces.end(), plan.begin(), plan.end());
     }
 
