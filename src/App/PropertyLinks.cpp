@@ -1308,7 +1308,11 @@ bool PropertyLinkBase::_updateElementFingerprints(App::DocumentObject* feature,
     // through Paste(), records included, and without this it would restore the edit's inputs
     // under the record of the edit's result. Two undos in a row with one recompute after them then
     // brought back a suppression and a move at once, and the pass-through veto (ops#549) broke the
-    // pick. Once per call, before the first write; never while undoing or redoing.
+    // pick. Once per call, before the first write; never while undoing or redoing. Only a
+    // recompute's refresh (a solve's, the held records' take at its end): a setter refreshes inside
+    // its own set, after its aboutToSetValue() put the property in the transaction, and a second
+    // one there would be a nested change (DressUp::onBeforeChange() would take the new Base for
+    // the old one and keep BaseFeature, TestChamfer.testChamferBaseLinkedToAnotherFeature).
     bool captured = false;
     auto capture = [&]() {
         if (captured) {
@@ -1316,7 +1320,8 @@ bool PropertyLinkBase::_updateElementFingerprints(App::DocumentObject* feature,
         }
         captured = true;
         auto document = owner ? owner->getDocument() : nullptr;
-        if (document && document->hasPendingTransaction() && !document->isPerformingTransaction()) {
+        if (document && document->testStatus(Document::Recomputing)
+            && document->hasPendingTransaction() && !document->isPerformingTransaction()) {
             aboutToSetValue();
         }
     };
