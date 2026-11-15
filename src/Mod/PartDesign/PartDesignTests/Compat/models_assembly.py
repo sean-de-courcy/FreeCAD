@@ -85,8 +85,17 @@ def joint(joints, name, kind, refs, **props):
 def flipped(obj):
     """Flip primary, as the dialog's button: a mate between two faces meant face to face. Onshape's
     connectors (ops#683, C2) have Z out of the material on both faces, so the unflipped mate puts
-    the faces' normals the same way and the parts overlap."""
-    obj.Proxy.flipOnePart(obj)
+    the faces' normals the same way and the parts overlap. A new mate keeps the pose closest to
+    the parts' start (ops#838, oracle 26 U1/U2), which may be flipped already: pressed only if not."""
+    if obj.Proxy.areJcsSameDir(obj):
+        obj.Proxy.flipOnePart(obj)
+    return obj
+
+
+def unflipped(obj):
+    """The unflipped mate whatever the start pose (ops#838: a new mate keeps the closest pose)."""
+    if not obj.Proxy.areJcsSameDir(obj):
+        obj.Proxy.flipOnePart(obj)
     return obj
 
 
@@ -401,15 +410,15 @@ def AsmOnshapeFrames(make):
     ground(joints, linkBase)
     (baseTop, _), (baseBottom, _) = topAndBottom(base.Shape, 10)
     (plateTop, _), _ = topAndBottom(plate.Shape, 5)
-    joint(joints, "Hanger", "Fixed", [[linkBase, [baseBottom, baseBottom]], [hanger, [plateTop, plateTop]]])
-    flipped = joint(
+    unflipped(joint(joints, "Hanger", "Fixed", [[linkBase, [baseBottom, baseBottom]], [hanger, [plateTop, plateTop]]]))
+    topperJoint = joint(
         joints,
         "Topper",
         "Fixed",
         [[linkBase, [baseTop, baseTop]], [topper, [plateTop, plateTop]]],
         Offset2=App.Placement(V(5, 7, 3), App.Rotation()),
     )
-    flipped.Proxy.flipOnePart(flipped)
+    flipped(topperJoint)
     solve(assembly)
     assertAt(linkBase.Placement.Base, V(0, 0, 0), "LinkBase")
     turned = App.Rotation(V(1, 0, 0), 180)
