@@ -13,11 +13,12 @@
 # The fresh build (FUZZ_FRESHMODE): jump (default) builds the template at its defaults, with the live document's own
 # step-0 picks, and jumps to the state in one edit and one recompute: a LOUD_FRESH is then a real path dependence (ops#843).
 # scratch builds the template at the state's values (re-picking edges there): its LOUD_FRESH is mostly pick noise.
-# Undo history is keyed by unique transaction names (App caps its stack at 20 without a GUI). Suppress steps avoid the
-# ops#592 state (a live pattern whose originals are all suppressed keeps a stale shape).
+# Undo history is keyed by unique transaction names (App caps its stack at 20 without a GUI). FUZZ_AVOID592=1 makes suppress
+# steps avoid the ops#592 state (a live pattern whose originals are all suppressed kept a stale shape before lx12's fix).
 #
 # FUZZ_OWNER=1 (default, ops#842): Pad/Pocket/Hole/Revolution/Groove are studio owners as the GUI makes them (pattern
-# originals stay Body members, as in truth.py); 0 builds Body members only (upstream's in-Body path, the runs before 11-15).
+# originals stay Body members, as in truth.py), and so are Fillet/Chamfer (StudioPickIds; FUZZ_OWNER_DRESS=0 keeps
+# them members); 0 builds Body members only (upstream's in-Body path, the runs before 11-15).
 # Run: FUZZ_SEED=<n> FUZZ_STEPS=<n> [FUZZ_HEAL=1] [FUZZ_OUT=<dir>] FreeCADCmd tools/fuzz/fuzzplus.py
 #   writes <out>/<tag>.jsonl and .sum. FUZZ_STOP=<k> saves the document after step k. FUZZ_FRESH=0 skips the fresh check.
 import os, json, random, time, traceback
@@ -36,6 +37,8 @@ HEAL = os.environ.get("FUZZ_HEAL") == "1"
 FRESH = os.environ.get("FUZZ_FRESH", "1") != "0"
 FRESHMODE = os.environ.get("FUZZ_FRESHMODE", "jump")   # jump | scratch (see freshBuild)
 OWNER = os.environ.get("FUZZ_OWNER", "1") == "1"   # Pad/Pocket/Hole/Revolution/Groove as studio owners, as the GUI makes them
+OWNER_DRESS = OWNER and os.environ.get("FUZZ_OWNER_DRESS", "1") == "1"   # Fillet/Chamfer as studio owners too (StudioPickIds)
+AVOID592 = os.environ.get("FUZZ_AVOID592", "0") == "1"   # 1 on heads before lx12: steer clear of the ops#592 state
 STOPAT = set(x for x in os.environ.get("FUZZ_STOPAT", "").split(",") if x)   # e.g. SILENT,LOUD: end the seed at the first one
 SAVED = [0]
 LOG = open("%s/%s.jsonl" % (OUT, TAG), "w", buffering=1)
@@ -209,6 +212,22 @@ class Studio:
         self.doc.recompute()
         return f
 
+    def dress(self, kind, name, last, edges, **props):
+        """a Fillet or Chamfer on edges of last (the Body's Tip, as a pick on the shown part is: Command.cpp
+        dressupGetSelected). FUZZ_OWNER_DRESS=1 (default in owner mode): a studio owner whose picks are StudioPickIds, as
+        Command.cpp makeStudioDressUp makes it in a listed studio (no Base; a step <name>_at_Plate in the Body; the
+        ops#808 path). 0: a Body member with Base=(last, edges)"""
+        if not OWNER_DRESS or kind not in ("Fillet", "Chamfer"):
+            return self.feat(kind, name, Base=(last, edges), **props)
+        props = {k: self.pv(name, k, x) for k, x in props.items()}
+        f = self.doc.addObject("PartDesign::" + kind, name)
+        f.StudioPickIds = [PartDesign.studioPickId(last, e) for e in edges]
+        for k, x in props.items():
+            setattr(f, k, x)
+        PartDesign.studioInsert(f, -1)
+        self.doc.recompute()
+        return f
+
     def shapeOf(self, f):
         """the Body feature that carries f's result: f itself, or an owner's step"""
         if self.body.hasObject(f):
@@ -308,12 +327,12 @@ class Studio:
         corner = lambda p: min(abs(p.x - Bx), abs(p.x - Bx - Bw)) < E and min(abs(p.y - By), abs(p.y - By - Bh)) < E
         vert = self.edgesWhere(base, lambda e: abs(e.Vertexes[0].Point.z - e.Vertexes[-1].Point.z) > 5 and corner(e.Vertexes[0].Point))
         last = self.body.Tip
-        f1 = self.feat("Fillet", "CornerFillet", Base=(last, self.mapEdges(base, last, vert)), Radius=4)
+        f1 = self.dress("Fillet", "CornerFillet", last, self.mapEdges(base, last, vert), Radius=4)
         self.p(f1, "Radius", 2, 6, "prop")
         doc.recompute()
         top = self.edgesWhere(boss2s, lambda e: all(abs(x.Point.z - ztop2) < 1e-6 and inD(x.Point) for x in e.Vertexes))
         last = self.body.Tip
-        c1 = self.feat("Chamfer", "Boss2Chamfer", Base=(last, self.mapEdges(boss2s, last, top)), Size=1)
+        c1 = self.dress("Chamfer", "Boss2Chamfer", last, self.mapEdges(boss2s, last, top), Size=1)
         self.p(c1, "Size", 0.5, 2, "prop")
         doc.recompute()
         zb = 10 + float(boss.Length)
@@ -321,7 +340,7 @@ class Studio:
         rim = self.edgesWhere(boss, lambda e: hasattr(e.Curve, "Radius") and all(abs(x.Point.z - zb) < 1e-6 for x in e.Vertexes)
                               and abs(e.Curve.Center.x - Cx) < 1e-6 and abs(e.Curve.Center.y - Cy) < 1e-6 and abs(e.Curve.Radius - Cr) < 1e-6)
         last = self.body.Tip
-        f2 = self.feat("Fillet", "BossFillet", Base=(last, self.mapEdges(boss, last, rim)), Radius=1.5)
+        f2 = self.dress("Fillet", "BossFillet", last, self.mapEdges(boss, last, rim), Radius=1.5)
         self.p(f2, "Radius", 0.5, 3, "prop")
         doc.recompute()
         P1x, P1y = self.v("Pk1Sk", "P1x", -52), self.v("Pk1Sk", "P1y", -32)
@@ -331,7 +350,7 @@ class Studio:
         pk1s = self.shapeOf(pk1)
         rim1 = self.edgesWhere(pk1s, lambda e: all(abs(x.Point.z - zt) < 1e-6 and in1(x.Point) for x in e.Vertexes))
         last = self.body.Tip
-        c2 = self.feat("Chamfer", "Pk1Chamfer", Base=(last, self.mapEdges(pk1s, last, rim1)), Size=0.8)
+        c2 = self.dress("Chamfer", "Pk1Chamfer", last, self.mapEdges(pk1s, last, rim1), Size=0.8)
         self.p(c2, "Size", 0.3, 1.5, "prop")
         doc.recompute()
         s = self.sk("LateSk")
@@ -349,7 +368,7 @@ class Studio:
         tabs = self.shapeOf(tab)
         edges = self.edgesWhere(tabs, lambda e: all(abs(x.Point.z - zT) < 1e-6 and x.Point.x < Tx + Tw + 1 for x in e.Vertexes))
         last = self.body.Tip
-        c3 = self.feat("Chamfer", "TabChamfer", Base=(last, self.mapEdges(tabs, last, edges)), Size=0.6)
+        c3 = self.dress("Chamfer", "TabChamfer", last, self.mapEdges(tabs, last, edges), Size=0.6)
         self.p(c3, "Size", 0.3, 1.2, "prop")
         self.features = listFeatures(self.doc)
         return self
@@ -659,13 +678,15 @@ def stepSuppress(doc, rng):
     sup = [o for o in feats if getattr(o, "Suppressed", False)]
     # unsuppress more often when several are off, so the model stays mostly whole
     offn = {y.Name for y in sup}
-    back = [x for x in sup if not (getattr(x, "Originals", None) and all(q.Name in offn for q in x.Originals))]   # ops#592
+    back = [x for x in sup if not (AVOID592 and getattr(x, "Originals", None) and all(q.Name in offn for q in x.Originals))]   # ops#592
     if back and rng.random() < min(0.8, 0.3 * len(sup)):
         o = rng.choice(back); on = False
     else:
         # never leave a live pattern with all its originals suppressed: that is ops#592 (filed, deferred), whose stale
         # shape would turn every later comparison of the seed into noise
         def orphans(x):
+            if not AVOID592:   # lx12 has ops#592's fix (4d3e0eecba): the state fails loudly now, a fair test
+                return False
             off = {y.Name for y in sup} | {x.Name}
             return any(not getattr(p, "Suppressed", False) and p.Name not in off and getattr(p, "Originals", None)
                        and all(q.Name in off for q in p.Originals) for p in feats)
