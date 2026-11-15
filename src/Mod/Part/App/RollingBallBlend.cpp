@@ -1161,9 +1161,10 @@ double endDistance(const FaceEnd& end, const gp_Pnt& point, Foot& hint)
     }
     if (end.surface->IsKind(STANDARD_TYPE(Geom_ElementarySurface))
         && (end.surface->IsUPeriodic() || end.surface->IsVPeriodic())) {
-        // A closed surface has a second foot, on its far side, where the distance has the other
-        // sign; Newton from the last foot lands on it once the points pass near the axis (ops#779:
-        // the arc inside a hole not much wider than the round). The nearer foot says which side
+        // A closed surface has a second foot, on its far side, and from a point in the body
+        // beside a hole that foot reads as clear (R + d against the nearer foot's R - d < 0).
+        // Newton from the last foot lands on it once the points pass near the axis (ops#779: the
+        // arc inside a hole not much wider than the round). The nearer foot says which side
         const Foot nearest = foot(end.surface, point);
         if (nearest.ok && nearest.distance < hint.distance - 1e-9) {
             hint = nearest;
