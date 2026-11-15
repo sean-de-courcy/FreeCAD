@@ -602,7 +602,7 @@ struct DressUpRun
     // one the feature's own compute would repeat as it is
     bool keep = false;
     bool kept = false;
-    Part::TopoShape raw;
+    Part::TopoShape raw {};
 };
 thread_local DressUpRun* dressUpRun = nullptr;
 
@@ -619,7 +619,7 @@ struct KeptDressUp
     // The step's parameters it was built with (the owner's then): a step computed alone after
     // its owner's values changed builds for itself (review r1 F2)
     std::vector<std::pair<std::string, std::string>> parameters;  ///< name, saved value
-    Part::TopoShape raw;
+    Part::TopoShape raw {};
 };
 // Per thread, as dressUpRun: the try and the take are one recompute's (review r2)
 thread_local std::map<const App::DocumentObject*, KeptDressUp> keptDressUps;
