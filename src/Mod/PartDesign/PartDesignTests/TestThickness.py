@@ -1018,6 +1018,62 @@ class TestThickness(unittest.TestCase):
                     self.assertGreater(shell.Volume, least)
                     self.assertLess(shell.Volume, most)
 
+    def testShellFromASlopeRunningIntoATowersWall(self):
+        """A tower 20 x 20 x 26 with a lower part beside it whose top slopes from the tower's
+        wall (z 10 there) up or down by 0.3 or 1 per mm, shelled 2 inward from the slope. The
+        cavity under the slope reaches its plane, continued under the tower's wall to that
+        wall's offset (x 18), and ends 2 from the end wall (x 38): its section there is
+        20 x 8 and the slope's rise over those 20, 160 (1 + slope); the tower's is 16 x 22
+        (ops#811; the tower's wall is measured from the slope's plane, the review's find)."""
+        for slope in (0.3, 1.0, -0.3):
+            with self.subTest(slope=slope):
+                profile = [(0, 0), (40, 0), (40, 10 + 20 * slope), (20, 10), (20, 26), (0, 26)]
+                points = [FreeCAD.Vector(x, 0, z) for x, z in profile + profile[:1]]
+                solid = Part.Face(Part.makePolygon(points)).extrude(FreeCAD.Vector(0, 20, 0))
+                opened = [
+                    face
+                    for face in solid.Faces
+                    if abs(face.CenterOfMass.x - 30) < 1e-6
+                    and abs(face.CenterOfMass.z - (10 + 10 * slope)) < 1e-6
+                ]
+                self.assertEqual(len(opened), 1)
+                shell = solid.makeThickness(opened, -2, 1e-7, False, False, 0, 2)
+                self.assertTrue(shell.isValid())
+                self.assertEqual(len(shell.Solids), 1)
+                self.assertEqual(len(shell.Faces), 16)
+                removed = (16 * 22 + 160 * (1 + slope)) * 16
+                self.assertAlmostEqual(solid.Volume - shell.Volume, removed, places=4)
+
+    def testShellUnderAHalfRoundStepWithATiltedTopIsNeverThinner(self):
+        """A 40 x 60 x 10 block with a half-round step (r 15) at its wall whose top rises from
+        the open face's level at the wall by 0.5 per mm, shelled 2 inward from the block's
+        top: OCCT's offset runs the cavity flat under the step, the roof as thin as the step
+        is high there. Refused: the step's top is held up to 2 from the open face's edge,
+        along the arc of its foot too (ops#811, the review's find). Where a kernel builds
+        it, the roof is left: less is removed than the plain block's cavity."""
+        V = FreeCAD.Vector
+        half = Part.makeCylinder(15, 40, V(0, 0, 10)).common(Part.makeBox(15, 30, 40, V(0, -15, 10)))
+        under = Part.Face(
+            Part.makePolygon(
+                [V(-5, -20, 7.5), V(20, -20, 20), V(20, 20, 20), V(-5, 20, 7.5), V(-5, -20, 7.5)]
+            )
+        ).extrude(V(0, 0, -40))
+        solid = Part.makeBox(40, 60, 10, V(0, -30, 0)).fuse(half.common(under)).removeSplitter()
+        self.assertTrue(solid.isValid())
+        opened = [
+            face for face in solid.Faces if abs(face.CenterOfMass.z - 10) < 1e-3 and face.Area > 1000
+        ]
+        self.assertEqual(len(opened), 1)
+        for join in (0, 2):
+            with self.subTest(join=join):
+                try:
+                    shell = solid.makeThickness(opened, -2, 1e-7, False, False, 0, join)
+                except Exception as error:  # the kernel's refusal
+                    self.assertIn("no shell was built", str(error))
+                else:
+                    self.assertTrue(shell.isValid())
+                    self.assertLess(solid.Volume - shell.Volume, 36 * 56 * 8 - 100)
+
     def testShellBesideAStepWithARoundOnTheOpenFaceIsRefused(self):
         """The L-block with a round of 0.5 or 1 on the open face's side edge (y 0, z 10), which
         OCCT's thick-solid builder returned as a solid larger than the L. The round's offset
