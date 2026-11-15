@@ -1002,15 +1002,26 @@ bool NameAncestry::isMadeFromPiecesOf(std::string_view name, std::string_view ol
     if (sections.front() == oldSections.front()) {
         return false;
     }
-    // Copies: decoding another section may grow the cache the references point into
-    const DecodedMappedSection made = decodeSection(sections.front());
-    const DecodedMappedSection old = decodeSection(oldSections.front());
-    if (old.linkedNames.empty() || made.linkedNames.size() != old.linkedNames.size()
-        || made.referenceIDs != old.referenceIDs || made.iterationTag != old.iterationTag
-        || made.opCode != old.opCode || made.index != old.index
-        || made.elementType != old.elementType || made.duplicateCount != old.duplicateCount
-        || sortedFlags(made) != sortedFlags(old)
-        || made.connectedElements != old.connectedElements) {
+    const DecodedMappedSection& made = decodeSection(sections.front());
+    const DecodedMappedSection& old = decodeSection(oldSections.front());
+    if (made.iterationTag != old.iterationTag || made.opCode != old.opCode
+        || made.elementType != old.elementType || made.index != old.index
+        || old.linkedNames.empty() || made.linkedNames.size() != old.linkedNames.size()
+        || made.referenceIDs != old.referenceIDs || sortedFlags(made) != sortedFlags(old)) {
+        return false;
+    }
+    // The only element its sources made (no duplicate counter, no connected elements to tell it
+    // from others) holds whatever the pieces of those sources make in its place: a piece of a
+    // source that makes two (an arc cut again by a seam) tells them apart by their connected
+    // elements. An element that had siblings must keep its own.
+    const auto isEmpty = [](const std::vector<std::string>& names) {
+        return names.empty() || (names.size() == 1 && names.front() == Data::EMPTY_VALUE);
+    };
+    const bool alone = isEmpty(old.connectedElements)
+        && (old.duplicateCount == Data::EMPTY_VALUE || old.duplicateCount == "0");
+    if (!alone
+        && (made.duplicateCount != old.duplicateCount
+            || made.connectedElements != old.connectedElements)) {
         return false;
     }
     // Each linked name takes one of the old ones: an equal one first, then one it is a piece of
