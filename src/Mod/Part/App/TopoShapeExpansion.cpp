@@ -11219,14 +11219,17 @@ std::string splitEventOf(std::string_view section)
     return event;
 }
 
-/// The tag of a name's last section (the feature that named the element last), 0 if unreadable
-long lastTagOf(std::string_view name)
+/// The tag of a name's first section (the feature the element comes from: a split or a later
+/// feature's section doesn't change it), 0 if unreadable. An interned piece's first section is
+/// behind a reference, so the name is read in full form.
+long firstTagOf(const std::string& name)
 {
-    const auto sections = Data::NameAncestry::splitSections(name);
+    const std::string plain = Data::NameTable::instance().toPlain(name);
+    const auto sections = Data::NameAncestry::splitSections(plain);
     if (sections.empty()) {
         return 0;
     }
-    const auto fields = sectionFields(sections.back());
+    const auto fields = sectionFields(sections.front());
     if (fields.size() != static_cast<std::size_t>(Data::SECTION_SIZE)) {
         return 0;
     }
@@ -11249,9 +11252,10 @@ long lastTagOf(std::string_view name)
  * lists) that holds a piece `X|<split>` takes the name X again when no face outside the merge
  * holds a piece of the same split of X: the merged face then contains all of X the split left.
  * A piece of a piece comes back level by level. The whole names come first, each piece's
- * deepest whole name before the levels above it, then the one named by the older feature (the
- * smaller tag; a feature inserted earlier in the history is the newer one, so the names of what
- * was there stay first), then in the input's order. The pieces' own names stay on the face
+ * deepest whole name before the levels above it, then the one that comes from the older feature
+ * (the smaller tag of its first section; a feature inserted earlier in the history is the newer
+ * one, so the names of what was there stay first, also where a newer feature cut them), then in
+ * the input's order. The pieces' own names stay on the face
  * after them, for references made to them.
  */
 void restoreWholeFaceNames(TopoShape& result, const TopoShape& input, const TopoShape::Mapper& mapper)
@@ -11394,7 +11398,7 @@ void restoreWholeFaceNames(TopoShape& result, const TopoShape& input, const Topo
                     // (a plate's top cut by an earlier groove, `<top>|...CUT`, is the face
                     // later features knew: it comes before the rib's top; review r2)
                     whole.push_back(
-                        {undone - 1 - k, lastTagOf(name), Data::MappedName(name), piece.sids}
+                        {undone - 1 - k, firstTagOf(name), Data::MappedName(name), piece.sids}
                     );
                 }
             }
