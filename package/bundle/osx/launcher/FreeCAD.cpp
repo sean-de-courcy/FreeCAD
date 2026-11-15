@@ -31,6 +31,25 @@ int main(int argc, char *argv[], char *const *envp) {
     env["SSL_CERT_FILE"]        = prefix + "/ssl/cacert.pem";    // https://forum.freecad.org/viewtopic.php?f=3&t=42825
     env["GIT_SSL_CAINFO"]       = prefix + "/ssl/cacert.pem";
 
+    // FreeCAD-CH (ops#815): Python must not write __pycache__ into the signed bundle, which breaks
+    // its seal (codesign --verify, Gatekeeper). Bytecode goes to the user's cache folder instead,
+    // ~/Library/Caches/<app name>/pycache, or is not written at all without HOME.
+    if (env.find("PYTHONPYCACHEPREFIX") == env.end()) {
+        auto home = env.find("HOME");
+        if (home != env.end() && !home->second.empty()) {
+            // cwd is <name>.app/Contents/MacOS
+            std::string bundle = realpath((std::string(cwd) + "/../..").c_str(), NULL);
+            std::string name = bundle.substr(bundle.find_last_of('/') + 1);
+            if (name.size() > 4 && name.compare(name.size() - 4, 4, ".app") == 0) {
+                name.erase(name.size() - 4);
+            }
+            env["PYTHONPYCACHEPREFIX"] = home->second + "/Library/Caches/" + name + "/pycache";
+        }
+        else {
+            env["PYTHONDONTWRITEBYTECODE"] = "1";
+        }
+    }
+
     char **new_env = new char*[env.size() + 1];
     int i = 0;
     for (const auto& [var, value] : env) {
