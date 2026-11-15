@@ -233,3 +233,8 @@ class TestDressUpRelinkHome(unittest.TestCase):
         self.assertEqual(len(self.chamfer.Base[1]), 1)
         # One edge chamfered, if the solver finds it on the draft; never the four from before
         self.assertLessEqual(self.chamferedEdges(), 1)
+        # A pick the draft doesn't have by name is solved from the boss's name for it (the pad's
+        # edge), not from the name an earlier pick had on the draft
+        for row in App.getReferenceReport(self.chamfer):
+            self.assertIn(";XTR;", row["old"])
+            self.assertNotIn(";DFT;", row["old"])
