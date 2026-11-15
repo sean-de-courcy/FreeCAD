@@ -4406,6 +4406,40 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.assertEqual(self.originalNames(pattern), [pad.Name, bump.Name])
         self.assertNotIn("No feature", self.statusText(field))
 
+    def testAnOriginPlaneShowsOnshapesName(self):
+        """ops#640 gaps3 row 24: a field holding the studio's XY plane names it Top, as Onshape's
+        dialogs and the Features list do, while its Label stays XY-plane; renamed, it shows the
+        new Label. A 10 x 10 sketch at z 5 padded up to the XY plane (reversed, down to z 0)."""
+        self.body = models.body(self.doc)
+        top = models.originFeature(self.body, "XY_Plane")
+        self.assertEqual(top.Label, "XY-plane")
+        profile = models.sketch(self.doc, "Profile", models.rectangle(0, 0, 10, 10), self.body, z=5)
+        pad = models.pad(self.body, profile, 5)
+        pad.Type = "UpToFace"
+        pad.UpToFace = (top, [""])
+        pad.Reversed = True
+        self.doc.recompute()
+        self.assertTrue(pad.isValid(), pad.getStatusString())
+        self.assertAlmostEqual(pad.Shape.Volume, 500, places=6)
+
+        def shownWhenEdited():
+            Gui.getDocument(self.doc.Name).setEdit(pad.Name)
+            self.assertTrue(waitFor(lambda: any(texts(f) for f in fields())), "the Pad's fields")
+            settle()
+            shown = [texts(field) for field in fields()]
+            Gui.Control.closeDialog()
+            pump()
+            self.assertTrue(waitFor(lambda: not fields(), 3.0))
+            return shown
+
+        shown = shownWhenEdited()
+        self.assertIn(["Top"], shown)
+        self.assertFalse([t for field in shown for t in field if "XY-plane" in t], shown)
+        self.assertEqual(top.Label, "XY-plane")
+        top.Label = "Floor"
+        self.doc.recompute()
+        self.assertIn(["Floor"], shownWhenEdited())
+
     def testPatternOriginalsPickOfUpToFaceLoftAndPipeCaps(self):
         """ops#214, a pin: the top of a pad up to a datum plane, the cap of a loft at its section
         and the cap of a pipe at its spine's end have histories that end at the pad's sketch, the
