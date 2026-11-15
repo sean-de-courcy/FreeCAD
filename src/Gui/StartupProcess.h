@@ -42,6 +42,8 @@ public:
     static void setupApplication();
     /// The fork's first-start pack on a new settings folder, before the main window exists
     static void applyFirstStartPack();
+    /// Once per settings folder: the Onshape pack's colours over folders made before them (ops#796)
+    static void reapplyPackColours();
     void execute();
 
 private:
