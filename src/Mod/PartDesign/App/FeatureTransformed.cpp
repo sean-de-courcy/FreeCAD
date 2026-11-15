@@ -47,11 +47,14 @@
 #include <algorithm>
 
 #include <App/Document.h>
+#include <App/ElementNamingUtils.h>
+#include <App/ElementSolverBatch.h>
 #include <App/GeoFeature.h>
 #include <Base/Console.h>
 #include <Base/Exception.h>
 #include <Base/Reader.h>
 #include <Base/Sequencer.h>
+#include <Mod/Part/App/AttachExtension.h>
 #include <Mod/Part/App/modelRefine.h>
 
 #include "FeatureTransformed.h"
@@ -1368,6 +1371,85 @@ App::DocumentObjectExecReturn* Transformed::recomputePreview()
     }
 }
 
+namespace
+{
+
+/// FreeCAD-CH (ops#595): a transform made a MultiTransform's step computes nothing more, and its
+/// shape stays what it was. What is attached to its elements (a sketch on a copy's face) moves to
+/// the MultiTransform, whose shape takes the step's place, as the base-following references do
+/// (Feature::relinkToMatchingSubelements): each reference to the step is marked missing with its
+/// mapped name, and the MultiTransform's shape solves it (the solver finds it, or it breaks
+/// loudly). A reference without a name to carry is left missing too, so it breaks loudly; left on
+/// the step, it stayed on the step's old face after every edit before it, silently
+void moveAttachmentsToMulti(Transformed* step, MultiTransform* multi)
+{
+    const Part::TopoShape stepShape = step->Shape.getShape();
+    for (auto user : step->getInList()) {
+        if (user == multi) {
+            continue;
+        }
+        auto attach = user->getExtensionByType<Part::AttachExtension>(true);
+        if (!attach) {
+            continue;
+        }
+        auto& support = attach->AttachmentSupport;
+        const auto& objs = support.getValues();
+        if (std::ranges::find(objs, step) == objs.end()) {
+            continue;
+        }
+        const auto& oldSubs = support.getSubValues();
+        const auto& oldShadows = support.getShadowSubs();
+        std::vector<App::DocumentObject*> newObjs;
+        std::vector<std::string> newSubs;
+        std::vector<App::PropertyLinkBase::ShadowSub> newShadows;
+        for (std::size_t i = 0; i < objs.size(); ++i) {
+            const std::string sub = i < oldSubs.size() ? oldSubs[i] : std::string();
+            const auto shadow = i < oldShadows.size() ? oldShadows[i]
+                                                      : App::PropertyLinkBase::ShadowSub();
+            if (objs[i] != step) {
+                newObjs.push_back(objs[i]);
+                newSubs.push_back(sub);
+                newShadows.push_back(shadow);
+                continue;
+            }
+            newObjs.push_back(multi);
+            if (sub.empty()) {
+                newSubs.emplace_back();
+                newShadows.emplace_back();
+                continue;
+            }
+            std::string mapped = App::bareMappedName(shadow.newName);
+            const char* element = Data::findElementName(shadow.oldName.c_str());
+            std::string index = element ? element : "";
+            if (Data::hasMissingElement(index.c_str())) {
+                index.erase(0, std::strlen(Data::MISSING_PREFIX));
+            }
+            if ((mapped.empty() || index.empty()) && !stepShape.isNull()) {
+                Data::MappedElement found = stepShape.getElementName(sub.c_str());
+                mapped = found.name.toString();
+                index = found.index ? found.index.toString() : std::string();
+            }
+            if (index.empty()) {
+                const char* name = Data::findElementName(sub.c_str());
+                index = name ? name : sub;
+                if (Data::hasMissingElement(index.c_str())) {
+                    index.erase(0, std::strlen(Data::MISSING_PREFIX));
+                }
+            }
+            std::string missing = Data::MISSING_PREFIX + index;
+            newSubs.push_back(missing);
+            newShadows.emplace_back(
+                mapped.empty() ? std::string()
+                               : Data::ComplexGeoData::elementMapPrefix() + mapped + "." + index,
+                missing
+            );
+        }
+        support.setValues(std::move(newObjs), std::move(newSubs), std::move(newShadows));
+    }
+}
+
+}  // namespace
+
 void Transformed::onChanged(const App::Property* prop)
 {
     if (prop == &TransformMode) {
@@ -1397,6 +1479,11 @@ void Transformed::onChanged(const App::Property* prop)
                     auto step = freecad_cast<Transformed*>(obj);
                     if (!step || freecad_cast<MultiTransform*>(step)) {
                         continue;
+                    }
+                    if (!step->Originals.getValues().empty()
+                        || step->TransformMode.getValue() != static_cast<long>(Mode::Features)) {
+                        // Made a step now: what is attached to it follows (ops#595)
+                        moveAttachmentsToMulti(step, multi);
                     }
                     if (!step->Originals.getValues().empty()) {
                         step->Originals.setValues({});
@@ -1579,8 +1666,14 @@ App::DocumentObjectExecReturn* Transformed::execute()
         return studioOwnerOfOriginal(obj) != nullptr;
     });
     if (mode == Mode::Features && originals.empty() && !studioOriginals) {
-        // Every original suppressed: as upstream
-        return App::DocumentObject::StdReturn;
+        // FreeCAD-CH (ops#592): every original suppressed. It fails in Onshape's words (oracle 9j,
+        // U7), and the failure rule passes its base through: the Body is the model without the
+        // originals. Returned StdReturn, upstream's, it kept its last shape, the suppressed
+        // original's copies included, Valid
+        return new App::DocumentObjectExecReturn(QT_TRANSLATE_NOOP(
+            "Exception",
+            "Selected features do not create any geometry that may be patterned."
+        ));
     }
 
     if (!this->BaseFeature.getValue()) {
