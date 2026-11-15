@@ -24,7 +24,7 @@ import FreeCAD as App
 import Part
 import PartDesign
 
-from PartDesignTests.TestStudio import pad, rect, sketch, xyPlane
+from PartDesignTests.TestStudio import faceAt, pad, rect, sketch, xyPlane
 from PartDesignTests.TestStudioList import newStudio, studioList
 
 V = App.Vector
@@ -471,6 +471,73 @@ class TestStudioOwner(unittest.TestCase):
         self.assertAlmostEqual(self.volume("A"), 1000 - 90 - 8, places=3)
         self.assertAlmostEqual(self.volume("B"), 1000 - 90, places=3)
         self.assertOneSolid("A")
+
+    # ------------------------------------------------------------------------------- up to a face of the own part
+    # ops#846 (notes/owner-upto-face.md). On A (10 x 10 x 10, V 1000): Step, a Pad owner 4 wide
+    # (x 6..10, y 0..10) and hs tall on A's top; Boss, a Pad owner on a circle r 1 at (2, 5) on
+    # A's top, up to Step's top face, which doesn't lie over the circle (Onshape UT1: the face's
+    # plane is extended). V = 1000 + 40 hs + pi hs.
+    def stepAndBoss(self, hs=4.0):
+        stepSk = studioSketch(self.doc, self.studio, "StepSk", ((6, 0, 10, 10),), z=10)
+        step = makeOwner(self.doc, self.studio, "Pad", "Step", stepSk, ("A",), Length=hs)
+        self.doc.recompute()
+        made = self.step(step, "A")
+        top = faceAt(made, 10 + hs)
+        self.assertIsNotNone(top)
+        bossSk = studioSketch(self.doc, self.studio, "BossSk", z=10, circles=((2, 5, 1),))
+        boss = makeOwner(self.doc, self.studio, "Pad", "Boss", bossSk, ("A",), Type="UpToFace")
+        boss.UpToFace = (made, [top])
+        self.doc.recompute()
+        return step, boss
+
+    def assertStepAndBoss(self, hs):
+        self.assertVolume("A", 1000 + 40 * hs + math.pi * hs)
+        self.assertEqual([o.Name for o in self.doc.Objects if "Touched" in o.State], [])
+        self.assertEqual([o.Name for o in self.doc.Objects if not o.isValid()], [])
+
+    def testUpToFaceOntoTheOwnPartFollowsTheFace(self):
+        """The link on the part's feature before the owner (what the task panel stores): every
+        edit of the face's maker shows after one recompute, nothing stays touched or goes red."""
+        step, boss = self.stepAndBoss()
+        self.assertIsOwner(boss)
+        self.assertStepAndBoss(4)
+        sketch = self.doc.getObject("StepSk")
+        for hs, x in ((4, 1), (2, 1), (7, 1), (4, 0)):  # the face moves sideways, down, up, back
+            step.Length = hs
+            sketch.Placement = App.Placement(V(x, 0, 10), App.Rotation())
+            self.doc.recompute()
+            self.assertStepAndBoss(hs)
+
+    def testUpToFaceOntoTheOwnPartWithItsMakerSuppressed(self):
+        """Onshape UT3: the face's maker suppressed, the boss fails and adds nothing; unsuppressed,
+        everything is back with no further edit."""
+        step, boss = self.stepAndBoss()
+        PartDesign.studioSuppress(step, True)
+        self.doc.recompute()
+        self.assertFalse(boss.isValid())
+        self.assertVolume("A", 1000)
+        PartDesign.studioSuppress(step, False)
+        self.doc.recompute()
+        self.assertStepAndBoss(4)
+
+    def testAnOwnerLinkingItsOwnPartIsRefused(self):
+        """A link only a script can write, to the part itself, to the owner's own step or to a
+        later feature of the part, is a dependency cycle: the owner fails and says what to link."""
+        step, boss = self.stepAndBoss()
+        a = self.doc.getObject("A")
+        later = self.cutOwner("Later", scope=("A",), rects=((1, 8, 2, 9),), Length=1)
+        self.doc.recompute()
+        for target in (a, self.step(boss, "A"), self.step(later, "A")):
+            with self.subTest(target=target.Name):
+                boss.UpToFace = (target, [faceAt(target, 14)])
+                self.doc.recompute()
+                self.assertFalse(boss.isValid(), "a link to " + target.Name + " was computed")
+                self.assertIn("UpToFace", boss.getStatusString())
+                self.assertIn(target.Label, boss.getStatusString())
+        boss.UpToFace = (self.step(step, "A"), [faceAt(self.step(step, "A"), 14)])
+        self.doc.recompute()
+        self.assertTrue(boss.isValid(), boss.getStatusString())
+        self.assertVolume("A", 1000 + 40 * 4 + math.pi * 4 - 1)
 
     # ------------------------------------------------------------------------------- edits
     def testEditUndoRedoSaveReopen(self):
