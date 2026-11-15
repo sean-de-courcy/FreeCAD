@@ -4240,3 +4240,170 @@ class DocumentSaveGuardCases(unittest.TestCase):
         doc.getObject("Marker").Integer = 7
         doc.save()
         self.assertEqual(self._marker(self.path), 7)
+
+
+class DocumentTeamFolderCases(unittest.TestCase):
+    """FreeCAD-CH ops#640, folder sync item 2 (notes/folder-sync.md section 3; design A4; ops#705).
+
+    The team folder setting: setting the preference writes the shared ignore list into the folder
+    (`.stglobalignore`) and makes the folder's `.stignore` include it; the list matches the names
+    the safe save and the backup policy really make, and not the documents or their conflict
+    copies; documents saved inside the folder keep five local backups; the Start page's sentence
+    says when the setup is missing or was trimmed.
+
+    Designed documents: one App::FeatureTest, "Marker", saved under a temporary team folder."""
+
+    def setUp(self):
+        import shutil
+
+        self.shutil = shutil
+        self.root = tempfile.mkdtemp(prefix="fcch_teamfolder_")
+        self.team = os.path.join(self.root, "team")
+        self.outside = os.path.join(self.root, "outside")
+        os.makedirs(self.team)
+        os.makedirs(self.outside)
+        self.group = FreeCAD.ParamGet("User parameter:BaseApp/Preferences/Document")
+        self.saved = {
+            "TeamFolder": self.group.GetString("TeamFolder", ""),
+            "UseFCBakExtension": self.group.GetBool("UseFCBakExtension", True),
+            "CountBackupFiles": self.group.GetInt("CountBackupFiles", 1),
+            "CreateBackupFiles": self.group.GetBool("CreateBackupFiles", True),
+        }
+        self.opened = []
+
+    def tearDown(self):
+        for name in self.opened:
+            if name in FreeCAD.listDocuments():
+                FreeCAD.closeDocument(name)
+        self.group.SetString("TeamFolder", self.saved["TeamFolder"])
+        self.group.SetBool("UseFCBakExtension", self.saved["UseFCBakExtension"])
+        self.group.SetInt("CountBackupFiles", self.saved["CountBackupFiles"])
+        self.group.SetBool("CreateBackupFiles", self.saved["CreateBackupFiles"])
+        self.shutil.rmtree(self.root, ignore_errors=True)
+
+    def _lines(self, name):
+        with open(os.path.join(self.team, name), encoding="utf-8") as f:
+            return [line.strip() for line in f]
+
+    def _patterns(self):
+        """The list's patterns as (glob, case-insensitive) pairs, Syncthing's prefixes read."""
+        result = []
+        for line in self._lines(".stglobalignore"):
+            if not line or line.startswith("//") or line.startswith("#"):
+                continue
+            insensitive = False
+            while line.startswith("(?"):
+                insensitive = insensitive or line.startswith("(?i)")
+                line = line[line.index(")") + 1 :]
+            result.append((line, insensitive))
+        return result
+
+    def _ignored(self, name):
+        import fnmatch
+
+        for glob, insensitive in self._patterns():
+            if insensitive and fnmatch.fnmatchcase(name.lower(), glob.lower()):
+                return True
+            if fnmatch.fnmatchcase(name, glob):
+                return True
+        return False
+
+    def _saves(self, folder, count):
+        doc = FreeCAD.newDocument("TeamFolderDoc")
+        self.opened.append(doc.Name)
+        marker = doc.addObject("App::FeatureTest", "Marker")
+        path = os.path.join(folder, "Frame.FCStd")
+        for value in range(count):
+            marker.Integer = value
+            if value == 0:
+                doc.saveAs(path)
+            else:
+                doc.save()
+        name = doc.Name
+        FreeCAD.closeDocument(name)
+        self.opened.remove(name)
+
+    def testSettingWritesTheIgnoreList(self):
+        self.group.SetString("TeamFolder", self.team)
+        self.assertIn("#include .stglobalignore", self._lines(".stignore"))
+        globs = [glob for glob, _ in self._patterns()]
+        for wanted in ("*.fctmp", "*.FCBak", "*.FCStd[0-9]*", ".DS_Store", "._*", "Thumbs.db", "desktop.ini"):
+            self.assertIn(wanted, globs)
+        self.assertNotIn("*.fcch", globs, "design A's history and presence must travel")
+        self.assertEqual(FreeCAD.teamFolderProblem(), "")
+
+    def testSettingAgainAddsNothingAndKeepsTheUsersLines(self):
+        with open(os.path.join(self.team, ".stignore"), "w", encoding="utf-8") as f:
+            f.write("renders")  # the user's own line, with no newline at its end
+        self.group.SetString("TeamFolder", self.team)
+        self.group.SetString("TeamFolder", "")
+        self.group.SetString("TeamFolder", self.team)
+        lines = self._lines(".stignore")
+        self.assertEqual(lines.count("#include .stglobalignore"), 1)
+        self.assertIn("renders", lines)
+        globals_ = [line for line in self._lines(".stglobalignore") if line]
+        self.assertEqual(len(globals_), len(set(globals_)), "no pattern twice")
+
+    def testTheListMatchesWhatSavesMake(self):
+        self.group.SetString("TeamFolder", self.team)
+        self.group.SetBool("UseFCBakExtension", True)
+        self._saves(self.team, 2)
+        self.group.SetBool("UseFCBakExtension", False)
+        self._saves(self.team, 3)
+        made = [name for name in os.listdir(self.team) if not name.startswith(".st")]
+        backups = [name for name in made if name != "Frame.FCStd"]
+        self.assertTrue(any(name.endswith(".FCBak") for name in backups), made)
+        self.assertTrue(any(name.endswith(".FCStd1") for name in backups), made)
+        for name in backups:
+            self.assertTrue(self._ignored(name), name + " would sync")
+        # The safe save's temporary file (A1: <name>.FCStd.<8 hex>.fctmp), in either case
+        self.assertTrue(self._ignored("Frame.FCStd.0a1b2c3d.fctmp"))
+        self.assertTrue(self._ignored("Frame.FCSTD.0A1B2C3D.FCTMP"))
+        # What must travel: the document, a conflict copy (A2 reads it), design A's .fcch folder
+        for name in ("Frame.FCStd", "frame.fcstd",
+                     "Frame.sync-conflict-20261115-101010-ABCDEFG.FCStd", ".fcch"):
+            self.assertFalse(self._ignored(name), name + " would not sync")
+
+    def testFiveLocalBackupsInsideTheFolder(self):
+        self.group.SetString("TeamFolder", self.team)
+        self.group.SetBool("UseFCBakExtension", False)
+        self.group.SetBool("CreateBackupFiles", True)
+        self.group.SetInt("CountBackupFiles", 1)
+        self._saves(self.team, 7)
+        inside = sorted(n for n in os.listdir(self.team) if n.startswith("Frame.FCStd") and n != "Frame.FCStd")
+        self.assertEqual(len(inside), 5, inside)
+        self._saves(self.outside, 7)
+        outside = [n for n in os.listdir(self.outside) if n != "Frame.FCStd"]
+        self.assertEqual(len(outside), 1, "outside the folder the preference stands: " + str(outside))
+
+    def testNoBackupsStaysNoBackups(self):
+        self.group.SetString("TeamFolder", self.team)
+        self.group.SetBool("UseFCBakExtension", False)
+        self.group.SetBool("CreateBackupFiles", False)
+        self._saves(self.team, 3)
+        self.assertEqual([n for n in os.listdir(self.team) if n.startswith("Frame.FCStd") and n != "Frame.FCStd"], [])
+
+    def testProblemSentences(self):
+        self.group.SetString("TeamFolder", "")
+        self.assertIn("not set", FreeCAD.teamFolderProblem())
+        self.group.SetString("TeamFolder", os.path.join(self.root, "missing"))
+        self.assertIn("does not exist", FreeCAD.teamFolderProblem())
+        self.group.SetString("TeamFolder", self.team)
+        self.assertEqual(FreeCAD.teamFolderProblem(), "")
+        with open(os.path.join(self.team, ".stignore"), "w", encoding="utf-8") as f:
+            f.write("// someone trimmed it\n")
+        self.assertIn(".stignore", FreeCAD.teamFolderProblem())
+        self.group.SetString("TeamFolder", "")
+        self.group.SetString("TeamFolder", self.team)
+        self.assertEqual(FreeCAD.teamFolderProblem(), "", "setting it again restores it")
+
+    def testRelativeOrFileIsRefused(self):
+        """Review F1, F3: a relative path would follow the working directory; a file is no folder."""
+        self.group.SetString("TeamFolder", "team")
+        self.assertIn("not an absolute", FreeCAD.teamFolderProblem())
+        afile = os.path.join(self.root, "afile.txt")
+        with open(afile, "w", encoding="utf-8") as f:
+            f.write("x")
+        self.group.SetString("TeamFolder", afile)
+        self.assertIn("not a folder", FreeCAD.teamFolderProblem())
+        self.assertFalse(os.path.exists(os.path.join(self.root, ".stignore")))

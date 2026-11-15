@@ -47,6 +47,7 @@
 #include <App/DocumentObject.h>
 #include <App/Application.h>
 #include <Base/Interpreter.h>
+#include <App/TeamFolder.h>
 #include <Base/Tools.h>
 #include <Gui/Action.h>
 #include <Gui/Application.h>
@@ -117,6 +118,12 @@ StartView::StartView(QWidget* parent)
     documentsScrollArea->setWidgetResizable(true);
     auto documentsContentLayout = gsl::owner<QVBoxLayout*>(new QVBoxLayout(documentsScrollWidget));
     documentsContentLayout->setSizeConstraint(QLayout::SizeConstraint::SetMinAndMaxSize);
+
+    _teamFolderLabel = gsl::owner<QLabel*>(new QLabel());
+    _teamFolderLabel->setObjectName(QStringLiteral("TeamFolderProblem"));
+    _teamFolderLabel->setWordWrap(true);
+    documentsContentLayout->addWidget(_teamFolderLabel);
+    updateTeamFolderLabel();
 
     _newFileLabel = gsl::owner<QLabel*>(new QLabel());
     documentsContentLayout->addWidget(_newFileLabel);
@@ -546,7 +553,18 @@ void StartView::showEvent(QShowEvent* event)
             );
         }
     }
+    updateTeamFolderLabel();
     Gui::MDIView::showEvent(event);
+}
+
+void StartView::updateTeamFolderLabel()
+{
+    if (!_teamFolderLabel) {
+        return;
+    }
+    const std::string problem = App::TeamFolder::problem();
+    _teamFolderLabel->setText(QString::fromStdString(problem));
+    _teamFolderLabel->setVisible(!problem.empty());
 }
 
 void StartView::onMdiSubWindowActivated(QMdiSubWindow* subWindow)

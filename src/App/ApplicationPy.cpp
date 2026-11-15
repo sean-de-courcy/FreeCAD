@@ -56,6 +56,7 @@
 #include "PropertyLinks.h"
 #include "RecoverySnapshot.h"
 #include "StringHasher.h"
+#include "TeamFolder.h"
 
 
 // using Base::GetConsole;
@@ -377,6 +378,19 @@ PyObject* ApplicationPy::sActiveDocument(PyObject* /*self*/, PyObject* args)
 
     Py_INCREF(Py_None);
     return Py_None;
+}
+
+// FreeCAD-CH (ops#640, folder sync item 2)
+PyObject* ApplicationPy::sTeamFolderProblem(PyObject* /*self*/, PyObject* args)
+{
+    if (!PyArg_ParseTuple(args, "")) {
+        return nullptr;
+    }
+    PY_TRY
+    {
+        return Py::new_reference_to(Py::String(TeamFolder::problem()));
+    }
+    PY_CATCH;
 }
 
 PyObject* ApplicationPy::sGetDocument(PyObject* /*self*/, PyObject* args)
