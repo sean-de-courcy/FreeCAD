@@ -24,7 +24,9 @@
  ***************************************************************************/
 
 #include <cassert>
+#include <cstdlib>
 #include <sstream>
+#include <string>
 #include <boost/regex.hpp>
 
 #include <FCConfig.h>
@@ -670,15 +672,30 @@ void initInterpreter(int argc, char* argv[])
     // The isolated config ignores the PYTHON* environment. Honor the two bytecode variables,
     // which the macOS launcher sets so that Python writes no __pycache__ into the signed
     // app bundle (ops#815).
-    const char* pycachePrefix = getenv("PYTHONPYCACHEPREFIX");
-    if (pycachePrefix && *pycachePrefix) {
-        status = PyConfig_SetBytesString(&config, &config.pycache_prefix, pycachePrefix);
+    // _dupenv_s under MSVC: clang-cl's -Wdeprecated rejects getenv there
+    auto environmentValue = [](const char* name) {
+#ifdef _MSC_VER
+        char* value = nullptr;
+        std::size_t size = 0;
+        if (_dupenv_s(&value, &size, name) != 0 || !value) {
+            return std::string();
+        }
+        std::string text(value);
+        std::free(value);
+        return text;
+#else
+        const char* value = std::getenv(name);
+        return value ? std::string(value) : std::string();
+#endif
+    };
+    const std::string pycachePrefix = environmentValue("PYTHONPYCACHEPREFIX");
+    if (!pycachePrefix.empty()) {
+        status = PyConfig_SetBytesString(&config, &config.pycache_prefix, pycachePrefix.c_str());
         if (PyStatus_Exception(status)) {
             throw Base::RuntimeError("Failed to set the bytecode cache folder");
         }
     }
-    const char* dontWriteBytecode = getenv("PYTHONDONTWRITEBYTECODE");
-    if (dontWriteBytecode && *dontWriteBytecode) {
+    if (!environmentValue("PYTHONDONTWRITEBYTECODE").empty()) {
         config.write_bytecode = 0;
     }
 
