@@ -4427,8 +4427,12 @@ class TestReferenceFieldGui(unittest.TestCase):
             self.assertTrue(waitFor(lambda: any(texts(f) for f in fields())), "the Pad's fields")
             settle()
             shown = [texts(field) for field in fields()]
-            Gui.Control.closeDialog()
+            taskButton(QtWidgets.QDialogButtonBox.Cancel).click()
             pump()
+            guiDoc = Gui.getDocument(self.doc.Name)
+            if guiDoc.getInEdit():
+                guiDoc.resetEdit()
+                pump()
             self.assertTrue(waitFor(lambda: not fields(), 3.0))
             return shown
 
