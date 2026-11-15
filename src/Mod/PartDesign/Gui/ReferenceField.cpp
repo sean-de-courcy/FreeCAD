@@ -853,6 +853,9 @@ ReferenceField::ReferenceField(App::DocumentObject* owner,
     entryList->setMouseTracking(true);
     entryList->viewport()->setMouseTracking(true);
     entryList->installEventFilter(this);
+    // Enter in the list accepts the dialog, as Onshape's with the focus in its edges list (oracle
+    // 24, G3-3; ops#627): the list's Enter opens nothing (a double click opens the use menu)
+    entryList->setProperty("enterAccepts", true);
     entryList->viewport()->installEventFilter(this);
     connect(entryList, &QListWidget::customContextMenuRequested, this, &ReferenceField::showMenu);
     connect(entryList, &QListWidget::currentItemChanged, this, [this]() {
