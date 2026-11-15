@@ -1468,6 +1468,38 @@ class TestPipeThin(PipeCase):
         self.assertSweeps(pipe, math.pi * (4 - 1.5 ** 2) * 20)
         self.assertBox(pipe.Shape, -2, -2, 0, 2, 2, 20)
 
+    def holed(self):
+        """ops#714: the region of a rectangle (-5, -4)..(5, 4) less a circle r 1.5 at the origin."""
+        return self.sketch("Profile", models.rectangle(-5, -4, 5, 4) + [models.circle(0, 0, 1.5)])
+
+    def assertHoleWalled(self, pipe, inside, outside):
+        for x in inside:
+            self.assertTrue(pipe.Shape.isInside(V(x, 0, 10), 1e-7, True), x)
+        for x in outside:
+            self.assertFalse(pipe.Shape.isInside(V(x, 0, 10), 1e-7, True), x)
+
+    def testRegionWithAHoleWallsBothLoops(self):
+        """ops#714, as Onshape: thickness 1 outward walls the rectangle to 12 x 10 and the hole in
+        to r 0.5: (120 - 80 + pi (2.25 - 0.25)) x 20."""
+        pipe = self.pipe(self.holed(), self.line(0, 20), BodyType="Thin", Thickness1=1)
+        self.assertSweeps(pipe, (40 + 2 * math.pi) * 20)
+        self.assertBox(pipe.Shape, -6, -5, 0, 6, 5, 20)
+        self.assertHoleWalled(pipe, (1, 5.5), (0.25, 3))
+
+    def testRegionWithAHoleFlippedWallsBothLoopsInward(self):
+        """FlipWall: the rectangle in to 8 x 6, the hole out to r 2.5: (80 - 48 + pi (6.25 - 2.25)) x 20."""
+        pipe = self.pipe(self.holed(), self.line(0, 20), BodyType="Thin", Thickness1=1, FlipWall=True)
+        self.assertSweeps(pipe, (32 + 4 * math.pi) * 20)
+        self.assertBox(pipe.Shape, -5, -4, 0, 5, 4, 20)
+        self.assertHoleWalled(pipe, (2, 4.5), (1, 3.5))
+
+    def testRegionWithAHoleMidplaneWallsBothLoops(self):
+        """Midplane: 11 x 9 less 9 x 7, and the ring r 1..2: (99 - 63 + pi (4 - 1)) x 20."""
+        pipe = self.pipe(self.holed(), self.line(0, 20), BodyType="Thin", Thickness1=1, Midplane=True)
+        self.assertSweeps(pipe, (36 + 3 * math.pi) * 20)
+        self.assertBox(pipe.Shape, -5.5, -4.5, 0, 5.5, 4.5, 20)
+        self.assertHoleWalled(pipe, (1.5, 5), (0.5, 3.5))
+
     def testAlongABentPath(self):
         """SW4's path (line z 0..10, quarter arc r 10 to (10, 0, 20), line to (30, 0, 20)), the line's
         wall: 4 x (10 + 5 pi + 20) = 182.832, the wall staying across the path's plane."""

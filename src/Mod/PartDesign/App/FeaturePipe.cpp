@@ -7320,18 +7320,31 @@ TopoDS_Shape thinWall(
     }
     if (!closed.empty()) {
         const Part::TopoShape regions = Part::TopoShape(-1).makeElementFace(closed);
-        const Part::JoinType joinType = join == GeomAbs_Arc ? Part::JoinType::arc : Part::JoinType::intersection;
         auto grown = [&](double distance) {
             if (std::abs(distance) < Precision::Confusion()) {
                 // A copy, as an open wire's (`offsetOpenWire`)
                 return Part::TopoShape(BRepBuilderAPI_Copy(regions.getShape()).Shape());
             }
-            return regions.makeElementOffset2D(
-                distance,
-                joinType,
-                Part::FillType::noFill,
-                Part::OpenResult::noOpenResult
-            );
+            // Each region face is offset as a face (ops#714): OCCT then moves a hole's boundary
+            // against the outer one, so growing a region shrinks its holes. `makeElementOffset2D`
+            // feeds the face's wires to the offset as separate spines, which grows each hole as a
+            // disk of its own: a region with a hole lost the hole's wall
+            std::vector<Part::TopoShape> wires;
+            for (TopExp_Explorer it(regions.getShape(), TopAbs_FACE); it.More(); it.Next()) {
+                BRepOffsetAPI_MakeOffset offset(TopoDS::Face(it.Current()), join);
+                offset.Perform(distance);
+                if (!offset.IsDone()) {
+                    // A region the shrink takes away: the caller says the wall is too thick
+                    return Part::TopoShape();
+                }
+                for (TopExp_Explorer w(offset.Shape(), TopAbs_WIRE); w.More(); w.Next()) {
+                    wires.emplace_back(w.Current());
+                }
+            }
+            if (wires.empty()) {
+                return Part::TopoShape();
+            }
+            return Part::TopoShape(-1).makeElementFace(wires);
         };
         const Part::TopoShape outer = grown(right);
         const Part::TopoShape inner = grown(-left);
