@@ -930,9 +930,22 @@ std::vector<Body*> makePieces(App::DocumentObject* entry, std::string* why)
         }
         if (upstream) {
             std::set<App::DocumentObject*> read;
+            try {
+                for (auto obj : objs) {
+                    for (auto out : obj->getOutListRecursive()) {
+                        read.insert(out);
+                    }
+                }
+            }
+            catch (const Base::Exception&) {
+                return false;  // a cycle: the recomputes say so, as before (review r2)
+            }
+            // A step is placed in its Body's frame, which no link of its out list holds (its
+            // Body is a hidden link): a part moved and not computed yet (review r2)
             for (auto obj : objs) {
-                for (auto out : obj->getOutListRecursive()) {
-                    read.insert(out);
+                for (App::DocumentObject* holder = Body::findBodyOf(obj); holder;
+                     holder = App::Part::getPartOfObject(holder, /*recursive=*/false)) {
+                    read.insert(holder);
                 }
             }
             for (auto obj : read) {
