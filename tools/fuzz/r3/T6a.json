@@ -1,0 +1,155 @@
+{
+ "template": "T6a",
+ "note": "T1; every parameter is a Variable Studio variable",
+ "params": {
+  "a": 100,
+  "b": 60,
+  "t": 8,
+  "px": 10,
+  "py": 10,
+  "pw": 20,
+  "ph": 15,
+  "bx": 50,
+  "by": 40,
+  "rb": 8,
+  "hb": 10,
+  "hx": 80,
+  "hy": 15,
+  "rh": 4,
+  "kx": 80,
+  "ky": 45,
+  "d": 5,
+  "D": 10
+ },
+ "features": [
+  {
+   "name": "PlateSk",
+   "type": "sketch",
+   "plane": "Top",
+   "entities": [
+    {
+     "rect": {
+      "corner": [
+       "0",
+       "0"
+      ],
+      "size": [
+       "#a",
+       "#b"
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "Plate",
+   "type": "extrude",
+   "op": "new",
+   "profile": "PlateSk",
+   "end": "blind",
+   "depth": "#t"
+  },
+  {
+   "name": "PocketSk",
+   "type": "sketch",
+   "plane": "top face of Plate (z = #t)",
+   "entities": [
+    {
+     "rect": {
+      "corner": [
+       "#px",
+       "#py"
+      ],
+      "size": [
+       "#pw",
+       "#ph"
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "ThruPocket",
+   "type": "extrude",
+   "op": "remove",
+   "profile": "PocketSk",
+   "end": "through all",
+   "direction": "-Z"
+  },
+  {
+   "name": "BossSk",
+   "type": "sketch",
+   "plane": "top face of Plate",
+   "entities": [
+    {
+     "circle": {
+      "center": [
+       "#bx",
+       "#by"
+      ],
+      "radius": "#rb"
+     }
+    }
+   ]
+  },
+  {
+   "name": "Boss",
+   "type": "extrude",
+   "op": "add",
+   "profile": "BossSk",
+   "end": "blind",
+   "depth": "#hb",
+   "direction": "+Z"
+  },
+  {
+   "name": "HoleSk",
+   "type": "sketch",
+   "plane": "top face of Plate",
+   "entities": [
+    {
+     "circle": {
+      "center": [
+       "#hx",
+       "#hy"
+      ],
+      "radius": "#rh"
+     }
+    }
+   ]
+  },
+  {
+   "name": "ThruHole",
+   "type": "extrude",
+   "op": "remove",
+   "profile": "HoleSk",
+   "end": "through all",
+   "direction": "-Z"
+  },
+  {
+   "name": "CSinkSk",
+   "type": "sketch",
+   "plane": "top face of Plate",
+   "entities": [
+    {
+     "point": [
+      "#kx",
+      "#ky"
+     ]
+    }
+   ]
+  },
+  {
+   "name": "CSink",
+   "type": "hole",
+   "style": "countersink",
+   "diameter": "#d",
+   "countersink_diameter": "#D",
+   "countersink_angle": "90",
+   "end": "through all",
+   "at": "CSinkSk point"
+  }
+ ],
+ "variables": {
+  "D": "#d < 6 mm ? #d + 4 mm : #d * 1.5"
+ }
+}

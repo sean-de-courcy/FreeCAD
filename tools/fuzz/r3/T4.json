@@ -1,0 +1,97 @@
+{
+ "template": "T4",
+ "note": "revolved ring; a rectangular groove and a half-torus groove in its outer wall; a partial revolve when #ang < 360",
+ "params": {
+  "ri": 20,
+  "ro": 40,
+  "h": 30,
+  "gd": 6,
+  "gz": 4,
+  "gh": 6,
+  "rc": 5,
+  "zc": 20,
+  "ang": 360
+ },
+ "features": [
+  {
+   "name": "RingSk",
+   "type": "sketch",
+   "plane": "Front",
+   "entities": [
+    {
+     "rect": {
+      "corner": [
+       "#ri",
+       "0"
+      ],
+      "size": [
+       "#ro-#ri",
+       "#h"
+      ]
+     }
+    }
+   ],
+   "note": "sketch x = model X, sketch y = model Z"
+  },
+  {
+   "name": "Ring",
+   "type": "revolve",
+   "op": "new",
+   "profile": "RingSk",
+   "axis": "Z (the model's Z axis)",
+   "angle": "#ang",
+   "note": "full when #ang = 360"
+  },
+  {
+   "name": "G1Sk",
+   "type": "sketch",
+   "plane": "Front",
+   "entities": [
+    {
+     "rect": {
+      "corner": [
+       "#ro-#gd",
+       "#gz"
+      ],
+      "size": [
+       "#gd+5",
+       "#gh"
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "G1",
+   "type": "revolve",
+   "op": "remove",
+   "profile": "G1Sk",
+   "axis": "Z",
+   "angle": "360"
+  },
+  {
+   "name": "G2Sk",
+   "type": "sketch",
+   "plane": "Front",
+   "entities": [
+    {
+     "circle": {
+      "center": [
+       "#ro",
+       "#zc"
+      ],
+      "radius": "#rc"
+     }
+    }
+   ]
+  },
+  {
+   "name": "G2",
+   "type": "revolve",
+   "op": "remove",
+   "profile": "G2Sk",
+   "axis": "Z",
+   "angle": "360"
+  }
+ ]
+}

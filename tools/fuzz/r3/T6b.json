@@ -1,0 +1,124 @@
+{
+ "template": "T6b",
+ "note": "T2; every parameter is a Variable Studio variable",
+ "params": {
+  "a": 120,
+  "b": 80,
+  "t": 10,
+  "x0": -50,
+  "y0": -37,
+  "w": 12,
+  "h": 8,
+  "d": 4,
+  "m": 4,
+  "L": 80,
+  "R": 18,
+  "rh": 3,
+  "n": 6
+ },
+ "features": [
+  {
+   "name": "PlateSk",
+   "type": "sketch",
+   "plane": "Top",
+   "entities": [
+    {
+     "rect": {
+      "corner": [
+       "-#a/2",
+       "-#b/2"
+      ],
+      "size": [
+       "#a",
+       "#b"
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "Plate",
+   "type": "extrude",
+   "op": "new",
+   "profile": "PlateSk",
+   "end": "blind",
+   "depth": "#t"
+  },
+  {
+   "name": "RowSk",
+   "type": "sketch",
+   "plane": "top face of Plate",
+   "entities": [
+    {
+     "rect": {
+      "corner": [
+       "#x0",
+       "#y0"
+      ],
+      "size": [
+       "#w",
+       "#h"
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "RowPocket",
+   "type": "extrude",
+   "op": "remove",
+   "profile": "RowSk",
+   "end": "blind",
+   "depth": "#d",
+   "direction": "-Z",
+   "note": "when #d >= #t it cuts through; FreeCAD then clips at the plate's bottom"
+  },
+  {
+   "name": "RowPat",
+   "type": "linear pattern",
+   "kind": "feature",
+   "of": "RowPocket",
+   "direction": "X",
+   "count": "#m",
+   "spacing": "#L/(#m-1)",
+   "note": "FreeCAD's Length is first-to-last = #L"
+  },
+  {
+   "name": "HoleSk",
+   "type": "sketch",
+   "plane": "top face of Plate",
+   "entities": [
+    {
+     "circle": {
+      "center": [
+       "#R",
+       "0"
+      ],
+      "radius": "#rh"
+     }
+    }
+   ]
+  },
+  {
+   "name": "Hole",
+   "type": "extrude",
+   "op": "remove",
+   "profile": "HoleSk",
+   "end": "through all",
+   "direction": "-Z"
+  },
+  {
+   "name": "HolePat",
+   "type": "circular pattern",
+   "kind": "feature",
+   "of": "Hole",
+   "axis": "Z (Top plane normal through the origin)",
+   "count": "#n",
+   "angle": "360",
+   "equal_spacing": true
+  }
+ ],
+ "variables": {
+  "m": "#L > 60 mm ? 5 : (#L > 35 mm ? 3 : 2)"
+ }
+}
