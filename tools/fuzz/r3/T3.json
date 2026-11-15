@@ -1,0 +1,75 @@
+{
+ "template": "T3",
+ "note": "centred box; a cylinder boss on top; mirrored about the Right plane (the copies overlap when |cx| < r)",
+ "params": {
+  "a": 100,
+  "b": 60,
+  "t": 8,
+  "cx": 25,
+  "cy": 0,
+  "r": 10,
+  "h": 12
+ },
+ "features": [
+  {
+   "name": "PlateSk",
+   "type": "sketch",
+   "plane": "Top",
+   "entities": [
+    {
+     "rect": {
+      "corner": [
+       "-#a/2",
+       "-#b/2"
+      ],
+      "size": [
+       "#a",
+       "#b"
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "Plate",
+   "type": "extrude",
+   "op": "new",
+   "profile": "PlateSk",
+   "end": "blind",
+   "depth": "#t"
+  },
+  {
+   "name": "BossSk",
+   "type": "sketch",
+   "plane": "top face of Plate",
+   "entities": [
+    {
+     "circle": {
+      "center": [
+       "#cx",
+       "#cy"
+      ],
+      "radius": "#r"
+     }
+    }
+   ]
+  },
+  {
+   "name": "Boss",
+   "type": "extrude",
+   "op": "add",
+   "profile": "BossSk",
+   "end": "blind",
+   "depth": "#h",
+   "direction": "+Z"
+  },
+  {
+   "name": "MirBoss",
+   "type": "mirror",
+   "kind": "feature",
+   "of": "Boss",
+   "plane": "Right",
+   "op": "add"
+  }
+ ]
+}

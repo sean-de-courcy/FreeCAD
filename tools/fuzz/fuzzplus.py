@@ -25,6 +25,8 @@ STOP = int(os.environ.get("FUZZ_STOP", "0"))
 TAG = os.environ.get("FUZZ_TAG", "plus%d" % SEED)
 HEAL = os.environ.get("FUZZ_HEAL") == "1"
 FRESH = os.environ.get("FUZZ_FRESH", "1") != "0"
+STOPAT = set(x for x in os.environ.get("FUZZ_STOPAT", "").split(",") if x)   # e.g. SILENT,LOUD: end the seed at the first one
+SAVED = [0]
 LOG = open("%s/%s.jsonl" % (OUT, TAG), "w", buffering=1)
 
 # step kinds and weights (sum 100)
@@ -512,7 +514,7 @@ def freshCheck(doc, live, params, k):
         flips = []
         for _ in range(2):
             js, _n, _t = freshBuild(jitter(state, 1e-6, jr))
-            jd = geomDiffs(fsig, js)
+            jd = {x: y for x, y in geomDiffs(fsig, js).items() if x != "ftypes"}   # only V, A or red flips mark a boundary
             if jd:
                 flips.append(jd)
         rec["fresh"] = "BEYOND" if flips else "SILENT"
@@ -679,7 +681,8 @@ def main():
                 tally["fresh_" + r["fresh"]] += 1
                 if r["fresh"] not in ("OK",):
                     rec["state"] = state
-            if diffs or rec.get("fresh") in ("SILENT", "LOUD"):
+            if (diffs or rec.get("fresh") in ("SILENT", "LOUD")) and SAVED[0] < 5:
+                SAVED[0] += 1
                 doc.saveAs("%s/%s-fail%d.FCStd" % (OUT, TAG, k))
         except Exception as e:
             rec["exc"] = "check %s: %s" % (type(e).__name__, e); rec["tb"] = traceback.format_exc().splitlines()[-3:]
@@ -703,6 +706,9 @@ def main():
         if HEAL:
             base_err = signature(doc)["errors"]
         emit(**rec)
+        if rec.get("fresh") in STOPAT:
+            emit(step="stopat", at=k, verdict=rec["fresh"])
+            break
         if STOP and k >= STOP:
             doc.saveAs("%s/%s-k%d.FCStd" % (OUT, TAG, k))
             break
@@ -715,8 +721,9 @@ def main():
     print("FUZZ", json.dumps(summ))
 
 
-try:
-    main()
-except Exception:
-    emit(step="fatal", tb=traceback.format_exc())
-    print(traceback.format_exc())
+if os.environ.get("FUZZ_NOMAIN") != "1":   # FUZZ_NOMAIN=1: load only (reduceplus.py)
+    try:
+        main()
+    except Exception:
+        emit(step="fatal", tb=traceback.format_exc())
+        print(traceback.format_exc())
