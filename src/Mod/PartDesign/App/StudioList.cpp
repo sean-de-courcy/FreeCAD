@@ -1768,6 +1768,25 @@ bool StudioList::reconcile(std::string* why)
                 read.push_back(gone);
             }
         }
+        // The parts whose faces its up-to links name (ops#848): it reads them as they are at its
+        // place (studioElementAt()), so it runs again when their last solid before it changes
+        for (const char* name : {"UpToFace", "UpToFace2", "UpToShape", "UpToShape2"}) {
+            auto link = freecad_cast<App::PropertyLinkBase*>(entry->getPropertyByName(name));
+            if (!link) {
+                continue;
+            }
+            std::vector<App::DocumentObject*> linked;
+            link->getLinks(linked, /*all=*/true);
+            for (auto obj : linked) {
+                if (!obj || !Body::isSolidFeature(obj)) {
+                    continue;
+                }
+                auto it = std::ranges::find(bodies, Body::findBodyOf(obj));
+                if (it != bodies.end() && std::ranges::find(read, *it) == read.end()) {
+                    read.push_back(*it);
+                }
+            }
+        }
         if (!read.empty()) {
             for (auto tool : read) {
                 App::DocumentObject* last = nullptr;

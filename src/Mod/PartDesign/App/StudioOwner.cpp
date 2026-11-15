@@ -4,6 +4,10 @@
 // and 10.9): which features run as owners, and the in-scope parts' shapes at an owner's place.
 
 #include <algorithm>
+#include <cmath>
+#include <cstdlib>
+#include <cstring>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -155,6 +159,105 @@ Part::TopoShape studioPartShapeAt(
     );
     shape.transformShape(body->Placement.getValue().toMatrix(), false, true);
     return shape;
+}
+
+Part::TopoShape studioElementAt(
+    const App::DocumentObject* owner,
+    const App::DocumentObject* linked,
+    const std::string& element
+)
+{
+    const StudioList* list = linked && !element.empty() ? StudioList::holding(owner) : nullptr;
+    if (!list || Body::findBodyOf(owner) || !Body::isSolidFeature(linked)) {
+        return {};
+    }
+    const Body* body = Body::findBodyOf(linked);
+    auto from = freecad_cast<const Part::Feature*>(linked);
+    if (!body || !from) {
+        return {};
+    }
+    const Part::Feature* last = studioPartSolidBefore(owner, body);
+    if (!last || last == from) {
+        return {};
+    }
+    // Only forward: linked is before the part's last solid at owner
+    const auto& group = body->Group.getValues();
+    if (std::find(group.begin(), group.end(), linked)
+        >= std::find(group.begin(), group.end(), static_cast<const App::DocumentObject*>(last))) {
+        return {};
+    }
+    const Part::TopoShape& fromShape = from->Shape.getShape();
+    const Part::TopoShape& lastShape = last->Shape.getShape();
+    const Data::IndexedName picked(element.c_str());
+    const Data::MappedName mapped = picked ? fromShape.getMappedName(picked) : Data::MappedName();
+    if (!mapped) {
+        return {};
+    }
+    auto read = [last](const Data::IndexedName& index) {
+        const std::string sub = index.toString();
+        return Part::Feature::getTopoShape(
+            last,
+            Part::ShapeOption::NeedSubElement | Part::ShapeOption::ResolveLink
+                | Part::ShapeOption::Transform,
+            sub.c_str()
+        );
+    };
+    // Under the same name: the element as it is there (a Draft keeps the name of a face it tilts)
+    if (const Data::IndexedName same = lastShape.getIndexedName(mapped)) {
+        return read(same);
+    }
+    // What became of it. A feature that changes the element renames it, and the new name's
+    // history names the old one in full (un-hashed), as the old name's own history does under its
+    // own tag: an element of the last solid that linked doesn't have, with the picked name among
+    // its ancestors, is the picked element as it is there (a face a Draft tilted)
+    const auto ancestry = Part::Feature::getElementHistory(
+        const_cast<Part::Feature*>(from),
+        element.c_str(),
+        /*recursive=*/true,
+        /*sameType=*/false
+    );
+    // The picked name in full: a hashed name "_;~<hash>;<its op>" is followed in its own history
+    // by "_;<its sources>;<its op>", the form a later name's history holds
+    Data::MappedName key = mapped;
+    const std::string hashed = mapped.toString();
+    if (ancestry.size() > 1 && hashed.rfind("_;~", 0) == 0) {
+        const auto cut = hashed.find(';', 2);
+        const std::string op = cut == std::string::npos ? std::string() : hashed.substr(cut);
+        const auto& second = *std::next(ancestry.begin());
+        const std::string full = second.element.toString();
+        if (!op.empty() && full.size() > op.size()
+            && full.compare(full.size() - op.size(), op.size(), op) == 0) {
+            key = second.element;
+        }
+    }
+    const char* type = picked.getType();
+    const unsigned count = lastShape.countSubElements(type);
+    for (unsigned i = 1; i <= count; ++i) {
+        const Data::IndexedName index(type, static_cast<int>(i));
+        const Data::MappedName there = lastShape.getMappedName(index);
+        if (!there || fromShape.getIndexedName(there)) {
+            continue;  // linked has it too: another element, unchanged
+        }
+        const std::string sub = index.toString();
+        const auto history = Part::Feature::getElementHistory(
+            const_cast<Part::Feature*>(last),
+            sub.c_str(),
+            /*recursive=*/true,
+            /*sameType=*/false
+        );
+        const bool descends = history.size() > 1
+            && std::any_of(std::next(history.begin()), history.end(), [&](const auto& item) {
+                   return item.element == key || item.element == mapped;
+               });
+        if (!descends) {
+            continue;
+        }
+        Part::TopoShape shape = read(index);
+        if (!shape.isNull()) {
+            return shape;
+        }
+    }
+    return {};
 }
 
 bool studioWholePartLink(const App::Property* prop)

@@ -539,6 +539,61 @@ class TestStudioOwner(unittest.TestCase):
         self.assertTrue(boss.isValid(), boss.getStatusString())
         self.assertVolume("A", 1000 + 40 * 4 + math.pi * 4 - 1)
 
+    def testUpToFaceFollowsADraftInsertedBeforeTheOwner(self):
+        """Onshape UT5 (ops#848): the face is read as the part has it at the owner. A Draft that
+        tilts Step's top about its x = 6 edge sits between Step and Boss, whose link still names
+        the face on Step: the boss ends on the tilted face's plane, pi (z(2, 5) - 10) with r 1."""
+        step, boss = self.stepAndBoss()
+        a = self.doc.getObject("A")
+        made = self.step(step, "A")
+        side = next(
+            f"Face{i}"
+            for i, f in enumerate(made.Shape.Faces, 1)
+            if abs(f.normalAt(0, 0).x + 1) < 1e-9 and abs(f.CenterOfMass.x - 6) < 1e-6
+        )
+        edge = next(
+            f"Edge{i}"
+            for i, e in enumerate(made.Shape.Edges, 1)
+            if len(e.Vertexes) == 2
+            and abs(e.Vertexes[0].Point.x - e.Vertexes[1].Point.x) > 1
+            and abs(e.Vertexes[0].Point.y) < 1e-6 and abs(e.Vertexes[1].Point.y) < 1e-6
+            and abs(e.Vertexes[0].Point.z - 14) < 1e-6 and abs(e.Vertexes[1].Point.z - 14) < 1e-6
+        )
+        draft = a.newObject("PartDesign::Draft", "Draft")
+        draft.Base = (made, [faceAt(made, 14)])
+        draft.Angle = 10
+        draft.NeutralPlane = (made, [side])
+        draft.PullDirection = (made, [edge])
+        self.doc.openTransaction("adopt")
+        PartDesign.studioReconcile(studioList(self.doc))
+        PartDesign.studioMove(draft, [o.Name for o in studioList(self.doc).Entries].index("Boss"))
+        self.doc.commitTransaction()
+        self.doc.recompute()
+        entries = [o.Name for o in studioList(self.doc).Entries]
+        self.assertLess(entries.index("Draft"), entries.index("Boss"))
+        self.assertTrue(draft.isValid(), draft.getStatusString())
+        self.assertIs(boss.UpToFace[0], made)
+        tilted = [
+            f for f in draft.Shape.Faces
+            if 0.01 < abs(f.normalAt(0, 0).x) < 0.99 and f.normalAt(0, 0).z > 0.5
+        ]
+        self.assertEqual(len(tilted), 1, "the Draft tilted no face")
+        n, p = tilted[0].normalAt(0, 0), tilted[0].CenterOfMass
+        z = p.z - (n.x * (2 - p.x) + n.y * (5 - p.y)) / n.z  # its plane over the boss's centre
+        self.assertGreater(abs(z - 14), 0.3)
+        self.assertTrue(boss.isValid(), boss.getStatusString())
+        self.assertAlmostEqual(boss.AddSubShape.Volume, math.pi * (z - 10), places=3)
+        self.assertEqual([o.Name for o in self.doc.Objects if "Touched" in o.State], [])
+        # The Draft's angle changes: the boss follows in the same recompute
+        draft.Angle = 5
+        self.doc.recompute()
+        n, p = [
+            (f.normalAt(0, 0), f.CenterOfMass) for f in draft.Shape.Faces
+            if 0.01 < abs(f.normalAt(0, 0).x) < 0.99 and f.normalAt(0, 0).z > 0.5
+        ][0]
+        z = p.z - (n.x * (2 - p.x) + n.y * (5 - p.y)) / n.z
+        self.assertAlmostEqual(boss.AddSubShape.Volume, math.pi * (z - 10), places=3)
+
     # A whole part as the stop (ops#846), TestOnshapeEndTypes' ring in a studio: Ring, a Revolution
     # owner on A, revolves the rectangle x 2..5, z 0..10 of the XZ plane about Z up to part W (the
     # box x -10..0, y 0..10, z -5..15): counterclockwise W's face x = 0 comes first, at 90 degrees,
