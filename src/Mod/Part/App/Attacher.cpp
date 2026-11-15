@@ -791,12 +791,21 @@ Base::Placement AttachEngine::placementFactory(
         double cosNX = ZAxis.Dot(dirX);
         double cosNY = ZAxis.Dot(dirY);
         double cosNZ = ZAxis.Dot(dirZ);
-        std::vector<double> cosXYZ;
-        cosXYZ.push_back(fabs(cosNX));
-        cosXYZ.push_back(fabs(cosNY));
-        cosXYZ.push_back(fabs(cosNZ));
-
-        int pos = std::max_element(cosXYZ.begin(), cosXYZ.end()) - cosXYZ.begin();
+        // Onshape's rule (ops#692, fact GS12c in the ops notes): X against Y is a plain
+        // comparison, but Z wins over X or Y only when |cos| with Z exceeds theirs by a
+        // fixed margin. Onshape hands a face over from Z at 44.76132 deg from Z toward X
+        // and at 44.72423 deg toward Y, so an exact 45-degree face never goes to Z,
+        // whichever way the last bit of its normal falls.
+        constexpr double zOverX = 1.008366404477815;  // 1 / tan(44.76132 deg)
+        constexpr double zOverY = 1.009672819845475;  // 1 / tan(44.72423 deg)
+        const double aX = fabs(cosNX);
+        const double aY = fabs(cosNY);
+        const double aZ = fabs(cosNZ);
+        int pos = aY > aX ? 1 : 0;
+        const double margin = pos == 0 ? zOverX : zOverY;
+        if (aZ > margin * (pos == 0 ? aX : aY)) {
+            pos = 2;
+        }
 
         // +X/-X
         if (pos == 0) {
