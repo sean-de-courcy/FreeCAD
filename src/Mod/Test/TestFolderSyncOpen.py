@@ -69,10 +69,11 @@ class TestOneFileOneDocument(unittest.TestCase):
         self.needsCaseInsensitive()
         lowerA = FreeCAD.openDocument(self.path("parts", "A.FCStd"))
         b = FreeCAD.newDocument("SpellB")
+        b.saveAs(self.path("B.FCStd"))  # an external link needs its owner saved
         link = b.addObject("App::Link", "Link")
         link.LinkedObject = lowerA.getObject("Marker")
         b.recompute()
-        b.saveAs(self.path("B.FCStd"))
+        b.save()
         FreeCAD.closeDocument(b.Name)
         FreeCAD.closeDocument(lowerA.Name)
         with open(self.path("B.FCStd"), "rb") as f:
