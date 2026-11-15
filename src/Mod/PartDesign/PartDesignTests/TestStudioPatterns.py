@@ -608,6 +608,36 @@ class TestStudioPatterns(unittest.TestCase):
         self.assertValid(hole)
         self.assertRefused(lp, "Drill", "Through all", "Reapply")
 
+    def testHoleCopyOnAStepStaysAtTheSeedsHeight(self):
+        """Oracle 24 (ops#805): Reapply off copies the seed's cut rigidly, so on a stepped part the
+        copy doesn't follow the new face. The plate raised to z 15 over x 40..60; the blind hole 5
+        deep from the top at x 10 cuts z 5..10, and its copy at x 50 cuts z 5..10 too, under the
+        raised top, which stays whole."""
+        self.plate()
+        p = self.part()
+        pad(p, "Raised", sketch(p, "RaisedSk", xyPlane(p), (40, 0, 60, 20), z=10), 5)
+        PartDesign.studioReconcile(studioList(self.doc))
+        self.doc.recompute()
+        hole = self.drill()
+        lp = linear(p, "LP", [hole], X_AXIS, 40, 3)
+        self.doc.recompute()
+        self.assertValid(hole, lp)
+        self.assertTipVolume(60 * 20 * 10 + 20 * 20 * 5 - 3 * self.hole(5))
+        tip = self.tipShape()
+        self.assertFalse(tip.isInside(V(50, 10, 7.5), 1e-6, True))
+        self.assertTrue(tip.isInside(V(50, 10, 12.5), 1e-6, True))
+        self.assertTrue(tip.isInside(V(50, 10, 2.5), 1e-6, True))
+
+    def testHoleInstanceOffThePartIsDropped(self):
+        """Oracle 24 (ops#805): an instance that falls off the part is dropped silently. Spacing
+        30 on the 60 long plate: x 10, 40 and 70, the last off the plate: two holes, no error."""
+        self.plate()
+        hole = self.drill()
+        lp = linear(self.part(), "LP", [hole], X_AXIS, 60, 3)
+        self.doc.recompute()
+        self.assertValid(hole, lp)
+        self.assertTipVolume(60 * 20 * 10 - 2 * self.hole(5))
+
     def testHoleUpToNextStillReRunsWithReapplyOff(self):
         """Up to next is re-run per instance with Reapply off too (oracle 9, R2): three holes
         through the plate."""
