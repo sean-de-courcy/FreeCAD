@@ -1381,8 +1381,10 @@ bool PropertyLinkBase::_updateElementFingerprints(App::DocumentObject* feature,
                 // in now (ops#833): the take at the end of the recompute is a setter's, which
                 // keeps the record's world, so a suppression the solve already judged would
                 // read as a switch at the next solve and veto a move made after it. Only the
-                // marks' flags change; the rest stays held.
-                if (feature) {
+                // marks' flags change; the rest stays held. Only a reference into the solve's
+                // target was judged (the batch skips the others): one into another object, still
+                // to be recomputed, keeps its world for its own solve (closure[1]: the holder).
+                if (feature && closure.size() > 1 && closure[1] == feature) {
                     auto held = old;
                     if (takeWorld(Data::ElementFingerprint::fromString(text), held)) {
                         fingerprints[i] = held.toString();

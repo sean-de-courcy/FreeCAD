@@ -2326,6 +2326,19 @@ class FailurePassThroughBase:
         edge = chamfer.Base[0].Shape.getElement(chamfer.Base[1][0])
         self.assertTrue(all(abs(v.Point.z - 12) < TOL for v in edge.Vertexes), chamfer.Base[1])
 
+        # The other way (ops#833 review): the hole back, the chamfer follows the next edit too
+        hole.Suppressed = False
+        self.doc.getObject("HoleSketch").Placement = App.Placement(V(0, 0, 12), App.Rotation())
+        self.recompute()
+        self.assertValid(hole, chamfer)
+        block.Length = 14
+        self.doc.getObject("HoleSketch").Placement = App.Placement(V(0, 0, 14), App.Rotation())
+        self.recompute()
+        self.assertValid(chamfer)
+        self.assertVolume(chamfer, BLOCK * 1.4 - HOLE + BOSS - edgeChamfer)
+        edge = chamfer.Base[0].Shape.getElement(chamfer.Base[1][0])
+        self.assertTrue(all(abs(v.Point.z - 14) < TOL for v in edge.Vertexes), chamfer.Base[1])
+
     def testReopenedWhileSuppressed(self):
         """Saved and reopened with the hole suppressed, a sketch on the top still follows the
         block: the record keeps the world it was taken in (ops#549 PS)."""
