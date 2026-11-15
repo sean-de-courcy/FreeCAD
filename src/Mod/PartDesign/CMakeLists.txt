@@ -87,6 +87,7 @@ set(PartDesign_TestScripts
     PartDesignTests/TestCorpusGate.py
     PartDesignTests/TestNamingSolver.py
     PartDesignTests/TestNameGrowth.py
+    PartDesignTests/TestRefineWholeNames.py
     PartDesignTests/TestNamingRewrite.py
     PartDesignTests/TestMaplessNames.py
     PartDesignTests/TestBetaMapless.py
