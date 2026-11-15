@@ -3,7 +3,7 @@
 # existing dump changes and the revision doesn't: a change of existing names needs a new revision,
 # which makes files saved before it re-derive their references from geometry once. A new or
 # removed dump only needs recording again.
-revision 19
+revision 20
 digest CompoundCopies.V2.txt 4f4fe665c70b8117fdecfbb2dd40c396a60299e5794b7c959a4eb5aa455aab44
 digest CompoundCut.V2.txt 37e1920268e5b309eaff29ab40d9f4a2c9e8b51c2bf8187282f1c6b0cc312035
 digest CutSplit.V2.txt 44b0e24de77cbcd8b83bb99731e627546165cf04142d148c4d47afa557310ee4
@@ -19,7 +19,7 @@ digest PadPocket.V2.txt 02af122bf9876dad909d8ddcd64b57fc9da4b10dff57e01d4084ca7f
 digest PadUpToFace.V2.txt 25bd8e31c23f49100deb80b397787e6a164433044993c3842df9246434baf564
 digest PadUpToFreeform.V2.txt 8dd54e54562c086ac05a5d1d83f92aae5d7ccbcf09eb6afe6063537fcb642b0a
 digest PatternSteps.V2.txt 29fe411d5a53a3390e4e9acd8792dcb0b38c57df570cb046cdf2f7c2c8b760c6
-digest PipeClosedAndUnion.V2.txt 3f3dbafb7cb6107cb6a591e2663fdfe43c6e67de4f389994e42bfe28c97ca547
+digest PipeClosedAndUnion.V2.txt aaae3e8481b8e06a51ae09af1eab512abadcfd25491ebb2ad8a68835d7c57306
 digest PipeShell.V2.txt 3e8e0a5245466d11e1ed162911e2c4c4c86118b6f03dcc3a6cc4b9ed8ef60a9d
 digest Refine.V2.txt 77a6b7f41ba546f4bb3d122424dbf9174ca5906e9ccd9eebe42da18bc5499532
 digest RevolutionUpToFace.V2.txt 9a7ab6b34ef6647b7429ed070c820a1c73e36bf369923325b3b71f2513fe5d3e
