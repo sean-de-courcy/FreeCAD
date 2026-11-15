@@ -432,12 +432,10 @@ class TestThickness(unittest.TestCase):
 
     def testShellRefusalsSayWhatHelps(self):
         """Where no mode of OCCT's builds the shell, the feature fails and says what helps. With
-        OCCT 8.0.1 on Windows all three fail: the Intersection join with the hole 5 from two
-        sides, and a hole's wall tangent to the side's wall (6 from the side) with either join
-        (the intersecting mode returns the plate as it was there, which is never taken for the
-        shell, ops#795). Where a kernel builds one, it is the shell."""
+        OCCT 8.0.1 on Windows a hole's wall tangent to the side's wall (6 from the side) fails
+        with either join (the intersecting mode returns the plate as it was there, which is
+        never taken for the shell, ops#795). Where a kernel builds one, it is the shell."""
         for holes, join in (
-            ([(5, 5)], "Intersection"),
             ([(60, 6)], "Arc"),
             ([(60, 6)], "Intersection"),
         ):
@@ -449,6 +447,26 @@ class TestThickness(unittest.TestCase):
                     self.assertIn("opposite direction", thickness.getStatusString())
                 FreeCAD.closeDocument(self.Doc.Name)
                 self.Doc = FreeCAD.newDocument("PartDesignTestThickness")
+
+    def testShellWithTheIntersectionJoinAndAHoleNearACorner(self):
+        """The Intersection join with the hole 5 from two sides, which no mode of OCCT's
+        thick-solid builder builds: the cavity is built with the open face held in place
+        (ops#811). It is the Arc join's shell there, but for the sliver of cavity the hole's
+        wall cuts off in the corner (0.21 mm^2 across, between the two side walls' inner
+        planes and the hole's wall of radius 4.5): OCCT's offset of the whole solid leaves
+        that out, so the corner stays solid, 1.781 mm^3 more than designed. Debt, and never
+        a wall thinner than asked."""
+        thickness, expected = self._plateWithHoles([(5, 5)], "Intersection")
+        self.assertTrue(thickness.isValid(), thickness.getStatusString())
+        shape = thickness.Shape
+        self.assertTrue(shape.isValid())
+        self.assertEqual(len(shape.Solids), 1)
+        self.assertLess(expected.cut(shape).Volume, 1e-4)
+        # the sliver's section: within 3.5 of the hole's axis along x and along y, outside
+        # the radius 4.5; the cavity is 8.5 high
+        reach = math.sqrt(4.5**2 - 3.5**2)
+        area = 3.5 * (3.5 - reach) - 4.5**2 / 2 * (math.asin(3.5 / 4.5) - math.asin(reach / 4.5))
+        self.assertAlmostEqual(shape.cut(expected).Volume, area * 8.5, places=4)
 
     def _outwardShellOfABlockWithAPocket(self, length, width, height, pocket, join, removeTop):
         """A <length> x <width> x <height> block with a through pocket <pocket> = (x, y, dx, dy),
@@ -621,11 +639,14 @@ class TestThickness(unittest.TestCase):
         self.assertAlmostEqual(expected.Volume, 2200 - (18 * 5 * 9 + 18 * 3 * 10), places=6)
         self._assertShell(thickness, expected)
 
-    def testShellFromAStepLowerThanTheWallIsNotComposed(self):
-        """The same with the step 0.5 high, half the wall of 1: the cavity opened in front of
-        the step's offset wall (y 6) would run under the step's top, 0.5 above it, where a
-        wall of 1 is asked. It is not composed: the feature fails and says what helps
-        (ops#811, the review's find). Where a kernel builds a shell, it is smaller."""
+    def testShellFromAStepLowerThanTheWallIsRefused(self):
+        """The same with the step 0.5 high, half the wall of 1: the step's wall has no offset
+        face (it would stand upside down), and the cavity built without it runs on under the
+        step's top, 0.5 below it, where a wall of 1 is asked. That is refused: the feature fails
+        and says what helps (ops#811). Onshape builds one there (a 40 x 20 x 10 block with a
+        step 1 high, 2 inward: 8400 -> 4048.000, 16 faces, oracle 26, SL7), with the strip
+        under the step's wall half as thick as asked; OCCT's offset gives another solid, so
+        this stays debt. Where a kernel builds a shell, it is smaller."""
         thickness, solid = self._steppedBlock((20, 10, 10), (0, 5, 20, 5, 0.5), (10, 2.5, 10), 1)
         if thickness.isValid():
             self.assertTrue(thickness.Shape.isValid())
@@ -633,11 +654,20 @@ class TestThickness(unittest.TestCase):
             self.fail("a shell from a step lower than the wall: check it and pin it here")
         self.assertIn("opposite direction", thickness.getStatusString())
 
-    def testShellBesideAStepWithAGrooveOrAHoleAboveTheOpenFaceIsNotComposed(self):
+    def testShellFromAStepExactlyAsHighAsTheThickness(self):
+        """A 40 x 20 x 10 block with a step 2 high on half its top, shelled 2 inward from the
+        other half: the step is the cavity's roof there, 2 thick, and the cavity 36 x 16 x 8
+        runs under it whole (ops#811)."""
+        thickness, solid = self._steppedBlock((40, 20, 10), (0, 0, 20, 20, 2), (30, 10, 10), 2)
+        self.assertAlmostEqual(solid.Volume, 8800, places=6)
+        expected = solid.cut(Part.makeBox(36, 16, 8, FreeCAD.Vector(2, 2, 2)))
+        self.assertAlmostEqual(expected.Volume, 8800 - 36 * 16 * 8, places=6)
+        self._assertShell(thickness, expected)
+
+    def testShellBesideAStepWithAGrooveOrAHoleJustAboveTheOpenFaceIsRefused(self):
         """The L-block with a groove across the step's wall (x 18..20, z 10.5..11) or a blind
         hole into it (r 1, 5 deep, axis at z 11.5): either lies 0.5 above the cavity's strip
-        under the step's wall, where 2 is asked, and touches no open face. Not composed
-        (ops#811, the review's finds)."""
+        under the step's wall, where 2 is asked. Refused (ops#811, the review's finds)."""
         for cut in (
             Part.makeBox(2, 20, 0.5, FreeCAD.Vector(18, 0, 10.5)),
             Part.makeCylinder(1, 5, FreeCAD.Vector(15, 10, 11.5), FreeCAD.Vector(1, 0, 0)),
@@ -650,21 +680,70 @@ class TestThickness(unittest.TestCase):
                 with self.assertRaises(Exception):
                     solid.makeThickness([top], -2, 1e-7, False, False, 0, 0)
 
-    def testShellFromAFaceWithAPocketBesideAStepIsNeverTheSolid(self):
-        """The L-block with a pocket 6 x 6 x 3 in the open face: the kept faces fall apart
-        (the pocket's cup), and of the pieces shelled one by one OCCT hands the L's own back
-        unchanged. That gave the solid unshelled as the result (11892 mm^3). It fails now
-        (ops#811, the review's find); the shell, where a kernel builds it, is 5736."""
-        solid, faceAt = self._lBlock()
-        solid = solid.cut(Part.makeBox(6, 6, 3, FreeCAD.Vector(27, 7, 7)))
-        self.assertAlmostEqual(solid.Volume, 11892, places=6)
-        top = faceAt(solid, 22, 2, 10)
-        try:
-            shell = solid.makeThickness([top], -2, 1e-7, False, False, 0, 2)
-        except Exception:
-            return
+    def _lBlockCavity(self):
+        """The cavity of the L-block shelled 2 inward from its low top: 6656 mm^3."""
+        return Part.makeBox(36, 16, 8, FreeCAD.Vector(2, 2, 2)).fuse(
+            Part.makeBox(16, 16, 8, FreeCAD.Vector(2, 2, 10))
+        )
+
+    def _assertBuiltShell(self, shell, expected, volume, solids=1):
+        """The shell is the solid defined by construction, of the closed-form volume."""
         self.assertTrue(shell.isValid())
-        self.assertAlmostEqual(shell.Volume, 5736, places=4)
+        self.assertEqual(len(shell.Solids), solids)
+        self.assertAlmostEqual(expected.Volume, volume, places=6)
+        self.assertLess(abs(shell.Volume - volume), 1e-6 * volume)
+        self.assertLess(shell.cut(expected).Volume + expected.cut(shell).Volume, 1e-4)
+
+    def testShellFromAFaceWithAPocketABossOrAHoleBesideAStep(self):
+        """The L-block with a pocket 6 x 6 x 3 in the open face, a boss (r 4, 5 high) on it or
+        a through hole (r 3) in it. With the pocket or the boss the kept faces fall apart, and
+        of the pieces shelled one by one OCCT hands the L's own back unchanged, which once gave
+        the solid unshelled (11892 mm^3); with the hole OCCT fails. Each is the L's shell now
+        (ops#811): the cavity keeps 2 from the pocket (a cup 10 x 10 x 5, standing free), runs
+        up into the boss (r 2, to 2 under its top; the boss's tube stands free on the opening)
+        or keeps 2 from the hole (r 5)."""
+        solid, faceAt = self._lBlock()
+        cavity = self._lBlockCavity()
+        for name, part, hollow, volume, solids in (
+            (
+                "pocket",
+                solid.cut(Part.makeBox(6, 6, 3, FreeCAD.Vector(27, 7, 7))),
+                cavity.cut(Part.makeBox(10, 10, 5, FreeCAD.Vector(25, 5, 5))),
+                (12000 - 108) - (6656 - 10 * 10 * 5),
+                2,
+            ),
+            (
+                "boss",
+                solid.fuse(Part.makeCylinder(4, 5, FreeCAD.Vector(30, 10, 10))).removeSplitter(),
+                cavity.fuse(Part.makeCylinder(2, 5, FreeCAD.Vector(30, 10, 8))),
+                (12000 + math.pi * 16 * 5) - (6656 + math.pi * 4 * 3),
+                2,
+            ),
+            (
+                "hole",
+                solid.cut(Part.makeCylinder(3, 10, FreeCAD.Vector(30, 10, 0))),
+                cavity.cut(Part.makeCylinder(5, 20, FreeCAD.Vector(30, 10, 0))),
+                (12000 - math.pi * 9 * 10) - (6656 - math.pi * 25 * 8),
+                1,
+            ),
+        ):
+            with self.subTest(name=name):
+                top = faceAt(part, 22, 2, 10)
+                shell = part.makeThickness([top], -2, 1e-7, False, False, 0, 2)
+                self._assertBuiltShell(shell, part.cut(hollow), volume, solids)
+
+    def testShellBesideAStepOverAHoleFromBelow(self):
+        """The L-block with a blind hole from its bottom under the open face (r 1 at (30, 10),
+        to z 7): the cavity keeps 2 from the hole and from its cap (r 3, to z 9), 5519.929 mm^3
+        as in Onshape (oracle 26). The shell composed from prisms left a column standing to
+        the open face there, 5548.204 (ops#811, ops#839)."""
+        solid, faceAt = self._lBlock()
+        part = solid.cut(Part.makeCylinder(1, 7, FreeCAD.Vector(30, 10, 0)))
+        hollow = self._lBlockCavity().cut(Part.makeCylinder(3, 9, FreeCAD.Vector(30, 10, 0)))
+        shell = part.makeThickness([faceAt(part, 22, 2, 10)], -2, 1e-7, False, False, 0, 2)
+        volume = (12000 - math.pi * 7) - (6656 - math.pi * 9 * 7)
+        self.assertAlmostEqual(volume, 5519.929, places=3)
+        self._assertBuiltShell(shell, part.cut(hollow), volume)
 
     def testShellFromAValleyBetweenTwoSteps(self):
         """A block 60 x 20 x 10 with a step at each end of its top (x 0..20, 10 high, and
@@ -756,19 +835,42 @@ class TestThickness(unittest.TestCase):
         self.assertAlmostEqual(shell.Volume, 2364, places=4)
         self.assertAlmostEqual(expected, 2364, places=6)
 
-    def testShellBesideAStepWithALeaningWallIsNotComposed(self):
+    def testShellBesideAStepWithALeaningWall(self):
         """The L-block with a leaning wall beside the open face: its outer side (x 40 at the
-        floor, 36 at the open face) or the step's wall (x 22 at the open face, 18 at the top).
-        The composed cavity ends square on the open face, which would thin a leaning wall
-        towards it, so it is not composed: the shell fails, it is neither the solid unchanged
-        nor a wall thinner than asked (ops#811). Where a kernel builds one, it is a shell."""
-        for profile in (
-            [(0, 0), (40, 0), (36, 10), (20, 10), (20, 20), (0, 20)],
-            [(0, 0), (40, 0), (40, 10), (22, 10), (18, 20), (0, 20)],
+        floor and 36 at the open face, or 36 and 40) or the step's wall (x 22 at the open face
+        and 18 at the top, or 18 and 22). The cavity's wall is the leaning wall's offset, 2
+        along its normal, up to the open face's plane (ops#811). The first is Onshape's
+        5270.920 mm^3 with 16 faces (oracle 26, SL5)."""
+        k = 2 * math.sqrt(116)  # the offset 2 along the normal (10, 4) / sqrt(116), times 116
+
+        def area(profile):
+            ahead = profile[1:] + profile[:1]
+            return abs(sum(a[0] * b[1] - b[0] * a[1] for a, b in zip(profile, ahead))) / 2
+
+        def prism(profile, y, width):
+            points = [FreeCAD.Vector(x, y, z) for x, z in profile + profile[:1]]
+            return Part.Face(Part.makePolygon(points)).extrude(FreeCAD.Vector(0, width, 0))
+
+        for profile, hollow in (
+            (
+                [(0, 0), (40, 0), (36, 10), (20, 10), (20, 20), (0, 20)],
+                [(2, 2), ((392 - k) / 10, 2), ((360 - k) / 10, 10), (18, 10), (18, 18), (2, 18)],
+            ),
+            (
+                [(0, 0), (36, 0), (40, 10), (20, 10), (20, 20), (0, 20)],
+                [(2, 2), ((368 - k) / 10, 2), ((400 - k) / 10, 10), (18, 10), (18, 18), (2, 18)],
+            ),
+            (
+                [(0, 0), (40, 0), (40, 10), (22, 10), (18, 20), (0, 20)],
+                [(2, 2), (38, 2), (38, 10), ((220 - k) / 10, 10), ((188 - k) / 10, 18), (2, 18)],
+            ),
+            (
+                [(0, 0), (40, 0), (40, 10), (18, 10), (22, 20), (0, 20)],
+                [(2, 2), (38, 2), (38, 10), ((180 - k) / 10, 10), ((212 - k) / 10, 18), (2, 18)],
+            ),
         ):
             with self.subTest(profile=profile):
-                points = [FreeCAD.Vector(x, 0, z) for x, z in profile + profile[:1]]
-                solid = Part.Face(Part.makePolygon(points)).extrude(FreeCAD.Vector(0, 20, 0))
+                solid = prism(profile, 0, 20)
                 self.assertTrue(solid.isValid())
                 opened = [
                     face
@@ -776,13 +878,15 @@ class TestThickness(unittest.TestCase):
                     if abs(face.CenterOfMass.z - 10) < 1e-7 and abs(face.normalAt(0, 0).z) > 0.99
                 ]
                 self.assertEqual(len(opened), 1)
-                try:
-                    shell = solid.makeThickness(opened, -2, 1e-7, False, False, 0, 2)
-                except Exception as error:  # the kernel's refusal
-                    self.assertIn("no shell was built", str(error))
-                else:
-                    self.assertTrue(shell.isValid())
-                    self.assertLess(shell.Volume, solid.Volume - 1)
+                shell = solid.makeThickness(opened, -2, 1e-7, False, False, 0, 2)
+                volume = area(profile) * 20 - area(hollow) * 16
+                self._assertBuiltShell(shell, solid.cut(prism(hollow, 2, 16)), volume)
+                self.assertEqual(len(shell.Faces), 16)
+        self.assertAlmostEqual(
+            580 * 20 - area([(2, 2), ((392 - k) / 10, 2), ((360 - k) / 10, 10), (18, 10), (18, 18), (2, 18)]) * 16,
+            5270.920,
+            places=3,
+        )
 
     def _lBlock(self):
         """The L-block of testShellOfAnLBlockFromItsStep as a plain solid, and a function
@@ -806,65 +910,90 @@ class TestThickness(unittest.TestCase):
 
         return solid, faceAt
 
-    def _assertShellOrRefusal(self, solid, opened, expectedVolume):
-        """The inward shell of 2 is the designed one, or it is refused: never the solid
-        unchanged, never another valid solid."""
-        try:
-            shell = solid.makeThickness(opened, -2, 1e-7, False, False, 0, 0)
-        except Exception as error:  # the kernel's refusal
-            self.assertIn("no shell was built", str(error))
-        else:
-            self.assertTrue(shell.isValid())
-            self.assertAlmostEqual(shell.Volume, expectedVolume, places=4)
 
-    def testShellFromTwoTouchingFacesBesideAStepIsNotComposed(self):
+    def testShellFromTwoTouchingFacesBesideAStep(self):
         """The L-block shelled 2 inward from the step's top and a face next to it: the end
-        (x 40) or a side (y 0). A prism per open face would leave the bar between them
-        standing across the open corner (2 x 2 x 16, or 2 x 2 x 20 along the side), so it is
-        not composed (ops#811, the review's find). The designed shells: 5088 and 4512."""
+        (x 40) or a side (y 0). Both open faces stay where they are and the cavity runs out
+        through each: 5088 mm^3 with 16 faces, as in Onshape (oracle 26, SL6), and 4512
+        (ops#811)."""
         solid, faceAt = self._lBlock()
         top = faceAt(solid, 30, 10, 10)
-        for other, cavity in (
+        for other, cavity, volume in (
             (
                 faceAt(solid, 40, 10, 5),
                 Part.makeBox(38, 16, 8, FreeCAD.Vector(2, 2, 2)).fuse(
                     Part.makeBox(16, 16, 8, FreeCAD.Vector(2, 2, 10))
                 ),
+                12000 - (38 * 16 * 8 + 16 * 16 * 8),
             ),
             (
                 faceAt(solid, 30, 0, 5),
                 Part.makeBox(36, 18, 8, FreeCAD.Vector(2, 0, 2)).fuse(
                     Part.makeBox(16, 18, 16, FreeCAD.Vector(2, 0, 2))
                 ),
+                12000 - (36 * 18 * 8 + 16 * 18 * 8),
             ),
         ):
             with self.subTest(other=other.CenterOfMass):
-                self._assertShellOrRefusal(solid, [top, other], solid.cut(cavity).Volume)
+                shell = solid.makeThickness([top, other], -2, 1e-7, False, False, 0, 0)
+                self._assertBuiltShell(shell, solid.cut(cavity), volume)
+        self.assertEqual(12000 - (38 * 16 * 8 + 16 * 16 * 8), 5088)
 
-    def testShellBesideAStepWithAChamferOnTheOpenFaceIsNotComposed(self):
-        """The L-block with a chamfer of 0.5 or 1 on the open face's outer edge (y 0, z 10).
-        The chamfer's offset face is cut away by its neighbours' in the offset solid, so a
-        cavity composed from that alone runs 1.5 or 1 from the chamfer, not 2: it is not
-        composed (ops#811, the review's find). A round there, which OCCT returned as a solid
-        larger than the L, is refused the same way."""
+    def testShellBesideAStepWithAChamferOnTheOpenFace(self):
+        """The L-block with a chamfer on an edge of the open face: 0.5 or 1 on its side edge
+        (y 0, z 10) or 1 on its end edge (x 40, z 10). The cavity keeps 2 from the chamfer
+        along its normal: a corner with legs of the chamfer's size + 2 sqrt(2) - 2 stays, along
+        the cavity's 20 (the side, on under the step's wall) or 16 (the end). The last is
+        Onshape's 5360.745 mm^3 with 18 faces (oracle 26, SL4; ops#811)."""
+        for size, where, length in ((0.5, "side", 20), (1.0, "side", 20), (1.0, "end", 16)):
+            with self.subTest(size=size, where=where):
+                solid, faceAt = self._lBlock()
+                edges = [
+                    edge
+                    for edge in solid.Edges
+                    if abs(edge.CenterOfMass.z - 10) < 1e-7
+                    and (
+                        abs(edge.CenterOfMass.x - 40) < 1e-7
+                        if where == "end"
+                        else abs(edge.CenterOfMass.y) < 1e-7 and abs(edge.CenterOfMass.x - 30) < 1e-7
+                    )
+                ]
+                self.assertEqual(len(edges), 1)
+                dressed = solid.makeChamfer(size, edges)
+                self.assertTrue(dressed.isValid())
+                self.assertAlmostEqual(dressed.Volume, 12000 - size * size / 2 * 20, places=6)
+                top = faceAt(dressed, 30, 10, 10)
+                shell = dressed.makeThickness([top], -2, 1e-7, False, False, 0, 0)
+                self.assertTrue(shell.isValid())
+                self.assertEqual(len(shell.Solids), 1)
+                self.assertEqual(len(shell.Faces), 18)
+                leg = size + 2 * math.sqrt(2) - 2
+                volume = (12000 - size * size / 2 * 20) - (6656 - leg * leg / 2 * length)
+                self.assertLess(abs(shell.Volume - volume), 1e-6 * volume)
+        self.assertAlmostEqual(11990 - (6656 - (2 * math.sqrt(2) - 1) ** 2 / 2 * 16), 5360.745, places=3)
+
+    def testShellBesideAStepWithARoundOnTheOpenFaceIsRefused(self):
+        """The L-block with a round of 0.5 or 1 on the open face's side edge (y 0, z 10), which
+        OCCT's thick-solid builder returned as a solid larger than the L. The round's offset
+        face does not reach the open face's plane, and the cavity OCCT's offset gives there
+        cuts the wall beside the round away: refused (ops#811). Debt: Onshape, not checked."""
         for size in (0.5, 1.0):
-            for make in ("makeChamfer", "makeFillet"):
-                with self.subTest(size=size, make=make):
-                    solid, faceAt = self._lBlock()
-                    edges = [
-                        edge
-                        for edge in solid.Edges
-                        if abs(edge.CenterOfMass.y) < 1e-7
-                        and abs(edge.CenterOfMass.z - 10) < 1e-7
-                        and abs(edge.CenterOfMass.x - 30) < 1e-7
-                    ]
-                    self.assertEqual(len(edges), 1)
-                    dressed = getattr(solid, make)(size, edges)
-                    self.assertTrue(dressed.isValid())
-                    top = faceAt(dressed, 30, 10, 10)
-                    with self.assertRaises(Exception) as refusal:
-                        dressed.makeThickness([top], -2, 1e-7, False, False, 0, 0)
-                    self.assertIn("no shell was built", str(refusal.exception))
+            with self.subTest(size=size):
+                solid, faceAt = self._lBlock()
+                edges = [
+                    edge
+                    for edge in solid.Edges
+                    if abs(edge.CenterOfMass.y) < 1e-7
+                    and abs(edge.CenterOfMass.z - 10) < 1e-7
+                    and abs(edge.CenterOfMass.x - 30) < 1e-7
+                ]
+                self.assertEqual(len(edges), 1)
+                dressed = solid.makeFillet(size, edges)
+                self.assertTrue(dressed.isValid())
+                top = faceAt(dressed, 30, 10, 10)
+                with self.assertRaises(Exception) as refusal:
+                    dressed.makeThickness([top], -2, 1e-7, False, False, 0, 0)
+                self.assertIn("no shell was built", str(refusal.exception))
 
     def _partThicknessOfAPlate(self, hole, join):
         """Part's Thickness of a 120 x 80 x 10 plate less <hole> (a through solid), bottom face
