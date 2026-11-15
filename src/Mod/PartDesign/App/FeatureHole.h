@@ -287,7 +287,7 @@ private:
     const CutDimensionSet& find_cutDimensionSet(const CutDimensionKey& k);
 
     void addCutType(const CutDimensionSet& dimensions);
-    void updateHoleCutParams();
+    void updateHoleCutParams(bool diameterChanged = false);
     void calculateAndSetCounterbore();
     void calculateAndSetCountersink();
     std::optional<double> determineDiameter() const;
