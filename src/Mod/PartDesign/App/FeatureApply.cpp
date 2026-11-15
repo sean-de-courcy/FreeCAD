@@ -204,7 +204,34 @@ short FeatureApply::mustExecute() const
     if (StudioOwner.isTouched()) {
         return 1;
     }
+    // Its part (or the owner's) moved: no link it reads changed (ops#813, as a Merge's
+    // toolFrames). Polled, so a move recomputed for other reasons first is still seen here
+    if (lastOwnerFrame) {
+        const std::optional<Base::Placement> now = ownerFrame();
+        if (!now || !now->isSame(*lastOwnerFrame, Precision::Confusion())) {
+            return 1;
+        }
+    }
     return FeatureAddSub::mustExecute();
+}
+
+std::optional<Base::Placement> FeatureApply::ownerFrame() const
+{
+    App::DocumentObject* owner = StudioOwner.getValue();
+    if (!owner || !owner->isAttachedToDocument()) {
+        return std::nullopt;
+    }
+    Body* body = getFeatureBody();
+    const Base::Placement bodyFrame = body ? App::GeoFeature::getGlobalPlacement(body)
+                                           : Base::Placement();
+    return bodyFrame.inverse() * App::GeoFeature::getGlobalPlacement(owner);
+}
+
+void FeatureApply::onDocumentRestored()
+{
+    // A saved step is taken as computed where it is: the file records no frame
+    lastOwnerFrame = ownerFrame();
+    FeatureAddSub::onDocumentRestored();
 }
 
 Part::TopoShape FeatureApply::toolOf(const App::DocumentObject* owner, std::string* why)
@@ -262,6 +289,8 @@ Part::TopoShape FeatureApply::toolOf(const App::DocumentObject* owner, std::stri
 
 App::DocumentObjectExecReturn* FeatureApply::execute()
 {
+    // The frame this compute reads (ops#813)
+    lastOwnerFrame = ownerFrame();
     if (onlyHaveRefined()) {
         return App::DocumentObject::StdReturn;
     }
