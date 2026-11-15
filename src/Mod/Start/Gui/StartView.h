@@ -119,6 +119,9 @@ private:
     QLabel* _examplesLabel;
     QLabel* _recentFilesLabel;
     QLabel* _customFolderLabel;
+    // FreeCAD-CH (ops#640, folder sync item 2): what is wrong with the team folder, if anything
+    QLabel* _teamFolderLabel = nullptr;
+    void updateTeamFolderLabel();
     QPushButton* _openFirstStart;
     QCheckBox* _showOnStartupCheckBox;
     // FreeCAD-CH: the Onshape keymap's Documents page (New, Open, recent documents), ops#640 P11
