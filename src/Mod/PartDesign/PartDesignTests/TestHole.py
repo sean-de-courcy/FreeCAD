@@ -165,6 +165,53 @@ class TestHole(unittest.TestCase):
         self.Doc.recompute()
         self.assertAlmostEqual(self.Hole.Shape.Volume, 10**3 - pi * 3**2 * 10 - 24.7400421)
 
+    def testCutNarrowerThanHoleErrsAndKeepsValues(self):
+        """A hole diameter at or past the cut's errs and keeps the cut values, as Onshape (ops#847)"""
+        for cutType, values in (("Counterbore", (8, 2)), ("Countersink", (9, 90)), ("Counterdrill", (9, 90))):
+            self.Hole.Diameter = 6
+            self.Hole.Depth = 10
+            self.Hole.ThreadType = 0
+            self.Hole.HoleCutType = cutType
+            self.Hole.DepthType = "Dimension"
+            self.Hole.DrillPoint = "Flat"
+            self.Hole.Tapered = False
+            self.Doc.recompute()
+            # a new cut has a proposal wider than the hole
+            self.assertGreater(self.Hole.HoleCutDiameter.Value, 6, cutType)
+            self.Hole.HoleCutDiameter = values[0]
+            if cutType == "Counterbore":
+                self.Hole.HoleCutDepth = values[1]
+            else:
+                self.Hole.HoleCutCountersinkAngle = values[1]
+            if cutType == "Counterdrill":
+                self.Hole.HoleCutDepth = 2
+            self.Doc.recompute()
+            self.assertTrue(self.Hole.isValid(), cutType)
+            kept = (self.Hole.HoleCutDiameter.Value, self.Hole.HoleCutDepth.Value,
+                    self.Hole.HoleCutCountersinkAngle.Value)
+            for diameter in (values[0], 10):
+                self.Hole.Diameter = diameter
+                self.Doc.recompute()
+                self.assertFalse(self.Hole.isValid(), (cutType, diameter))
+                now = (self.Hole.HoleCutDiameter.Value, self.Hole.HoleCutDepth.Value,
+                       self.Hole.HoleCutCountersinkAngle.Value)
+                for a, b in zip(now, kept):
+                    self.assertAlmostEqual(a, b, msg=(cutType, diameter))
+            self.Hole.Diameter = 6
+            self.Doc.recompute()
+            self.assertTrue(self.Hole.isValid(), cutType)
+            if cutType == "Counterbore":
+                # 2 deep at r 4, 8 deep at r 3
+                self.assertAlmostEqual(self.Hole.Shape.Volume,
+                                       10**3 - pi * 4**2 * 2 - pi * 3**2 * 8)
+            elif cutType == "Countersink":
+                # a 90 degree cone from r 4.5 down to r 3, 1.5 deep, then r 3 for the rest
+                cone = pi * 1.5 / 3 * (4.5**2 + 4.5 * 3 + 3**2)
+                self.assertAlmostEqual(self.Hole.Shape.Volume,
+                                       10**3 - cone - pi * 3**2 * 8.5)
+            self.tearDown()
+            self.setUp()
+
     def testCustomCutValuesSurviveReopen(self):
         """Custom counterbore values of a normed hole cut stay after a save and reopen (ops#389)"""
         # An M6 hole with an ISO 4762 counterbore, whose normed cut is wider than 10, overridden

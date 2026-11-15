@@ -874,15 +874,17 @@ void Hole::updateHoleCutParams()
 
         std::string threadSizeStr = ThreadSize.getValueAsString();
 
-        // we don't update for these settings but we need to set a value for new holes
-        // furthermore we must assure the hole cut diameter is not <= the hole diameter
-        // if we have a cut but the values are zero, we assume it is a new hole
+        // we don't update for these settings but we need to set a value for new holes:
+        // if we have a cut but the values are zero, we assume it is a new hole.
+        // FreeCAD-CH (ops#847): a cut diameter not larger than the hole keeps the user's
+        // values and execute() reports "Hole cut diameter too small", as Onshape does
+        // (HOLE_CBORE_TOO_SMALL, HOLE_CSINK_TOO_SMALL)
         // we take in this case the values from the norm ISO 4762 or ISO 10642
         if (holeCutTypeStr == "Counterbore") {
             // read ISO 4762 values
             const CutDimensionSet& counter = find_cutDimensionSet(threadTypeStr, "ISO 4762");
             const CounterBoreDimension& dimen = counter.get_bore(threadSizeStr);
-            if (HoleCutDiameter.getValue() == 0.0 || HoleCutDiameter.getValue() <= diameterVal) {
+            if (HoleCutDiameter.getValue() == 0.0) {
                 // there is no norm defining counterbores for all sizes, thus we need to use the
                 // same fallback as for the case HoleCutTypeMap.count(key)
                 if (dimen.diameter != 0.0) {
@@ -903,7 +905,7 @@ void Hole::updateHoleCutParams()
         else if (holeCutTypeStr == "Countersink" || holeCutTypeStr == "Counterdrill") {
             // read ISO 10642 values
             const CutDimensionSet& counter = find_cutDimensionSet(threadTypeStr, "ISO 10642");
-            if (HoleCutDiameter.getValue() == 0.0 || HoleCutDiameter.getValue() <= diameterVal) {
+            if (HoleCutDiameter.getValue() == 0.0) {
                 const CounterSinkDimension& dimen = counter.get_sink(threadSizeStr);
                 HoleCutCountersinkAngle.setValue(counter.angle);
                 if (dimen.diameter != 0.0) {
@@ -988,7 +990,7 @@ void Hole::updateHoleCutParams()
                     // make a cut
                     if (proposeValues
                         || (!inTransaction
-                            && (HoleCutDiameter.getValue() <= diameterVal
+                            && (HoleCutDiameter.getValue() <= 0.0
                                 || HoleCutDepth.getValue() <= 0.0))) {
                         calculateAndSetCounterbore();
                     }
@@ -1042,7 +1044,7 @@ void Hole::updateHoleCutParams()
                     }
                     // FreeCAD-CH (ops#389): as for the counterbore above
                     if (proposeValues
-                        || (!inTransaction && HoleCutDiameter.getValue() <= diameterVal)) {
+                        || (!inTransaction && HoleCutDiameter.getValue() <= 0.0)) {
                         calculateAndSetCountersink();
                     }
                     // we force custom values since there are no normed ones
@@ -1090,12 +1092,14 @@ void Hole::updateHoleCutParams()
         }
     }
     else {
-        // we don't update for these settings but we need to set a value for new holes
-        // furthermore we must assure the hole cut diameter is not <= the hole diameter
-        // if we have a cut but the values are zero, we assume it is a new hole
+        // we don't update for these settings but we need to set a value for new holes:
+        // if we have a cut but the values are zero, we assume it is a new hole.
+        // FreeCAD-CH (ops#847): a cut diameter not larger than the hole keeps the user's
+        // values and execute() reports "Hole cut diameter too small", as Onshape does
+        // (HOLE_CBORE_TOO_SMALL, HOLE_CSINK_TOO_SMALL)
         // we use rules of thumbs as proposal
         if (holeCutTypeStr == "Counterbore") {
-            if (HoleCutDiameter.getValue() == 0.0 || HoleCutDiameter.getValue() <= diameterVal) {
+            if (HoleCutDiameter.getValue() == 0.0) {
                 HoleCutDiameter.setValue(diameterVal * 1.6);
                 HoleCutDepth.setValue(diameterVal * 0.9);
             }
@@ -1106,7 +1110,7 @@ void Hole::updateHoleCutParams()
             HoleCutDepth.setReadOnly(false);
         }
         else if (holeCutTypeStr == "Countersink" || holeCutTypeStr == "Counterdrill") {
-            if (HoleCutDiameter.getValue() == 0.0 || HoleCutDiameter.getValue() <= diameterVal) {
+            if (HoleCutDiameter.getValue() == 0.0) {
                 HoleCutDiameter.setValue(diameterVal * 1.7);
                 HoleCutCountersinkAngle.setValue(getCountersinkAngle());
             }
