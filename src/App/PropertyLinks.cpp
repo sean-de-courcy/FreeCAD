@@ -6234,7 +6234,10 @@ public:
         const char* filename = doc.getFileName();
         QString docPath(getFullPath(filename));
 
-        if (path.isEmpty() || path != docPath) {
+        // FreeCAD-CH (folder-sync item 4): another spelling of the same file is not a move. Moving
+        // this entry to the document's own spelling would collide with the entry of a link that
+        // spells it that way, and the collision detaches these links
+        if (path.isEmpty() || (path != docPath && !isFileOf(filename, path))) {
             FC_LOG("document '" << doc.getName() << "' path changed");
             auto me = shared_from_this();
             auto ret = _DocInfoMap.insert(std::make_pair(docPath, me));
