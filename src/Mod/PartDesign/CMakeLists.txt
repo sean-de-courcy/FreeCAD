@@ -27,6 +27,7 @@ if(BUILD_GUI)
           SprocketFeature.ui
           DerivedFromFileGui.py
           ConfigurationsGui.py
+          ExportPartsGui.py
     )
 endif(BUILD_GUI)
 
@@ -158,6 +159,7 @@ if(BUILD_GUI)
         PartDesignTests/TestMeasuredVariablesGui.py
         PartDesignTests/TestRollBackBarGui.py
     PartDesignTests/TestFeaturesViewGui.py
+    PartDesignTests/TestExportPartsGui.py
         PartDesignTests/TestParkedMarkingGui.py
         PartDesignTests/TestSelectionFilterGui.py
         PartDesignTests/TestExpressionFieldsGui.py

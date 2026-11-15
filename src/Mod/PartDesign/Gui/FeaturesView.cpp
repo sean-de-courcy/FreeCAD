@@ -2907,6 +2907,22 @@ void FeaturesView::onFeatureMenu(const QPoint& pos)
     edit->setObjectName(QStringLiteral("featureEdit"));
     // One feature is edited at a time
     edit->setEnabled(features->selectedItems().size() <= 1);
+    // Onshape's Edit <its sketch>... (GB16): on a feature made from a sketch, the sketch opens
+    if (auto sketch = sketchOf(obj)) {
+        const std::string sketchName = sketch->getNameInDocument();
+        auto editSketch = menu.addAction(
+            tr("Edit %1...").arg(QString::fromUtf8(sketch->Label.getValue())),
+            [self, sketchName]() {
+                auto doc = self ? self->document() : nullptr;
+                auto target = doc ? doc->getObject(sketchName.c_str()) : nullptr;
+                if (auto vp = target ? viewProviderOf(target) : nullptr) {
+                    vp->doubleClicked();
+                }
+            }
+        );
+        editSketch->setObjectName(QStringLiteral("featureEditSketch"));
+        editSketch->setEnabled(features->selectedItems().size() <= 1);
+    }
     auto rename = menu.addAction(tr("Rename"), [self]() {
         if (self) {
             self->renameCurrent(self->features);
@@ -3092,6 +3108,13 @@ void FeaturesView::markDependencies()
         item->setData(Qt::BackgroundRole, background);
         item->setData(DependencyRole, dependencyParents.count(name) ? 1 : dependencyChildren.count(name) ? 2 : 0);
     }
+}
+
+App::DocumentObject* FeaturesView::sketchOf(App::DocumentObject* feature)
+{
+    auto based = freecad_cast<PartDesign::ProfileBased*>(feature);
+    App::DocumentObject* profile = based ? based->Profile.getValue() : nullptr;
+    return profile && profile->isDerivedFrom<Part::Part2DObject>() ? profile : nullptr;
 }
 
 App::DocumentObject* FeaturesView::creatorOf(App::DocumentObject* shape, const char* element)
@@ -3330,36 +3353,39 @@ void FeaturesView::onPartMenu(const QPoint& pos)
         }
     });
     rename->setObjectName(QStringLiteral("partRename"));
+    // Onshape's order (GB16): Rename; Assign material, Edit appearance; Create drawing, Export; Hide,
+    // Hide other parts, Hide all parts, Isolate; Zoom to selection; Delete
     menu.addSeparator();
-    auto show = menu.addAction(tr("Show/Hide"), [runByName]() { runByName("Std_ToggleVisibility"); });
-    show->setObjectName(QStringLiteral("partToggleVisibility"));
-    auto isolate = menu.addAction(tr("Isolate"), [runByName]() { runByName("Std_Isolate"); });
-    isolate->setObjectName(QStringLiteral("partIsolate"));
-    // Onshape's Hide other parts: every other part of the list, not the sketches or planes
     std::vector<std::string> keep;
     for (auto selected : parts->selectedItems()) {
         if (auto part = objectOf(selected)) {
             keep.emplace_back(part->getNameInDocument());
         }
     }
-    auto others = menu.addAction(tr("Hide other parts"), [self, keep]() {
+    // The selected parts, by name (the menu's actions run after it closes)
+    auto selectedParts = [self, keep]() {
+        std::vector<App::DocumentObject*> objs;
+        auto doc = self ? self->document() : nullptr;
+        for (const auto& partName : keep) {
+            if (auto part = doc ? doc->getObject(partName.c_str()) : nullptr) {
+                objs.push_back(part);
+            }
+        }
+        return objs;
+    };
+    auto& commands = Gui::Application::Instance->commandManager();
+    // Material's command, registered at the GUI's start, sets the selection's material
+    auto material = menu.addAction(tr("Assign material..."), [self, selectedParts, runByName]() {
         if (!self) {
             return;
         }
-        for (int i = 0; i < self->parts->topLevelItemCount(); ++i) {
-            auto part = self->objectOf(self->parts->topLevelItem(i));
-            auto vp = part ? viewProviderOf(part) : nullptr;
-            if (vp && vp->isShow() && std::ranges::find(keep, part->getNameInDocument()) == keep.end()) {
-                vp->hide();
-            }
-        }
-        self->scheduleRebuild();
+        self->pushSelection(selectedParts());
+        runByName("Std_SetMaterial");
     });
-    others->setObjectName(QStringLiteral("partHideOthers"));
+    material->setObjectName(QStringLiteral("partAssignMaterial"));
+    material->setEnabled(commands.getCommandByName("Std_SetMaterial") != nullptr);
     auto appearance = menu.addAction(tr("Edit appearance..."), [runByName]() { runByName("Std_SetAppearance"); });
     appearance->setObjectName(QStringLiteral("partAppearance"));
-    auto fit = menu.addAction(tr("Zoom to selection"), [runByName]() { runByName("Std_ViewFitSelection"); });
-    fit->setObjectName(QStringLiteral("partZoom"));
     // Onshape's Create drawing of <part> (ops#640 rank 62): TechDraw's command, registered at the
     // GUI's start, draws the one selected object, so the part is selected alone first
     menu.addSeparator();
@@ -3377,10 +3403,55 @@ void FeaturesView::onPartMenu(const QPoint& pos)
         }
     );
     drawing->setObjectName(QStringLiteral("partCreateDrawing"));
-    drawing->setEnabled(
-        Gui::Application::Instance->commandManager().getCommandByName("TechDraw_CreateDrawing")
-        != nullptr
-    );
+    drawing->setEnabled(commands.getCommandByName("TechDraw_CreateDrawing") != nullptr);
+    // Onshape's Export... (GB15): one dialog, STL by default, with units and resolution
+    // (ExportPartsGui.py), for the selected parts
+    auto exportParts = menu.addAction(tr("Export..."), [self, keep]() {
+        auto doc = self ? self->document() : nullptr;
+        if (!doc) {
+            return;
+        }
+        std::string names;
+        for (const auto& partName : keep) {
+            names += "'" + partName + "',";
+        }
+        try {
+            Base::Interpreter().runString(
+                ("import ExportPartsGui\nExportPartsGui.showDialog('" + std::string(doc->getName())
+                 + "', [" + names + "])")
+                    .c_str()
+            );
+        }
+        catch (const Base::Exception& e) {
+            Gui::getMainWindow()->showMessage(QString::fromUtf8(e.what()), 5000);
+        }
+    });
+    exportParts->setObjectName(QStringLiteral("partExport"));
+    menu.addSeparator();
+    auto show = menu.addAction(tr("Show/Hide"), [runByName]() { runByName("Std_ToggleVisibility"); });
+    show->setObjectName(QStringLiteral("partToggleVisibility"));
+    // Onshape's Hide other parts and Hide all parts: the parts of the list, not the sketches or planes
+    auto hideParts = [self](const std::vector<std::string>& spared) {
+        if (!self) {
+            return;
+        }
+        for (int i = 0; i < self->parts->topLevelItemCount(); ++i) {
+            auto part = self->objectOf(self->parts->topLevelItem(i));
+            auto vp = part ? viewProviderOf(part) : nullptr;
+            if (vp && vp->isShow() && std::ranges::find(spared, part->getNameInDocument()) == spared.end()) {
+                vp->hide();
+            }
+        }
+        self->scheduleRebuild();
+    };
+    auto others = menu.addAction(tr("Hide other parts"), [hideParts, keep]() { hideParts(keep); });
+    others->setObjectName(QStringLiteral("partHideOthers"));
+    auto all = menu.addAction(tr("Hide all parts"), [hideParts]() { hideParts({}); });
+    all->setObjectName(QStringLiteral("partHideAll"));
+    auto isolate = menu.addAction(tr("Isolate"), [runByName]() { runByName("Std_Isolate"); });
+    isolate->setObjectName(QStringLiteral("partIsolate"));
+    auto fit = menu.addAction(tr("Zoom to selection"), [runByName]() { runByName("Std_ViewFitSelection"); });
+    fit->setObjectName(QStringLiteral("partZoom"));
     menu.addSeparator();
     // A Body's delete is a Delete part feature at the bar (ops#635)
     auto remove = menu.addAction(tr("Delete"), [runByName]() { runByName("Std_Delete"); });
