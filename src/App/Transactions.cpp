@@ -38,6 +38,7 @@
 #include "Property.h"
 #include "PropertyGeo.h"
 #include "PropertyLinks.h"
+#include "PropertyPythonObject.h"
 
 
 FC_LOG_LEVEL_INIT("App", true, true)
@@ -1178,9 +1179,11 @@ bool isResult(const TransactionalObject* pcObj, const Property& prop)
 
 // Geometry data that is an input (a mesh, points, a plain Part::Feature's shape) is not compared:
 // its Save() text names a file, and isSame() would call two meshes of equal size the same
+// A Python object's value is not compared either: its copy has no container to save it with
+// (ops#804: a Proxy replaced in a transaction crashed the commit), so it counts as a change
 bool isComparable(const Property& prop)
 {
-    return !prop.isDerivedFrom<PropertyComplexGeoData>();
+    return !prop.isDerivedFrom<PropertyComplexGeoData>() && !prop.isDerivedFrom<PropertyPythonObject>();
 }
 
 // Whether the live property holds the value its transaction copy recorded. The copy isn't

@@ -385,6 +385,9 @@ void PropertyPythonObject::saveObject(Base::Writer& writer) const
     Base::PyGILStateLocker lock;
     try {
         PropertyContainer* parent = this->getContainer();
+        if (!parent) {
+            return;  // a copy (a transaction's record) belongs to no container (ops#804)
+        }
         if (parent->isDerivedFrom(Base::Type::fromName("App::DocumentObject"))) {
             if (this->object.hasAttr("__object__")) {
                 writer.Stream() << " object=\"yes\"";

@@ -1359,6 +1359,31 @@ class UndoRedoCases(unittest.TestCase):
         self.Doc.addObject("App::FeatureTest", "Del")
         self.Doc.getObject("Del").Integer = 2
 
+    def testCommitAPythonObjectChange(self):
+        """FreeCAD-CH (ops#804): a transaction that replaced a Python feature's Proxy commits as a
+        step (the no-op check doesn't compare a Python object; it crashed here) and undoes."""
+
+        class Proxy:
+            def __init__(self, obj=None):
+                if obj is not None:
+                    obj.Proxy = self
+
+            def execute(self, obj):
+                pass
+
+        self.Doc.UndoMode = 1
+        obj = self.Doc.addObject("App::FeaturePython", "Py")
+        Proxy(obj)
+        self.Doc.recompute()
+        self.Doc.clearUndos()
+        self.Doc.openTransaction("Replace proxy")
+        obj.Proxy = Proxy()
+        self.Doc.commitTransaction()
+        self.assertEqual(self.Doc.UndoNames, ["Replace proxy"])
+        self.Doc.undo()
+        self.assertIs(type(obj.Proxy), Proxy)
+        self.assertEqual(self.Doc.RedoNames, ["Replace proxy"])
+
     def testUndoProperties(self):
         # first transaction
         self.Doc.openTransaction("Transaction1")
