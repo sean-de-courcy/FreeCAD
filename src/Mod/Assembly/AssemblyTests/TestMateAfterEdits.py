@@ -427,6 +427,66 @@ class TestMateOffsetPickOrder(MateEditsBase):
         self.assertNear(self.above(self.c), V(0, 0, 3), "C then A, after the reopen")
 
 
+class TestMateOffsetUIPose(MateEditsBase):
+    """ops#826 (oracle 26, AR6, Onshape's UI): Pin's bottom-face centre picked first, Blk's top-face
+    centre second. The new mate takes the pose closer to the parts' own (face to face, flipped): the
+    Pin stands upright on the face's centroid. Offset Z +3 runs along the first pick's Z (the Pin
+    bottom's outward normal, -z): the Pin's bottom goes to z 7, 3 into Blk, whether Blk was grounded
+    before the picks or after. Blk picked first (U1, Blk grounded): the same, z 7. U2 (an
+    upside-down Pin stays hanging): TestMateOffsetsGui.test_new_mate_closest_pose_when_facing.
+    The face's centroid moved by suppressing a notch: the Pin follows and
+    keeps the offset. Blk = 20 x 20 x 10 with a notch x 15..20, z 8..10 (top face x 0..15, centroid
+    (7.5, 10, 10); without it (10, 10, 10)); Pin = 4 x 4 x 20, its bottom-face centre (2, 2, 0)."""
+
+    def testPinUprightOffsetIntoBlk(self):
+        for groundFirst, pinFirst in ((True, True), (False, True), (True, False)):
+            with self.subTest(groundFirst=groundFirst, pinFirst=pinFirst):
+                blk = self.doc.addObject("PartDesign::Body", "Blk")
+                box = blk.newObject("PartDesign::AdditiveBox", "BlkBox")
+                box.Length, box.Width, box.Height = 20, 20, 10
+                notch = blk.newObject("PartDesign::SubtractiveBox", "Notch")
+                notch.Length, notch.Width, notch.Height = 5, 20, 2
+                notch.Placement = App.Placement(V(15, 0, 8), App.Rotation())
+                pin, _ = self.studio("Pin", 4, 4, 20)
+                self.asm = self.assembly()
+                b = self.instance(self.asm, "B", blk)
+                p = self.instance(self.asm, "P", pin, V(60, 0, 0))
+                self.doc.recompute()
+                if groundFirst:
+                    self.ground(b)
+                top = self.topFace(blk.Shape, 10)
+                bottom = self.element(
+                    pin.Shape,
+                    "Face",
+                    lambda f: abs(f.CenterOfMass.z) < 1e-6 and f.normalAt(0, 0).z < -0.5,
+                )
+                if pinFirst:
+                    joint = self.fastened(p, (bottom, bottom), b, (top, top))
+                else:
+                    joint = self.fastened(b, (top, top), p, (bottom, bottom))
+                if not groundFirst:
+                    self.ground(b)
+
+                def solve():
+                    self.doc.recompute()
+                    self.asm.solve()
+                    self.doc.recompute()
+
+                solve()
+                self.assertNear(p.Placement.Rotation.multVec(V(0, 0, 1)), V(0, 0, 1), "Pin upright")
+                self.assertNear(p.Placement.multVec(V(2, 2, 0)), V(7.5, 10, 10), "Pin on the face")
+                joint.Offset2 = App.Placement(V(0, 0, 3), App.Rotation())
+                solve()
+                self.assertTrue(joint.isValid(), joint.getStatusString())
+                self.assertNear(p.Placement.multVec(V(2, 2, 0)), V(7.5, 10, 7), "offset +3: 3 into Blk")
+                self.assertNear(p.Placement.Rotation.multVec(V(0, 0, 1)), V(0, 0, 1), "still upright")
+                notch.Suppressed = True
+                solve()
+                self.assertNear(p.Placement.multVec(V(2, 2, 0)), V(10, 10, 7), "follows the centroid")
+                App.closeDocument(self.doc.Name)
+                self.doc = App.newDocument(self.__class__.__name__)
+
+
 class TestRedMateOffset(MateEditsBase):
     """ops#827 (Onshape B3): a mate whose pick is gone is in error and drives nothing; editing its
     offset (as one does while repairing it) moves no part. Before, each edit moved the part on from
