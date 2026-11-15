@@ -28,6 +28,10 @@ from AssemblyTests.TestJointDialogWrappersGui import TestJointDialogWrappersGui 
 
 True if TestJointDialogWrappersGui else False
 
+from AssemblyTests.TestUndoRegenerateGui import TestUndoRegenerateGui  # ops#800
+
+True if TestUndoRegenerateGui else False
+
 from AssemblyTests.TestOnshapeAssembliesGui import (  # ops#640, ops#651
     TestSeveralAssembliesGui,
     TestJointErrorsGui,
