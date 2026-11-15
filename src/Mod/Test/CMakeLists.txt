@@ -48,6 +48,8 @@ SET(Test_SRCS
     TestDocumentTabs.py
     TestDocumentTabsGui.py
     TestSaveGuardGui.py
+    TestPresence.py
+    TestPresenceGui.py
     TestVariableStudioGui.py
 )
 
