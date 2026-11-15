@@ -3497,7 +3497,7 @@ class TestPanelFixesGui(unittest.TestCase):
         pads = [o for o in made if o.isDerivedFrom("PartDesign::Pad")]
         self.assertEqual(len(pads), 1, [o.Name for o in made])
         [pad] = pads
-        self.assertAlmostEqual(pad.Length.Value, 10, places=6)
+        self.assertAlmostEqual(pad.Length.Value, 25, places=6)  # Onshape's opening (gaps3 row 15)
         self.close(ok=True)
         self.answering = False
         self.assertEqual(self.modals, [])
@@ -3517,7 +3517,7 @@ class TestPanelFixesGui(unittest.TestCase):
         list. The copy is
         attached to the body's XY plane with an offset that keeps it where the sketch is
         (decision 40; fixSketchSupport also dropped the offset and turn in the plane), and the pad
-        is 10 x 10 x 10 on it."""
+        is 10 x 10 x 25 on it (Onshape's opening depth, gaps3 row 15)."""
         sketch = models.sketch(
             self.doc,
             "Free",
@@ -3533,7 +3533,7 @@ class TestPanelFixesGui(unittest.TestCase):
         self.doc.recompute()
         self.assertTrue(copy.getGlobalPlacement().isSame(sketch.getGlobalPlacement(), 1e-9))
         self.assertTrue(pad.isValid(), pad.getStatusString())
-        self.assertAlmostEqual(pad.Shape.Volume, 1000, places=3)
+        self.assertAlmostEqual(pad.Shape.Volume, 2500, places=3)
 
     @siblingEraPath
     def testPadOfAnXZSketchCopiedIntoABody(self):
@@ -3558,7 +3558,7 @@ class TestPanelFixesGui(unittest.TestCase):
         self.doc.recompute()
         self.assertTrue(copy.getGlobalPlacement().isSame(sketch.getGlobalPlacement(), 1e-9))
         self.assertTrue(pad.isValid(), pad.getStatusString())
-        self.assertAlmostEqual(pad.Shape.Volume, 1000, places=3)
+        self.assertAlmostEqual(pad.Shape.Volume, 2500, places=3)
 
     def testDatumOnADependentCopyAcrossPlacedBodiesStops(self):
         """PR 227 review M1: datumPointAcross's placed bodies, Make dependent copy. Attached to
