@@ -42,4 +42,5 @@ FreeCAD.__unit_test__ += [
     "TestNotificationArea",
     "TestDocumentTabs",
     "TestPresence",
+    "TestFolderSyncOpen",
 ]
