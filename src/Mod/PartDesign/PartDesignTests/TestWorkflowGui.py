@@ -419,16 +419,24 @@ class TestWorkflowGui(unittest.TestCase):
         self.assertEqual([o.Name for o in self.doc.Objects if not o.isValid()], [])
         self.assertAlmostEqual(self.body1.Shape.Volume, 1000 + 32 - 20, places=3)
 
-    def testAboveItsSketchIsRefused(self):
-        """The Pocket dragged above its own sketch: refused with a message naming both; nothing
-        changes."""
+    def testAboveItsSketchFailsAlone(self):
+        """The Pocket dragged above its own sketch: not refused (RO1, ops#647: Onshape never
+        refuses a drag); only its row moves, in one undo step, and it fails alone. Dragged back
+        below its sketch, it recovers by itself and the part is the same."""
         self.holeBlock()
         before = self.rows()
         undo = self.doc.UndoCount
         self.dragRowTo("Pocket", "HoleSk", below=False)
-        self.assertTrue(waitFor(lambda: "'Pocket' uses 'HoleSk'" in self.message()), self.message())
-        self.assertEqual(self.rows(), before)
-        self.assertEqual(self.doc.UndoCount, undo)
+        own = lambda: [r for r in self.rows() if r not in ("SkB", "PadB", "|")]  # noqa: E731
+        moved = ["SkA", "PadA", "BossSk", "Pocket", "HoleSk", "BossPad"]
+        self.assertTrue(waitFor(lambda: own() == moved), self.rows())
+        self.assertEqual(self.doc.UndoCount, undo + 1)
+        self.assertEqual([o.Name for o in self.body1.Group if not o.isValid()], ["Pocket"])
+        self.dragRowTo("Pocket", "BossPad", below=True)
+        self.assertTrue(waitFor(lambda: self.rows() == before), self.rows())
+        self.assertEqual([o.Name for o in self.body1.Group if not o.isValid()], [])
+        self.assertEqual(self.pocket.Profile[0], self.holeSk)
+        self.assertAlmostEqual(self.body1.Shape.Volume, 1000 + 32 - 20, places=3)
 
     # ------------------------------------------------ a broken dress-up (rank 12 part, F19)
 

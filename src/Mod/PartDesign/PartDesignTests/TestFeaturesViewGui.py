@@ -446,14 +446,22 @@ class TestFeaturesViewGui(unittest.TestCase):
         )
         self.assertEqual(self.tips(), ["PadA", "Box"])
 
-    def testRefusedDropLeavesTheRows(self):
-        """Body1's Pocket reads Body2's sketch: dragged to the top it is refused with a message
-        naming both, and nothing changes."""
+    def testBrokenReadDropParksAndComesBack(self):
+        """Body1's Pocket reads Body2's sketch: dragged to the top it is not refused (RO1, ops#647:
+        Onshape never refuses a drag); it moves in one undo step, its read parked, and fails
+        alone. Dragged back below the sketch, it recovers by itself."""
         undo = self.doc.UndoCount
         self.dragRowTo("Pocket1", "SkA", below=False)
-        self.assertTrue(waitFor(lambda: "'Pocket1' uses 'SkB'" in self.message()))
-        self.assertEqual(self.rows(), self.expected)
-        self.assertEqual(self.doc.UndoCount, undo)
+        moved = ["Pocket1", "SkA", "PadA", "Box", "SkB", "PocketB", "|"]
+        self.assertTrue(waitFor(lambda: self.rows() == moved), self.rows())
+        self.assertEqual(self.doc.UndoCount, undo + 1)
+        pocket = self.doc.getObject("Pocket1")
+        self.assertFalse(pocket.isValid())
+        self.assertEqual([o.Name for o in self.doc.Objects if not o.isValid() and o is not pocket
+                          and o.isDerivedFrom("PartDesign::Feature")], [])
+        self.dragRowTo("Pocket1", "PocketB", below=False)
+        self.assertTrue(waitFor(lambda: self.rows() == self.expected), self.rows())
+        self.assertTrue(waitFor(lambda: pocket.isValid()))
 
     def testDragSeveralRows(self):
         """Two selected rows dragged together: a click on one of them keeps the selection for the
