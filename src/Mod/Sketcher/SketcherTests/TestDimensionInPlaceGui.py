@@ -1594,10 +1594,11 @@ class TestDimensionInPlaceGui(SketcherGuiTestCase):
         texts = [view.item(row).text() for row in range(view.count())]
         self.fail(f"Expected {name} in the constraint list, got {texts}")
 
-    def edit_from_list(self, index, text=None, accept=True):
+    def edit_from_list(self, index, text=None, accept=True, keys=(), shown=None):
         """Opens the datum dialog on constraint `index` from the constraint list (as a
-        double-click there does), records the field's text, types `text` (None: nothing) and
-        presses OK or Cancel. Returns the text the field opened with."""
+        double-click there does), records the field's text, types `text` (None: nothing), sends
+        `keys` to the field and presses OK or Cancel. Returns the text the field opened with;
+        `shown` (a dict) gets the field's text just before OK or Cancel as "text"."""
         view, item = self.constraint_list_item(index)
         seen = {}
 
@@ -1614,6 +1615,10 @@ class TestDimensionInPlaceGui(SketcherGuiTestCase):
             if text is not None:
                 line_edit.selectAll()
                 line_edit.insert(text)
+            for key in keys:
+                QTest.keyClick(line_edit, key)
+            if shown is not None:
+                shown["text"] = line_edit.text()
             if accept:
                 dialog.accept()
             else:
@@ -1836,3 +1841,61 @@ class TestDimensionInPlaceGui(SketcherGuiTestCase):
         self.assertEqual(len(self.expressions()), 1, self.expressions())
         self.assertAlmostEqual(self.sketch.Constraints[2].Value, INCH_MM / 8, places=9)
         self.assertEqual(self.edit_from_list(2, None, accept=False), "(1/8) in")
+
+    # D56-D58: a step by the arrows is the field's value (ops#684 review R1) ------------------
+
+    def assert_shown_value(self, index, shown_text, unit_mm):
+        """Constraint `index` has no expression and the value the field showed (a number in a
+        unit of `unit_mm` mm), to the field's display precision."""
+        import re
+
+        number = re.search(r"[+-]?\d+(?:\.(\d*))?", shown_text)
+        self.assertIsNotNone(number, shown_text)
+        decimals = len(number.group(1) or "")
+        self.assertEqual(self.expressions(), {})
+        self.assertLessEqual(
+            abs(self.sketch.Constraints[index].Value - float(number.group(0)) * unit_mm),
+            0.5 * 10**-decimals * unit_mm + 1e-9,
+            shown_text,
+        )
+
+    def test_d56_in_place_arrow_step_is_applied(self):
+        """D56 (review R1): the new Distance's field (10 mm), Up, Enter: the stepped value the
+        field shows is applied, not the 10 mm it opened with."""
+        record = {}
+
+        def step(popup, edit):
+            QTest.keyClick(edit, QtCore.Qt.Key_Up)
+            record["text"] = edit.text()
+
+        state = self.place_distance([{"act": step, "key": QtCore.Qt.Key_Return}])
+        self.wait_answered(state, 1)
+        self.assertNotEqual(record["text"].split()[0], "10", record)
+        self.assert_shown_value(2, record["text"], 1.0)
+        self.assertNotAlmostEqual(self.sketch.Constraints[2].Value, 10.0, places=6)
+
+    def test_d57_dialog_step_over_kept_text_is_applied(self):
+        """D57 (review R1): the dialog on a Distance kept as (1/8) in, Up, OK: the stepped value
+        is applied as a plain value; the kept (1/8) in isn't put back."""
+        self.add_kept_distance(INCH, "(1/8) in", "(1/8) in")
+        shown = {}
+        self.assertEqual(
+            self.edit_from_list(2, None, keys=[QtCore.Qt.Key_Up], shown=shown), "(1/8) in"
+        )
+        self.doc.recompute()
+        self.assertNotAlmostEqual(self.sketch.Constraints[2].Value, INCH_MM / 8, places=6)
+        self.assert_shown_value(2, shown["text"], INCH_MM)
+
+    def test_d58_dialog_typed_then_stepped_is_applied(self):
+        """D58 (review R1): 1/8 typed in the dialog of an inch document, then Up, OK: the stepped
+        value the field shows, not (1/8) in."""
+        self.use_units(INCH)
+        self.add_line()
+        self.sketch.addConstraint(Sketcher.Constraint("Distance", 0, 10.0))
+        self.doc.recompute()
+        self.start_edit()
+        shown = {}
+        self.edit_from_list(2, "1/8", keys=[QtCore.Qt.Key_Up], shown=shown)
+        self.doc.recompute()
+        self.assertNotAlmostEqual(self.sketch.Constraints[2].Value, INCH_MM / 8, places=6)
+        self.assert_shown_value(2, shown["text"], INCH_MM)
