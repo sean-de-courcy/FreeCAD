@@ -207,9 +207,14 @@ class TestDressUpRelinkHome(unittest.TestCase):
 
     def testTheBaseInBetweenIsNotBlamedOnAReorder(self):
         """While the boss is below the draft the chamfer's picks that broke on the boss say so,
-        without the re-target rule's hint: the draft they were on is still before the chamfer."""
+        without the re-target rule's hint: the draft they were on is still before the chamfer.
+        The boss is made 3 taller there, so that its top edges are out of tier 3's reach and the
+        picks break (where they sit, they are found on the boss: ops#824)."""
         self.build()
         self.moveBoss(1)
+        self.assertNotIn("?", "".join(self.chamfer.Base[1]))  # found where they sit (ops#824)
+        self.boss.Length = 9
+        self.doc.recompute()
         self.assertIn("?", "".join(self.chamfer.Base[1]))
         self.assertNotIn("which a reorder put after", self.chamfer.getStatusString())
 
