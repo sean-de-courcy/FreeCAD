@@ -706,6 +706,7 @@ bool AttachExtension::positionBySupport()
         // (its plane deleted): under the Onshape keymap it fails, as Onshape's sketch whose plane
         // is gone goes red with what is built on it, instead of staying where it was
         if (AttachmentSupport.getValues().empty() && lostSupportFails(getExtendedObject())) {
+            keepLinkFrames(std::nullopt);  // those of the support it had (ops#796)
             throw AttachEngineException(
                 getExtendedObject()->isDerivedFrom(Base::Type::fromName("Part::Part2DObject"))
                     ? "The sketch plane is missing: pick a plane or a planar face"
@@ -897,6 +898,13 @@ void AttachExtension::extensionOnChanged(const App::Property* prop)
             try {
                 if (!missingSupport && !lostSupport) {
                     bAttached = positionBySupport();
+                }
+                else if (lostSupport) {
+                    // FreeCAD-CH (ops#796): the frames kept are those of the support it had. With
+                    // none left they would differ at every recompute (extensionMustExecute()),
+                    // and an object that fails before it runs (a support a reorder set aside)
+                    // never keeps new ones: it ran again each time, and all that follows it
+                    keepLinkFrames(std::nullopt);
                 }
             }
             catch (Base::Exception& e) {

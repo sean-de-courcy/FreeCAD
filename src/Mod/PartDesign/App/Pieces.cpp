@@ -123,6 +123,9 @@ namespace
 {
 
 const App::DocumentObject* commandEntry = nullptr;
+// Whether the command flag kept a check quiet since it was last cleared (ops#796): only then
+// does a recompute under the flag differ from one outside it
+bool commandSilenced = false;
 
 std::string quoted(const App::DocumentObject* obj)
 {
@@ -621,25 +624,35 @@ std::string unclaimedSplit(const App::DocumentObject* maker,
                            const Body* part,
                            const Part::TopoShape& result)
 {
-    if (!maker || !part || result.isNull() || commandEntry == maker) {
+    if (!maker || !part || result.isNull()) {
         return {};
     }
     const int solids = static_cast<int>(result.countSubShapes(TopAbs_SOLID));
     if (solids < 2) {
         return {};
     }
+    // Under its command the check passes; that it would have failed is kept (ops#796)
+    const auto silence = [maker](std::string text) {
+        if (commandEntry == maker) {
+            commandSilenced = commandSilenced || !text.empty();
+            return std::string();
+        }
+        return text;
+    };
     const std::string head = quoted(maker) + " splits " + quoted(part) + " into "
         + std::to_string(solids) + " pieces";
     const auto records = pieceRecords(maker, studioPartId(part));
     if (records.empty()) {
-        return head + ": open " + quoted(maker) + " and press OK to make them parts";
+        return silence(head + ": open " + quoted(maker) + " and press OK to make them parts");
     }
     const PieceMatch match = matchPieces(result, records);
     std::set<int> claimed(match.solids.begin(), match.solids.end());
     claimed.erase(-1);
     if (static_cast<int>(claimed.size()) < solids) {
-        return head + ", " + std::to_string(claimed.size()) + " are parts: open " + quoted(maker)
-            + " and press OK";
+        return silence(
+            head + ", " + std::to_string(claimed.size()) + " are parts: open " + quoted(maker)
+            + " and press OK"
+        );
     }
     return {};
 }
@@ -703,7 +716,7 @@ void noteSplitHeld(App::DocumentObject* maker, const Body* part, const Part::Top
 
 std::string unclaimedLeftovers(const App::DocumentObject* owner)
 {
-    if (!owner || commandEntry == owner) {
+    if (!owner) {
         return {};
     }
     const Part::TopoShape left = leftoverSolids(owner);
@@ -714,6 +727,10 @@ std::string unclaimedLeftovers(const App::DocumentObject* owner)
     const PieceMatch match = matchPieces(left, pieceRecords(owner, std::string()));
     for (int j = 0; j < solids; ++j) {
         if (std::ranges::find(match.solids, j) == match.solids.end()) {
+            if (commandEntry == owner) {
+                commandSilenced = true;  // passes under its command (ops#796)
+                return {};
+            }
             return "Solid " + std::to_string(j + 1)
                 + " of the tool touches no part of the merge scope and is no part: open "
                 + quoted(owner) + " and press OK to make it a new part";
@@ -907,18 +924,15 @@ std::vector<Body*> makePieces(App::DocumentObject* entry, std::string* why)
             step->touch();
         }
     };
-    // Nothing to make (ops#796): the entry and its steps computed, none failing, no result in
-    // more than one solid, no leftover and no part made from its pieces. The command flag only
-    // silences the entry's unclaimed split and leftover errors (unclaimedSplit,
-    // unclaimedLeftovers), which need a split or a leftover: computed under it, the document
-    // would come out as it is, and the command would make and delete nothing. Only the reconcile
-    // is left, and the recompute of what it changes. Without this, a dimension's OK in a
-    // 22-feature studio computed the history three more times (twice here, once more when the
-    // caller's abort of this empty step rolled the results back): 4-5 s for one edit
-    // upstream: also nothing they read, however far, waits for a recompute (a value written
-    // before the entry and not computed: the entry's results are then not the ones the command
-    // would see; review r1 F1)
-    const auto quiet = [entry, doc](bool upstream) {
+    // One pass per action (ops#796). The command flag only lets the entry's unclaimed split and
+    // leftover checks pass (unclaimedSplit, unclaimedLeftovers), so a recompute under it gives
+    // what the document already holds when the entry and its steps are computed, none failing,
+    // and nothing they read, however far, waits for a recompute (a value written before the
+    // entry and not computed: review r1 F1). Then nothing is computed here. Without this, a
+    // dimension's OK in a 22-feature studio computed the history three more times (twice here,
+    // once more when the caller's abort of this empty step rolled the results back), and an OK
+    // of a feature whose pieces are parts already computed it twice more
+    const auto settled = [entry]() {
         std::vector<App::DocumentObject*> objs {entry};
         for (auto step : StudioList::stepsOf(entry)) {
             objs.push_back(step);
@@ -928,72 +942,49 @@ std::vector<Body*> makePieces(App::DocumentObject* entry, std::string* why)
                 return false;
             }
         }
-        if (upstream) {
-            std::set<App::DocumentObject*> read;
-            try {
-                for (auto obj : objs) {
-                    for (auto out : obj->getOutListRecursive()) {
-                        read.insert(out);
-                    }
-                }
-            }
-            catch (const Base::Exception&) {
-                return false;  // a cycle: the recomputes say so, as before (review r2)
-            }
-            // A step is placed in its Body's frame, which no link of its out list holds (its
-            // Body is a hidden link): a part moved and not computed yet (review r2)
+        std::set<App::DocumentObject*> read;
+        try {
             for (auto obj : objs) {
-                for (App::DocumentObject* holder = Body::findBodyOf(obj); holder;
-                     holder = App::Part::getPartOfObject(holder, /*recursive=*/false)) {
-                    read.insert(holder);
-                }
-            }
-            for (auto obj : read) {
-                if (obj->isTouched() || obj->mustExecute() > 0) {
-                    return false;
+                for (auto out : obj->getOutListRecursive()) {
+                    read.insert(out);
                 }
             }
         }
-        for (auto result : resultsOf(entry)) {
-            if (result->Shape.getShape().countSubShapes(TopAbs_SOLID) > 1) {
-                return false;
+        catch (const Base::Exception&) {
+            return false;  // a cycle: the recomputes say so, as before (review r2)
+        }
+        // A step is placed in its Body's frame, which no link of its out list holds (its
+        // Body is a hidden link): a part moved and not computed yet (review r2)
+        for (auto obj : objs) {
+            for (App::DocumentObject* holder = Body::findBodyOf(obj); holder;
+                 holder = App::Part::getPartOfObject(holder, /*recursive=*/false)) {
+                read.insert(holder);
             }
         }
-        for (auto obj : doc->getObjectsOfType(Body::getClassTypeId())) {
-            auto body = static_cast<Body*>(obj);
-            if (isPieceBody(body) && body->StudioMadeBy.getValue() == entry) {
-                return false;
-            }
-        }
-        return leftoverSolids(entry).isNull();
+        return std::ranges::none_of(read, [](App::DocumentObject* obj) {
+            return obj->isTouched() || obj->mustExecute() > 0;
+        });
     };
-    const auto nothingToMake = [&]() {
-        std::string text;
-        if (!list->reconcile(&text)) {
-            return fail(text);
-        }
-        doc->recompute({}, /*force=*/true);
-        return std::vector<Body*>();
-    };
-    if (quiet(/*upstream=*/true)) {
-        return nothingToMake();
-    }
-    {
+    // Whether the flag kept a check quiet in the recompute under it: the document then differs
+    // from what a recompute outside the command gives, and is computed again at the end
+    bool silenced = false;
+    if (!settled()) {
         CommandGuard guard(entry);
+        commandSilenced = false;
         touchAll();
         doc->recompute({}, /*force=*/true);
+        silenced = commandSilenced;
     }
-    // The same once it is computed (a moved row, a suppression, a value changed outside a
-    // dialog): the flag silenced nothing, so the second recompute of the history that would
-    // make the entry loud again has nothing to say
-    if (quiet(/*upstream=*/false)) {
-        return nothingToMake();
-    }
-    // A refusal after the recompute under the guard: computed again outside it, so that entry
-    // stays loud (its checks passed meanwhile)
+    // Whether the command made, deleted or retired something: only then, or after a silenced
+    // check, the entry and its steps are computed again
+    bool changed = false;
+    // A refusal after a silenced check: computed again outside the command, so that the entry
+    // is loud again
     auto refuse = [&](const std::string& text) {
-        touchAll();
-        doc->recompute({}, /*force=*/true);
+        if (silenced || changed) {
+            touchAll();
+            doc->recompute({}, /*force=*/true);
+        }
         return fail(text);
     };
 
@@ -1104,6 +1095,7 @@ std::vector<Body*> makePieces(App::DocumentObject* entry, std::string* why)
     auto counter = freecad_cast<App::PropertyInteger*>(entry->getPropertyByName("StudioPieceCount"));
     if (!reused.empty()) {
         dropRetired(entry, reused);
+        changed = true;
     }
     for (const auto& [parentId, witness, reusedId, label] : pieces) {
         // Its id: a retired record's that claims it (the same piece back), else "<entry>:<k>",
@@ -1141,6 +1133,7 @@ std::vector<Body*> makePieces(App::DocumentObject* entry, std::string* why)
         // A default name: numbered by place (S3); a retired piece's name comes back with its id
         body->Label.setValue(label.empty() ? "Part 1" : label.c_str());
         made.push_back(body);
+        changed = true;
     }
     // A record without a solid goes when its Body holds nothing else and nothing outside the
     // studio reads it (a Binder, a Link: deleted, the reader would keep its last shape, review
@@ -1172,6 +1165,7 @@ std::vector<Body*> makePieces(App::DocumentObject* entry, std::string* why)
             continue;
         }
         retirePiece(entry, body);
+        changed = true;
         for (auto member : group) {
             const std::string name = member->getNameInDocument();
             body->removeObject(member);
@@ -1192,7 +1186,10 @@ std::vector<Body*> makePieces(App::DocumentObject* entry, std::string* why)
         }
         return refuse(text);
     }
-    touchAll();
+    // Nothing made, deleted or silenced: only what the reconcile changed is computed
+    if (changed || silenced) {
+        touchAll();
+    }
     doc->recompute({}, /*force=*/true);
     return made;
 }

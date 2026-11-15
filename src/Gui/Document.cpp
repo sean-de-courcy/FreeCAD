@@ -109,6 +109,8 @@ void updateRegenerationHold(const App::Document* closingStep = nullptr);
 bool hasUndoStep(const Document* doc, bool undo);
 /// FreeCAD-CH (ops#640): defined below; PartDesign's TaskFeatureParameters.cpp declares it
 GuiExport bool editStartedUnchanged(const App::Document* doc);
+/// FreeCAD-CH (ops#796): defined below; PartDesign's TaskFeatureParameters.cpp declares it
+GuiExport bool editStartedComputed(const App::Document* doc, const App::DocumentObject* obj);
 /// FreeCAD-CH (ops#640, hands-on B5-5): defined below; Sketcher's ViewProviderSketch.cpp declares it
 GuiExport int undoOpenSketchSession(const App::Document* doc);
 
@@ -162,6 +164,9 @@ struct DocumentP
     unsigned _undoSteps = 20;
     /// FreeCAD-CH (ops#640): the edit started with no change in its step (editStartedUnchanged())
     bool _editStartedUnchanged = false;
+    /// FreeCAD-CH (ops#796): the objects that waited for a recompute when the edit started
+    /// (editStartedComputed())
+    std::set<std::string> _editStartedWaiting;
     int _editMode;
     int _editModePrevious;
     ViewProvider* _editViewProvider;
@@ -1387,6 +1392,13 @@ bool Document::trySetEdit(Gui::ViewProvider* p, int ModNum, const char* subname)
     const bool bookedHere = bookEditStep(this, obj, _subname, ModNum);
     // FreeCAD-CH (ops#640): whether the edit's step holds nothing yet (editStartedUnchanged())
     d->_editStartedUnchanged = !getDocument()->hasPendingTransaction();
+    // FreeCAD-CH (ops#796): what waits for a recompute now, before the edit touches anything
+    d->_editStartedWaiting.clear();
+    for (auto each : getDocument()->getObjects()) {
+        if (each->getNameInDocument() && (each->isTouched() || each->mustExecute() > 0)) {
+            d->_editStartedWaiting.insert(each->getNameInDocument());
+        }
+    }
 
     Application::Instance->setEditDocument(this);
 
@@ -3938,6 +3950,20 @@ bool Gui::editStartedUnchanged(const App::Document* doc)
                                                          : nullptr;
     auto it = guiDoc ? stepDocuments.find(guiDoc) : stepDocuments.end();
     return it != stepDocuments.end() && it->second->_editStartedUnchanged;
+}
+
+/** FreeCAD-CH (ops#796): whether obj was computed when the document's current edit started:
+ * neither touched nor asking to run. What touches it from then on is the edit's own (its preview,
+ * the panels' writes). PartDesign's OK reads it (an OK that changed nothing computes nothing).
+ * Exported and declared where it is called, not in Document.h. */
+bool Gui::editStartedComputed(const App::Document* doc, const App::DocumentObject* obj)
+{
+    Gui::Document* guiDoc = doc && Application::Instance ? Application::Instance->getDocument(doc)
+                                                         : nullptr;
+    auto it = guiDoc ? stepDocuments.find(guiDoc) : stepDocuments.end();
+    return it != stepDocuments.end() && obj && obj->getNameInDocument()
+        && guiDoc->getInEdit() != nullptr
+        && !it->second->_editStartedWaiting.count(obj->getNameInDocument());
 }
 
 /** FreeCAD-CH (ops#640, hands-on B5-5): a sketch's Cancel leaves no step, as in Onshape (no
