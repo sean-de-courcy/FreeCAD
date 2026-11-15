@@ -935,13 +935,14 @@ bool PythonWrapper::loadUiToolsModule()
     return loadPySideModule("QtUiTools", SbkPySide_QtUiToolsTypes);
 }
 
-// FreeCAD-CH (ops#790): a Python wrapper outlives its object when the object is deleted from C++
-// without shiboken being told (a widget wrapped through PySide, its parent deleted from C++) and
-// something still holds the wrapper. It stays valid and mapped to the freed address, so a widget
-// later created there came back through the old wrapper, with the old object's cached signal
-// instances: the joint dialog's connect() raised "Signal source has been deleted" (ops#790, after
-// other dialogs in a GUI suite). An object made since the last Python call can't have a wrapper
-// of its own yet, so one found at its address is the dead object's.
+// FreeCAD-CH (ops#790, ops#825): a Python wrapper outlives its object when the object is deleted
+// from C++ without shiboken being told and something still holds the wrapper. It stays valid and
+// mapped to the freed address, so a widget later created there came back through the old wrapper,
+// with the old object's cached signal instances: the joint dialog's connect() raised "Signal
+// source has been deleted" (ops#790, after other dialogs in a GUI suite). An object made since the
+// last Python call can't have a wrapper of its own yet, so one found at its address is the dead
+// object's. A wrapper created by Python is skipped: its object's destructor tells shiboken, so it
+// can't be left at a reused address.
 void PythonWrapper::dropStaleWrapper(QObject* object)
 {
 #if defined(HAVE_SHIBOKEN) && defined(HAVE_PYSIDE)
@@ -958,6 +959,19 @@ void PythonWrapper::dropStaleWrapper(QObject* object)
 #endif
 }
 
+void PythonWrapper::dropStaleWrappers(QObject* object)
+{
+    if (!object) {
+        return;
+    }
+    dropStaleWrapper(object);
+    // the children its constructor made (a spin box's line edit, a scroll area's viewport)
+    const auto children = object->findChildren<QObject*>();
+    for (QObject* child : children) {
+        dropStaleWrapper(child);
+    }
+}
+
 void PythonWrapper::createChildrenNameAttributes(PyObject* root, QObject* object)
 {
     Q_FOREACH (QObject* child, object->children()) {
@@ -967,7 +981,6 @@ void PythonWrapper::createChildrenNameAttributes(PyObject* root, QObject* object
             bool hasAttr = PyObject_HasAttrString(root, name.constData());
             if (!hasAttr) {
 #if defined(HAVE_SHIBOKEN) && defined(HAVE_PYSIDE)
-                dropStaleWrapper(child);  // the loader has just made it
                 Shiboken::AutoDecRef pyChild(
                     Shiboken::Conversions::pointerToPython(getPyTypeObjectForTypeName<QObject>(), child)
                 );
