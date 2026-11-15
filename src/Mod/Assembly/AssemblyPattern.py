@@ -153,7 +153,45 @@ def referenceAxis(fp, second=False):
                 fp.Label, name, what
             )
         )
+    return keptSense(fp, "Direction2" if second else "Direction", obj, sub, axis)
+
+
+def keptSense(fp, key, obj, sub, axis):
+    """axis, turned to keep the way the pattern last took along it (FreeCAD-CH ops#832). An edge's
+    tangent and a face's normal come from storage order (the orientation the shape's element map
+    met first), which a feature that leaves the element's geometry alone can still turn: a pocket
+    that shortens the edge, or one in a face beside it. Onshape keeps the direction then. So the
+    way read in the part's own frame is kept (on the proxy, saved with it) while the element stays
+    parallel and on the same part, and taken afresh when it changes or the user picks again."""
+    proxy = getattr(fp, "Proxy", None)
+    if proxy is None:
+        return axis
+    try:
+        local = axisOfShape(Part.getShape(obj, sub, needSubElement=True, transform=False))
+    except Exception:
+        local = None
+    if local is None:
+        return axis
+    way = local[1]
+    senses = getattr(proxy, "senses", None)
+    if not isinstance(senses, dict):
+        senses = proxy.senses = {}
+    kept = senses.get(key)
+    if kept and kept[0] == obj.Name:
+        last = App.Vector(*kept[1:])
+        if abs(abs(way.dot(last)) - 1.0) < 1e-9:
+            if way.dot(last) < 0:
+                return axis[0], -axis[1]
+            return axis
+    senses[key] = [obj.Name, way.x, way.y, way.z]
     return axis
+
+
+def forgetSense(fp, key):
+    """The user picked the reference again: its way is the pick's own (keptSense)"""
+    senses = getattr(getattr(fp, "Proxy", None), "senses", None)
+    if isinstance(senses, dict):
+        senses.pop(key, None)
 
 
 def axisOfShape(shape):
@@ -163,14 +201,12 @@ def axisOfShape(shape):
         curve = shape.Curve
         kind = type(curve).__name__
         if kind in ("Line", "LineSegment"):
-            # The edge's tangent (its curve's direction, the other way on a reversed edge), as
-            # Onshape's edge direction, and not its first vertex to its last: the vertex order
-            # is storage order, and a feature that only shortens the edge can rebuild it the
-            # other way round (FreeCAD-CH ops#832: the copies jumped to the seed's other side)
-            axis = App.Vector(curve.Direction).normalize()
-            if shape.Orientation == "Reversed":
-                axis = -axis
-            return App.Vector(shape.valueAt(shape.FirstParameter)), axis
+            # First vertex to last: storage order, which an edit can turn (keptSense keeps the
+            # pattern's way then, FreeCAD-CH ops#832)
+            points = [v.Point for v in shape.Vertexes]
+            if len(points) >= 2 and (points[-1] - points[0]).Length > TOLERANCE:
+                return points[0], (points[-1] - points[0]).normalize()
+            return App.Vector(curve.Location), App.Vector(curve.Direction).normalize()
         if hasattr(curve, "Axis") and hasattr(curve, "Center"):
             # The axis the edge turns about (right hand), whichever way its curve is parametrized
             axis = App.Vector(curve.Axis).normalize()
@@ -264,9 +300,13 @@ class InstancePattern:
         self.addSecondDirection(fp)
 
     def dumps(self):
-        return None
+        # The ways kept along the references (keptSense)
+        senses = getattr(self, "senses", None)
+        return {"senses": senses} if senses else None
 
     def loads(self, state):
+        if isinstance(state, dict) and isinstance(state.get("senses"), dict):
+            self.senses = state["senses"]
         return None
 
     # --- what the pattern makes -------------------------------------------------------------------
@@ -943,8 +983,10 @@ class TaskInstancePattern(QtCore.QObject if App.GuiUp else object):
             if not sub:
                 return
             if self.field == "direction":
+                forgetSense(self.pattern, "Direction")
                 self.pattern.Direction = (comp, [sub])
             else:
+                forgetSense(self.pattern, "Direction2")
                 self.pattern.Direction2 = (comp, [sub])
             self.setField("")
         elif self.field == "seeds":
