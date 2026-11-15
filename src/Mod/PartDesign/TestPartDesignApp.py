@@ -142,6 +142,7 @@ from PartDesignTests.TestNamingDump import TestNamingRevision  # FreeCAD-CH, ops
 from PartDesignTests.TestNamingDump import TestNamingInterning  # FreeCAD-CH, ops#6
 from PartDesignTests.TestNamingSave import *  # FreeCAD-CH, ops#6
 from PartDesignTests.TestNamingLoad import *  # FreeCAD-CH, ops#6
+from PartDesignTests.TestObjectIdReuse import TestObjectIdReuse  # FreeCAD-CH, ops#657
 from PartDesignTests.TestNamingScenarios import *  # one class per scenario (FreeCAD-CH, ops#5)
 from PartDesignTests.TestNamingRList import TestNamingRList  # FreeCAD-CH, ops#5
 from PartDesignTests.TestNamingSolver import TestNamingSolver  # FreeCAD-CH, ops#7
