@@ -204,6 +204,7 @@ SET(Document_CPP_SRCS
     Datums.cpp
     Range.cpp
     RecomputeContinuation.cpp
+    RecomputeMemo.cpp
     Transactions.cpp
     TransactionalObject.cpp
     VRMLObject.cpp
@@ -261,6 +262,7 @@ SET(Document_HPP_SRCS
     Datums.h
     Range.h
     RecomputeContinuation.h
+    RecomputeMemo.h
     Transactions.h
     TransactionalObject.h
     VRMLObject.h

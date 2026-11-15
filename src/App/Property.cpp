@@ -31,6 +31,7 @@
 #include <Base/Writer.h>
 #include <CXX/Objects.hxx>
 
+#include "RecomputeMemo.h"
 #include "Property.h"
 #include "ElementSolverEdits.h"
 #include "ObjectIdentifier.h"
@@ -303,6 +304,8 @@ void Property::setReadOnly(bool readOnly)
 
 void Property::hasSetValue()
 {
+    // FreeCAD-CH (ops#796): the recompute memo's serials, and what a run writes
+    const RecomputeMemo::ChangeScope memoScope(father, this);
     PropertyCleaner guard(this);
     // As in touch() (ops#640)
     forgetPlacementDigestOf(father);

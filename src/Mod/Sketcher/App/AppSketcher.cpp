@@ -23,6 +23,7 @@
  ***************************************************************************/
 
 
+#include <App/RecomputeMemo.h>
 #include <Base/Console.h>
 #include <Base/Interpreter.h>
 
@@ -97,6 +98,8 @@ PyMOD_INIT_FUNC(Sketcher)
     Sketcher::ExternalGeometryFacade::init();
     Sketcher::SketchObjectSF::init();
     Sketcher::SketchObject::init();
+    // FreeCAD-CH (ops#796): the recompute memo may keep a sketch's run (App/RecomputeMemo.h)
+    App::RecomputeMemo::allow(Sketcher::SketchObject::getClassTypeId());
     Sketcher::SketchObjectPython::init();
     Sketcher::Sketch::init();
     Sketcher::Constraint::init();

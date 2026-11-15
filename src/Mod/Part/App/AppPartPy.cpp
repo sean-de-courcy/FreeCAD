@@ -76,6 +76,7 @@
 
 #include <BRepFill_Generator.hxx>
 
+#include <App/RecomputeMemo.h>
 #include <App/Application.h>
 #include <App/Document.h>
 #include <App/DocumentObjectPy.h>
@@ -514,6 +515,13 @@ public:
             &Module::kernelBudget,
             "kernelBudget() -- The time limit for a feature's geometry (FreeCAD-CH kernel safety): "
             "a dict of the limit in seconds and the abandoned calls still running and in all."
+        );
+        add_varargs_method(
+            "recomputeMemo",
+            &Module::recomputeMemo,
+            "recomputeMemo(reset=False) -- The recompute result memo's counters (FreeCAD-CH, "
+            "ops#796): a dict of runs, hits, recorded, notAllowed, noKey, notRecorded, canonical, "
+            "verifyErrors, flushes and notes (why runs weren't kept; verify differences)."
         );
         add_varargs_method(
             "kernelSampleBegin",
@@ -1122,6 +1130,31 @@ private:
     }
     // kernelSampleBegin()'s sampler
     std::unique_ptr<KernelBudget::Sampler> pySampler;
+    Py::Object recomputeMemo(const Py::Tuple& args)
+    {
+        PyObject* reset = Py_False;
+        if (!PyArg_ParseTuple(args.ptr(), "|O!", &PyBool_Type, &reset)) {
+            throw Py::Exception();
+        }
+        const bool clear = Base::asBoolean(reset);
+        const App::RecomputeMemo::Stats stats = App::RecomputeMemo::stats(clear);
+        Py::Dict result;
+        result.setItem("runs", Py::Long(static_cast<long>(stats.runs)));
+        result.setItem("hits", Py::Long(static_cast<long>(stats.hits)));
+        result.setItem("recorded", Py::Long(static_cast<long>(stats.recorded)));
+        result.setItem("notAllowed", Py::Long(static_cast<long>(stats.notAllowed)));
+        result.setItem("noKey", Py::Long(static_cast<long>(stats.noKey)));
+        result.setItem("notRecorded", Py::Long(static_cast<long>(stats.notRecorded)));
+        result.setItem("canonical", Py::Long(static_cast<long>(stats.canonical)));
+        result.setItem("verifyErrors", Py::Long(static_cast<long>(stats.verifyErrors)));
+        result.setItem("flushes", Py::Long(static_cast<long>(stats.flushes)));
+        Py::List notes;
+        for (const std::string& line : App::RecomputeMemo::notes(clear)) {
+            notes.append(Py::String(line));
+        }
+        result.setItem("notes", notes);
+        return result;
+    }
     Py::Object kernelSampleBegin(const Py::Tuple& args)
     {
         double delay = KernelBudget::Sampler::defaultDelay;

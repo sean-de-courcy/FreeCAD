@@ -35,6 +35,12 @@
 #include <Standard_Version.hxx>
 #include <TopoDS.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
+#include <BRep_Tool.hxx>
+#include <TopExp.hxx>
+#include <gp_Pnt.hxx>
+#include <gp_Trsf.hxx>
+#include <QByteArray>
+#include <QCryptographicHash>
 
 #include <App/Application.h>
 #include <App/Document.h>
@@ -46,6 +52,7 @@
 #include <App/MappedName.h>
 #include <App/NameTable.h>
 #include <App/ObjectIdentifier.h>
+#include <App/RecomputeMemo.h>
 #include <Base/Console.h>
 #include <Base/Exception.h>
 #include <Base/FileInfo.h>
@@ -327,8 +334,132 @@ bool PropertyPartShape::namesByMatch(const TopoShape& shape) const
         && !owner->getDocument()->testStatus(App::Document::Restoring);
 }
 
+// FreeCAD-CH (ops#796): how the recompute memo (App/RecomputeMemo.h) tells the values of a shape
+// property apart. The identity is the very shape and the very element map: equal bytes mean the
+// same value while a copy of it is alive. The quick digest differs after nearly every real
+// change; the content is the BREP text (full precision, no triangulation) and the element map
+namespace
+{
+struct MemoMapPeek: Part::TopoShape
+{
+    static const void* of(const Part::TopoShape& shape)
+    {
+        return (shape.*(&MemoMapPeek::elementMap))(false).get();
+    }
+};
+
+template<typename T>
+void memoPut(std::string& bytes, const T& value)
+{
+    bytes.append(reinterpret_cast<const char*>(&value), sizeof(value));  // NOLINT
+}
+
+std::string memoDigest(const std::string& text)
+{
+    return QCryptographicHash::hash(
+               QByteArray::fromRawData(text.data(), static_cast<qsizetype>(text.size())),
+               QCryptographicHash::Sha1
+    )
+        .toStdString();
+}
+
+bool memoIdentity(const App::Property& property, std::string& bytes)
+{
+    auto prop = freecad_cast<const Part::PropertyPartShape*>(&property);
+    if (!prop) {
+        return false;
+    }
+    const Part::TopoShape& shape = prop->getShape();
+    const TopoDS_Shape& whole = shape.getShape();
+    bytes.clear();
+    memoPut(bytes, whole.IsNull() ? nullptr : whole.TShape().get());
+    if (!whole.IsNull()) {
+        const gp_Trsf transform = whole.Location().Transformation();
+        for (int row = 1; row <= 3; ++row) {
+            for (int column = 1; column <= 4; ++column) {
+                memoPut(bytes, transform.Value(row, column));
+            }
+        }
+        memoPut(bytes, static_cast<int>(whole.Orientation()));
+    }
+    memoPut(bytes, MemoMapPeek::of(shape));
+    memoPut(bytes, shape.Tag);
+    return true;
+}
+
+bool memoQuick(const App::Property& property, std::string& digest)
+{
+    auto prop = freecad_cast<const Part::PropertyPartShape*>(&property);
+    if (!prop) {
+        return false;
+    }
+    const Part::TopoShape& shape = prop->getShape();
+    const TopoDS_Shape& whole = shape.getShape();
+    std::string bytes;
+    memoPut(bytes, shape.getElementMapSize(false));
+    if (!whole.IsNull()) {
+        TopTools_IndexedMapOfShape subs;
+        TopExp::MapShapes(whole, subs);
+        const int count = subs.Extent();
+        memoPut(bytes, count);
+        for (int i = 1; i <= count; ++i) {
+            const TopoDS_Shape& sub = subs(i);
+            bytes.push_back(static_cast<char>(sub.ShapeType()));
+            if (sub.ShapeType() == TopAbs_VERTEX) {
+                const gp_Pnt point = BRep_Tool::Pnt(TopoDS::Vertex(sub));
+                memoPut(bytes, point.X());
+                memoPut(bytes, point.Y());
+                memoPut(bytes, point.Z());
+            }
+        }
+    }
+    digest = memoDigest(bytes);
+    return true;
+}
+
+bool memoContent(const App::Property& property, std::string& digest)
+{
+    auto prop = freecad_cast<const Part::PropertyPartShape*>(&property);
+    if (!prop) {
+        return false;
+    }
+    try {
+        const Part::TopoShape& shape = prop->getShape();
+        std::ostringstream text;
+        text.imbue(std::locale::classic());
+        if (!shape.isNull()) {
+            shape.exportBrep(text);
+        }
+        text << "\nElementMap " << shape.Tag << "\n";
+        for (const auto& element : shape.getElementMap()) {
+            text << element.index.toString() << ' ' << element.name.toString() << '\n';
+        }
+        digest = memoDigest(text.str());
+        return true;
+    }
+    catch (...) {
+        return false;
+    }
+}
+}  // namespace
+
+namespace Part
+{
+void registerRecomputeMemoHooks()
+{
+    App::RecomputeMemo::HandleHooks hooks;
+    hooks.identity = &memoIdentity;
+    hooks.quick = &memoQuick;
+    hooks.content = &memoContent;
+    App::RecomputeMemo::setHandleHooks(PropertyPartShape::getClassTypeId(), hooks);
+}
+}  // namespace Part
+
 void PropertyPartShape::nameByMatch(TopoShape& shape, long tag, bool fixedOrder)
 {
+    // FreeCAD-CH (ops#796): the names depend on the value this property holds now, which is no
+    // input of the recompute memo's key: such a run isn't kept
+    App::RecomputeMemo::noteImpureRun("named its result by a match with its last");
     Part::nameByMatch(shape, _Shape, tag, _NextElementId, fixedOrder);
 }
 

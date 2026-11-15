@@ -220,6 +220,11 @@ PyObject* Part::PartExceptionOCCConstructionError;
 PyObject* Part::PartExceptionOCCDimensionError;
 
 // clang-format off
+namespace Part
+{
+void registerRecomputeMemoHooks();
+}
+
 PyMOD_INIT_FUNC(Part)
 {
     // load dependent module
@@ -426,6 +431,8 @@ PyMOD_INIT_FUNC(Part)
 
     Part::TopoShape             ::init();
     Part::PropertyPartShape     ::init();
+    // FreeCAD-CH (ops#796): the recompute memo tells shape values apart (PropertyTopoShape.cpp)
+    Part::registerRecomputeMemoHooks();
     Part::PropertyGeometryList  ::init();
     Part::PropertyShapeHistory  ::init();
     Part::PropertyFilletEdges   ::init();

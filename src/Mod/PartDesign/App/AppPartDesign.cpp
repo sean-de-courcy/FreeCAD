@@ -23,6 +23,7 @@
  ***************************************************************************/
 
 
+#include <App/RecomputeMemo.h>
 #include <Base/Console.h>
 #include <Base/Interpreter.h>
 #include <Base/PyObjectBase.h>
@@ -125,6 +126,9 @@ PyMOD_INIT_FUNC(_PartDesign)
 
     // clang-format off
     PartDesign::Feature                     ::init();
+    // FreeCAD-CH (ops#796): a feature's run reads its properties and what it links to, so the
+    // recompute memo may keep it (App/RecomputeMemo.h)
+    App::RecomputeMemo::allow(PartDesign::Feature::getClassTypeId());
     PartDesign::FeaturePython               ::init();
     PartDesign::FeatureRefine               ::init();
     PartDesign::FeatureRefinePython         ::init();

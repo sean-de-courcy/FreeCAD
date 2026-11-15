@@ -41,6 +41,7 @@
 #include "Application.h"
 #include "ElementNamingUtils.h"
 #include "Document.h"
+#include "RecomputeMemo.h"
 #include "DocumentObject.h"
 #include "DocumentObjectPy.h"
 #include "DocumentObjectExtension.h"
@@ -97,6 +98,7 @@ DocumentObject::~DocumentObject()
     forgetElementReferencesTo(this);
     // Its address may be reused within the recompute (ops#640)
     forgetPlacementDigestOf(this);
+    RecomputeMemo::forget(this);
     if (!PythonObject.is(Py::_None())) {
         Base::PyGILStateLocker lock;
         // Remark: The API of Py::Object has been changed to set whether the wrapper owns the passed
@@ -316,16 +318,19 @@ App::DocumentObjectExecReturn* DocumentObject::recompute()
     // mark the object to recompute its extensions
     this->setStatus(App::RecomputeExtension, true);
 
-    auto ret = this->execute();
-    if (ret == StdReturn) {
-        // most feature classes don't call the execute() method of its base class
-        // so execute the extensions now
-        if (this->testStatus(App::RecomputeExtension)) {
-            ret = executeExtensions();
+    // FreeCAD-CH (ops#796): the run, or the paste of an earlier run with the same inputs
+    // (RecomputeMemo.h)
+    return RecomputeMemo::run(this, [this]() {
+        auto ret = this->execute();
+        if (ret == StdReturn) {
+            // most feature classes don't call the execute() method of its base class
+            // so execute the extensions now
+            if (this->testStatus(App::RecomputeExtension)) {
+                ret = executeExtensions();
+            }
         }
-    }
-
-    return ret;
+        return ret;
+    });
 }
 
 DocumentObjectExecReturn* DocumentObject::execute()
@@ -372,6 +377,8 @@ void DocumentObject::touch(bool noRecompute)
         StatusBits.set(ObjectStatus::Enforce);
     }
     StatusBits.set(ObjectStatus::Touch);
+    // FreeCAD-CH (ops#796): a run that touches another object isn't a paste of its properties
+    RecomputeMemo::objectTouched(this);
     if (_pDoc) {
         _pDoc->signalTouchedObject(*this);
     }
