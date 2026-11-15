@@ -388,6 +388,128 @@ class TestStudioHistory(StudioCase):
             self.assertEqual(chainOf(self.doc.getObject(p))[2:], ["Y", "X"], p)
         self.assertVolumes(yThenX)
 
+    # ------------------------------------------------------- a park held through other moves
+    def parkedSlot(self):
+        """A's Pocket ASlot (a Body member, 2 x 6 x 3 deep) on its sketch ASlotSk, then Pads ABoss
+        and ABoss2 and an owner F1 bossing A's top elsewhere. ASlot dragged above ASlotSk: its
+        Profile is parked (RO1) and it fails alone, the part uncut. Returns the slot, its sketch
+        and the part's volumes cut and uncut"""
+        a = self.doc.getObject("A")
+        slotSk = sketch(a, "ASlotSk", xyPlane(a), (2, 2, 4, 8), z=10)
+        slot = a.newObject("PartDesign::Pocket", "ASlot")
+        slot.Profile = slotSk
+        slot.Length = 3
+        self.transaction("slot", lambda: PartDesign.studioInsert(slotSk, -1))
+        bossSk = sketch(a, "ABossSk", xyPlane(a), (6, 6, 8, 8), z=10)
+        pad(a, "ABoss", bossSk, 3)
+        self.transaction("boss", lambda: PartDesign.studioInsert(bossSk, -1))
+        boss2Sk = sketch(a, "ABoss2Sk", xyPlane(a), (6, 0.5, 8, 1.5), z=10)
+        pad(a, "ABoss2", boss2Sk, 1)
+        self.transaction("boss2", lambda: PartDesign.studioInsert(boss2Sk, -1))
+        self.owner("F1", [6, 2, 8, 4], 2, "Union", ["A"])
+        self.assertEqual(
+            self.entries()[NATIVES:],
+            ["ASlotSk", "ASlot", "ABossSk", "ABoss", "ABoss2Sk", "ABoss2", "F1"],
+        )
+        uncut = (
+            self.partBox("A")
+            .fuse(Part.makeBox(2, 2, 3, V(6, 6, 10)))
+            .fuse(Part.makeBox(2, 1, 1, V(6, 0.5, 10)))
+            .fuse(self.tool([6, 2, 8, 4], 2, "Union"))
+        )
+        cut = uncut.cut(Part.makeBox(2, 6, 3, V(2, 2, 7)))
+        self.assertVolume("A", cut.Volume)
+
+        self.transaction("up", lambda: PartDesign.studioMove(slot, NATIVES))
+        self.assertParked(slot, uncut.Volume)
+        return slot, slotSk, cut.Volume, uncut.Volume
+
+    def assertParked(self, slot, uncut):
+        names = self.entries()
+        self.assertLess(names.index("ASlot"), names.index("ASlotSk"))
+        self.assertFalse(slot.Profile)
+        self.assertIn("Invalid", slot.State)
+        self.assertVolume("A", uncut)
+
+    def assertParkHeldThenPutBack(self, slot, slotSk, cut, uncut):
+        """ops#853 (Onshape: a feature moved above its sketch stays in error until it's moved
+        back): the park holds after an unrelated move and a full recompute, as a fresh build of
+        that order; the sketch dragged back above the slot gives the Profile back"""
+        self.assertParked(slot, uncut)
+        for obj in self.doc.Objects:
+            obj.touch()
+        self.doc.recompute()
+        self.assertParked(slot, uncut)
+
+        self.transaction("back", lambda: PartDesign.studioMove(slotSk, NATIVES))
+        self.assertEqual(self.entries()[NATIVES : NATIVES + 2], ["ASlotSk", "ASlot"])
+        self.assertIs(slot.Profile[0], slotSk)
+        self.assertNotIn("Invalid", slot.State)
+        self.assertVolume("A", cut)
+
+    def testParkHeldWhenAnOwnerMoves(self):
+        """The unrelated move is an owner's: F1 dragged above ABoss (its step alone moves in A's
+        chain)."""
+        slot, slotSk, cut, uncut = self.parkedSlot()
+        f1 = self.doc.getObject("F1")
+        self.transaction("F1 up", lambda: PartDesign.studioMove(f1, NATIVES + 2))
+        self.assertEqual(
+            self.entries()[NATIVES + 2 :], ["F1", "ABossSk", "ABoss", "ABoss2Sk", "ABoss2"]
+        )
+        self.assertParkHeldThenPutBack(slot, slotSk, cut, uncut)
+
+    def testParkHeldWhenABodyMemberMoves(self):
+        """The unrelated move is a Body member's: ABoss dragged below ABoss2, so A's chain is
+        reordered (Body::reorderObject(), whose rule once gave the parked Profile back)."""
+        slot, slotSk, cut, uncut = self.parkedSlot()
+        boss = self.doc.getObject("ABoss")
+        self.transaction("boss down", lambda: PartDesign.studioMove(boss, NATIVES + 5))
+        self.assertEqual(
+            self.entries()[NATIVES + 2 :], ["ABossSk", "ABoss2Sk", "ABoss2", "ABoss", "F1"]
+        )
+        solids = [n for n in chainOf(self.doc.getObject("A")) if not n.endswith("Sk")]
+        self.assertEqual(solids, ["APad", "ASlot", "ABoss2", "ABoss", "F1"])
+        self.assertParkHeldThenPutBack(slot, slotSk, cut, uncut)
+
+
+    def testParkedProjectionHeldThenPutBack(self):
+        """ops#853 for a projection: AProjSk projects an edge of the sketch ASlotSk (a sketch of
+        the same Body, no solid). Dragged above it, the projection is parked; an unrelated Body
+        reorder (ABoss below ABoss2) leaves it parked; ASlotSk dragged back above gives it back."""
+        a = self.doc.getObject("A")
+        slotSk = sketch(a, "ASlotSk", xyPlane(a), (2, 2, 4, 8), z=10)
+        self.transaction("slot", lambda: PartDesign.studioInsert(slotSk, -1))
+        proj = sketch(a, "AProjSk", xyPlane(a), z=10)
+        proj.addExternal("ASlotSk", "Edge1")
+        self.transaction("proj", lambda: PartDesign.studioInsert(proj, -1))
+        for name, rect, height in (("ABoss", (6, 6, 8, 8), 3), ("ABoss2", (6, 0.5, 8, 1.5), 1)):
+            sk = sketch(a, name + "Sk", xyPlane(a), rect, z=10)
+            pad(a, name, sk, height)
+            self.transaction(name, lambda sk=sk: PartDesign.studioInsert(sk, -1))
+        self.doc.recompute()
+        names = ["ASlotSk", "AProjSk", "ABossSk", "ABoss", "ABoss2Sk", "ABoss2"]
+        self.assertEqual(self.entries()[NATIVES:], names)
+
+        def projected():
+            return {link[0].Name for link in proj.ExternalGeometry if link and link[0]}
+
+        self.assertEqual(projected(), {"ASlotSk"})
+
+        self.transaction("up", lambda: PartDesign.studioMove(proj, NATIVES))
+        self.assertEqual(self.entries()[NATIVES : NATIVES + 2], ["AProjSk", "ASlotSk"])
+        self.assertEqual(projected(), set())
+
+        boss = self.doc.getObject("ABoss")
+        self.transaction("boss down", lambda: PartDesign.studioMove(boss, NATIVES + 5))
+        self.assertEqual(self.entries()[NATIVES + 3 :], ["ABoss2Sk", "ABoss2", "ABoss"])
+        self.doc.recompute()
+        self.assertEqual(projected(), set())
+
+        self.transaction("back", lambda: PartDesign.studioMove(slotSk, NATIVES))
+        self.assertEqual(self.entries()[NATIVES : NATIVES + 2], ["ASlotSk", "AProjSk"])
+        self.assertEqual(projected(), {"ASlotSk"})
+        self.doc.recompute()
+        self.assertTrue(proj.isValid())
 
 if __name__ == "__main__":
     unittest.main()
