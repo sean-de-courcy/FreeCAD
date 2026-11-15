@@ -1567,10 +1567,46 @@ class ViewProviderRigidGroupJoint:
 ################ Grounded Joint object #################
 
 
+class _RegroundAfterUndo:
+    """FreeCAD-CH (ops#787): a grounded part is the one whose Placement is ReadOnly, and an undo
+    or redo can lift that status after the joint set it: undoing a part's deletion restores its
+    AttachmentSupport after the joint's ObjectToGround, and the attacher then sets the Placement
+    of a part with no attachment editable. Once the undo or redo is complete, every grounded
+    joint's part is ReadOnly again, as Onshape's undone delete restores the part fixed."""
+
+    def slotUndoDocument(self, doc):
+        reground(doc)
+
+    def slotRedoDocument(self, doc):
+        reground(doc)
+
+
+_reground_observer = None
+
+
+def _watch_undo():
+    global _reground_observer
+    if _reground_observer is None:
+        _reground_observer = _RegroundAfterUndo()
+        App.addDocumentObserver(_reground_observer)
+
+
+def reground(doc):
+    """Sets the Placement of every grounded joint's part in doc ReadOnly"""
+    for obj in doc.Objects:
+        proxy = getattr(obj, "Proxy", None)
+        if isinstance(proxy, GroundedJoint):
+            try:
+                proxy.setReadOnly(obj, True)
+            except Exception:
+                pass
+
+
 class GroundedJoint:
     def __init__(self, joint, obj_to_ground):
         joint.Proxy = self
         self.joint = joint
+        _watch_undo()
 
         self.createObjectToGroundProperty(joint, obj_to_ground)
 
@@ -1586,6 +1622,7 @@ class GroundedJoint:
         self.setReadOnly(joint, True)
 
     def onDocumentRestored(self, joint):
+        _watch_undo()
         self.migrationScript(joint)
 
         self.setReadOnly(joint, True)

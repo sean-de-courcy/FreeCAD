@@ -29,6 +29,7 @@ from AssemblyTests.TestCommandCreateView import TestCommandCreateView
 from AssemblyTests.TestSimulationExport import TestSimulationExport
 from AssemblyTests.TestJointRecords import TestJointRecords  # FreeCAD-CH, ops#504
 from AssemblyTests.TestFloatingSolve import TestFloatingSolve  # FreeCAD-CH, ops#640
+from AssemblyTests.TestGroundedUndo import TestGroundedUndo  # FreeCAD-CH, ops#787
 from AssemblyTests.TestVariantLinks import (
     TestLinkRetargetJoints,
     TestLinkRetargetProperties,
