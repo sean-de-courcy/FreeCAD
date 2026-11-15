@@ -11,6 +11,8 @@
 namespace App
 {
 
+class Document;
+
 /// FreeCAD-CH (ops#640, folder sync item 2; notes/folder-sync.md section 3, design A4): the company
 /// folder that Syncthing keeps the same on every computer. One preference,
 /// `User parameter:BaseApp/Preferences/Document/TeamFolder`, holds its path. Setting it writes the
@@ -33,6 +35,18 @@ AppExport std::string folder();
 /// Whether `path` (a file or a folder that exists, or a file whose folder exists) lies inside the
 /// team folder. False when the folder is not set.
 AppExport bool contains(const std::string& path);
+
+/// The files a document saved as `target` uses that lie outside the team folder, as file names,
+/// sorted and without repeats (FreeCAD-CH, folder sync item 3): the files of the documents its
+/// links and expressions reach, and the absolute paths in its `PropertyFile` and `PropertyPath`
+/// values. Paths under the installation, its resources and the user's data folder are exempt.
+/// Empty when `target` is not inside the team folder. Links to documents that are not open
+/// (broken links, already shown in the tree) are not seen.
+AppExport std::vector<std::string> outsideFiles(const Document& doc, const std::string& target);
+
+/// Warns in the report view when `outsideFiles` is not empty, once per document until the list
+/// changes. Called by every save.
+void warnOutside(const Document& doc, const std::string& target);
 
 /// Writes the ignore list into `folder`: adds each missing pattern to `.stglobalignore` and the
 /// line `#include .stglobalignore` to `.stignore` when it is missing (lines already there, the

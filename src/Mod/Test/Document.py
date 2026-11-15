@@ -4413,3 +4413,69 @@ class DocumentTeamFolderCases(unittest.TestCase):
         self.group.SetString("TeamFolder", afile)
         self.assertIn("not a folder", FreeCAD.teamFolderProblem())
         self.assertFalse(os.path.exists(os.path.join(self.root, ".stignore")))
+
+    # Folder sync item 3 (ops#640): the files a document uses from outside the team folder
+
+    def _new(self, name):
+        doc = FreeCAD.newDocument(name)
+        self.opened.append(doc.Name)
+        return doc
+
+    def _using(self, part_folder):
+        """A part document "Plate" saved in part_folder, and "Frame" in the team folder using it
+        three ways: an App::Link to its marker, an expression reading it, and a FeaturePython
+        holding a PropertyFile and a PropertyPath in the outside folder."""
+        plate = self._new("Plate")
+        marker = plate.addObject("App::FeatureTest", "Marker")
+        marker.Integer = 7
+        marker.Path = ""  # FeatureTest's default, c:	emp, is a path outside the folder
+        plate.saveAs(os.path.join(part_folder, "Plate.FCStd"))
+        frame = self._new("Frame")
+        frame.saveAs(os.path.join(self.team, "Frame.FCStd"))  # an XLink needs its owner saved
+        link = frame.addObject("App::Link", "Link")
+        link.LinkedObject = marker
+        reader = frame.addObject("App::FeatureTest", "Reader")
+        reader.Path = ""
+        reader.setExpression("Integer", "Plate#Marker.Integer")
+        holder = frame.addObject("App::FeaturePython", "Holder")
+        holder.addProperty("App::PropertyFile", "Template")
+        holder.addProperty("App::PropertyPath", "Folder")
+        template = os.path.join(self.outside, "Template.svg")
+        with open(template, "w", encoding="utf-8") as f:
+            f.write("<svg/>")
+        holder.Template = template
+        holder.Folder = os.path.join(self.outside, "renders")
+        frame.recompute()
+        self.assertEqual(reader.Integer, 7)
+        frame.saveAs(os.path.join(self.team, "Frame.FCStd"))
+        return plate, frame, holder
+
+    def testOutsideFilesAreNamed(self):
+        self.group.SetString("TeamFolder", self.team)
+        _, frame, _ = self._using(self.outside)
+        self.assertEqual(FreeCAD.teamFolderOutside(frame.Name), ["Plate.FCStd", "Template.svg", "renders"])
+        frame.removeObject("Link")  # the expression alone still reads Plate
+        self.assertIn("Plate.FCStd", FreeCAD.teamFolderOutside(frame.Name))
+
+    def testNothingOutsideNamesNothing(self):
+        self.group.SetString("TeamFolder", self.team)
+        _, frame, holder = self._using(self.team)
+        self.assertEqual(FreeCAD.teamFolderOutside(frame.Name), ["Template.svg", "renders"])
+        holder.Template = os.path.join(self.team, "Template.svg")
+        holder.Folder = "renders"  # relative: saved as written, the same on every computer
+        self.assertEqual(FreeCAD.teamFolderOutside(frame.Name), [])
+
+    def testInstallationFilesAreExempt(self):
+        """TechDraw's Template points into the resources on every drawing; that file is on every computer."""
+        self.group.SetString("TeamFolder", self.team)
+        _, frame, holder = self._using(self.team)
+        holder.Template = os.path.join(FreeCAD.getResourceDir(), "Mod", "TechDraw", "Templates", "A4.svg")
+        holder.Folder = FreeCAD.getUserAppDataDir()
+        self.assertEqual(FreeCAD.teamFolderOutside(frame.Name), [])
+
+    def testOnlyDocumentsInsideTheFolderAreChecked(self):
+        self.group.SetString("TeamFolder", self.team)
+        _, frame, _ = self._using(self.outside)
+        self.assertEqual(FreeCAD.teamFolderOutside(frame.Name, os.path.join(self.outside, "Frame.FCStd")), [])
+        self.group.SetString("TeamFolder", "")
+        self.assertEqual(FreeCAD.teamFolderOutside(frame.Name), [])

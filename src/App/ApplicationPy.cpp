@@ -458,6 +458,30 @@ PyObject* ApplicationPy::sTeamFolderProblem(PyObject* /*self*/, PyObject* args)
     PY_CATCH;
 }
 
+// FreeCAD-CH (ops#640, folder sync item 3)
+PyObject* ApplicationPy::sTeamFolderOutside(PyObject* /*self*/, PyObject* args)
+{
+    char* name = nullptr;
+    char* target = nullptr;
+    if (!PyArg_ParseTuple(args, "s|s", &name, &target)) {
+        return nullptr;
+    }
+    PY_TRY
+    {
+        Document* doc = GetApplication().getDocument(name);
+        if (!doc) {
+            PyErr_Format(PyExc_NameError, "Unknown document '%s'", name);
+            return nullptr;
+        }
+        Py::List result;
+        for (const auto& file : TeamFolder::outsideFiles(*doc, target ? target : doc->FileName.getValue())) {
+            result.append(Py::String(file));
+        }
+        return Py::new_reference_to(result);
+    }
+    PY_CATCH;
+}
+
 PyObject* ApplicationPy::sGetDocument(PyObject* /*self*/, PyObject* args)
 {
     char* pstr = nullptr;
