@@ -419,6 +419,26 @@ class TestInsertStudioGui(AssembliesGuiBase):
         self.assertAlmostEqual(links[0].Shape.Volume, math.pi * 36 * 20, 3)
         self.assertAlmostEqual(links[1].Shape.Volume, 1000, 6)
 
+    def testStudioFeaturesNotListed(self):
+        """ops#798: a studio's features (a studio-level Pad, a sketch, a Derived binder) are not
+        listed under it, its parts are (Onshape's Insert lists parts only)."""
+        if not tabsOn():
+            self.skipTest("the typed tabs are on under the Onshape keymap only")
+        doc, studio, asm = self.model()
+        for kind, name in (
+            ("PartDesign::Pad", "StudioPad"),
+            ("Sketcher::SketchObject", "StudioSketch"),
+            ("PartDesign::SubShapeBinder", "DerivedSource"),
+        ):
+            studio.addObject(doc.addObject(kind, name))
+        pump(0.2)
+        panel = self.openInsert(doc, asm)
+        top = panel.form.partList.topLevelItem(0)
+        rows = {r.text(0): r for r in self.children(top)}
+        self.assertEqual([c.text(0) for c in self.children(rows["Part Studio 2"])], ["Body002"])
+        Gui.Control.closeDialog()
+        pump(0.2)
+
     def test_studio_using_assembly_not_offered(self):
         """R7A-2: Part Studio 3 (an App::Part) holds a Body on a SubShapeBinder of the assembly's
         cube face: inserting it would close a cycle, so neither the studio nor its Body is
