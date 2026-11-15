@@ -42,7 +42,9 @@ def shapeOf(objs):
 
     shapes = []
     for obj in objs:
-        shape = Part.getShape(obj)
+        # the placement in the studio, a container's (an App::Part's) included
+        shape = Part.getShape(obj, transform=False).copy()
+        shape.Placement = obj.getGlobalPlacement()
         if shape.isNull():
             raise ValueError(translate("ExportParts", "{} has no shape").format(obj.Label))
         shapes.append(shape)
