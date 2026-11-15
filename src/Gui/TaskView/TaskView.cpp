@@ -751,14 +751,17 @@ void TaskView::keyPressEvent(QKeyEvent* ke)
             // The box's OK (ops#605 2a) accepts as Onshape's Enter does (ops#640, rank 38): from a
             // check box or a radio button (hands-on B-1) and from the graphics area (R6, through
             // GraphicsEnterFilter). In a value field Enter only commits the value, which the field
-            // did already; a list's Enter opens its item. Not in the sketch editor, nor a renamed
+            // did already; a list's Enter opens its item, except a pick list's, which accepts as
+            // Onshape's (oracle 24, G3-3; ops#627): a list whose Enter does nothing of its own
+            // says so with the property enterAccepts. Not in the sketch editor, nor a renamed
             // OK (Delete, Run Check): Qt makes the box's first accept button the default when it
             // shows, so its default flag doesn't tell. The graphics area's Enter is the sketch
             // editor's while a sketch is in edit (hands-on C-4: a tool's, as the Fillet preview's)
             QWidget* focus = QApplication::focusWidget();
             const bool fromGraphics = (enterFromGraphics || isInGraphics(focus)) && !sketchInEdit();
             const bool accepts = qobject_cast<QCheckBox*>(focus)
-                || qobject_cast<QRadioButton*>(focus) || fromGraphics;
+                || qobject_cast<QRadioButton*>(focus) || fromGraphics
+                || (focus && focus->property("enterAccepts").toBool());
             QPushButton* boxOk = active->ActiveCtrl->standardButtons()->button(QDialogButtonBox::Ok);
             // get all buttons of the complete task dialog
             QList<QPushButton*> list = this->findChildren<QPushButton*>();
