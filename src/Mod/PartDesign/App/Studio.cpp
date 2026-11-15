@@ -1380,6 +1380,60 @@ std::vector<App::DocumentObject*> dropped(const std::vector<App::DocumentObject*
 
 }  // namespace
 
+/** A drop's parks and put-backs (RO1, Onshape: a feature dragged above what it reads fails alone,
+ * and dragged back it recovers by itself), written once the list is: each (reader, read) of parks
+ * has its link entries on read (or a step of read's) parked; then each entry's reads parked by an
+ * earlier drop (its own, or its sketch's or datum's) are put back where their row is now above
+ * the entry's. A solid of the reader's own Body is the Body reorder's (Body::reorderObject()),
+ * never put back here. True when anything was written
+ */
+bool parkAndPutBack(const std::vector<App::DocumentObject*>& order,
+                    const std::vector<std::pair<App::DocumentObject*, App::DocumentObject*>>& parks)
+{
+    bool written = false;
+    for (const auto& [reader, read] : parks) {
+        auto target = read;
+        written = parkReadsOf(reader, [target](App::DocumentObject* obj) {
+            return obj == target || ownerOfStep(obj) == target;
+        }) || written;
+    }
+    std::unordered_map<const App::DocumentObject*, std::size_t> place;
+    for (std::size_t i = 0; i < order.size(); ++i) {
+        place.emplace(order[i], i);
+    }
+    auto rowOf = [&place](App::DocumentObject* obj) -> std::optional<std::size_t> {
+        auto it = place.find(obj);
+        if (it == place.end()) {
+            auto owner = ownerOfStep(obj);
+            it = owner ? place.find(owner) : place.end();
+        }
+        return it == place.end() ? std::nullopt : std::optional<std::size_t>(it->second);
+    };
+    for (std::size_t i = 0; i < order.size(); ++i) {
+        std::vector<App::DocumentObject*> holders {order[i]};
+        for (auto obj : linkReads(order[i], /*picksOnly=*/true)) {
+            if (obj && !Body::isSolidFeature(obj)
+                && (obj->isDerivedFrom<Part::Part2DObject>() || obj->isDerivedFrom<Part::Datum>())) {
+                holders.push_back(obj);
+            }
+        }
+        for (auto holder : holders) {
+            if (!hasParkedReferences(holder)) {
+                continue;
+            }
+            const Body* own = Body::findBodyOf(holder);
+            written = putBackReadsOf(holder, [&](App::DocumentObject* target) {
+                if (own && Body::findBodyOf(target) == own && Body::isSolidFeature(target)) {
+                    return false;
+                }
+                auto row = rowOf(target);
+                return row && *row < i;
+            }) || written;
+        }
+    }
+    return written;
+}
+
 /** FreeCAD-CH ops#654 S3: moves block, entries of list, to after the entry after (null: the top)
  * as one drag, and reconciles. Refused with why, before anything is written, where an entry would
  * go above what it reads or below what reads it (orderRefusal()), unless the read is an element an
@@ -1441,8 +1495,9 @@ bool moveStudioEntries(StudioList* list,
     // A face, edge or vertex of a later member that an earlier one made (a pad's top face a later
     // fillet trimmed) is read from that one instead, as Onshape traces a reference to the feature
     // that made it, as moveInStudio() does without a list (report 16, ops#647: the Features list
-    // always drags with one). Any other broken read refuses the drop. Planned first, written below
+    // always drags with one). Any other broken read is parked (RO1). Planned first, written below
     std::vector<Retrace> retraces;
+    std::vector<std::pair<App::DocumentObject*, App::DocumentObject*>> parks;
     PlannedReads planned;
     for (;;) {
         const RefusedRead broken = orderRefusal(order, moved, planned);
@@ -1463,7 +1518,20 @@ bool moveStudioEntries(StudioList* list,
         // The entry's sketch is read at the entry's place: traced there
         const auto plan = retraceRead(broken.linker, broken.read, earlier);
         if (plan.empty()) {
-            return refuse(broken.text);
+            // No earlier version (RO1, Onshape: a drag is never refused): the read is parked, as
+            // a reorder parks it, so the reader fails alone with "missing selection" and a drop
+            // that puts the order right again gives it back (putBackReadsOf() below). Not where
+            // it can't be parked (a reader in no Body): refused as before
+            if (!Body::findBodyOf(broken.linker)) {
+                return refuse(broken.text);
+            }
+            auto reads = linkReads(broken.linker, /*picksOnly=*/true);
+            std::erase_if(reads, [&broken](App::DocumentObject* obj) {
+                return obj == broken.read || ownerOfStep(obj) == broken.read;
+            });
+            planned[broken.linker] = std::move(reads);
+            parks.emplace_back(broken.linker, broken.read);
+            continue;
         }
         // What it reads once traced: its picks with read replaced by the earlier members
         auto reads = linkReads(broken.linker, /*picksOnly=*/true);
@@ -1507,12 +1575,13 @@ bool moveStudioEntries(StudioList* list,
         }
         throw;
     }
+    const bool parkedOrPutBack = parkAndPutBack(order, parks);
     bool tipMoved = false;
     for (std::size_t i = 0; i < bodies.size(); ++i) {
         tipMoved = tipMoved || bodies[i]->Tip.getValue() != tips[i];
     }
     if (changed) {
-        *changed = listChanged || tipMoved || !retraces.empty();
+        *changed = listChanged || tipMoved || !retraces.empty() || parkedOrPutBack;
     }
     return true;
 }
@@ -1669,6 +1738,7 @@ static bool moveRowsInStudio(App::Document* doc,
     // any other broken read refuses the drop. Planned on the history, written in step 5
     std::unordered_set<const App::DocumentObject*> earlier;
     std::vector<Retrace> retraces;
+    std::vector<std::pair<App::DocumentObject*, App::DocumentObject*>> parks;
     std::unordered_map<App::DocumentObject*, std::vector<App::DocumentObject*>> plannedReads;
     for (;;) {
         auto broken = brokenRead(history, order, moved, lane, lanePlan);
@@ -1683,9 +1753,29 @@ static bool moveRowsInStudio(App::Document* doc,
             earlier.insert(obj);
         }
         auto plan = retraceRead(broken.reader, broken.read, earlier);
-        if (plan.empty() || std::ranges::any_of(retraces, [&broken](const Retrace& done) {
-                return done.prop->getContainer() == broken.reader;
-            })) {
+        const bool tracedBefore = std::ranges::any_of(retraces, [&broken](const Retrace& done) {
+            return done.prop->getContainer() == broken.reader;
+        });
+        const bool parkedBefore = std::ranges::any_of(parks, [&broken](const auto& done) {
+            return done.first == broken.reader && done.second == broken.read;
+        });
+        if (plan.empty() && !tracedBefore && !parkedBefore && Body::findBodyOf(broken.reader)) {
+            // No earlier version (RO1, Onshape: a drag is never refused): parked, so the reader
+            // fails alone, and a drop that puts the order right gives it back (parkAndPutBack())
+            auto reads = linkReads(broken.reader);
+            std::erase_if(reads, [&broken](App::DocumentObject* obj) {
+                return obj == broken.read || ownerOfStep(obj) == broken.read;
+            });
+            plannedReads[broken.reader] = reads;
+            readMember(history, history.laneOf.at(broken.reader), broken.reader, reads);
+            // Still read another way (through a datum, a spreadsheet): refused
+            if (history.deps[broken.reader].count(broken.read)) {
+                throw Base::ValueError(broken.text);
+            }
+            parks.emplace_back(broken.reader, broken.read);
+            continue;
+        }
+        if (plan.empty() || tracedBefore) {
             throw Base::ValueError(broken.text);
         }
         // What it reads once traced: its reads with read replaced by the earlier members
@@ -1735,8 +1825,9 @@ static bool moveRowsInStudio(App::Document* doc,
         }
     }
 
-    // 5. Written: the traced reads, the Group, the order, the bar
+    // 5. Written: the traced reads, the parked ones, the Group, the order, the bar
     writeRetraces(retraces);
+    const bool parkedOrPutBack = parkAndPutBack(order, parks);
     App::DocumentObject* oldTip = body->Tip.getValue();
     if (groupMoves) {
         {
@@ -1747,8 +1838,8 @@ static bool moveRowsInStudio(App::Document* doc,
             throw Base::RuntimeError("The reorder carried other features than planned: undo it");
         }
     }
-    bool changed = groupMoves || order != sequence;
-    if (changed) {
+    bool changed = groupMoves || order != sequence || parkedOrPutBack;
+    if (groupMoves || order != sequence) {
         saveHistoryOrder(order);
     }
     if (rolledBack) {
