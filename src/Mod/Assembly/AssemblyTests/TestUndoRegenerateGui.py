@@ -15,7 +15,8 @@ import AssemblyPattern
 import JointObject
 from AssemblyTests.TestOnshapeAssembliesGui import AssembliesGuiBase, pump, tabsOn, waitFor
 
-SOLVED = App.Placement(App.Vector(-20, -30, 0), App.Rotation())
+# Peg picked first: the offset runs from Base's pick to Peg's, whatever is grounded (ops#826, MO1, AR6)
+SOLVED = App.Placement(App.Vector(20, 30, 0), App.Rotation())
 STALE = ("Touched", "Invalid")
 
 
