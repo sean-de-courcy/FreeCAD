@@ -1,0 +1,130 @@
+{
+ "template": "T8",
+ "note": "plate; a through counterbore, a through 90 deg counterdrill, a blind 118 deg drill (depth to the tip when tip=1, to the shoulder when tip=0), a through hole; the 4 vertical edges chamfered (ch=0 two distances, ch=1 distance and angle)",
+ "params": {
+  "a": 100,
+  "b": 60,
+  "t": 12,
+  "d1": 6,
+  "D1": 11,
+  "k1": 4,
+  "d2": 6,
+  "D2": 12,
+  "k2": 2,
+  "d3": 5,
+  "L3": 8,
+  "tip": 1,
+  "d5": 4,
+  "s1": 3,
+  "s2": 5,
+  "ang": 30,
+  "ch": 0
+ },
+ "features": [
+  {
+   "name": "PlateSk",
+   "type": "sketch",
+   "plane": "Top",
+   "entities": [
+    {
+     "rect": {
+      "corner": [
+       "0",
+       "0"
+      ],
+      "size": [
+       "#a",
+       "#b"
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "Plate",
+   "type": "extrude",
+   "op": "new",
+   "profile": "PlateSk",
+   "end": "blind",
+   "depth": "#t"
+  },
+  {
+   "name": "Cham",
+   "type": "chamfer",
+   "edges": "the 4 edges of Plate parallel to Z",
+   "chamfer_type": "ch=0: two distances #s1, #s2; ch=1: distance #s1 and angle #ang",
+   "note": "V and A are symmetric in which face takes which distance"
+  },
+  {
+   "name": "HoleSk",
+   "type": "sketch",
+   "plane": "top face of Plate",
+   "entities": [
+    {
+     "point": [
+      "20",
+      "20"
+     ]
+    },
+    {
+     "point": [
+      "50",
+      "20"
+     ]
+    },
+    {
+     "point": [
+      "80",
+      "20"
+     ]
+    },
+    {
+     "point": [
+      "50",
+      "45"
+     ]
+    }
+   ]
+  },
+  {
+   "name": "H1",
+   "type": "hole",
+   "style": "counterbore",
+   "diameter": "#d1",
+   "counterbore_diameter": "#D1",
+   "counterbore_depth": "#k1",
+   "end": "through all",
+   "at": "(20, 20)"
+  },
+  {
+   "name": "H2",
+   "type": "hole",
+   "style": "counterdrill",
+   "diameter": "#d2",
+   "counterdrill_diameter": "#D2",
+   "counterdrill_depth": "#k2",
+   "counterdrill_angle": "90",
+   "end": "through all",
+   "at": "(50, 20)"
+  },
+  {
+   "name": "H3",
+   "type": "hole",
+   "style": "simple",
+   "diameter": "#d3",
+   "depth": "#L3",
+   "tip_angle": "118",
+   "end": "blind",
+   "at": "(80, 20)",
+   "note": "tip=1: #L3 to the tip; tip=0: #L3 to the shoulder (Onshape's 'blind in last' or depth reference)"
+  },
+  {
+   "name": "H5",
+   "type": "hole",
+   "style": "simple",
+   "diameter": "#d5",
+   "end": "through all",
+   "at": "(50, 45)"
+  }
+ ]
+}

@@ -1,0 +1,47 @@
+{
+ "template": "T5c",
+ "note": "box a x b x c; an equal chamfer of size r on all 12 edges (all=1) or on the 4 edges parallel to Z (all=0)",
+ "params": {
+  "a": 40,
+  "b": 30,
+  "c": 20,
+  "r": 3,
+  "all": 1
+ },
+ "features": [
+  {
+   "name": "BoxSk",
+   "type": "sketch",
+   "plane": "Top",
+   "entities": [
+    {
+     "rect": {
+      "corner": [
+       "0",
+       "0"
+      ],
+      "size": [
+       "#a",
+       "#b"
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "Box",
+   "type": "extrude",
+   "op": "new",
+   "profile": "BoxSk",
+   "end": "blind",
+   "depth": "#c"
+  },
+  {
+   "name": "Dress",
+   "type": "chamfer",
+   "edges": "all=1: all 12 edges of Box; all=0: the 4 edges of Box parallel to Z",
+   "distance": "#r",
+   "chamfer_type": "equal distance"
+  }
+ ]
+}

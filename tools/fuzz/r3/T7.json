@@ -1,0 +1,191 @@
+{
+ "template": "T7",
+ "note": "stepped plate; a boss up to the step's top face (beyond its footprint); a rect tool up to next downward; a through hole; a groove across the step's top (split=1) placed before the boss; step=0 suppresses Step",
+ "params": {
+  "a": 100,
+  "b": 60,
+  "t": 8,
+  "sx": 60,
+  "hs": 10,
+  "cx": 30,
+  "cy": 30,
+  "r": 8,
+  "nx": 40,
+  "nw": 30,
+  "ny": 40,
+  "nh": 15,
+  "zn": 30,
+  "hx": 85,
+  "hy": 15,
+  "rh": 4,
+  "split": 0,
+  "gx": 75,
+  "gw": 5,
+  "gd": 4,
+  "step": 1
+ },
+ "features": [
+  {
+   "name": "PlateSk",
+   "type": "sketch",
+   "plane": "Top",
+   "entities": [
+    {
+     "rect": {
+      "corner": [
+       "0",
+       "0"
+      ],
+      "size": [
+       "#a",
+       "#b"
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "Plate",
+   "type": "extrude",
+   "op": "new",
+   "profile": "PlateSk",
+   "end": "blind",
+   "depth": "#t"
+  },
+  {
+   "name": "StepSk",
+   "type": "sketch",
+   "plane": "plane z = #t",
+   "entities": [
+    {
+     "rect": {
+      "corner": [
+       "#sx",
+       "0"
+      ],
+      "size": [
+       "#a-#sx",
+       "#b"
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "Step",
+   "type": "extrude",
+   "op": "add",
+   "profile": "StepSk",
+   "end": "blind",
+   "depth": "#hs",
+   "direction": "+Z",
+   "suppressed": "#step == 0"
+  },
+  {
+   "name": "GrooveSk",
+   "type": "sketch",
+   "plane": "plane z = #t+#hs",
+   "entities": [
+    {
+     "rect": {
+      "corner": [
+       "#gx",
+       "-5"
+      ],
+      "size": [
+       "#gw",
+       "#b+10"
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "Groove",
+   "type": "extrude",
+   "op": "remove",
+   "profile": "GrooveSk",
+   "end": "blind",
+   "depth": "#gd",
+   "direction": "-Z",
+   "suppressed": "#split == 0",
+   "note": "splits Step's top face in two"
+  },
+  {
+   "name": "BossSk",
+   "type": "sketch",
+   "plane": "plane z = #t",
+   "entities": [
+    {
+     "circle": {
+      "center": [
+       "#cx",
+       "#cy"
+      ],
+      "radius": "#r"
+     }
+    }
+   ]
+  },
+  {
+   "name": "Boss",
+   "type": "extrude",
+   "op": "add",
+   "profile": "BossSk",
+   "end": "up to face",
+   "face": "Step's top face (z = #t+#hs), picked before the groove",
+   "direction": "+Z"
+  },
+  {
+   "name": "NextSk",
+   "type": "sketch",
+   "plane": "plane z = #zn",
+   "entities": [
+    {
+     "rect": {
+      "corner": [
+       "#nx",
+       "#ny"
+      ],
+      "size": [
+       "#nw",
+       "#nh"
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "Next",
+   "type": "extrude",
+   "op": "add",
+   "profile": "NextSk",
+   "end": "up to next",
+   "direction": "-Z"
+  },
+  {
+   "name": "HoleSk",
+   "type": "sketch",
+   "plane": "Top",
+   "entities": [
+    {
+     "circle": {
+      "center": [
+       "#hx",
+       "#hy"
+      ],
+      "radius": "#rh"
+     }
+    }
+   ]
+  },
+  {
+   "name": "Hole",
+   "type": "extrude",
+   "op": "remove",
+   "profile": "HoleSk",
+   "end": "through all",
+   "symmetric": true
+  }
+ ]
+}
