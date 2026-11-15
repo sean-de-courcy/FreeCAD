@@ -3,6 +3,7 @@
 // Owners outside every Body (FreeCAD-CH ops#654 S2, notes/parts-design.md 10.1 "(b) on the build"
 // and 10.9): which features run as owners, and the in-scope parts' shapes at an owner's place.
 
+#include <algorithm>
 #include <string>
 #include <vector>
 
@@ -18,6 +19,7 @@
 #include "Feature.h"
 #include "FeatureApply.h"
 #include "Pieces.h"
+#include "Studio.h"
 #include "StudioList.h"
 #include "StudioOwner.h"
 
@@ -77,6 +79,192 @@ Part::TopoShape studioBaseAt(const App::DocumentObject* owner, const Body* part)
     }
     shape.transformShape(part->globalPlacement().toMatrix(), false, true);
     return shape;
+}
+
+const Part::Feature* studioPartSolidBefore(const App::DocumentObject* owner, const Body* part)
+{
+    const StudioList* list = StudioList::holding(owner);
+    if (!list || !part) {
+        return nullptr;
+    }
+    const auto& entries = list->Entries.getValues();
+    auto placeOf = [&entries](const App::DocumentObject* obj) {
+        auto it = std::ranges::find(entries, obj);
+        return it == entries.end() ? -1 : static_cast<int>(it - entries.begin());
+    };
+    const int at = placeOf(owner);
+    if (at < 0) {
+        return nullptr;
+    }
+    const Part::Feature* last = nullptr;
+    int key = -1;
+    for (App::DocumentObject* obj : part->Group.getValues()) {
+        int here = placeOf(obj);
+        if (here < 0) {
+            if (auto feature = freecad_cast<Feature*>(obj)) {
+                here = placeOf(feature->StudioOwner.getValue());
+            }
+        }
+        if (here >= 0) {
+            key = here;  // else the place of the member before it
+        }
+        if (key >= at || !Body::isSolidFeature(obj)) {
+            continue;
+        }
+        auto feature = static_cast<const Part::Feature*>(obj);
+        const Part::TopoShape& shape = feature->Shape.getShape();
+        if (!shape.isNull() && shape.hasSubShape(TopAbs_SOLID)) {
+            last = feature;  // a failed feature contributes nothing (parts-design 10.9)
+        }
+    }
+    return last;
+}
+
+Part::TopoShape studioPartShapeAt(
+    const App::DocumentObject* owner,
+    const App::DocumentObject* linked,
+    bool& isPart
+)
+{
+    isPart = false;
+    const StudioList* list = linked ? StudioList::holding(owner) : nullptr;
+    if (!list || Body::findBodyOf(owner)) {
+        return {};
+    }
+    auto body = freecad_cast<const Body*>(linked);
+    if (!body && Body::isSolidFeature(linked)) {
+        body = Body::findBodyOf(linked);
+    }
+    if (!body) {
+        return {};
+    }
+    const auto bodies = studioBodies(owner->getDocument(), list->studio());
+    if (std::ranges::find(bodies, body) == bodies.end()) {
+        return {};
+    }
+    isPart = true;
+    const Part::Feature* last = studioPartSolidBefore(owner, body);
+    if (!last) {
+        return {};
+    }
+    // With its Body's placement, as the Body's own shape has it, whichever of the two the link
+    // names: reconcile writes the solid in place of the Body, and the result must not change
+    Part::TopoShape shape = Part::Feature::getTopoShape(
+        last,
+        Part::ShapeOption::ResolveLink | Part::ShapeOption::Transform
+    );
+    shape.transformShape(body->Placement.getValue().toMatrix(), false, true);
+    return shape;
+}
+
+bool studioWholePartLink(const App::Property* prop)
+{
+    const char* name = prop ? prop->getName() : nullptr;
+    auto link = freecad_cast<const App::PropertyLinkBase*>(prop);
+    if (!name || !link) {
+        return false;
+    }
+    const std::string propName = name;
+    if (propName != "UpToFace" && propName != "UpToFace2" && propName != "UpToShape"
+        && propName != "UpToShape2") {
+        return false;
+    }
+    std::vector<App::DocumentObject*> objs;
+    std::vector<std::string> subs;
+    link->getLinks(objs, /*all=*/true, &subs, /*newStyle=*/false);
+    if (objs.empty() || !std::ranges::all_of(subs, &std::string::empty)) {
+        return false;
+    }
+    return std::ranges::all_of(objs, [](const App::DocumentObject* obj) {
+        return obj
+            && (obj->isDerivedFrom<Body>() || (Body::isSolidFeature(obj) && Body::findBodyOf(obj)));
+    });
+}
+
+void studioReleaseWholePartLinks(App::DocumentObject* step, Body* body)
+{
+    if (!step || !body) {
+        return;
+    }
+    App::DocumentObject* before = body->getPrevSolidFeature(step);
+    App::DocumentObject* target = before ? before : body;
+    for (auto reader : step->getInList()) {
+        if (!reader || Body::findBodyOf(reader)) {
+            continue;
+        }
+        for (const char* name : {"UpToFace", "UpToFace2", "UpToShape", "UpToShape2"}) {
+            App::Property* prop = reader->getPropertyByName(name);
+            if (!studioWholePartLink(prop)) {
+                continue;
+            }
+            if (auto one = freecad_cast<App::PropertyLinkSub*>(prop)) {
+                if (one->getValue() == step) {
+                    one->setValue(target, one->getSubValues());
+                }
+            }
+            else if (auto many = freecad_cast<App::PropertyLinkSubList*>(prop)) {
+                auto sets = many->getSubListValues();
+                bool changed = false;
+                for (auto& [obj, subs] : sets) {
+                    if (obj == step) {
+                        obj = target;
+                        changed = true;
+                    }
+                }
+                if (changed) {
+                    many->setSubListValues(sets);
+                }
+            }
+        }
+    }
+}
+
+std::string studioLinkAhead(const Feature* owner)
+{
+    if (!runsAsStudioOwner(owner)) {
+        return {};
+    }
+    std::vector<App::Property*> props;
+    owner->getPropertyList(props);
+    for (auto prop : props) {
+        auto link = freecad_cast<App::PropertyLinkBase*>(prop);
+        const char* name = prop->getName();
+        if (!link || !name || link->getScope() == App::LinkScope::Hidden) {
+            continue;
+        }
+        std::vector<App::DocumentObject*> linked;
+        link->getLinks(linked, /*all=*/true);
+        for (auto obj : linked) {
+            if (!obj) {
+                continue;
+            }
+            auto body = freecad_cast<const Body*>(obj);
+            const bool whole = body != nullptr;
+            if (!body && Body::isSolidFeature(obj)) {
+                body = Body::findBodyOf(obj);
+            }
+            const Feature* step = body ? StudioList::stepOf(owner, body) : nullptr;
+            if (!step) {
+                continue;  // a part it doesn't change: no cycle through a step
+            }
+            const std::string head = std::string(name) + " links '" + obj->Label.getValue() + "', ";
+            const std::string tail = ": link a feature of the part from before this one (the "
+                                     "link is a dependency loop, and results would come one "
+                                     "recompute late)";
+            if (whole) {
+                return head + "the part this feature changes" + tail;
+            }
+            if (obj == step) {
+                return head + "this feature's own step in '" + body->Label.getValue() + "'" + tail;
+            }
+            const auto& group = body->Group.getValues();
+            if (std::find(group.begin(), group.end(), obj)
+                > std::find(group.begin(), group.end(), static_cast<const App::DocumentObject*>(step))) {
+                return head + "a feature of '" + body->Label.getValue() + "' after this one" + tail;
+            }
+        }
+    }
+    return {};
 }
 
 Part::TopoShape studioScopeBaseAt(const App::DocumentObject* owner)

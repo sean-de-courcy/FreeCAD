@@ -3146,10 +3146,21 @@ App::DocumentObjectExecReturn* Revolved::tryExecuteRevolved(Part::RevolMode revo
         if (!part) {
             throw Base::ValueError(QT_TRANSLATE_NOOP("Exception", "Select the part to revolve up to"));
         }
-        TopoShape shape = Part::Feature::getTopoShape(
-            part,
-            Part::ShapeOption::ResolveLink | Part::ShapeOption::Transform
-        );
+        // A part of the studio: as it is at this owner's place, never with the features after it
+        // (FreeCAD-CH ops#846, Onshape reads the part at the feature)
+        bool isPart = false;
+        TopoShape shape = studioPartShapeAt(this, part, isPart);
+        if (isPart && shape.isNull()) {
+            throw Base::ValueError(
+                QT_TRANSLATE_NOOP("Exception", "Up to part: the part has no solid before this feature")
+            );
+        }
+        if (!isPart) {
+            shape = Part::Feature::getTopoShape(
+                part,
+                Part::ShapeOption::ResolveLink | Part::ShapeOption::Transform
+            );
+        }
         if (shape.isNull() || !shape.hasSubShape(TopAbs_FACE)) {
             throw Base::ValueError(
                 QT_TRANSLATE_NOOP("Exception", "Up to part: the part has no faces to revolve up to")
