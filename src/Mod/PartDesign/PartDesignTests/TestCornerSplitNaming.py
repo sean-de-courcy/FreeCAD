@@ -131,9 +131,10 @@ def cornerNames(doc):
     }
 
 
-def build(name, owners, pieces=1):
+def build(name, owners, pieces=1, refine=True):
     """The model; with `owners` the Fillet is a studio owner outside the Body (what the GUI
-    makes), else a Body member. `pieces`: of the plate sketch's bottom edge."""
+    makes), else a Body member. `pieces`: of the plate sketch's bottom edge. `refine`: the
+    pad's Refine (the default follows a user preference, so it is always set)."""
     doc = App.newDocument(name)
     doc.UndoMode = 0
     body = doc.addObject("PartDesign::Body", "Part")
@@ -146,6 +147,7 @@ def build(name, owners, pieces=1):
     pad = body.newObject("PartDesign::Pad", "Plate")
     pad.Profile = s
     pad.Length = ZT
+    pad.Refine = refine
     PartDesign.studioInsert(pad, -1)
     doc.recompute()
     corners = [f"Edge{i}" for i, e in enumerate(pad.Shape.Edges, 1) if isCorner(e)]
@@ -173,8 +175,8 @@ class _CornerThroughSketchEdit:
         if self.doc:
             App.closeDocument(self.doc.Name)
 
-    def build(self, pieces=1):
-        self.doc = build("TestCornerSplitNaming", self.OWNERS, pieces)
+    def build(self, pieces=1, refine=True):
+        self.doc = build("TestCornerSplitNaming", self.OWNERS, pieces, refine)
         return self.doc.getObject("PlateSk")
 
     def rounded(self):
@@ -283,6 +285,20 @@ class TestCornerThroughSketchEditOwners(_CornerThroughSketchEdit, unittest.TestC
         self.assertAlmostEqual(
             self.doc.getObject("Part").Shape.Volume, volume(3, cutOff=True), places=5
         )
+
+    def testSplitUnrefined(self):
+        """A pad that doesn't refine keeps an edge at the split point, whose vertex keeps the
+        old corner's other edge end: two candidates, so the pick is not found."""
+        sketch = self.build(refine=False)
+        self.check()
+        split(sketch)
+        self.doc.recompute()
+        fillet = self.doc.getObject("Fillet")
+        self.assertNotIn("Invalid", fillet.State)
+        self.assertIn("a picked edge is not found", fillet.getStatusString())
+        # Three corners rounded, by the volume alone: the split point is nearer the first corner
+        # than R, so that corner's fillet runs over it and its face is no plain cylinder
+        self.assertAlmostEqual(self.doc.getObject("Part").Shape.Volume, volume(3), places=5)
 
 
 class TestCornerThroughSketchEditBody(_CornerThroughSketchEdit, unittest.TestCase):
