@@ -1306,6 +1306,48 @@ class BodyReorderBase:
         self.assertIn("Pad2", sketch.getStatusString())
         self.assertEqual((len(sketch.ExternalGeo), len(sketch.Constraints)), counts)
 
+    def testUnparkAfterDeleteWarnsLoudly(self):
+        """RO11f x ops#656 D4 row 2 (ruled by c771: the park wins): Pad2 deleted while the
+        projection is parked is quiet in the compute (the parked geometry takes no part in it);
+        the move back below the block, which can't put it back, makes it loud: the sketch warns
+        that Pad2's reference is missing, the geometry is flagged missing and dropped from its
+        park, and the pocket after it still builds. It is row 2's missing-reference warning, not
+        the error of a geometry whose link went with its object, and it stays so through a save
+        and reopen."""
+        block, pad2, sketch, hole = self.projecting()
+        self.body.reorderObject([hole], None, True)
+        self.recompute()
+        self.deleteFeature(pad2)
+        self.recompute()
+
+        self.body.reorderObject([hole], block, True)
+        self.recompute()
+        self.assertEqual(self.parked(sketch), [])
+        facade = Sketcher.ExternalGeometryFacade(sketch.ExternalGeo[2])
+        self.assertTrue(facade.testFlag("Missing"))
+        self.assertTrue(facade.testFlag("ParkDropped"))
+        self.assertTrue(sketch.isValid(), sketch.getStatusString())
+        self.assertIn("Warning", sketch.State)
+        self.assertIn("missing", sketch.getStatusString().lower())
+        self.assertIn("Pad2", sketch.getStatusString())
+        self.assertTrue(hole.isValid(), hole.getStatusString())
+
+        self.tempDir = tempfile.mkdtemp()
+        path = os.path.join(self.tempDir, "parkdropped.FCStd")
+        self.doc.saveAs(path)
+        names = (self.body.Name, sketch.Name, hole.Name)
+        App.closeDocument(self.doc.Name)
+        self.doc = App.openDocument(path)
+        self.body, sketch, hole = (self.doc.getObject(name) for name in names)
+        sketch.touch()
+        self.recompute()
+        self.assertTrue(
+            Sketcher.ExternalGeometryFacade(sketch.ExternalGeo[2]).testFlag("ParkDropped")
+        )
+        self.assertTrue(sketch.isValid(), sketch.getStatusString())
+        self.assertIn("Warning", sketch.State)
+        self.assertIn("Pad2", sketch.getStatusString())
+
     def testParkUndoRedo(self):
         """RO11g: one transaction; undo gives the projecting model as it was, redo the parked
         one."""

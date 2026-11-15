@@ -5775,6 +5775,10 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
         else {
             egf->setFlag(ExternalGeometryExtension::Missing,false);
         }
+        // FreeCAD-CH (ops#656 D4 row 2): a link holds its reference again
+        if (refSet.count(egf->getRef())) {
+            egf->setFlag(ExternalGeometryExtension::ParkDropped, false);
+        }
     }
 
     std::set<int> reversedGeoIds;
@@ -6511,6 +6515,7 @@ void SketchObject::parkExternalGeometry(const std::vector<int>& entries)
             auto egf = ExternalGeometryFacade::getFacade(geo);
             egf->setRef(std::string());
             egf->setFlag(ExternalGeometryExtension::Missing, false);
+            egf->setFlag(ExternalGeometryExtension::ParkDropped, false);
             if (undecided && !egf->testFlag(ExternalGeometryExtension::TypeGuessed)) {
                 egf->setFlag(ExternalGeometryExtension::TypeUndecided, true);
             }
@@ -6676,6 +6681,7 @@ int SketchObject::unparkExternalGeometry(App::DocumentObject* obj,
             egf->setFlag(ExternalGeometryExtension::Frozen, false);
             egf->setFlag(ExternalGeometryExtension::Sync, false);
             egf->setFlag(ExternalGeometryExtension::Missing, false);
+            egf->setFlag(ExternalGeometryExtension::ParkDropped, false);
             egf->setFlag(ExternalGeometryExtension::Detached, false);
             // and the kind its Id had when the entry was parked, not its model's: the rebuild
             // hands the Ids out per kind, so a placeholder of the other kind would take that
@@ -6792,6 +6798,8 @@ int SketchObject::markExternalGeometryMissing(const std::vector<long>& ids, cons
         geo = geo->clone();
         ExternalGeometryFacade::getFacade(geo)->setRef(ref);
         ExternalGeometryFacade::getFacade(geo)->setSource(std::string());  // (ops#264 e2)
+        // FreeCAD-CH (ops#656 D4 row 2): dropped from a park, not orphaned by its link: it warns
+        ExternalGeometryFacade::getFacade(geo)->setFlag(ExternalGeometryExtension::ParkDropped, true);
         ++marked;
     }
     if (marked) {

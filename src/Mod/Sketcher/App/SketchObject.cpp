@@ -519,6 +519,13 @@ App::DocumentObjectExecReturn* SketchObject::execute()
             if (!missing(geo)) {
                 return false;
             }
+            // FreeCAD-CH (ops#656 D4 row 2 x ops#131 RO11f, ruled by c771: the park wins): a
+            // parked projection whose object was deleted while parked took no part in the compute;
+            // dropped from its park, it warns as a missing reference
+            if (ExternalGeometryFacade::getFacade(geo)->testFlag(
+                    ExternalGeometryExtension::ParkDropped)) {
+                return false;
+            }
             const std::string& ref = ExternalGeometryFacade::getFacade(geo)->getRef();
             return !ref.empty() && !keys.contains(ref);
         });
