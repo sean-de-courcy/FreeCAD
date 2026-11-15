@@ -867,6 +867,45 @@ std::vector<Body*> makePieces(App::DocumentObject* entry, std::string* why)
             step->touch();
         }
     };
+    // Nothing to make (ops#796): the entry and its steps computed, none failing, no result in
+    // more than one solid, no leftover and no part made from its pieces. The command flag only
+    // silences the entry's unclaimed split and leftover errors (unclaimedSplit,
+    // unclaimedLeftovers), which need a split or a leftover: computed under it, the document
+    // would come out as it is, and the command would make and delete nothing. Only the reconcile
+    // is left, and the recompute of what it changes. Without this, a dimension's OK in a
+    // 22-feature studio computed the history three more times (twice here, once more when the
+    // caller's abort of this empty step rolled the results back): 4-5 s for one edit
+    const auto quiet = [entry, doc]() {
+        std::vector<App::DocumentObject*> objs {entry};
+        for (auto step : StudioList::stepsOf(entry)) {
+            objs.push_back(step);
+        }
+        for (auto obj : objs) {
+            if (obj->isError() || obj->isTouched() || obj->mustExecute() > 0) {
+                return false;
+            }
+        }
+        for (auto result : resultsOf(entry)) {
+            if (result->Shape.getShape().countSubShapes(TopAbs_SOLID) > 1) {
+                return false;
+            }
+        }
+        for (auto obj : doc->getObjectsOfType(Body::getClassTypeId())) {
+            auto body = static_cast<Body*>(obj);
+            if (isPieceBody(body) && body->StudioMadeBy.getValue() == entry) {
+                return false;
+            }
+        }
+        return leftoverSolids(entry).isNull();
+    };
+    if (quiet()) {
+        std::string text;
+        if (!list->reconcile(&text)) {
+            return fail(text);
+        }
+        doc->recompute();
+        return made;
+    }
     {
         CommandGuard guard(entry);
         touchAll();
