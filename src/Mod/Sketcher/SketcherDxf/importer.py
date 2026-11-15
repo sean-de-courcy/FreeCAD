@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 """DXF into a sketch (FreeCAD-CH): `insert(sketch, path, ...)`.
 
-The file's model space lands in the sketch's plane, its origin on the sketch's origin and its X
-and Y on the sketch's, at 1:1 in the file's units ($INSUNITS); a file without units needs
-`units=` (the command asks). Blocks and layers are flattened; lines, arcs, circles, ellipses and
+The file's model space lands in the sketch's plane, its X and Y on the sketch's, at 1:1 in the
+file's units ($INSUNITS) unless `units=` names others (the command always does, as Onshape's
+Units field applies whatever the file says); a file without units needs `units=`. With
+`origin="file"` (the default here) the file's origin goes on the sketch's origin; with
+`origin="centre"` (the command's default, Onshape's) the centre of the imported curves' extents
+does. Blocks and layers are flattened; lines, arcs, circles, ellipses and
 splines stay what they are. With `fit` (the default), chains of short segments become lines, arcs
 and B-splines within `tolerance` millimetres (`fitting.py`), corners sharper than `corner` degrees
 kept. The imported curves are held by one Block constraint each (`hold="block"`, the default) or
@@ -51,6 +54,8 @@ class Report:
         self.projected = 0
         self.missing_blocks = []
         self.first_geo = None
+        self.origin = "file"  # "file" or "centre"
+        self.shift = (0.0, 0.0)  # mm added to every point (the extents' centre, negated)
         self.seconds = 0.0
 
     def lines(self):
@@ -62,6 +67,13 @@ class Report:
         ]
         src = "from the file" if self.units_from_file else "chosen (the file states none)"
         out.append(f"Units: {self.units}, {src}")
+        if self.origin == "centre":
+            out.append(
+                f"Placed with the centre of its extents, file point ({-self.shift[0]:.6g}, {-self.shift[1]:.6g}) mm, "
+                "on the sketch origin"
+            )
+        else:
+            out.append("Placed with the file's origin on the sketch origin")
         if self.fit:
             out.append(
                 f"Fitted within {self.tolerance:g} mm: largest deviation {self.max_deviation:.4g} mm"
@@ -523,13 +535,45 @@ def resolve_units(drawing, units=None):
     return k, reader.UNIT_NAMES.get(drawing.insunits, f"code {drawing.insunits}"), True
 
 
-def insert(sketch, path, units=None, fit=True, tolerance=DEFAULT_TOLERANCE, corner=DEFAULT_CORNER, hold="block"):
+def extents_centre(geos):
+    """The centre (x, y) of the geometries' extents, or None when there are none"""
+    box = None
+    for g in geos:
+        sh = g.toShape()
+        try:
+            bb = sh.optimalBoundingBox()
+        except Exception:
+            bb = sh.BoundBox
+        if box is None:
+            box = bb
+        else:
+            box.add(bb)
+    if box is None or not box.isValid():
+        return None
+    return (0.5 * (box.XMin + box.XMax), 0.5 * (box.YMin + box.YMax))
+
+
+def insert(
+    sketch,
+    path,
+    units=None,
+    fit=True,
+    tolerance=DEFAULT_TOLERANCE,
+    corner=DEFAULT_CORNER,
+    hold="block",
+    origin="file",
+):
     """Insert the DXF at path into the sketch; returns the Report.
 
-    units: None for the file's; "mm", "in", ... or millimetres per unit to choose them.
-    hold: "block" (one Block constraint per curve) or "free"."""
+    units: None for the file's; "mm", "in", ... or millimetres per unit to choose them (they win
+    over the file's).
+    hold: "block" (one Block constraint per curve) or "free".
+    origin: "file" (the file's origin on the sketch origin) or "centre" (the centre of the
+    imported curves' extents on it)."""
     if hold not in ("block", "free"):
         raise ValueError(f"hold must be 'block' or 'free', not {hold!r}")
+    if origin not in ("file", "centre"):
+        raise ValueError(f"origin must be 'file' or 'centre', not {origin!r}")
     t = time.perf_counter()
     drawing = reader.read(path)
     k, name, from_file = resolve_units(drawing, units)
@@ -540,6 +584,14 @@ def insert(sketch, path, units=None, fit=True, tolerance=DEFAULT_TOLERANCE, corn
     rep.projected = drawing.projected
     rep.missing_blocks = sorted(drawing.missing_blocks, key=str)
     geos, rep = geometry(drawing, k, fit, tolerance, corner, rep)
+    rep.origin = origin
+    if origin == "centre":
+        c = extents_centre(geos)
+        if c is not None and (c[0] != 0.0 or c[1] != 0.0):
+            d = V(-c[0], -c[1], 0)
+            for g in geos:
+                g.translate(d)
+            rep.shift = (-c[0], -c[1])
     if geos:
         first = sketch.GeometryCount
         sketch.addGeometry(geos, False)
