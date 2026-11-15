@@ -539,6 +539,92 @@ class TestStudioOwner(unittest.TestCase):
         self.assertTrue(boss.isValid(), boss.getStatusString())
         self.assertVolume("A", 1000 + 40 * 4 + math.pi * 4 - 1)
 
+    # A whole part as the stop (ops#846), TestOnshapeEndTypes' ring in a studio: Ring, a Revolution
+    # owner on A, revolves the rectangle x 2..5, z 0..10 of the XZ plane about Z up to part W (the
+    # box x -10..0, y 0..10, z -5..15): counterclockwise W's face x = 0 comes first, at 90 degrees,
+    # so its tool is (pi / 2)(5^2 - 2^2) 10 / 2 = 52.5 pi. Cut, a later Pocket owner on W, takes
+    # away all of W within reach (y < 6): Ring is before it and still stops at 90 degrees (Onshape
+    # reads a part as it is at the feature).
+    def ringAndCut(self, kind="Revolution", profile=(2, 0, 5, 10)):
+        doc, studio = floatingStudio("O8Ring", (("A", 0, 0, 10), ("W", -10, -5, 20)))
+        w = doc.getObject("W")
+        ringSk = studioSketch(doc, studio, "RingSk", (profile,))
+        ringSk.Placement = App.Placement(V(0, 0, 0), App.Rotation(V(1, 0, 0), 90))
+        axis = [o for o in studio.Origin.OutList if getattr(o, "Role", "") == "Z_Axis"][0]
+        ring = makeOwner(
+            doc, studio, kind, "Ring", ringSk, ("A",),
+            ReferenceAxis=(axis, [""]), Type="UpToShape", UpToFace=(w, [""]),
+        )  # fmt: skip
+        doc.recompute()
+        cutSk = studioSketch(doc, studio, "CutSk", ((-11, -1, 1, 6),), z=15)
+        makeOwner(doc, studio, "Pocket", "Cut", cutSk, ("W",), Length=20)
+        doc.recompute()
+        return doc, ring, w
+
+    def assertRing(self, doc, ring, tool=52.5 * math.pi):
+        self.assertTrue(ring.isValid(), ring.getStatusString())
+        self.assertAlmostEqual(ring.AddSubShape.Volume, tool, places=3)
+        self.assertEqual([o.Name for o in doc.Objects if "Touched" in o.State], [])
+
+    def testAWholePartLinkIsReadBeforeTheOwner(self):
+        """The link is written to the part's last solid before the owner, and a later feature of
+        the target part doesn't move the stop."""
+        doc, ring, w = self.ringAndCut()
+        self.assertVolume("W", 2000 - 10 * 6 * 20, doc)
+        self.assertEqual(ring.UpToFace[0].Name, "WPad")
+        self.assertRing(doc, ring)
+        # A script's link to the Body, before any list edit: read at the owner's place all the same
+        ring.UpToFace = (w, [""])
+        doc.recompute()
+        self.assertRing(doc, ring)
+
+    def testAWholePartLinkFollowsAReorderAndADelete(self):
+        """The link names the part, not the feature it is written to: the owner moves below the
+        target part's later feature and reads the part with it (W is out of reach then: the ring
+        fails, as it must), moves back, and survives the delete of the feature it was written to."""
+        doc, ring, w = self.ringAndCut()
+        cut = doc.getObject("Cut")
+        entries = lambda: [o.Name for o in studioList(doc).Entries]  # noqa: E731
+        doc.openTransaction("down")
+        PartDesign.studioMove(ring, len(entries()) - 1)
+        doc.commitTransaction()
+        doc.recompute()
+        self.assertLess(entries().index("Cut"), entries().index("Ring"))
+        self.assertIs(ring.UpToFace[0], self.step(cut, "W", doc))
+        self.assertFalse(ring.isValid())
+        doc.openTransaction("delete")
+        doc.removeObject("Cut")
+        doc.commitTransaction()
+        doc.recompute()
+        self.assertEqual(ring.UpToFace[0].Name, "WPad")
+        self.assertRing(doc, ring)
+
+    def testAWholePartLinkToAPlacedPart(self):
+        """The part's placement counts whichever object the link names: W turned -30 degrees about
+        Z meets the ring at 60 degrees (35 pi), before and after reconcile writes the link."""
+        doc, ring, w = self.ringAndCut()
+        w.Placement = App.Placement(V(0, 0, 0), App.Rotation(V(0, 0, 1), -30))
+        for link in (w, doc.getObject("WPad")):
+            ring.UpToFace = (link, [""])
+            doc.recompute()
+            self.assertTrue(ring.isValid(), ring.getStatusString())
+            self.assertAlmostEqual(ring.AddSubShape.Volume, 35 * math.pi, places=3, msg=link.Name)
+
+    def testAWholePartLinkToAPartEnteringTheScopeMakesNoCycle(self):
+        """The part linked whole joins the owner's scope (a Groove: it gets a step in W, so a link
+        to W's Body would be a cycle): the link names W's solid before the owner, nothing stays
+        touched, and A loses the quarter ring z 2..8, (pi / 4)(5^2 - 2^2) 6 = 31.5 pi."""
+        doc, ring, w = self.ringAndCut("Groove", (2, 2, 5, 8))
+        ring.UpToFace = (w, [""])
+        doc.openTransaction("scope")
+        PartDesign.studioSetScopeIds(ring, ["A", "W"])
+        doc.commitTransaction()
+        doc.recompute()
+        self.assertIsNotNone(self.step(ring, "W", doc))
+        self.assertEqual(ring.UpToFace[0].Name, "WPad")
+        self.assertRing(doc, ring, 31.5 * math.pi)
+        self.assertVolume("A", 1000 - 31.5 * math.pi, doc)
+
     # ------------------------------------------------------------------------------- edits
     def testEditUndoRedoSaveReopen(self):
         """An edit of the owner drives its steps; undo, redo, save and reopen keep it so."""

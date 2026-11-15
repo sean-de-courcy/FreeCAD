@@ -34,6 +34,7 @@
 #include "Retarget.h"
 #include "Studio.h"
 #include "StudioList.h"
+#include "StudioOwner.h"
 
 namespace App
 {
@@ -894,6 +895,11 @@ std::vector<App::DocumentObject*> readersOf(const App::DocumentObject* step, con
             if (member && propName == "Base" && isDressUpOwner(ownerOfStep(in))) {
                 continue;
             }
+            // A part named whole is read at the reader's place and re-targeted by reconcile: the
+            // step isn't kept for it (ops#846)
+            if (studioWholePartLink(prop)) {
+                continue;
+            }
             std::vector<App::DocumentObject*> linked;
             link->getLinks(linked, /*all=*/true);
             if (std::ranges::find(linked, step) != linked.end()) {
@@ -1416,6 +1422,9 @@ bool StudioList::reconcile(std::string* why)
     for (auto member : doomed) {
         const std::string name = member->getNameInDocument();
         if (Body* body = Body::findBodyOf(member)) {
+            // An up-to link naming the part whole through this step: removing it would clear
+            // the link (ops#846)
+            studioReleaseWholePartLinks(member, body);
             body->removeObject(member);
         }
         doc->removeObject(name.c_str());
@@ -1655,6 +1664,84 @@ bool StudioList::reconcile(std::string* why)
         }
         if (Body::findBodyOf(entry)) {
             continue;
+        }
+        // Its up-to links to a part of the studio, whole (the Body, or a solid of it): to the
+        // part's last solid before it, as 3.1 rules for whole parts, so that no link names a Body
+        // it changes (a cycle through its step) and an insert or a reorder re-targets it; a path
+        // link through the Body to an earlier solid, to that solid (ops#846,
+        // notes/owner-upto-face.md)
+        {
+            auto bodyOf = [&bodies](const App::DocumentObject* obj) -> Body* {
+                auto it = std::ranges::find(bodies, obj);
+                return it == bodies.end() ? nullptr : *it;
+            };
+            auto solidBefore = [&orders, i](const Body* body, const App::DocumentObject* only) {
+                App::DocumentObject* last = nullptr;
+                for (const auto& item : orders.at(body)) {
+                    if (item.key < i && Body::isSolidFeature(item.obj) && (!only || item.obj == only)) {
+                        last = item.obj;
+                    }
+                }
+                return last;
+            };
+            auto retarget = [&](App::DocumentObject*& obj, std::vector<std::string>& subs) {
+                if (!obj) {
+                    return false;
+                }
+                const bool whole = std::ranges::all_of(subs, &std::string::empty);
+                Body* body = bodyOf(obj);
+                if (body && !whole) {
+                    // (Body, 'X.FaceN'), every sub through the same earlier solid X
+                    App::DocumentObject* through = nullptr;
+                    std::vector<std::string> rest;
+                    for (const auto& sub : subs) {
+                        const auto dot = sub.find('.');
+                        auto named = dot == std::string::npos
+                            ? nullptr
+                            : doc->getObject(sub.substr(0, dot).c_str());
+                        if (!named || (through && named != through) || !solidBefore(body, named)) {
+                            return false;
+                        }
+                        through = named;
+                        rest.push_back(sub.substr(dot + 1));
+                    }
+                    obj = through;
+                    subs = rest;
+                    return true;
+                }
+                if (!whole) {
+                    return false;
+                }
+                if (!body && Body::isSolidFeature(obj)) {
+                    body = bodyOf(Body::findBodyOf(obj));
+                }
+                App::DocumentObject* last = body ? solidBefore(body, nullptr) : nullptr;
+                if (!last || last == obj) {
+                    return false;
+                }
+                obj = last;
+                return true;
+            };
+            for (const char* name : {"UpToFace", "UpToFace2", "UpToShape", "UpToShape2"}) {
+                App::Property* prop = entry->getPropertyByName(name);
+                if (auto one = freecad_cast<App::PropertyLinkSub*>(prop)) {
+                    App::DocumentObject* obj = one->getValue();
+                    std::vector<std::string> subs = one->getSubValues();
+                    if (retarget(obj, subs)) {
+                        one->setValue(obj, subs);
+                    }
+                }
+                else if (auto many = freecad_cast<App::PropertyLinkSubList*>(prop)) {
+                    auto sets = many->getSubListValues();
+                    bool changed = false;
+                    for (auto& [obj, subs] : sets) {
+                        changed = retarget(obj, subs) || changed;
+                    }
+                    if (changed) {
+                        many->setSubListValues(sets);
+                    }
+                }
+            }
         }
         std::vector<App::DocumentObject*> bases = basesByOwner[entry];
         // A part pattern's source parts too (the part mirror, slice 9): its tool is their shapes

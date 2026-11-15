@@ -1532,6 +1532,20 @@ int ProfileBased::getUpToShapeFromLinkSubList(
     // its coordinate system, which makeTopoShapeFromPlane below places in the body (ops#198)
     if (subSets.size() == 1 && !freecad_cast<App::Plane*>(subSets[0].first)
         && (subSets[0].second.empty() || subSets[0].second[0].empty())) {
+        // A part of the studio, whole: as it is at this owner's place, never with the features
+        // after it (FreeCAD-CH ops#846, Onshape reads the part at the feature)
+        bool isPart = false;
+        auto owner = freecad_cast<App::DocumentObject*>(refShape.getContainer());
+        if (TopoShape at = studioPartShapeAt(owner, subSets[0].first, isPart); isPart) {
+            if (at.isNull()) {
+                throw Base::ValueError(QT_TRANSLATE_NOOP(
+                    "Exception",
+                    "Up to shape: the part has no solid before this feature"
+                ));
+            }
+            upToShape = at;
+            return 2;
+        }
         // With its placement, as the faces below are taken (ops#200: a datum plane at z = 7)
         upToShape = Part::Feature::getTopoShape(
             subSets[0].first,

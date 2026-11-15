@@ -905,6 +905,12 @@ App::DocumentObjectExecReturn* Feature::recompute()
         return new App::DocumentObjectExecReturn(lock, this);
     }
 
+    // An owner linking the part it changes, its own step or a later solid (ops#846): a cycle
+    if (std::string ahead = studioLinkAhead(this); !ahead.empty()) {
+        purgeTouched();
+        return new App::DocumentObjectExecReturn(ahead, this);
+    }
+
     const char* placer = nullptr;
     std::string where;
     if (placerElsewhere(&placer, &where)) {

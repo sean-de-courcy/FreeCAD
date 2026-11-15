@@ -50,6 +50,7 @@
 #include "Pieces.h"
 #include "Retarget.h"
 #include "StudioList.h"
+#include "StudioOwner.h"
 #include "StudioVariables.h"
 
 namespace PartDesign
@@ -103,7 +104,9 @@ std::vector<App::DocumentObject*> linkReads(const App::DocumentObject* reader, b
     reader->getPropertyList(props);
     for (auto prop : props) {
         auto link = freecad_cast<App::PropertyLinkBase*>(prop);
-        if (!link || (picksOnly && isProjectedLink(prop))) {
+        // A part named whole by an up-to link is read at the reader's place, as a Body is: no
+        // pick of the feature it names (ops#846)
+        if (!link || (picksOnly && (isProjectedLink(prop) || studioWholePartLink(prop)))) {
             continue;
         }
         std::vector<App::DocumentObject*> objs;
@@ -521,6 +524,8 @@ void forgetDeletedEntry(const App::DocumentObject& deleted)
                 continue;
             }
             if (auto body = Body::findBodyOf(step)) {
+                // An up-to link naming the part whole through this step (ops#846)
+                studioReleaseWholePartLinks(step, body);
                 body->removeObject(step);
             }
             doc->removeObject(name.c_str());
