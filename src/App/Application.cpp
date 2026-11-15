@@ -177,6 +177,7 @@
 #include <App/CMakeScript.h>
 
 #include "SafeMode.h"
+#include "TeamFolder.h"
 
 #ifdef FC_OS_WIN32
 #include <windows.h>
@@ -3309,6 +3310,9 @@ void Application::initApplication()
     catch (const Base::Exception& e) {
         e.reportException();
     }
+
+    // FreeCAD-CH (ops#640, folder sync item 2): the team folder's ignore list, now and on change
+    TeamFolder::watchPreference();
 
     // seed randomizer
     srand(time(nullptr));
