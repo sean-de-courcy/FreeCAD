@@ -66,6 +66,12 @@ bool isCounterOpCode(const std::string& opCode)
 // instance of which pattern the element is in.
 constexpr const char* patternInstanceOpCode = "TRF";
 
+// The op code of a face made of a profile's edges, `_;{<edges>};<sketch>;FAC;0;F;0;LOW;_` (Part's
+// OpCodes::Face): its linked names are the edges of its outer wire that no other face of the
+// profile shares (FaceMaker), so an edit that adds or removes such an edge renames the face,
+// although it is the same one (ops#849).
+constexpr const char* profileFaceOpCode = "FAC";
+
 // The op code of a boundary section, `_;_;<object>;EXT;<i>;<type>;0;_;_` (Part's
 // OpCodes::External, ops#56): the element came from another document through the object (a
 // Link, a binder), and the name before it is that document's. Like an instance, it is a copy.
@@ -1006,8 +1012,15 @@ bool NameAncestry::isMadeFromPiecesOf(std::string_view name, std::string_view ol
     const DecodedMappedSection& old = decodeSection(oldSections.front());
     if (made.iterationTag != old.iterationTag || made.opCode != old.opCode
         || made.elementType != old.elementType || made.index != old.index
-        || old.linkedNames.empty() || made.linkedNames.size() != old.linkedNames.size()
+        || old.linkedNames.empty() || made.linkedNames.empty()
         || made.referenceIDs != old.referenceIDs || sortedFlags(made) != sortedFlags(old)) {
+        return false;
+    }
+    // A profile's face whose profile gained or lost edges (ops#849: a sketch edge split in two,
+    // or two joined): the edges of one are all among the other's, by their own names
+    const bool editedProfile = old.opCode == profileFaceOpCode && old.elementType == 'F'
+        && made.linkedNames.size() != old.linkedNames.size();
+    if (!editedProfile && made.linkedNames.size() != old.linkedNames.size()) {
         return false;
     }
     // The only element its sources made (no duplicate counter, no connected elements to tell it
@@ -1023,6 +1036,15 @@ bool NameAncestry::isMadeFromPiecesOf(std::string_view name, std::string_view ol
         && (made.duplicateCount != old.duplicateCount
             || made.connectedElements != old.connectedElements)) {
         return false;
+    }
+    if (editedProfile) {
+        const bool grew = made.linkedNames.size() > old.linkedNames.size();
+        std::vector<std::string> fewer = grew ? old.linkedNames : made.linkedNames;
+        std::vector<std::string> more = grew ? made.linkedNames : old.linkedNames;
+        std::ranges::sort(fewer);
+        std::ranges::sort(more);
+        return std::ranges::adjacent_find(fewer) == fewer.end()
+            && std::ranges::includes(more, fewer);
     }
     // Each linked name takes one of the old ones: an equal one first, then one it is a piece of
     // or made from pieces of

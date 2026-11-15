@@ -111,7 +111,16 @@ public:
      * `_;{<top>, <cylinder>};<boss>;FUS;0;E;0;GEN;_`, once a wall inserted before the boss has cut
      * the top in two: `_;{<top>|<split>, <cylinder>};<boss>;FUS;0;E;0;GEN;_`. The same feature
      * made the element in the same way from what is left of the same sources; an edge that runs
-     * over two pieces gives one such name per piece. Sections after the first must be equal,
+     * over two pieces gives one such name per piece. A source that is a profile's face
+     * (`_;{<edges>};<sketch>;FAC;0;F;0;LOW;_`, a pad's bottom cap, and inside its top cap's name)
+     * may also be the same face of an edited profile (ops#849): the same section, its edges (those
+     * of its outer wire that are its own alone) all among the old ones or the old ones all among
+     * its own, as after a sketch edge was split in two or two were joined; a profile with an edge
+     * replaced by a new one is another face. Faces of one profile share no edge name, so only one
+     * can hold all of the old one's edges; a face cut in two by a new line gives two that each
+     * hold some, both pieces of it. So
+     * an edge a pocket cuts in a pad's top, named after the top and the pocket's side, is still
+     * that edge once the pad's sketch has an edge more. Sections after the first must be equal,
      * or \a name's further ones its own split's. A name is not made from pieces of itself, and
      * a plain piece of \a oldName isn't either.
      */

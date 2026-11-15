@@ -466,6 +466,73 @@ TEST(NameAncestry, madeFromPiecesOfTheSameSources)
     EXPECT_FALSE(NameAncestry::isMadeFromPiecesOf(generated({after, cylinder}, 8, "FUS", 'E'), junction));
 }
 
+// ops#849: a pad's caps are named after its whole profile, so a sketch edge split in two renames
+// them, and with them every edge a later cut makes in them.
+TEST(NameAncestry, madeFromAnEditedProfile)
+{
+    const std::vector<std::string> four {sketchEdge(1), sketchEdge(2), sketchEdge(3), sketchEdge(4)};
+    std::vector<std::string> five = four;
+    five.push_back(sketchEdge(5));
+    const auto bottom = lowFace(four);
+    const auto bottomSplit = lowFace(five);
+    const auto top = section({}, {bottom}, 7, "XTR", 0, 'F', {"PRJ"});
+    const auto topSplit = section({}, {bottomSplit}, 7, "XTR", 0, 'F', {"PRJ"});
+    const auto pocketSide = generated({sketchEdge(1, 8)}, 9, "XTR", 'F');
+    const auto rim = generated({top, pocketSide}, 9, "CUT", 'E');
+    const auto rimSplit = generated({topSplit, pocketSide}, 9, "CUT", 'E');
+
+    //   the profile gains an edge: the caps, and the edge cut in a cap
+    EXPECT_TRUE(NameAncestry::isMadeFromPiecesOf(bottomSplit, bottom));
+    EXPECT_TRUE(NameAncestry::isMadeFromPiecesOf(topSplit, top));
+    EXPECT_TRUE(NameAncestry::isMadeFromPiecesOf(rimSplit, rim));
+    EXPECT_TRUE(
+        NameAncestry::isMadeFromPiecesOf(generated({pocketSide, bottomSplit}, 9, "CUT", 'E'),
+                                         generated({bottom, pocketSide}, 9, "CUT", 'E'))
+    );
+    //   and loses one
+    EXPECT_TRUE(NameAncestry::isMadeFromPiecesOf(bottom, bottomSplit));
+    EXPECT_TRUE(NameAncestry::isMadeFromPiecesOf(rim, rimSplit));
+    //   a piece of the cap of the edited profile, and a split of the edge
+    EXPECT_TRUE(
+        NameAncestry::isMadeFromPiecesOf(
+            generated({piece(topSplit, 12, "FUS", 0, 'F'), pocketSide}, 9, "CUT", 'E'),
+            rim
+        )
+    );
+    EXPECT_TRUE(NameAncestry::isMadeFromPiecesOf(piece(rimSplit, 14, "CUT", 0, 'E'), rim));
+
+    //   not itself; an edge replaced by a new one; another sketch; nothing in common
+    EXPECT_FALSE(NameAncestry::isMadeFromPiecesOf(bottom, bottom));
+    const auto redrawn = lowFace({sketchEdge(1), sketchEdge(2), sketchEdge(3), sketchEdge(6)});
+    EXPECT_FALSE(NameAncestry::isMadeFromPiecesOf(redrawn, bottom));
+    const auto redrawnMore
+        = lowFace({sketchEdge(1), sketchEdge(2), sketchEdge(3), sketchEdge(6), sketchEdge(7)});
+    EXPECT_FALSE(NameAncestry::isMadeFromPiecesOf(redrawnMore, bottom));
+    EXPECT_FALSE(NameAncestry::isMadeFromPiecesOf(lowFace(five, 6), bottom));
+    EXPECT_FALSE(
+        NameAncestry::isMadeFromPiecesOf(lowFace({sketchEdge(8), sketchEdge(9), sketchEdge(10)}), bottom)
+    );
+    //   two regions of one sketch are two faces (each is named after its own edges alone)
+    const auto leftRegion = lowFace({sketchEdge(1), sketchEdge(2), sketchEdge(9)});
+    const auto rightRegion = lowFace({sketchEdge(3), sketchEdge(4), sketchEdge(5)});
+    EXPECT_FALSE(NameAncestry::isMadeFromPiecesOf(rightRegion, leftRegion));
+    //   a face cut in two by a new line: each half holds some of its edges, both are pieces of it
+    EXPECT_TRUE(NameAncestry::isMadeFromPiecesOf(lowFace({sketchEdge(1), sketchEdge(2)}), bottom));
+    EXPECT_TRUE(NameAncestry::isMadeFromPiecesOf(lowFace({sketchEdge(3), sketchEdge(4)}), bottom));
+    //   only a profile's face: another element made of more sources is another element
+    EXPECT_FALSE(
+        NameAncestry::isMadeFromPiecesOf(generated(five, 7, "FUS", 'F'), generated(four, 7, "FUS", 'F'))
+    );
+    EXPECT_FALSE(
+        NameAncestry::isMadeFromPiecesOf(
+            generated({topSplit, pocketSide, bottom}, 9, "CUT", 'E'),
+            rim
+        )
+    );
+    //   another feature's edge in the same cap
+    EXPECT_FALSE(NameAncestry::isMadeFromPiecesOf(generated({topSplit, pocketSide}, 10, "CUT", 'E'), rim));
+}
+
 TEST(NameAncestry, cornerEdgeAfterTheNotchIsNotAPiece)
 {
     // ops#76: the vertical edge at the sketch corner (20, 0) comes from the vertex `g1v2,g2v1`.
