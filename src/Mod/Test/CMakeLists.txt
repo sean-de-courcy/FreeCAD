@@ -50,6 +50,7 @@ SET(Test_SRCS
     TestSaveGuardGui.py
     TestPresence.py
     TestFolderSyncOpen.py
+    TestFolderSyncSettings.py
     TestPresenceGui.py
     TestVariableStudioGui.py
     TestUiLoaderWrappersGui.py
