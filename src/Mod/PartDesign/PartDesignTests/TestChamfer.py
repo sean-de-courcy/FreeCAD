@@ -299,6 +299,40 @@ class TestChamfer(unittest.TestCase):
         self.Doc.recompute()
         self._assertValidDressUp(chamfer, 2000 + 48 - 1.0**2 / 2 * 4)
 
+    def testChamferBaseRelinkedDuringARecomputeInATransaction(self):
+        # A set of Base made while the document recomputes (here from its recompute signal) with a
+        # transaction open: the record refresh inside the set must not notify a second change, or
+        # DressUp would take the new Base for the old one and keep BaseFeature (ops#850 review R2)
+        body, block, boss, chamfer = self._block_with_inserted_boss()
+        self.Doc.UndoMode = 1
+        top = self._edge_between(boss.Shape, (5, 7, 13), (9, 7, 13))
+        self.Doc.openTransaction("Relink")
+        chamfer.Base = (boss, [top])
+        self.Doc.commitTransaction()
+        self.assertEqual(chamfer.BaseFeature, boss)
+        relink = (block, [self._edge_between(block.Shape, (0, 10, 10), (20, 10, 10))])
+
+        class Relinker:
+            done = False
+
+            def slotRecomputedDocument(self, doc):
+                if doc.Name == chamfer.Document.Name and not self.done:
+                    self.done = True
+                    chamfer.Base = relink
+
+        observer = Relinker()
+        FreeCAD.addDocumentObserver(observer)
+        try:
+            self.Doc.openTransaction("Relink")
+            boss.touch()
+            self.Doc.recompute()
+            self.Doc.commitTransaction()
+        finally:
+            FreeCAD.removeDocumentObserver(observer)
+        self.assertTrue(observer.done)
+        self.assertEqual(chamfer.Base[0], block)
+        self.assertEqual(chamfer.BaseFeature, block)
+
     # Invalid results that OCCT (8.0.1) returns without an error (ops#297), on the models of
     # parttests.FilletFallbackTest. The exact construction builds them where it can (at the
     # limit); the feature repairs the others only if the repair keeps the solids and the faces,

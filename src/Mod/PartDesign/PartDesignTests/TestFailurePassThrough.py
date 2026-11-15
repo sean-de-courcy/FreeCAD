@@ -2346,6 +2346,23 @@ class FailurePassThroughBase:
         edits again; redone both, the edits'. The record refreshed by each edit's recompute is
         restored with the reference: kept as the edit left it, it saw the suppression switched and
         the edge moved at once, and the veto (rule PS) broke the pick."""
+        self.undoMoveAndSuppression(self.recompute)
+
+    def testUndoOfAMoveAndASuppressionRecomputedObjectByObject(self):
+        """ops#850 with each edit recomputed object by object (obj.recompute(), as a dialog's
+        preview of a feature downstream of the edit does): outside the document's recompute, the
+        solve's refresh and the held records' take still keep the record from before the edit
+        (review pri850-r2, R1)."""
+
+        def objectByObject():
+            for obj in self.doc.Objects:
+                if obj.TypeId not in ("PartDesign::Body", "App::Origin", "App::Line",
+                                      "App::Plane", "App::Point"):
+                    obj.recompute()
+
+        self.undoMoveAndSuppression(objectByObject)
+
+    def undoMoveAndSuppression(self, recomputeEdit):
         if not self.solver:
             self.skipTest("rule PS is the reference solver's")
         self.doc.UndoMode = 1
@@ -2372,8 +2389,9 @@ class FailurePassThroughBase:
                            ("suppress", lambda: setattr(hole, "Suppressed", True))):
             self.doc.openTransaction(name)
             edit()
-            self.recompute()
+            recomputeEdit()
             self.doc.commitTransaction()
+        self.recompute()
         after = BLOCK * 1.2 + BOSS - edgeChamfer
         self.assertValid(chamfer)
         self.assertVolume(chamfer, after)

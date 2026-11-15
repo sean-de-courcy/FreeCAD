@@ -111,6 +111,29 @@ static std::unordered_set<PropertyLinkBase*> _HeldFingerprints;
 static const App::Document* _RecomputeEnded = nullptr;
 static const App::DocumentObject* _RecomputedAlone = nullptr;
 
+// Above zero while a record take runs (a link's updateElementFingerprints(): the held records at
+// the end of a recompute or of a feature's recompute alone, the ReferenceSolver switch). Such a
+// take, like a solve's refresh (feature given), puts the property in an open transaction before
+// writing a record (ops#850); a setter's refresh (neither) doesn't: it runs inside the setter's own
+// set, whose aboutToSetValue() already did.
+static thread_local int _TakingRecords = 0;
+namespace
+{
+struct TakingRecords
+{
+    TakingRecords()
+    {
+        ++_TakingRecords;
+    }
+    ~TakingRecords()
+    {
+        --_TakingRecords;
+    }
+    TakingRecords(const TakingRecords&) = delete;
+    TakingRecords& operator=(const TakingRecords&) = delete;
+};
+}  // namespace
+
 // The element a reference named before a link retarget made it index-only (ops#106): the sub,
 // the object it is a sub of (compared by address only), and the old element's fingerprint. The
 // sub's first resolution on the new target checks the element there against it
@@ -1308,11 +1331,13 @@ bool PropertyLinkBase::_updateElementFingerprints(App::DocumentObject* feature,
     // through Paste(), records included, and without this it would restore the edit's inputs
     // under the record of the edit's result. Two undos in a row with one recompute after them then
     // brought back a suppression and a move at once, and the pass-through veto (ops#549) broke the
-    // pick. Once per call, before the first write; never while undoing or redoing. Only a
-    // recompute's refresh (a solve's, the held records' take at its end): a setter refreshes inside
-    // its own set, after its aboutToSetValue() put the property in the transaction, and a second
-    // one there would be a nested change (DressUp::onBeforeChange() would take the new Base for
-    // the old one and keep BaseFeature, TestChamfer.testChamferBaseLinkedToAnotherFeature).
+    // pick. Once per call, before the first write; never while undoing or redoing. Only a solve's
+    // refresh (feature given) or a record take (_TakingRecords): a setter refreshes inside its own
+    // set, after its aboutToSetValue() put the property in the transaction, and a second one there
+    // would be a nested change (DressUp::onBeforeChange() would take the new Base for the old one
+    // and keep BaseFeature, TestChamfer.testChamferBaseLinkedToAnotherFeature). Not tied to the
+    // document's Recomputing status: a feature recomputed alone (obj.recompute()) refreshes outside
+    // it (review pri850-r2, R1), and a setter can run inside it (R2).
     bool captured = false;
     auto capture = [&]() {
         if (captured) {
@@ -1320,8 +1345,8 @@ bool PropertyLinkBase::_updateElementFingerprints(App::DocumentObject* feature,
         }
         captured = true;
         auto document = owner ? owner->getDocument() : nullptr;
-        if (document && document->testStatus(Document::Recomputing)
-            && document->hasPendingTransaction() && !document->isPerformingTransaction()) {
+        if (document && (feature || _TakingRecords > 0) && document->hasPendingTransaction()
+            && !document->isPerformingTransaction()) {
             aboutToSetValue();
         }
     };
@@ -3502,6 +3527,7 @@ void PropertyLinkSub::updateElementReference(DocumentObject* feature, bool rever
 
 bool PropertyLinkSub::updateElementFingerprints()
 {
+    TakingRecords taking;
     return _updateElementFingerprints(nullptr,
                                       _pcLinkSub,
                                       nullptr,
@@ -5067,6 +5093,7 @@ void PropertyLinkSubList::onContainerRestored()
 
 bool PropertyLinkSubList::updateElementFingerprints()
 {
+    TakingRecords taking;
     return _updateElementFingerprints(nullptr,
                                       nullptr,
                                       &_lValueList,
@@ -7384,6 +7411,7 @@ void PropertyXLink::updateElementReference(DocumentObject* feature, bool reverse
 
 bool PropertyXLink::updateElementFingerprints()
 {
+    TakingRecords taking;
     return _updateElementFingerprints(nullptr,
                                       _pcLink,
                                       nullptr,
