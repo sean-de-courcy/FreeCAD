@@ -169,6 +169,7 @@ if(BUILD_GUI)
         PartDesignTests/TestTreeItemsGui.py
         PartDesignTests/TestForkKeymapGui.py
         PartDesignTests/TestEnterInPickListGui.py
+        PartDesignTests/TestHiddenPartEditGui.py
         PartDesignTests/TestTaskStatusGui.py
         PartDesignTests/TestProblemNavigationGui.py
         PartDesignTests/TestToolbarsGui.py
