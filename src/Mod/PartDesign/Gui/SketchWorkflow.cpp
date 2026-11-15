@@ -22,6 +22,8 @@
  *                                                                         *
  ***************************************************************************/
 
+#include <algorithm>
+
 #include <TopoDS.hxx>
 #include <TopoDS_Face.hxx>
 #include <boost/signals2.hpp>
@@ -65,6 +67,7 @@
 #include <Gui/MainWindow.h>
 #include <Gui/ViewParams.h>
 #include <Gui/ViewProviderPlane.h>
+#include <Gui/Selection/Selection.h>
 #include <Gui/Selection/SelectionFilter.h>
 
 using namespace PartDesignGui;
@@ -1221,6 +1224,23 @@ std::tuple<bool, PartDesign::Body*> SketchWorkflow::shouldCreateBody()
     if (pdBody && topParent->isLink()) {
         auto* xLink = dynamic_cast<App::Link*>(topParent);
         pdBody->Placement.setValue(xLink->Placement.getValue());
+    }
+    if (!pdBody) {
+        // FreeCAD-CH (ops#793): no part active (after a reopen nothing is) and a face, edge or
+        // feature of one of the tab's parts picked: that part, with no question, as Onshape's
+        // sketch on a face is the face's part's (the walk's "Active Body Required" on reopen)
+        const auto bodies = PartDesignGui::tabBodies(appdocument, nullptr);
+        for (auto& sel : Gui::Selection().getSelectionEx(appdocument->getName())) {
+            App::DocumentObject* obj = sel.getObject();
+            auto owner = freecad_cast<PartDesign::Body*>(obj);
+            if (!owner && obj) {
+                owner = PartDesign::Body::findBodyOf(obj);
+            }
+            if (owner && std::ranges::find(bodies, owner) != bodies.end()) {
+                pdBody = owner;
+            }
+            break;
+        }
     }
     if (!pdBody) {
         // FreeCAD-CH (R6T-1): under the typed tabs a sketch in a studio with no part makes one
