@@ -133,6 +133,12 @@ private:
     std::shared_ptr<App::Expression> keptExpression;
     /// The field's text when it opened: Enter on it unchanged stores a plain value.
     std::string initialText;
+    /// The text showKeptText put in the field (keptExpression's typed text).
+    std::string keptShownText;
+    /// The field's text as typed, or as put there by this class; liveTextValid false: the
+    /// widget's own text counts (after a context menu, or the formula editor's OK or Reset).
+    std::string liveText;
+    bool liveTextValid {true};
 
 private Q_SLOTS:
     void accepted();
@@ -148,6 +154,11 @@ private:
     void setupValueEdit(QString& title, QString& label);
     /// Puts the text of keptExpression in the shown field, selected (ops#684).
     void showKeptText();
+    /// When `field` is the kept text unchanged, puts keptExpression back in the engine as it was
+    /// and returns true (ops#684 review F2: not re-read as typed text).
+    bool restoreKeptExpression(const std::string& field);
+    /// The field's text, trimmed: liveText, or the widget's text (ops#684).
+    std::string fieldText() const;
     /// Applies valueEdit's value to the constraint in the open transaction. Throws on failure.
     void applyValue();
     /// applyValue for the popup; on failure, shows the reason in the field and returns false.
@@ -159,7 +170,7 @@ private:
     /// single number in the document's own length unit outside inch documents (`25 mm` in a mm
     /// document stays a value). Text unchanged since the field opened, and anything that isn't
     /// a length, is a value.
-    std::string keptLengthText(const QString& text) const;
+    std::string keptLengthText(const std::string& text) const;
     /// Sets the constraint to the value of `text` and stores `text` as its expression, in the
     /// open transaction. Throws on failure, leaving the constraint as it was.
     void applyKeptText(const std::string& text);

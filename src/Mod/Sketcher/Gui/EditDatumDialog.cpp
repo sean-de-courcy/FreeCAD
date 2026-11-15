@@ -410,10 +410,62 @@ void EditDatumDialog::setupValueEdit(QString& title, QString& label)
         keptExpression.reset();
     }
     if (keptExpression) {
-        sketch->setExpression(path, std::shared_ptr<App::Expression>());
+        try {
+            sketch->setExpression(path, std::shared_ptr<App::Expression>());
+        }
+        catch (const Base::Exception&) {
+            // Refused, e.g. a configured dimension (ops#671): it stays bound, as before
+            // (ops#684 review F3).
+            keptExpression.reset();
+        }
     }
     valueEdit->bind(path);
     initialText = valueEdit->text().trimmed().toStdString();
+
+    // The field's text is read from what was typed (or put there here), not from the widget at
+    // the end: a QuantitySpinBox writes its rounded value over the text when it loses the focus
+    // or hides, and the dialog's accepted() runs after the hide (`1 / 8` read as `0.12 in`).
+    liveText = initialText;
+    liveTextValid = true;
+    if (auto* edit = valueEdit->findChild<QLineEdit*>()) {
+        QObject::connect(edit, &QLineEdit::textEdited, this, [this](const QString& text) {
+            liveText = text.trimmed().toStdString();
+            liveTextValid = true;
+        });
+    }
+    // A context menu can put a history value in (setText, no textEdited): the widget's text then
+    // counts, as before ops#684.
+    valueEdit->installEventFilter(this);
+    QObject::connect(valueEdit, &Gui::QuantitySpinBox::showFormulaDialog, this, [this](bool shown) {
+        auto* formula = shown && valueEdit ? visibleFormulaEditor(valueEdit) : nullptr;
+        if (!formula) {
+            return;
+        }
+        QPointer<Gui::Dialog::DlgExpressionInput> editor(formula);
+        QObject::connect(formula, &QDialog::finished, this, [this, editor](int result) {
+            if (result == QDialog::Rejected && editor && !editor->discardedFormula()) {
+                // Cancel: the text stays as it was; the field shows it again (ops#684 review F1:
+                // the field's rounded value was written over it). In place, once shown again.
+                if (!inPlacePopup && valueEdit && liveTextValid) {
+                    if (auto* edit = valueEdit->findChild<QLineEdit*>()) {
+                        edit->setText(QString::fromStdString(liveText));
+                    }
+                }
+                return;
+            }
+            // OK (the formula is the field's now) or Reset (a plain value)
+            liveTextValid = false;
+            keptShownText.clear();
+        });
+    });
+}
+
+std::string EditDatumDialog::fieldText() const
+{
+    if (liveTextValid || !valueEdit) {
+        return liveText;
+    }
+    return valueEdit->text().trimmed().toStdString();
 }
 
 void EditDatumDialog::showKeptText()
@@ -423,17 +475,31 @@ void EditDatumDialog::showKeptText()
         return;
     }
     if (auto* edit = valueEdit->findChild<QLineEdit*>()) {
-        edit->setText(QString::fromStdString(typedText(sketch, *keptExpression)));
+        keptShownText = typedText(sketch, *keptExpression);
+        liveText = keptShownText;
+        liveTextValid = true;
+        edit->setText(QString::fromStdString(keptShownText));
         edit->selectAll();
     }
 }
 
-std::string EditDatumDialog::keptLengthText(const QString& field) const
+bool EditDatumDialog::restoreKeptExpression(const std::string& field)
+{
+    if (!keptExpression || keptShownText.empty() || field != keptShownText) {
+        return false;
+    }
+    // The kept text, unchanged: the expression goes back as it was (its unit, its comment),
+    // not re-read as typed text. A dimensionless `1/8` stays 0.125 mm, not `(1/8) in`; an
+    // angle's constant expression stays (ops#684 review F2).
+    sketch->setExpression(sketch->Constraints.createPath(ConstrNbr), keptExpression);
+    return true;
+}
+
+std::string EditDatumDialog::keptLengthText(const std::string& text) const
 {
     if (!isLengthDimension(Constr)) {
         return {};
     }
-    const std::string text = field.trimmed().toStdString();
     if (text.empty() || (!keptExpression && text == initialText)) {
         return {};
     }
@@ -682,10 +748,14 @@ int EditDatumDialog::execInPlace(bool hasNext, bool hasPrevious)
     box->setFocus();
     box->selectNumber();
     if (keptExpression) {
-        showKeptText();
-        box->setMinimumWidth(std::max(80, metrics.horizontalAdvance(box->text()) + 24));
-        popup.adjustSize();
-        placeCentred(&popup, centre, area);
+        // Once the popup's event loop runs, as for the dialog (exec): the field's text is written
+        // from its value after show() (seen on screen, ops#684 D50), so a direct call is undone.
+        QTimer::singleShot(0, &popup, [&]() {
+            showKeptText();
+            box->setMinimumWidth(std::max(80, metrics.horizontalAdvance(box->text()) + 24));
+            popup.adjustSize();
+            placeCentred(&popup, centre, area);
+        });
     }
     int result = popup.exec();
     while (result == InPlaceFormula) {
@@ -695,6 +765,18 @@ int EditDatumDialog::execInPlace(bool hasNext, bool hasPrevious)
         }
         popup.show();
         box->setFocus();
+        if (keptExpression && liveTextValid
+            && !sketch->getExpression(expressionPath).expression) {
+            // After Cancel in the editor: the field's text is written from its rounded value on
+            // the show, e.g. the kept `(1/8) in` as `0.13 in` (ops#684 review F1). The text as it
+            // was, once the popup's event loop runs (as above).
+            QTimer::singleShot(0, &popup, [this, box]() {
+                if (auto* line = box->findChild<QLineEdit*>()) {
+                    line->setText(QString::fromStdString(liveText));
+                    line->selectAll();
+                }
+            });
+        }
         result = popup.exec();
     }
 
@@ -719,6 +801,10 @@ int EditDatumDialog::execInPlace(bool hasNext, bool hasPrevious)
 
 bool EditDatumDialog::eventFilter(QObject* watched, QEvent* event)
 {
+    if (event->type() == QEvent::ContextMenu && valueEdit && watched == valueEdit) {
+        liveTextValid = false;  // a history value may come in by setText (see setupValueEdit)
+        return QObject::eventFilter(watched, event);
+    }
     if (!inPlacePopup
         || (event->type() != QEvent::KeyPress && event->type() != QEvent::KeyRelease
             && event->type() != QEvent::ShortcutOverride)) {
@@ -797,6 +883,10 @@ void EditDatumDialog::applyValue()
         expr = sketch->getExpression(sketch->Constraints.createPath(ConstrNbr)).expression;
     }
     const bool fromEditor = expr != nullptr;
+    if (!fromEditor && restoreKeptExpression(fieldText())) {
+        valueEdit->pushToHistory();
+        return;
+    }
     if (!fromEditor) {
         QString text = valueEdit->text().trimmed();
         try {
@@ -855,7 +945,7 @@ void EditDatumDialog::applyValue()
         return;
     }
 
-    if (const std::string kept = keptLengthText(valueEdit->text()); !kept.empty()) {
+    if (const std::string kept = keptLengthText(fieldText()); !kept.empty()) {
         valueEdit->pushToHistory();
         applyKeptText(kept);
         return;
@@ -872,7 +962,7 @@ void EditDatumDialog::applyValue()
     }
 
     if (isLengthDimension(Constr) && !keptExpression
-        && valueEdit->text().trimmed().toStdString() == initialText) {
+        && fieldText() == initialText) {
         // The proposed value, unchanged: the length as it is, not as the field rounds it
         // (0.39 in for 10 mm at two decimals), as Onshape stores it at full precision (GS1).
         newQuant = Base::Quantity(Constr->getValue(), Base::Unit::Length);
@@ -962,8 +1052,11 @@ void EditDatumDialog::accepted()
                 if (ui_ins_datum->labelEdit->hasExpression()) {
                     ui_ins_datum->labelEdit->apply();
                 }
+                else if (restoreKeptExpression(fieldText())) {
+                    // unchanged kept text: the expression as it was (ops#684 review F2)
+                }
                 else if (const std::string kept
-                         = keptLengthText(ui_ins_datum->labelEdit->text());
+                         = keptLengthText(fieldText());
                          !kept.empty()) {
                     applyKeptText(kept);  // ops#684, as in applyValue
                 }
