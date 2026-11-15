@@ -3930,6 +3930,9 @@ bool Document::save()
 bool Document::saveToFile(const char* filename) const
 {
     signalStartSave(*this, filename);
+    // FreeCAD-CH (ops#640, folder sync item 3): a file used from outside the team folder is
+    // missing on the other computer; say so here, not when the other person opens it
+    TeamFolder::warnOutside(*this, filename);
 
     auto hGrp = GetApplication().GetParameterGroupByPath(
         "User parameter:BaseApp/Preferences/Document");

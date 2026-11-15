@@ -196,6 +196,11 @@ def teamFolderProblem() -> str:
     """What is wrong with the team folder setup (FreeCAD-CH), or an empty string."""
     ...
 
+def teamFolderOutside(name: str, target: str = "") -> list[str]:
+    """The files a document (saved as `target`, by default its own file) uses from outside the
+    team folder, as file names (FreeCAD-CH); empty when it isn't inside the team folder."""
+    ...
+
 # Document queries and observers
 def activeDocument() -> Document | None:
     """Return the current active document, if any."""
