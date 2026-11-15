@@ -900,6 +900,49 @@ class TestHistoryOrder(unittest.TestCase):
         self.assertParkedAndBack(self.skF, self.padF, self.padA)
         self.assertIs(self.skF.AttachmentSupport[0][0], self.fillet)
 
+    def testAParkingDropIsOneUndoStep(self):
+        """c771: a drop that parks (the list's PadF above the Fillet its sketch's edge is on) is
+        undone in one step: the order, the parking record and the volumes are as before the drop;
+        redone, it parks again, and undone again, it is as before"""
+        self.listedFilletedBlock()
+        tangent = next(
+            f"Edge{i}"
+            for i, e in enumerate(self.fillet.Shape.Edges, 1)
+            if all(abs(v.Point.z - 5) < 1e-9 and abs(v.Point.y - 1) < 1e-9 for v in e.Vertexes)
+        )
+        self.skF.AttachmentSupport = [(self.fillet, tangent)]
+        self.skF.MapMode = "NormalToEdge"
+        self.doc.recompute()
+        lst = PartDesign.studioList(self.doc, True)
+        lst.Entries = [self.skA, self.skF, self.padA, self.fillet, self.padF]
+        self.doc.recompute()
+        parked = lambda: list(getattr(self.skF, "ParkedReferences", []))
+        state = lambda: (self.order(), parked(), self.skF.AttachmentSupport,
+                         round(self.body1.Shape.Volume, 6), round(self.body2.Shape.Volume, 6))
+        before = state()
+        self.assertEqual(before[1], [])
+        self.doc.UndoMode = 1
+        count = self.doc.UndoCount
+        self.doc.openTransaction("Reorder")
+        self.assertTrue(PartDesign.moveInStudio(self.doc, self.padF, self.padA))
+        self.doc.commitTransaction()
+        self.doc.recompute()
+        self.assertTrue(parked())
+        self.assertFalse(self.skF.isValid())
+        self.assertEqual(self.doc.UndoCount, count + 1)
+        for _ in range(2):
+            self.doc.undo()
+            self.doc.recompute()
+            self.assertEqual(state(), before)
+            self.assertEqual([o.Name for o in self.doc.Objects if not o.isValid()], [])
+            self.doc.redo()
+            self.doc.recompute()
+            self.assertTrue(parked())
+            self.assertFalse(self.skF.isValid())
+        self.doc.undo()
+        self.doc.recompute()
+        self.assertEqual(state(), before)
+
     def testInTheListAnEdgeTheFilletMadeIsParked(self):
         """In the list too, a reference with no earlier version is parked (RO1): a sketch normal
         to the Fillet's tangent edge (y = 1), which the Pad hasn't, fails alone above the Fillet
