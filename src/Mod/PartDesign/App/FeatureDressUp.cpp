@@ -58,6 +58,7 @@
 
 #include <cstring>
 #include <map>
+#include <memory>
 #include <regex>
 #include <string>
 
@@ -71,6 +72,7 @@
 #include <App/ObjectIdentifier.h>
 #include <App/ElementNamingUtils.h>
 #include <Base/Exception.h>
+#include <Base/Writer.h>
 #include "Mod/Part/App/TopoShapeMapper.h"
 #include "Body.h"
 
@@ -613,10 +615,20 @@ struct KeptDressUp
     const App::DocumentObject* owner = nullptr;
     TopoDS_Shape base;
     std::vector<TopoDS_Shape> edges;
+    // The step's parameters it was built with (the owner's then): a step computed alone after
+    // its owner's values changed builds for itself (review r1 F2)
+    std::vector<std::pair<std::string, std::string>> parameters;  ///< name, saved value
     Part::TopoShape raw;
-    Part::TopoShape refined;
 };
 std::map<const App::DocumentObject*, KeptDressUp> keptDressUps;
+
+/// A property's value as it is saved (a copy's type can differ from its original's)
+std::string savedValue(const App::Property* prop)
+{
+    Base::StringWriter writer;
+    prop->Save(writer);
+    return writer.getString();
+}
 }  // namespace
 
 namespace PartDesign
@@ -639,6 +651,15 @@ PartDesignExport void dressUpReapplied(const Part::TopoShape& result)
     }
 }
 
+/// The owner a step is tried for, when the try's result may be kept (ops#796): the try's refine
+/// runs as the owner, as it did when the owner tried itself (its check note and its warning are
+/// the owner's; review r1 F3, F4); null otherwise
+PartDesignExport const DressUp* dressUpTriedFor(const DressUp* step)
+{
+    return dressUpRun && dressUpRun->keep ? freecad_cast<DressUp*>(step->StudioOwner.getValue())
+                                          : nullptr;
+}
+
 /// As dressUpReapplied(), with the shape before the refine. \a plain: the run built it the way
 /// the feature's own compute reports nothing about (no exact construction's Report line)
 PartDesignExport void dressUpReappliedFrom(const Part::TopoShape& raw,
@@ -655,12 +676,12 @@ PartDesignExport void dressUpReappliedFrom(const Part::TopoShape& raw,
 }
 
 /// ops#796: a studio step's compute takes what its owner's try built on this base and these
-/// edges, if it did: \a raw before the refine, \a refined after it. The entry goes either way
+/// edges with the step's parameters as they are, if it did: \a raw, before the refine (the step
+/// refines it itself, as it does what it builds). The entry goes either way
 PartDesignExport bool studioDressUpTake(const DressUp* step,
                                         const Part::TopoShape& base,
                                         const std::vector<Part::TopoShape>& edges,
-                                        Part::TopoShape& raw,
-                                        Part::TopoShape& refined)
+                                        Part::TopoShape& raw)
 {
     auto found = keptDressUps.find(step);
     if (found == keptDressUps.end()) {
@@ -677,8 +698,13 @@ PartDesignExport bool studioDressUpTake(const DressUp* step,
             return false;
         }
     }
+    for (const auto& [name, value] : kept.parameters) {
+        auto now = step->getPropertyByName(name.c_str());
+        if (!now || savedValue(now) != value) {
+            return false;
+        }
+    }
     raw = kept.raw;
-    refined = kept.refined;
     return true;
 }
 
@@ -1008,7 +1034,7 @@ PartDesignExport App::DocumentObjectExecReturn* studioDressUpOwnerRun(DressUp* o
     int done = 0;
     // ops#796: what an earlier run of this owner kept and no step took
     std::erase_if(keptDressUps, [owner](const auto& entry) { return entry.second.owner == owner; });
-    if (keptDressUps.size() > 256) {
+    if (keptDressUps.size() > 64) {
         keptDressUps.clear();
     }
     for (auto part : studioScopeOf(owner)) {
@@ -1078,8 +1104,12 @@ PartDesignExport App::DocumentObjectExecReturn* studioDressUpOwnerRun(DressUp* o
             for (const auto& edge : edges) {
                 kept.edges.push_back(edge.getShape());
             }
+            for (const char* name : ownerParameters(step)) {
+                if (auto prop = step->getPropertyByName(name)) {
+                    kept.parameters.emplace_back(name, savedValue(prop));
+                }
+            }
             kept.raw = raw;
-            kept.refined = tryResult;
             keptDressUps[step] = std::move(kept);
         }
         if (tryResult.isNull()) {
