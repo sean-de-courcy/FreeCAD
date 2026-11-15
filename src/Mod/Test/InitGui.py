@@ -114,4 +114,5 @@ FreeCAD.__unit_test__ += [
     "TestSaveGuardGui",
     "TestPresenceGui",
     "TestVariableStudioGui",
+    "TestUiLoaderWrappersGui",
 ]
