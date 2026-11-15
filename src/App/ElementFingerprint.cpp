@@ -24,6 +24,8 @@ constexpr char entryDelimiter = '/';
 constexpr char markDelimiter = ':';
 // A mark's suppressed flag (ops#549 PS)
 constexpr std::string_view suppressedFlag = "s";
+// A mark's failed flag (ops#814), after the suppressed flag when both are set
+constexpr std::string_view failedFlag = "f";
 // A closure's marks cut down to its suppressed objects (ops#549, decision 216)
 constexpr std::string_view partialMarks = "+";
 // An object's digest of its other inputs in version 8's sources (decision 231): 64 bits in hex
@@ -192,8 +194,9 @@ bool parseSides(std::string_view text, std::vector<ElementFingerprint::Side>& si
 }
 
 // Version 7's marks: `_`, or entries separated by `/`, each `<tag>:<mark>` or `<tag>:_`, and
-// `:s` after either for an object suppressed when the record was taken (ops#549 PS); a first entry
-// `+` for a closure too large, whose entries are only the suppressed ones (decision 216)
+// `:s` after either for an object suppressed when the record was taken (ops#549 PS), `:f` for one
+// passing its base through after a failure (ops#814), `:sf` for both; a first entry `+` for a
+// closure too large, whose entries are only the flagged ones (decision 216)
 bool parseMarks(std::string_view text, std::vector<ElementFingerprint::Mark>& marks, bool& partial)
 {
     marks.clear();
@@ -213,21 +216,30 @@ bool parseMarks(std::string_view text, std::vector<ElementFingerprint::Mark>& ma
         const auto tag = parseWhole(part.substr(0, colon));
         auto value = part.substr(colon + 1);
         bool suppressed = false;
+        bool failed = false;
         if (const auto flag = value.find(markDelimiter); flag != std::string_view::npos) {
-            if (value.substr(flag + 1) != suppressedFlag) {
+            auto flags = value.substr(flag + 1);
+            if (flags.substr(0, suppressedFlag.size()) == suppressedFlag) {
+                suppressed = true;
+                flags.remove_prefix(suppressedFlag.size());
+            }
+            if (flags == failedFlag) {
+                failed = true;
+                flags.remove_prefix(failedFlag.size());
+            }
+            if (!flags.empty() || (!suppressed && !failed)) {
                 return false;
             }
-            suppressed = true;
             value = value.substr(0, flag);
         }
         const auto mark = value == emptyField ? std::optional<long>(-1) : parseWhole(value);
         if (!tag || *tag < 0 || !mark || *mark < -1) {
             return false;
         }
-        if (partial && !suppressed) {
+        if (partial && !suppressed && !failed) {
             return false;
         }
-        marks.push_back({*tag, *mark, suppressed});
+        marks.push_back({*tag, *mark, suppressed, failed});
     }
     return marks.size() <= ElementFingerprint::MaxMarks;
 }
@@ -570,9 +582,14 @@ std::string ElementFingerprint::toString() const
                 text += std::to_string(marks[i].tag);
                 text += markDelimiter;
                 text += marks[i].mark < 0 ? std::string(emptyField) : std::to_string(marks[i].mark);
-                if (marks[i].suppressed) {
+                if (marks[i].world() != 0) {
                     text += markDelimiter;
-                    text += suppressedFlag;
+                    if (marks[i].suppressed) {
+                        text += suppressedFlag;
+                    }
+                    if (marks[i].failed) {
+                        text += failedFlag;
+                    }
                 }
             }
             if (marks.empty() && !marksPartial) {

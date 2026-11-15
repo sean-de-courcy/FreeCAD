@@ -89,6 +89,15 @@ public:
         bool suppressed = false;
     };
 
+    /// Whether 'obj''s output is now its base, passed through after it failed: shapeInputChain()'s
+    /// `failed` for that object, which a reference's record saves as its world (ops#814). False
+    /// without a rule.
+    virtual bool passesFailureThrough(const DocumentObject* obj) const
+    {
+        (void)obj;
+        return false;
+    }
+
     /// The features whose output 'target''s shape is built on and that can pass their base
     /// through, nearest first, from their current state (ops#549; PartDesign: the Body solid
     /// features of the BaseFeature chain and of the solid features' links, through a Body's Tip,

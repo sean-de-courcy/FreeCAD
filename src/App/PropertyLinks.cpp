@@ -54,6 +54,7 @@
 #include "GeoFeature.h"
 #include "Link.h"
 #include "ElementReferences.h"
+#include "RecomputeContinuation.h"
 #include "LinkRetarget.h"
 #include "NamingRevision.h"
 #include "ComplexGeoData.h"
@@ -1000,51 +1001,66 @@ bool PropertyLinkBase::inSolverDocument() const
 
 // The marks in the writer's order, one entry per ID and flag: two objects of different documents
 // can share an ID (F5), and their flags, if they differ, both stay, which the solver reads as a
-// switch (ops#549 PS). Of one ID and flag, the highest geometry ID.
+// switch (ops#549 PS). Of one ID and flag, the highest geometry ID. The flag is the mark's world():
+// suppressed, failed (ops#814), both or neither.
 static void sortMarks(std::vector<Data::ElementFingerprint::Mark>& marks)
 {
     std::sort(marks.begin(), marks.end(), [](const auto& a, const auto& b) {
-        return a.tag < b.tag || (a.tag == b.tag && a.suppressed < b.suppressed)
-            || (a.tag == b.tag && a.suppressed == b.suppressed && a.mark > b.mark);
+        return a.tag < b.tag || (a.tag == b.tag && a.world() < b.world())
+            || (a.tag == b.tag && a.world() == b.world() && a.mark > b.mark);
     });
     marks.erase(std::unique(marks.begin(),
                             marks.end(),
                             [](const auto& a, const auto& b) {
-                                return a.tag == b.tag && a.suppressed == b.suppressed;
+                                return a.tag == b.tag && a.world() == b.world();
                             }),
                 marks.end());
 }
 
+// The worlds (Mark::world()) `marks` list for the ID `tag`, as bits: 1 << world
+static unsigned worldsOf(const std::vector<Data::ElementFingerprint::Mark>& marks, long tag)
+{
+    unsigned worlds = 0;
+    for (const auto& mark : marks) {
+        if (mark.tag == tag) {
+            worlds |= 1U << mark.world();
+        }
+    }
+    return worlds;
+}
+
+// One mark of `tag` and `mark` per world of `worlds` (worldsOf())
+static void pushWorlds(std::vector<Data::ElementFingerprint::Mark>& marks,
+                       long tag,
+                       long mark,
+                       unsigned worlds)
+{
+    for (int world = 0; world < 4; ++world) {
+        if (worlds & (1U << world)) {
+            marks.push_back({tag, mark, (world & 1) != 0, (world & 2) != 0});
+        }
+    }
+}
+
 // A setter's refresh of a record (ops#549 PS): `fresh`, measured now, takes the world of `old`,
-// each object's flags as `old` had them (an object it doesn't list wasn't suppressed). True if
-// that changed `fresh`.
+// each object's flags as `old` had them (an object it doesn't list wasn't suppressed, nor passing
+// its base through after a failure: ops#814). True if that changed `fresh`.
 static bool keepWorld(const Data::ElementFingerprint& old, Data::ElementFingerprint& fresh)
 {
     using Mark = Data::ElementFingerprint::Mark;
     std::vector<Mark> marks;
     if (fresh.marksPartial) {
-        // Only the suppressed objects are listed: the old record's
+        // Only the flagged objects are listed: the old record's
         for (const auto& mark : old.marks) {
-            if (mark.suppressed) {
+            if (mark.world() != 0) {
                 marks.push_back(mark);
             }
         }
     }
     else {
         for (const auto& mark : fresh.marks) {
-            bool flagged = false;
-            bool unflagged = false;
-            for (const auto& was : old.marks) {
-                if (was.tag == mark.tag) {
-                    (was.suppressed ? flagged : unflagged) = true;
-                }
-            }
-            if (flagged) {
-                marks.push_back({mark.tag, mark.mark, true});
-            }
-            if (!flagged || unflagged) {
-                marks.push_back({mark.tag, mark.mark, false});
-            }
+            const unsigned worlds = worldsOf(old.marks, mark.tag);
+            pushWorlds(marks, mark.tag, mark.mark, worlds ? worlds : 1U);
         }
     }
     sortMarks(marks);
@@ -1057,8 +1073,8 @@ static bool keepWorld(const Data::ElementFingerprint& old, Data::ElementFingerpr
 
 // keepWorld()'s converse, for a record held by a solve (ops#833): `held`, kept as it was, takes
 // the world of `fresh`, each object's flags as `fresh` has them (one it doesn't list keeps its
-// own). True if that changed `held`. A partial record (only the suppressed listed) is left as it
-// was: it can't tell an unlisted object from an unsuppressed one.
+// own). True if that changed `held`. A partial record (only the flagged listed) is left as it
+// was: it can't tell an unlisted object from an unflagged one.
 static bool takeWorld(const Data::ElementFingerprint& fresh, Data::ElementFingerprint& held)
 {
     using Mark = Data::ElementFingerprint::Mark;
@@ -1067,23 +1083,12 @@ static bool takeWorld(const Data::ElementFingerprint& fresh, Data::ElementFinger
     }
     std::vector<Mark> marks;
     for (const auto& mark : held.marks) {
-        bool flagged = false;
-        bool unflagged = false;
-        for (const auto& now : fresh.marks) {
-            if (now.tag == mark.tag) {
-                (now.suppressed ? flagged : unflagged) = true;
-            }
-        }
-        if (!flagged && !unflagged) {
+        const unsigned worlds = worldsOf(fresh.marks, mark.tag);
+        if (!worlds) {
             marks.push_back(mark);
             continue;
         }
-        if (flagged) {
-            marks.push_back({mark.tag, mark.mark, true});
-        }
-        if (unflagged) {
-            marks.push_back({mark.tag, mark.mark, false});
-        }
+        pushWorlds(marks, mark.tag, mark.mark, worlds);
     }
     sortMarks(marks);
     if (marks == held.marks) {
@@ -1093,13 +1098,36 @@ static bool takeWorld(const Data::ElementFingerprint& fresh, Data::ElementFinger
     return true;
 }
 
+// For a record measured while its failed flags couldn't be taken (elementFingerprint()'s
+// `failuresTaken` false): each object of `fresh` is failed as `old` had it (ops#814). True if that
+// changed `fresh`.
+static bool keepFailures(const Data::ElementFingerprint& old, Data::ElementFingerprint& fresh)
+{
+    std::vector<Data::ElementFingerprint::Mark> marks;
+    for (const auto& mark : fresh.marks) {
+        bool failed = false;
+        for (const auto& was : old.marks) {
+            failed = failed || (was.tag == mark.tag && was.failed);
+        }
+        marks.push_back({mark.tag, mark.mark, mark.suppressed, failed});
+    }
+    sortMarks(marks);
+    if (marks == fresh.marks) {
+        return false;
+    }
+    fresh.marks = std::move(marks);
+    return true;
+}
+
 // _getElementFingerprint(), and the objects the marks are taken from in \a closureOut (if given):
 // the reference's object and the element's holder first (ops#564)
+// \a failuresTaken (if given): whether the marks' failed flags are the model's now, see below.
 static std::string elementFingerprint(App::DocumentObject* feature,
                                       App::DocumentObject* obj,
                                       const std::string& sub,
                                       const PropertyLinkBase::ShadowSub& shadow,
-                                      std::vector<App::DocumentObject*>* closureOut)
+                                      std::vector<App::DocumentObject*>* closureOut,
+                                      bool* failuresTaken = nullptr)
 {
     using ShadowSub = PropertyLinkBase::ShadowSub;
     App::SolverSiteTimer fingerprintTimer(App::SolverSite::Fingerprint);
@@ -1170,8 +1198,9 @@ static std::string elementFingerprint(App::DocumentObject* feature,
     upToTimer.reset();
     // The marks (ops#526 D2): every object the target is built from, the target and the element's
     // holder included, by its ID and its highest geometry ID now. Geometry with a higher ID is
-    // drawn later; an object listed was feeding the target. Each says whether it was suppressed:
-    // the world the record is taken in (ops#549 PS).
+    // drawn later; an object listed was feeding the target. Each says whether it was suppressed,
+    // or passing its base through after a failure (ops#814): the world the record is taken in
+    // (ops#549 PS).
     // A dependency cycle (getOutListRecursive() throws) has no closure: no marks, unjudged.
     std::optional<App::SolverSiteTimer> closureTimer(std::in_place, App::SolverSite::FpClosure);
     std::vector<App::DocumentObject*> closure {obj, geo};
@@ -1184,22 +1213,38 @@ static std::string elementFingerprint(App::DocumentObject* feature,
     catch (const Base::Exception&) {
         closure.clear();
     }
+    // A failed flag says the element's holder was made on the failure's pass-through. That holds
+    // while the holder is being made (its Shape set in its own recompute), and when nothing the
+    // holder is built from is left to recompute. Otherwise (the failed feature recomputed alone,
+    // a holder behind the roll-back bar, an aborted recompute) the holder's shape may still be
+    // the one made with the feature, and no failed flag is taken: the caller keeps the record's
+    // (ops#814, the skeptic's S1).
+    const auto continuation = App::recomputeContinuation();
+    const bool takeFailures = continuation
+        && (geo->isRecomputing()
+            || std::none_of(closure.begin(), closure.end(), [](const App::DocumentObject* object) {
+                   return object && object->isAttachedToDocument() && object->isTouched();
+               }));
+    if (failuresTaken) {
+        *failuresTaken = takeFailures;
+    }
     for (auto object : closure) {
         if (object && object->isAttachedToDocument()) {
             fingerprint.marks.push_back({object->getID(),
                                          std::max(object->elementIdMark(), -1L),
-                                         object->passesBaseThrough()});
+                                         object->passesBaseThrough(),
+                                         takeFailures && continuation->passesFailureThrough(object)});
         }
     }
     sortMarks(fingerprint.marks);
     if (fingerprint.marks.size() > Data::ElementFingerprint::MaxMarks) {
-        // Too many for D2's judging, which then has none; the suppressed ones stay, the record's
+        // Too many for D2's judging, which then has none; the flagged ones stay, the record's
         // world (PLAN decision 216: an unsuppress is never judged on a record that lost it)
         fingerprint.marksPartial = true;
         fingerprint.marks.erase(std::remove_if(fingerprint.marks.begin(),
                                                fingerprint.marks.end(),
                                                [](const auto& mark) {
-                                                   return !mark.suppressed;
+                                                   return mark.world() == 0;
                                                }),
                                 fingerprint.marks.end());
         if (fingerprint.marks.size() > Data::ElementFingerprint::MaxMarks) {
@@ -1328,11 +1373,13 @@ bool PropertyLinkBase::_updateElementFingerprints(App::DocumentObject* feature,
         }
         auto target = objs ? (i < objs->size() ? (*objs)[i] : nullptr) : obj;
         std::vector<App::DocumentObject*> closure;
+        bool failuresTaken = true;
         auto text = elementFingerprint(feature,
                                        target,
                                        subs[i],
                                        i < shadows.size() ? shadows[i] : ShadowSub(),
-                                       &closure);
+                                       &closure,
+                                       &failuresTaken);
         // A reference that doesn't resolve keeps its last fingerprint, for the next retry.
         if (text.empty()) {
             continue;
@@ -1352,6 +1399,14 @@ bool PropertyLinkBase::_updateElementFingerprints(App::DocumentObject* feature,
         // held, and taken again at the end of the recompute (updateHeldElementFingerprints()).
         std::optional<App::SolverSiteTimer> compareTimer(std::in_place, App::SolverSite::UpdateCompare);
         const auto old = Data::ElementFingerprint::fromString(fingerprints[i]);
+        // The failed flags couldn't be read from the model (see elementFingerprint()): the
+        // record's stay (ops#814)
+        if (!failuresTaken && old.isValid()) {
+            auto fresh = Data::ElementFingerprint::fromString(text);
+            if (fresh.isValid() && keepFailures(old, fresh)) {
+                text = fresh.toString();
+            }
+        }
         // The record's world (ops#549 PS) changes only where the solver judged the reference
         // against its target (feature given: the batch's veto ran). A setter's refresh keeps
         // each object's suppressed flag as the record had it, so the next solve still sees the

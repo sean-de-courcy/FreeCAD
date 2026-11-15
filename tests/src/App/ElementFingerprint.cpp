@@ -809,6 +809,42 @@ TEST(ElementFingerprint, aMarksSuppressedFlag)
     EXPECT_FALSE(ElementFingerprint::fromString(other).isValid());
 }
 
+TEST(ElementFingerprint, aMarksFailedFlag)
+{
+    // ops#814: an object passing its base through after a failure when the record was taken
+    // writes `<tag>:<mark>:f`, `:sf` when it was suppressed too; the flag is part of the record's
+    // equality, and a closure too large keeps a failed object's mark
+    ElementFingerprint corner;
+    corner.type = 'V';
+    corner.kind = "Point";
+    corner.center = Base::Vector3d(0, 0, 10);
+    corner.marks = {{12, 16, false, true}, {14, -1, true, true}, {15, 3}};
+    const std::string text = corner.toString();
+    EXPECT_NE(text.find("|12:16:f/14:_:sf/15:3"), std::string::npos) << text;
+    auto parsed = ElementFingerprint::fromString(text);
+    ASSERT_TRUE(parsed.isValid());
+    EXPECT_EQ(parsed, corner);
+    ASSERT_EQ(parsed.marks.size(), 3u);
+    EXPECT_TRUE(parsed.marks[0].failed);
+    EXPECT_FALSE(parsed.marks[0].suppressed);
+    EXPECT_TRUE(parsed.marks[1].failed);
+    EXPECT_TRUE(parsed.marks[1].suppressed);
+    EXPECT_FALSE(parsed.marks[2].failed);
+    auto unflagged = corner;
+    unflagged.marks[0].failed = false;
+    EXPECT_FALSE(unflagged == corner);
+    //   the flags in the other order are a malformed field
+    std::string other = text;
+    other.replace(other.find("14:_:sf"), 7, "14:_:fs");
+    EXPECT_FALSE(ElementFingerprint::fromString(other).isValid());
+    //   partial marks keep a failed object's
+    corner.marksPartial = true;
+    corner.marks = {{12, 16, false, true}};
+    const std::string partial = corner.toString();
+    EXPECT_NE(partial.find("|+/12:16:f"), std::string::npos) << partial;
+    EXPECT_EQ(ElementFingerprint::fromString(partial), corner);
+}
+
 TEST(ElementFingerprint, aClosureTooLargeKeepsItsSuppressedMarks)
 {
     // ops#549, PLAN decision 216: a closure of more than MaxMarks objects writes `+` and only the
