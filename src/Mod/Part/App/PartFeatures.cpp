@@ -429,6 +429,12 @@ void Thickness::handleChangedPropertyType(
     }
 }
 
+namespace Part
+{
+// Defined with makeElementThickSolid (TopoShapeExpansion.cpp)
+extern thread_local bool thickSolidJoinFallback;
+}  // namespace Part
+
 App::DocumentObjectExecReturn* Thickness::execute()
 {
     std::vector<TopoShape> shapes;
@@ -456,6 +462,16 @@ App::DocumentObjectExecReturn* Thickness::execute()
         makeTopoShape()
             .makeElementThickSolid(base, shapes, thickness, tol, inter, self, mode, static_cast<JoinType>(join))
     );
+    // The Arc join asked for gave no valid shell, and the sharp one was built instead (ops#807):
+    // a different shape than asked, so it is said
+    auto doc = getDocument();
+    if (thickSolidJoinFallback && doc) {
+        doc->setWarning(
+            this,
+            "The Arc join gives no valid shell here: built with the Intersection join (sharp "
+            "corners)."
+        );
+    }
     return Part::Feature::execute();
 }
 

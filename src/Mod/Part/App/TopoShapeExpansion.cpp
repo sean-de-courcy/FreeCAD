@@ -6783,6 +6783,10 @@ TopoShape makeThickSolidByOffsetCut(
 }
 }  // namespace
 
+// Set where makeElementThickSolid built the Intersection join for an outward Arc shell OCCT left
+// invalid (ops#807); read and cleared by Part::Thickness, which warns of it.
+thread_local bool thickSolidJoinFallback = false;
+
 TopoShape& TopoShape::makeElementThickSolid(
     const TopoShape& shape,
     const std::vector<TopoShape>& faces,
@@ -6798,6 +6802,7 @@ TopoShape& TopoShape::makeElementThickSolid(
     if (!op) {
         op = Part::OpCodes::Thicken;
     }
+    Part::thickSolidJoinFallback = false;
 
     // we do not offer tangent join type
     switch (join) {
@@ -6929,6 +6934,9 @@ TopoShape& TopoShape::makeElementThickSolid(
             auto sharp = build(withIntersection, JoinType::intersection);
             if (built(*sharp) && within(sharp->Shape())) {
                 mkThickPtr = sharp;
+                Part::thickSolidJoinFallback = true;
+                FC_WARN("thickness: the Arc join gives no valid outward shell here; built with the "
+                        "Intersection join (sharp corners)");
                 break;
             }
         }
