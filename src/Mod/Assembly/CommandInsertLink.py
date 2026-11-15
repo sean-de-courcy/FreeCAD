@@ -139,6 +139,24 @@ class InsertLinkObserver:
         self.callback(obj)
 
 
+def studioParts(members):
+    """FreeCAD-CH (ops#798): a studio's parts, not its features: Onshape's Insert lists parts
+    only. A studio's owners (Extrude, Fillet...), its sketches, its Derived binders and its
+    list are features of its history; its Bodies and plain solids are parts."""
+    parts = []
+    for obj in members:
+        if obj.isDerivedFrom("Part::Feature") and (
+            obj.isDerivedFrom("PartDesign::Feature")
+            or obj.isDerivedFrom("PartDesign::SubShapeBinder")
+            or obj.isDerivedFrom("Part::Part2DObject")
+        ):
+            continue
+        if obj.TypeId == "PartDesign::StudioList":
+            continue
+        parts.append(obj)
+    return parts
+
+
 class TaskAssemblyInsertLink(QtCore.QObject):
     def __init__(self, assembly, view):
         super().__init__()
@@ -364,7 +382,7 @@ class TaskAssemblyInsertLink(QtCore.QObject):
             if name == IMPLICIT_STUDIO:
                 members = [obj for obj in rootObjects if App.DocumentTabs.tabOf(obj) == name]
                 studioItem.setIcon(0, QIcon(":/icons/PartDesign_Body.svg"))
-                process_objects(members, studioItem)
+                process_objects(studioParts(members), studioItem)
                 listed.update(obj.Name for obj in members)
             else:
                 studio = doc.getObject(name)
@@ -374,7 +392,7 @@ class TaskAssemblyInsertLink(QtCore.QObject):
                 )
                 if not usesAssembly:
                     studioItem.setData(0, QtCore.Qt.UserRole, studio)
-                process_objects(studio.ViewObject.claimChildren(), studioItem)
+                process_objects(studioParts(studio.ViewObject.claimChildren()), studioItem)
                 listed.add(name)
             if studioItem.childCount() == 0 and not studioItem.data(0, QtCore.Qt.UserRole):
                 docItem.removeChild(studioItem)
