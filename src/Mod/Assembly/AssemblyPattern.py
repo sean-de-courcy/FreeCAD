@@ -161,29 +161,36 @@ def keptSense(fp, key, obj, sub, axis):
     tangent and a face's normal come from storage order (the orientation the shape's element map
     met first), which a feature that leaves the element's geometry alone can still turn: a pocket
     that shortens the edge, or one in a face beside it. Onshape keeps the direction then. So the
-    way read in the part's own frame is kept (on the proxy, saved with it) while the element stays
-    parallel and on the same part, and taken afresh when it changes or the user picks again."""
+    way read in the frame of the object owning the element is kept (on the proxy, saved with it)
+    while the element stays parallel and on the same object, and taken afresh when it changes or
+    the user picks again."""
     proxy = getattr(fp, "Proxy", None)
     if proxy is None:
         return axis
+    # The frame of the object that owns the element, every placement along the path left out:
+    # a part turned inside a sub-assembly (or a nested link) turns the way with it (review r2)
     try:
-        local = axisOfShape(Part.getShape(obj, sub, needSubElement=True, transform=False))
+        owner, _parent, mapped, element = obj.resolve(sub)
+        element = mapped or element
+        owner = owner.getLinkedObject(True) if owner is not None and element else None
+        local = axisOfShape(Part.getShape(owner, element, needSubElement=True, transform=False))
+        path = owner.Name
     except Exception:
-        local = None
-    if local is None:
+        local = path = None
+    if local is None or path is None:
         return axis
     way = local[1]
     senses = getattr(proxy, "senses", None)
     if not isinstance(senses, dict):
         senses = proxy.senses = {}
     kept = senses.get(key)
-    if kept and kept[0] == obj.Name:
+    if kept and kept[0] == path:
         last = App.Vector(*kept[1:])
         if abs(abs(way.dot(last)) - 1.0) < 1e-9:
             if way.dot(last) < 0:
                 return axis[0], -axis[1]
             return axis
-    senses[key] = [obj.Name, way.x, way.y, way.z]
+    senses[key] = [path, way.x, way.y, way.z]
     return axis
 
 
