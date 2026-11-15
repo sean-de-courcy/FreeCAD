@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <numbers>
 #include <optional>
 #include <string>
 #include <vector>
@@ -144,8 +145,9 @@ bool keepsPlane(const gp_Trsf& t, const gp_Pln& pln)
         && pln.Distance(moved.Location()) < lengthTolerance;
 }
 
-/// The normal of a profile-based feature's profile plane, in the document's frame
-std::optional<gp_Dir> profileNormal(const App::DocumentObject* owner)
+/// A profile-based feature's profile plane, in the document's frame: its sketch's plane, or the
+/// planar face it is drawn from
+std::optional<gp_Pln> profilePlane(const App::DocumentObject* owner)
 {
     auto profile = linkOf(owner, "Profile");
     App::DocumentObject* obj = profile ? profile->getValue() : nullptr;
@@ -153,12 +155,18 @@ std::optional<gp_Dir> profileNormal(const App::DocumentObject* owner)
         return std::nullopt;
     }
     if (obj->isDerivedFrom<Part::Part2DObject>()) {
-        const Base::Vector3d normal = App::GeoFeature::getGlobalPlacement(obj).getRotation().multVec(
-            Base::Vector3d(0, 0, 1)
-        );
-        return gp_Dir(normal.x, normal.y, normal.z);
+        const Base::Placement placement = App::GeoFeature::getGlobalPlacement(obj);
+        const Base::Vector3d normal = placement.getRotation().multVec(Base::Vector3d(0, 0, 1));
+        const Base::Vector3d origin = placement.getPosition();
+        return gp_Pln(gp_Pnt(origin.x, origin.y, origin.z), gp_Dir(normal.x, normal.y, normal.z));
     }
-    if (auto plane = referencePlane(profile)) {
+    return referencePlane(profile);
+}
+
+/// The normal of a profile-based feature's profile plane, in the document's frame
+std::optional<gp_Dir> profileNormal(const App::DocumentObject* owner)
+{
+    if (auto plane = profilePlane(owner)) {
         return plane->Axis().Direction();
     }
     return std::nullopt;
@@ -213,12 +221,16 @@ TopoDS_Shape footprintColumn(const TopoDS_Shape& copyLocal, double z0, double lo
 /** Whether every copy of a straight tool along normal (in the pattern's frame) spans the part:
  * within the copy's footprint (its own end faces swept across the part, ops#640 F2: its box
  * refused a hole beside a boss), the part lies between the copy's two ends. Then the copy removes what a Through all made at that place removes, as both are the
- * same profile swept from the same start, through all of the part's material ahead. */
+ * same profile swept from the same start, through all of the part's material ahead.
+ * tip: a hole's drill-point cone height (0 for a flat end). An angled tip has no flat face at its
+ * end, so the footprint is the start's end face, and the part must stay off the cone, where the
+ * copy removes less than the longer tool made at that place would (ops#805) */
 bool everyCopySpans(
     const Part::TopoShape& tool,
     const Part::TopoShape& part,
     const gp_Dir& normal,
-    const std::vector<gp_Trsf>& instances
+    const std::vector<gp_Trsf>& instances,
+    std::optional<double> tip = std::nullopt
 )
 {
     for (const gp_Trsf& t : instances) {
@@ -241,8 +253,16 @@ bool everyCopySpans(
         const double margin = 1.0;
         const double low = std::min(pz0, z0) - margin;
         const double high = std::max(pz1, z1) + margin;
-        TopoDS_Shape column =
-            footprintColumn(copy.Moved(TopLoc_Location(toLocal)), z0, low, high);
+        const TopoDS_Shape local = copy.Moved(TopLoc_Location(toLocal));
+        TopoDS_Shape column = footprintColumn(local, z0, low, high);
+        // The end without a flat face (a hole's angled tip): z1's when the footprint is z0's
+        double lowEnd = z0;
+        double highEnd = z1 - (tip ? *tip : 0.0);
+        if (column.IsNull() && tip) {
+            column = footprintColumn(local, z1, low, high);
+            lowEnd = z0 + *tip;
+            highEnd = z1;
+        }
         if (column.IsNull()) {
             column = BRepPrimAPI_MakeBox(
                          gp_Pnt(x0 - lengthTolerance, y0 - lengthTolerance, low),
@@ -261,7 +281,7 @@ bool everyCopySpans(
         double cx0, cy0, cz0, cx1, cy1, cz1;
         inColumn.Get(cx0, cy0, cz0, cx1, cy1, cz1);
         const double tolerance = 1e-5;
-        if (cz0 < z0 - tolerance || cz1 > z1 + tolerance) {
+        if (cz0 < lowEnd - tolerance || cz1 > highEnd + tolerance) {
             return false;
         }
     }
@@ -311,11 +331,36 @@ std::string studioCopyRefusal(
         return true;
     };
 
+    // Every instance maps the profile plane onto itself, the same side up: a translation along
+    // it, a rotation about its normal, or a mirror in a plane holding the normal (a flip, or a
+    // mirror in the profile plane, turns the feature over)
+    auto keepsProfile = [&]() {
+        auto pln = profilePlane(owner);
+        if (!pln) {
+            return false;
+        }
+        const gp_Pln here = pln->Transformed(fromDocument);
+        const gp_Dir up = here.Axis().Direction();
+        for (const gp_Trsf& t : instances) {
+            if (!keepsPlane(t, here) || !up.Transformed(t).IsEqual(up, angleTolerance)) {
+                return false;
+            }
+        }
+        return true;
+    };
+
     const std::string start = enumOf(owner, "StartType");
     if (start == "Reference" && !keepsFace(linkOf(owner, "StartReference"))) {
         return name + " starts at a reference face" + later;
     }
-    if (start == "Part") {
+    // A hole from the part's surface (Onshape's default) is copied where every instance keeps its
+    // profile plane (ops#805). The copy starts at the seed's start moved there, which is not
+    // always where a re-run would start: on a stepped top, or over an earlier pocket, the re-run
+    // meets the part at another depth. The rule rests on Onshape's Reapply off copying a
+    // feature's result (O6, P1), not on the copy equalling the re-run; an oracle check of a Hole
+    // feature is open. A pattern along the hole's axis is refused, by choice (Onshape would copy
+    // it too). To flip the rule, change this one condition
+    if (start == "Part" && (!hole || !keepsProfile())) {
         return name + " starts at the part's surface" + later;
     }
 
@@ -327,8 +372,13 @@ std::string studioCopyRefusal(
     };
     std::vector<End> ends;
     if (hole) {
+        // Blind (Dimension) is copied; Through all as a Remove extrude's, where every copy spans
+        // the part at its place (ops#805); Up to next is re-run per instance before this rule
         const std::string depth = enumOf(owner, "DepthType");
-        if (depth != "Dimension") {
+        if (depth == "ThroughAll") {
+            ends.push_back({depth, nullptr, nullptr});
+        }
+        else if (depth != "Dimension") {
             return name + " is a hole whose depth type is " + depth + later;
         }
     }
@@ -385,13 +435,30 @@ std::string studioCopyRefusal(
         }
         if (type == "ThroughAll") {
             const auto normal = profileNormal(owner);
-            if (!extrude || step->getAddSubType() != FeatureAddSub::Type::Subtractive || !normal
-                || boolOf(owner, "UseCustomVector")
-                || std::fabs(floatOf(owner, end.taper)) > angleTolerance) {
+            // A hole's tool runs along its profile's normal, straight unless tapered (TaperedAngle
+            // 90 is straight); an extrude's may be tilted or tapered
+            const bool straight = hole
+                ? (!boolOf(owner, "Tapered")
+                   || std::fabs(floatOf(owner, "TaperedAngle") - 90.0) <= angleTolerance)
+                : (extrude && !boolOf(owner, "UseCustomVector")
+                   && std::fabs(floatOf(owner, end.taper)) <= angleTolerance);
+            if (!straight || step->getAddSubType() != FeatureAddSub::Type::Subtractive || !normal) {
                 return name + " goes Through all" + later;
             }
+            // A hole's angled drill point: the cone's height, which the part must stay off
+            std::optional<double> tip;
+            if (hole) {
+                tip = 0.0;
+                const double halfAngle =
+                    floatOf(owner, "DrillPointAngle") * std::numbers::pi / 360.0;
+                if (enumOf(owner, "DrillPoint") == "Angled" && halfAngle > angleTolerance) {
+                    tip = floatOf(owner, "Diameter") / 2.0 / std::tan(halfAngle);
+                }
+            }
             try {
-                if (!everyCopySpans(tool, part, normal->Transformed(fromDocument), instances)) {
+                if (!everyCopySpans(
+                        tool, part, normal->Transformed(fromDocument), instances, tip
+                    )) {
                     return name
                         + " goes Through all, and a copy doesn't span the part at its place"
                         + later;
