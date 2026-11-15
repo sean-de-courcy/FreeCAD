@@ -250,7 +250,12 @@ App::DocumentObjectExecReturn* Chamfer::build()
         }
     }
     if (static_cast<Part::ChamferType>(chamferType) == Part::ChamferType::distanceAngle) {
-        reach = 0.0;
+        // The other face's distance, bounded by the edges' opening (ops#622); unbounded near an
+        // opening + angle of 180 degrees, where the checks don't run
+        reach = std::max(
+            0.0,
+            Part::distanceAngleReach(TopShape, edges, size, Base::toRadians(angle))
+        );
         size2 = angle;
     }
     // One pass: the chamfer from scratch, its checks, and the feature's result if they pass. Each

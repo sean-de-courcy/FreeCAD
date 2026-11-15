@@ -162,6 +162,27 @@ PartExport std::string lostMaterial(
     double size
 );
 
+/** The largest distance along a face of a distance-angle chamfer, for lostMaterial()'s size, or a
+ * negative value if it can't be bounded (FreeCAD-CH, ops#622).
+ *
+ * The chamfer cuts the distance \a size on one face and meets it at \a angle; on the other face
+ * it cuts size sin(angle) / sin(opening + angle), where the opening is pi - a at a convex edge and
+ * pi + a at a concave one, a the angle between the faces' normals (sampled along the chain of
+ * \a edges, as lostMaterial() takes it). That grows without bound as opening + angle nears pi:
+ * below a sine of 0.01 the reach is unknown.
+ *
+ * @param base The shape that is chamfered
+ * @param edges The edges of \a base that are chamfered
+ * @param size The distance on the first face
+ * @param angle The chamfer's angle to the first face, in radians
+ */
+PartExport double distanceAngleReach(
+    const TopoShape& base,
+    const std::vector<TopoShape>& edges,
+    double size,
+    double angle
+);
+
 /** Why a fillet's result bridges a hole or pocket its band crosses, or an empty string
  * (FreeCAD-CH, ops#604 gap 3a, decision 283).
  *

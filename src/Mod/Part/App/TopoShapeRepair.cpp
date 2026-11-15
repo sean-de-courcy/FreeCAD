@@ -2098,6 +2098,73 @@ std::string lostMaterial(
     return {};
 }
 
+double distanceAngleReach(
+    const TopoShape& base,
+    const std::vector<TopoShape>& edges,
+    double size,
+    double angle
+)
+{
+    // Below it, the other face's distance is unknown: opening + angle is nearly pi
+    constexpr double leastSine = 0.01;
+    const TopoDS_Compound before = solidsIn(base.getShape());
+    if (edges.empty() || !(size > 0.0) || !(angle > 0.0) || !(angle < std::numbers::pi)
+        || !TopoDS_Iterator(before).More()) {
+        return -1.0;
+    }
+    try {
+        const auto chain = chainOf(before, edges);
+        if (chain.Extent() == 0) {
+            return -1.0;
+        }
+        TopTools_IndexedDataMapOfShapeListOfShape facesOfEdges;
+        TopExp::MapShapesAndAncestors(before, TopAbs_EDGE, TopAbs_FACE, facesOfEdges);
+        double reach = size;
+        for (int i = 1; i <= chain.Extent(); ++i) {
+            const TopoDS_Edge& edge = TopoDS::Edge(chain(i));
+            const int index = facesOfEdges.FindIndex(edge);
+            if (index == 0 || BRep_Tool::Degenerated(edge)) {
+                return -1.0;
+            }
+            TopTools_IndexedMapOfShape faces;
+            for (const auto& face : facesOfEdges(index)) {
+                faces.Add(face);
+            }
+            if (faces.Extent() == 1 && BRep_Tool::IsClosed(edge, TopoDS::Face(faces(1)))) {
+                continue;
+            }
+            if (faces.Extent() != 2) {
+                return -1.0;
+            }
+            double first = 0.0;
+            double last = 0.0;
+            BRep_Tool::Range(edge, first, last);
+            for (int k = 0; k <= bendSamples; ++k) {
+                const double parameter = first + (last - first) * k / bendSamples;
+                const gp_Vec one = normalAt(edge, TopoDS::Face(faces(1)), parameter);
+                const gp_Vec other = normalAt(edge, TopoDS::Face(faces(2)), parameter);
+                if (one.Magnitude() <= gp::Resolution() || other.Magnitude() <= gp::Resolution()) {
+                    return -1.0;
+                }
+                // Convex or concave isn't told here: the smaller sine, the farther reach
+                const double a = one.Angle(other);
+                const double sine = std::min(
+                    std::abs(std::sin(a - angle)),
+                    std::abs(std::sin(a + angle))
+                );
+                if (sine < leastSine) {
+                    return -1.0;
+                }
+                reach = std::max(reach, size * std::sin(angle) / sine);
+            }
+        }
+        return reach;
+    }
+    catch (const Standard_Failure&) {
+        return -1.0;
+    }
+}
+
 std::string bridgedRecess(
     const TopoShape& shape,
     const TopoShape& base,
