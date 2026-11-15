@@ -422,8 +422,13 @@ std::string missingText(const ReferenceReport::Slot& slot, const ReferenceReport
     ss << ')';
     // Moved off the object it was on by a reorder (ops#127): say where it came from
     auto record = retargetOf(slot.prop, slot.localIndex);
-    if (!record.empty()) {
-        auto owner = slot.prop ? freecad_cast<DocumentObject*>(slot.prop->getContainer()) : nullptr;
+    auto owner = slot.prop ? freecad_cast<DocumentObject*>(slot.prop->getContainer()) : nullptr;
+    // Not a dress-up's Base, which follows its base feature (N1 2.2): its record names the base
+    // the reference was on before (ops#818), which no reorder put after its owner
+    const auto dressUp = Base::Type::fromName("PartDesign::DressUp");
+    const bool followsBase = owner && !dressUp.isBad() && owner->isDerivedFrom(dressUp)
+        && slot.prop == owner->getPropertyByName("Base");
+    if (!record.empty() && !followsBase) {
         auto doc = owner ? owner->getDocument() : nullptr;
         auto was = doc ? doc->getObject(record.target.c_str()) : nullptr;
         if (was && !record.isTarget(was->getID())) {
