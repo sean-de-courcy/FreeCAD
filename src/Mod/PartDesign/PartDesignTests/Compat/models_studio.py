@@ -173,4 +173,58 @@ def SplitHalves(make):
     return {"volumes": {"Inner": 592, original.Name: 364, half.Name: 228}}
 
 
-MODELS = [StudioNewPart, SiblingCuts, MergeAccepted, SplitHalves]
+def HolePatternCopied(make):
+    """A Linear pattern of a Hole studio feature with Reapply off (ops#805).
+
+    Studio S (listed) holds Plate, a 60 x 20 x 10 block (0..60, 0..20). Drill: a studio Hole with
+    the Hole command's defaults (start from the part's surface), on a studio sketch at z 15 with one
+    circle r3 at (10, 10), d6, blind 5, flat end: it starts at the plate's top (z 10) and cuts
+    z 5..10. LP: in Plate, a Linear pattern of Drill along X, Extent 40, 3 occurrences, Reapply
+    off: holes at x 10, 30 and 50. Builds before 0418608f78 refused LP (Reapply needed); since,
+    each instance is a copy of the seed's tool: 12000 - 3 x 45 pi."""
+    doc = make("HolePatternCopied")
+    studio = doc.addObject("App::Part", "S")
+    plate = newBody(doc, "Plate")
+    studio.addObject(plate)
+    block(plate, 0, 0, 60, 20, 10, "PlatePad")
+    doc.recompute()
+    PartDesign.studioList(studio, True)
+    sketch = doc.addObject("Sketcher::SketchObject", "DrillSketch")
+    studio.addObject(sketch)
+    sketch.Placement = at(15)
+    sketch.addGeometry(m.circle(10, 10, 3))
+    drill = doc.addObject("PartDesign::Hole", "Drill")
+    studio.addObject(drill)
+    drill.Profile = sketch
+    # Set as the Hole panel does (HoleFeature): a restore sets the thread fields from ThreadType
+    drill.ThreadType = "None"
+    drill.Diameter = 6
+    drill.DepthType = "Dimension"
+    drill.Depth = 5
+    drill.DrillPoint = "Flat"
+    drill.Refine = True
+    drill.StudioScope = [plate.Name]
+    PartDesign.studioInsert(drill, -1)
+    doc.recompute()
+    if drill.StartType != "Part" or not drill.isValid():
+        raise AssertionError(f"Drill: {drill.StartType}, {drill.getStatusString()}")
+    pattern = plate.newObject("PartDesign::LinearPattern", "LP")
+    pattern.Originals = [drill]
+    pattern.Direction = (plane(plate, "X_Axis"), [""])
+    pattern.Mode = "Extent"
+    pattern.Length = 40
+    pattern.Occurrences = 3
+    pattern.Reapply = False
+    PartDesign.studioInsert(pattern, -1)
+    doc.recompute()
+    if not pattern.isValid():
+        raise AssertionError(f"LP: {pattern.getStatusString()}")
+    for x in (10, 30, 50):
+        if pattern.Shape.isInside(V(x, 10, 7.5), 1e-6, True) or not pattern.Shape.isInside(
+            V(x, 10, 2.5), 1e-6, True
+        ):
+            raise AssertionError(f"LP: no blind hole 5 deep at x {x}")
+    return {"volumes": {"LP": 12000 - 3 * 45 * math.pi}}
+
+
+MODELS = [StudioNewPart, SiblingCuts, MergeAccepted, SplitHalves, HolePatternCopied]
