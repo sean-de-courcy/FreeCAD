@@ -1018,6 +1018,71 @@ class TestFeaturesViewGui(unittest.TestCase):
         # The right-clicked row became the selection
         self.assertEqual([i.text(0) for i in self.parts.selectedItems()], ["Body2"])
 
+    def testPartsMenuOnshapeItems(self):
+        """The part menu has Onshape's Assign material, Export and Hide all parts (GB16, gaps3 rows
+        11 and 17); Hide all parts hides every part and nothing else."""
+        self.assertTrue(waitFor(lambda: self.partRows() == ["Body1", "Body2"]))
+        sketches = (self.skA.Visibility, self.skB.Visibility)
+        names = self.popupAction(self.parts, self.partRect("Body2").center(), "partHideAll")
+        order = [n for n in names if n]
+        for name in ("partAssignMaterial", "partExport", "partHideAll"):
+            self.assertIn(name, order)
+        # Onshape's order: material and appearance, then drawing and export, then the hides
+        self.assertLess(order.index("partAssignMaterial"), order.index("partAppearance"))
+        self.assertLess(order.index("partExport"), order.index("partToggleVisibility"))
+        self.assertLess(order.index("partHideOthers"), order.index("partHideAll"))
+        self.assertLess(order.index("partHideAll"), order.index("partIsolate"))
+        self.assertTrue(waitFor(lambda: not self.body1.Visibility and not self.body2.Visibility))
+        self.assertEqual((self.skA.Visibility, self.skB.Visibility), sketches)
+
+    def testEditSketchFromRow(self):
+        """A feature made from a sketch has Edit <sketch>... in its row menu, which opens the
+        sketch (GB16, gaps3 row 12); a feature without a sketch has none."""
+        names = self.popupAction(self.list, self.rowRect("Box").center(), "")
+        self.assertIn("featureEdit", names)
+        self.assertNotIn("featureEditSketch", names)
+        names = self.popupAction(self.list, self.rowRect("PadA").center(), "featureEditSketch")
+        self.assertIn("featureEditSketch", names)
+        guiDoc = Gui.getDocument(self.doc.Name)
+        self.assertTrue(waitFor(lambda: guiDoc.getInEdit() is not None))
+        self.assertEqual(guiDoc.getInEdit().Object, self.skA)
+
+    def testEditFromFace(self):
+        """Edit <feature>... and Edit <sketch>... on a face: the feature that made the face, and its
+        sketch (GB16, gaps3 row 12). A face PadA made, under Pocket1, edits PadA and SkA; a face
+        of the Box has no sketch."""
+        guiDoc = Gui.getDocument(self.doc.Name)
+        face = faceAt(self.pocket1, 5)
+        self.assertIsNotNone(face)
+        Gui.Selection.clearSelection()
+        Gui.Selection.addSelection(self.doc.Name, self.pocket1.Name, face)
+        feature = Gui.Command.get("PartDesign_EditPickFeature")
+        sketchCommand = Gui.Command.get("PartDesign_EditPickSketch")
+        self.assertTrue(feature.isActive())
+        self.assertTrue(sketchCommand.isActive())
+        sketchCommand.run()
+        self.assertTrue(waitFor(lambda: guiDoc.getInEdit() is not None))
+        self.assertEqual(guiDoc.getInEdit().Object, self.skA)
+        guiDoc.resetEdit()
+        pump()
+        Gui.Selection.clearSelection()
+        Gui.Selection.addSelection(self.doc.Name, self.pocket1.Name, face)
+        feature.run()
+        self.assertTrue(waitFor(lambda: guiDoc.getInEdit() is not None))
+        self.assertEqual(guiDoc.getInEdit().Object, self.padA)
+        Gui.Control.closeDialog()
+        pump()
+        if guiDoc.getInEdit():
+            guiDoc.resetEdit()
+            pump()
+        boxFace = faceAt(self.pocketB, 8)
+        self.assertIsNotNone(boxFace)
+        Gui.Selection.clearSelection()
+        Gui.Selection.addSelection(self.doc.Name, self.pocketB.Name, boxFace)
+        self.assertTrue(feature.isActive())
+        self.assertFalse(sketchCommand.isActive())
+        Gui.Selection.clearSelection()
+
     # --------------------------------------------- ops#640 round 3 (ranks 32, 33, 34, 35, 40)
 
     def eyePoint(self, label):
