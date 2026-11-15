@@ -80,15 +80,20 @@
 #include <initializer_list>
 
 #include <BRepCheck_Analyzer.hxx>
+#include <BRepCheck_Edge.hxx>
+#include <BRepCheck_Face.hxx>
 #include <BRepCheck_Result.hxx>
 #include <BRepCheck_Shell.hxx>
 #include <BRepCheck_Solid.hxx>
+#include <BRepCheck_Vertex.hxx>
+#include <BRepCheck_Wire.hxx>
 #include <BRepTools.hxx>
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
 #include <BinTools.hxx>
 #include <Bnd_Box2d.hxx>
 #include <Geom_Surface.hxx>
+#include <Standard_ErrorHandler.hxx>
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
@@ -1659,9 +1664,9 @@ int wireCount(const TopoDS_Face& face)
 
 // Whether a face is checked by parts: many wires, every one a wire, on a surface that is neither
 // periodic nor closed (no seams: the outer wire is one loop), without natural restriction
-bool byParts(const TopoDS_Face& face)
+bool plainWires(const TopoDS_Face& face)
 {
-    if (wireCount(face) < manyWires || BRep_Tool::NaturalRestriction(face)) {
+    if (BRep_Tool::NaturalRestriction(face)) {
         return false;
     }
     for (TopoDS_Iterator it(face); it.More(); it.Next()) {
@@ -1674,6 +1679,257 @@ bool byParts(const TopoDS_Face& face)
         && !surface->IsUClosed() && !surface->IsVClosed();
 }
 
+bool byParts(const TopoDS_Face& face)
+{
+    return wireCount(face) >= manyWires && plainWires(face);
+}
+
+// Every wire of the face holds edges only, and every edge vertices only: what the check by
+// edges walks (a vertex set in a wire, or a wire in a wire, has checks of its own in OCCT)
+bool plainEdges(const TopoDS_Face& face)
+{
+    for (TopoDS_Iterator wire(face); wire.More(); wire.Next()) {
+        for (TopoDS_Iterator edge(wire.Value()); edge.More(); edge.Next()) {
+            if (edge.Value().ShapeType() != TopAbs_EDGE) {
+                return false;
+            }
+            for (TopoDS_Iterator vertex(edge.Value()); vertex.More(); vertex.Next()) {
+                if (vertex.Value().ShapeType() != TopAbs_VERTEX) {
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
+// A face checked edge by edge from this many edges on (ops#796). BRepCheck_Analyzer checks each
+// vertex and each edge of a face "in the face", and each such check first walks the whole face
+// to find its vertex or edge: edges squared for one face. A logo's outlines of 3600 segments on
+// one side of a box took 10 s a check, and every feature after them paid it again (the designed
+// model: two such Pockets and their pattern 26 s, 64 s and 126 s)
+constexpr int manyEdges = 200;
+
+// FREECAD_CH_CHECK_BY_EDGES: "off" checks such a face whole, as before; "verify" checks it both
+// ways, reports a difference and returns the whole check's answer; "verify-all" does so for a
+// face of any number of edges (the test suites' shapes have few)
+std::string byEdgesMode()
+{
+#ifdef _MSC_VER
+    char* value = nullptr;
+    std::size_t size = 0;
+    if (_dupenv_s(&value, &size, "FREECAD_CH_CHECK_BY_EDGES") != 0 || !value) {
+        return {};
+    }
+    std::string text(value);
+    std::free(value);
+    return text;
+#else
+    const char* value = std::getenv("FREECAD_CH_CHECK_BY_EDGES");
+    return value ? std::string(value) : std::string();
+#endif
+}
+
+// Whether a face is checked edge by edge: many edges, on the faces byParts() takes (no seams)
+bool byEdges(const TopoDS_Face& face)
+{
+    static const std::string mode = byEdgesMode();
+    if (mode == "off") {
+        return false;
+    }
+    const int enough = mode == "verify-all" ? 1 : manyEdges;
+    int count = 0;
+    for (TopExp_Explorer it(face, TopAbs_EDGE); it.More() && count < enough; it.Next()) {
+        ++count;
+    }
+    return count >= enough && plainWires(face) && plainEdges(face);
+}
+
+// A shape's own status, as BRepCheck_Analyzer::IsValid() reads it: the first one
+bool ownStatusOk(const Handle(BRepCheck_Result)& result)
+{
+    const auto& list = result->Status();
+    return list.IsEmpty() || list.First() == BRepCheck_NoError;
+}
+
+// A shape's status in a context, as BRepCheck_Analyzer::ValidSub() reads it: every one
+bool statusOkIn(const Handle(BRepCheck_Result)& result, const TopoDS_Shape& context)
+{
+    if (!result->IsStatusOnShape(context)) {
+        return true;
+    }
+    for (const BRepCheck_Status status : result->StatusOnShape(context)) {
+        if (status != BRepCheck_NoError) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Reading the sub-shapes of one kind as BRepCheck_Analyzer::ValidSub() does. The analyzer keeps
+// one result for each sub-shape with its orientation, and checks a sub-shape in a context once,
+// on the result of its first occurrence. ValidSub() walks the occurrences and stops, with no
+// error, at the first one whose own result has no status for the context: an occurrence of a
+// shape met before with another orientation. What it reads is the occurrences before that one
+class ReadAsValidSub
+{
+public:
+    // Whether this occurrence's status in the context is read; false from the stop on
+    bool reads(const TopoDS_Shape& occurrence)
+    {
+        if (stopped) {
+            return false;
+        }
+        const int before = first.Extent();
+        const int index = first.Add(occurrence);
+        if (index > before || first(index).IsEqual(occurrence)) {
+            return true;
+        }
+        stopped = true;
+        return false;
+    }
+
+private:
+    TopTools_IndexedMapOfShape first;
+    bool stopped {false};
+};
+
+// BRepCheck_Analyzer(face).IsValid(), check for check (OCCT 8.0.1's BRepCheck_Analyzer.cxx, the
+// EDGE and FACE cases of its task, IsValid() and ValidSub()), with one change: a vertex or an
+// edge is checked "in the face" on a copy of the face that holds this edge alone. Those two
+// checks (BRepCheck_Vertex::InContext, BRepCheck_Edge::InContext) read the vertex or the edge
+// and the face's surface, locations and tolerance, nothing else of the face, once they have
+// found their shape in it; the copy has the same surface, locations, tolerance and orientation.
+// The wires' checks and the face's own are made on the face itself, as the analyzer makes them.
+// An OCCT exception is the analyzer's CheckFail: invalid. For a face byEdges() takes
+bool faceValidByEdges(const TopoDS_Face& face)
+{
+    try {
+        OCC_CATCH_SIGNALS
+        Handle(BRepCheck_Face) faceCheck = new BRepCheck_Face(face);
+        if (!ownStatusOk(faceCheck)) {
+            return false;
+        }
+        BRep_Builder builder;
+        // The copy of the face with one edge alone
+        auto partOf = [&builder, &face](const TopoDS_Shape& edge) {
+            TopoDS_Wire wire;
+            builder.MakeWire(wire);
+            builder.Add(wire, edge);
+            TopoDS_Face part = TopoDS::Face(face.EmptyCopied());
+            builder.Add(part, wire);
+            return part;
+        };
+        // The vertices in the face: those ValidSub(face, VERTEX) reads
+        ReadAsValidSub faceVertices;
+        TopTools_MapOfShape verticesDone;
+        for (TopExp_Explorer edge(face, TopAbs_EDGE); edge.More(); edge.Next()) {
+            bool more = true;
+            const TopoDS_Face part = partOf(edge.Current());
+            for (TopExp_Explorer it(edge.Current(), TopAbs_VERTEX); it.More(); it.Next()) {
+                more = faceVertices.reads(it.Current());
+                if (!more) {
+                    break;
+                }
+                if (!verticesDone.Add(it.Current())) {
+                    continue;
+                }
+                Handle(BRepCheck_Vertex) check = new BRepCheck_Vertex(TopoDS::Vertex(it.Current()));
+                check->InContext(part);
+                if (!statusOkIn(check, part)) {
+                    return false;
+                }
+            }
+            if (!more) {
+                break;
+            }
+        }
+        // The edges: each one's own status and its vertices in it, as IsValid() reads them going
+        // down the face; in the face, every status up to ValidSub(face, EDGE)'s stop, and after
+        // it the four that make the analyzer's task call the face unorientable
+        ReadAsValidSub faceEdges;
+        TopTools_MapOfShape edgesDone;
+        for (TopExp_Explorer it(face, TopAbs_EDGE); it.More(); it.Next()) {
+            const bool read = faceEdges.reads(it.Current());
+            if (!edgesDone.Add(it.Current())) {
+                continue;
+            }
+            const TopoDS_Edge& edge = TopoDS::Edge(it.Current());
+            Handle(BRepCheck_Edge) edgeCheck = new BRepCheck_Edge(edge);
+            const BRepCheck_Status polygon = edgeCheck->CheckPolygonOnTriangulation(edge);
+            if (polygon != BRepCheck_NoError) {
+                edgeCheck->SetStatus(polygon);
+            }
+            ReadAsValidSub edgeVertices;
+            TopTools_MapOfShape done;
+            for (TopExp_Explorer vertex(edge, TopAbs_VERTEX); vertex.More(); vertex.Next()) {
+                if (!edgeVertices.reads(vertex.Current())) {
+                    break;
+                }
+                if (!done.Add(vertex.Current())) {
+                    continue;
+                }
+                Handle(BRepCheck_Vertex) check
+                    = new BRepCheck_Vertex(TopoDS::Vertex(vertex.Current()));
+                check->InContext(edge);
+                if (!ownStatusOk(check) || !statusOkIn(check, edge)) {
+                    return false;
+                }
+            }
+            const TopoDS_Face part = partOf(edge);
+            edgeCheck->InContext(part);
+            if (!ownStatusOk(edgeCheck)) {
+                return false;
+            }
+            if (!edgeCheck->IsStatusOnShape(part)) {
+                continue;
+            }
+            for (const BRepCheck_Status status : edgeCheck->StatusOnShape(part)) {
+                const bool stopsWires = status == BRepCheck_NoCurveOnSurface
+                    || status == BRepCheck_InvalidCurveOnSurface || status == BRepCheck_InvalidRange
+                    || status == BRepCheck_InvalidCurveOnClosedSurface;
+                if (stopsWires || (read && status != BRepCheck_NoError)) {
+                    return false;
+                }
+            }
+        }
+        for (TopoDS_Iterator it(face); it.More(); it.Next()) {
+            Handle(BRepCheck_Wire) wireCheck = new BRepCheck_Wire(TopoDS::Wire(it.Value()));
+            wireCheck->InContext(face);
+            if (!statusOkIn(wireCheck, face) || !ownStatusOk(wireCheck)) {
+                return false;
+            }
+        }
+        faceCheck->OrientationOfWires(Standard_True);
+        return ownStatusOk(faceCheck);
+    }
+    catch (const Standard_Failure&) {
+        return false;
+    }
+}
+
+// A face, or a part of one, checked whole: edge by edge where it has many edges
+bool wholeFaceValid(const TopoDS_Face& face)
+{
+    if (!byEdges(face)) {
+        return BRepCheck_Analyzer(face).IsValid() == Standard_True;
+    }
+    static const bool verify = byEdgesMode().starts_with("verify");
+    const bool fast = faceValidByEdges(face);
+    if (!verify) {
+        return fast;
+    }
+    const bool whole = BRepCheck_Analyzer(face).IsValid() == Standard_True;
+    if (fast != whole) {
+        Base::Console().error(
+            "check by edges: %s where BRepCheck_Analyzer finds the face %s\n",
+            fast ? "valid" : "invalid",
+            whole ? "valid" : "invalid"
+        );
+    }
+    return whole;
+}
+
 // The face with only these wires: the same surface, location, tolerance and orientation, so the
 // wires' edges find their curves on it as on the face
 bool partValid(const TopoDS_Face& face, std::initializer_list<const TopoDS_Shape*> wires)
@@ -1683,14 +1939,14 @@ bool partValid(const TopoDS_Face& face, std::initializer_list<const TopoDS_Shape
     for (const TopoDS_Shape* wire : wires) {
         builder.Add(part, *wire);
     }
-    return BRepCheck_Analyzer(part).IsValid() == Standard_True;
+    return wholeFaceValid(part);
 }
 
 bool faceValidByParts(const TopoDS_Face& face)
 {
     const TopoDS_Wire outer = BRepTools::OuterWire(face);
     if (outer.IsNull()) {
-        return BRepCheck_Analyzer(face).IsValid() == Standard_True;
+        return wholeFaceValid(face);
     }
     std::vector<TopoDS_Shape> holes;
     for (TopoDS_Iterator it(face); it.More(); it.Next()) {
@@ -1707,7 +1963,7 @@ bool faceValidByParts(const TopoDS_Face& face)
         for (std::size_t k = first; k < std::min(holes.size(), first + holesPerPart); ++k) {
             builder.Add(part, holes[k]);
         }
-        if (BRepCheck_Analyzer(part).IsValid() != Standard_True) {
+        if (!wholeFaceValid(part)) {
             return false;
         }
     }
@@ -1732,7 +1988,7 @@ bool faceValidByParts(const TopoDS_Face& face)
         Bnd_Box2d box;
         BRepTools::AddUVBounds(face, TopoDS::Wire(holes[k]), box);
         if (box.IsVoid()) {
-            return BRepCheck_Analyzer(face).IsValid() == Standard_True;
+            return wholeFaceValid(face);
         }
         Box b {0, 0, 0, 0, k};
         box.Get(b.u0, b.v0, b.u1, b.v1);
@@ -1760,17 +2016,44 @@ bool statusOk(const Handle(BRepCheck_Result)& result)
 }
 }  // namespace
 
+namespace
+{
+bool checkValidByFaces(const TopoDS_Shape& shape);
+}
+
 bool checkValid(const TopoDS_Shape& shape)
 {
     PhaseTimer phase(Phase::Check);
     if (shape.IsNull()) {
         return false;
     }
+    // FREECAD_CH_CHECK_BY_EDGES=verify, verify-all: the whole shape both ways too
+    static const bool verify = byEdgesMode().starts_with("verify");
+    if (!verify) {
+        return checkValidByFaces(shape);
+    }
+    const bool byFaces = checkValidByFaces(shape);
+    const bool whole = BRepCheck_Analyzer(shape).IsValid() == Standard_True;
+    if (byFaces != whole) {
+        Base::Console().error(
+            "check by faces: %s where BRepCheck_Analyzer finds the shape %s\n",
+            byFaces ? "valid" : "invalid",
+            whole ? "valid" : "invalid"
+        );
+    }
+    return whole;
+}
+
+namespace
+{
+bool checkValidByFaces(const TopoDS_Shape& shape)
+{
     // By parts only for solids (alone or in compounds) with a face that has many wires, every
     // face in a shell and every shell in a solid; anything else as BRepCheck_Analyzer checks it
     bool anyByParts = false;
     for (TopExp_Explorer it(shape, TopAbs_FACE); it.More() && !anyByParts; it.Next()) {
-        anyByParts = byParts(TopoDS::Face(it.Current()));
+        const TopoDS_Face& face = TopoDS::Face(it.Current());
+        anyByParts = byParts(face) || byEdges(face);
     }
     const bool solidsOnly = TopExp_Explorer(shape, TopAbs_SHELL, TopAbs_SOLID).More() == Standard_False
         && TopExp_Explorer(shape, TopAbs_FACE, TopAbs_SHELL).More() == Standard_False
@@ -1781,15 +2064,15 @@ bool checkValid(const TopoDS_Shape& shape)
         return BRepCheck_Analyzer(shape).IsValid() == Standard_True;
     }
     if (oneFace) {
-        return faceValidByParts(TopoDS::Face(shape));
+        return byParts(TopoDS::Face(shape)) ? faceValidByParts(TopoDS::Face(shape))
+                                            : wholeFaceValid(TopoDS::Face(shape));
     }
     // Each face once (shared faces too), as the analyzer checks each sub-shape once
     TopTools_IndexedMapOfShape faces;
     TopExp::MapShapes(shape, TopAbs_FACE, faces);
     for (int k = 1; k <= faces.Extent(); ++k) {
         const TopoDS_Face& face = TopoDS::Face(faces(k));
-        const bool valid = byParts(face) ? faceValidByParts(face)
-                                         : BRepCheck_Analyzer(face).IsValid() == Standard_True;
+        const bool valid = byParts(face) ? faceValidByParts(face) : wholeFaceValid(face);
         if (!valid) {
             return false;
         }
@@ -1809,6 +2092,8 @@ bool checkValid(const TopoDS_Shape& shape)
     }
     return true;
 }
+
+}  // namespace
 
 namespace
 {
@@ -1983,8 +2268,7 @@ bool narrowValid(const TopoDS_Shape& shape, const TopoDS_Shape& base)
             continue;
         }
         const TopoDS_Face& face = TopoDS::Face(faces(k));
-        const bool valid = byParts(face) ? faceValidByParts(face)
-                                         : BRepCheck_Analyzer(face).IsValid() == Standard_True;
+        const bool valid = byParts(face) ? faceValidByParts(face) : wholeFaceValid(face);
         if (!valid) {
             return false;
         }

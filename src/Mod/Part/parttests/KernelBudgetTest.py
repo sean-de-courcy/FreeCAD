@@ -766,5 +766,118 @@ class NarrowCheckTest(unittest.TestCase):
         self.assertTrue(Part.kernelCheck(filleted))
 
 
+def outline_points(cx, cy, r, segments):
+    """A closed gear-like outline of straight segments, counter-clockwise"""
+    points = []
+    for m in range(segments):
+        a = 2 * math.pi * m / segments
+        rr = r * (1.0 if m % 2 else 0.8)
+        points.append(V(cx + rr * math.cos(a), cy + rr * math.sin(a), 0))
+    return points
+
+
+def outline_wire(cx, cy, r, segments=120, points=None):
+    """The outline as a hole's wire (clockwise)"""
+    points = points or outline_points(cx, cy, r, segments)
+    return Part.makePolygon(points + [points[0]]).reversed()
+
+
+def logo_holes(n, side=100.0, segments=120):
+    """n x n outlines of `segments` straight edges each"""
+    step = side / n
+    return [
+        outline_wire(step * (i + 0.5), step * (j + 0.5), 0.4 * step, segments)
+        for i in range(n)
+        for j in range(n)
+    ]
+
+
+class KernelCheckByEdgesTest(unittest.TestCase):
+    """Part.kernelCheck of a face with many edges in few wires (ops#796): a logo's outlines, a few
+    dozen closed polylines of about a hundred segments each, cut into one side of a part.
+    BRepCheck_Analyzer checks each vertex and each edge of a face "in the face", and each such
+    check first walks the whole face to find its shape: edges squared. On the designed logo (two
+    Pockets of 30 outlines x 120 segments, and their pattern) the check was most of 26 s, 64 s and
+    126 s. From 200 edges on a face is checked edge by edge, each on a copy of the face with that
+    edge alone; the wires' checks and the face's own are OCCT's on the whole face. Designed faces
+    of 4 outlines x 120 segments (484 edges, 5 wires: under the 300 wires of the check by parts),
+    each wrong in one way: the verdicts must be BRepCheck_Analyzer's."""
+
+    def verdicts(self, shape):
+        """kernelCheck's and BRepCheck_Analyzer's (Shape.check)"""
+        try:
+            shape.check()
+            analyzer = True
+        except ValueError:
+            analyzer = False
+        return Part.kernelCheck(shape), analyzer
+
+    def testValidFace(self):
+        face = holed_face(logo_holes(2))
+        self.assertEqual(len(face.Edges), 484)
+        self.assertEqual(self.verdicts(face), (True, True))
+
+    def testValidSolid(self):
+        solid = holed_face(logo_holes(2)).extrude(V(0, 0, 5))
+        self.assertEqual(self.verdicts(solid), (True, True))
+        self.assertEqual(self.verdicts(Part.makeCompound([solid])), (True, True))
+
+    def testCrossingOutlinesFail(self):
+        holes = logo_holes(2)
+        holes.append(outline_wire(50.0, 25.0, 12.0))  # across the first two
+        self.assertEqual(self.verdicts(holed_face(holes)), (False, False))
+
+    def testNestedOutlineFails(self):
+        holes = logo_holes(2)
+        holes.append(outline_wire(25.0, 25.0, 5.0))  # inside the first
+        self.assertEqual(self.verdicts(holed_face(holes)), (False, False))
+
+    def testOutlineOutsideFails(self):
+        holes = logo_holes(2)
+        holes.append(outline_wire(150.0, 50.0, 10.0))
+        self.assertEqual(self.verdicts(holed_face(holes)), (False, False))
+
+    def testOutlineTurnedTheWrongWayFails(self):
+        holes = logo_holes(2)
+        holes[3] = holes[3].reversed()
+        self.assertEqual(self.verdicts(holed_face(holes)), (False, False))
+
+    def testOutlineCrossingItselfFails(self):
+        holes = logo_holes(2)
+        points = outline_points(25.0, 25.0, 20.0, 120)
+        points[10], points[40] = points[40], points[10]  # two corners exchanged: a bow tie
+        holes[0] = outline_wire(0, 0, 0, points=points)
+        self.assertEqual(self.verdicts(holed_face(holes)), (False, False))
+
+    def testOpenOutlineFails(self):
+        holes = logo_holes(2)
+        points = outline_points(25.0, 25.0, 20.0, 120)
+        holes[0] = Part.makePolygon(points).reversed()  # the last segment is missing
+        self.assertEqual(self.verdicts(holed_face(holes)), (False, False))
+
+    def testVertexOffItsEdgeFails(self):
+        """A corner moved off its two segments: the vertex's check in its edges"""
+        face = holed_face(logo_holes(2))
+        moved = face.copy()
+        vertex = moved.Wires[1].Vertexes[7]
+        moved = moved.replaceShape([(vertex, Part.Vertex(vertex.Point + V(0.5, 0.3, 0)))])
+        self.assertEqual(self.verdicts(moved), (False, False))
+
+    def testSolidWithAFaceTurnedFails(self):
+        solid = holed_face(logo_holes(2)).extrude(V(0, 0, 5))
+        faces = solid.Faces
+        faces[0] = faces[0].reversed()
+        self.assertEqual(self.verdicts(Part.Solid(Part.Shell(faces))), (False, False))
+
+    def testThousandsOfSegmentsInSeconds(self):
+        """36 outlines x 120 segments on one face, as a solid: under a second by edges on the
+        reference machine (2026-11), where BRepCheck_Analyzer took about 10 s. CPU time: a loaded
+        machine must not fail it"""
+        solid = holed_face(logo_holes(6)).extrude(V(0, 0, 5))
+        start = time.process_time()
+        self.assertTrue(Part.kernelCheck(solid))
+        self.assertLess(time.process_time() - start, 6.0)
+
+
 if __name__ == "__main__":
     unittest.main()
