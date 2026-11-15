@@ -9,6 +9,10 @@ exec(open(os.path.join(os.path.dirname(os.path.abspath(os.environ.get("RED_SELF"
 WANT = os.environ.get("RED_WANT", "SILENT")
 K = int(os.environ["RED_K"])
 SAVE_EACH = os.environ.get("RED_SAVE", "1") == "1"
+TRACE = os.environ.get("RED_TRACE") == "1"
+SIG_EACH = os.environ.get("RED_SIG", "1") == "1"
+FULL_EACH = os.environ.get("RED_FULL", "1") == "1"
+MODE = os.environ.get("RED_MODE", "")   # probes of what in the full check matters: open | openrc | empty
 STEPS_IN = []
 for line in open(os.environ["RED_LOG"]):
     r = json.loads(line)
@@ -58,6 +62,8 @@ def trial(seq, save=False):
                     for _ in range(d):
                         doc.undo()
                     doc.recompute()
+                    if SIG_EACH:
+                        signature(doc)
                     for _ in range(d):
                         doc.redo()
                     doc.recompute()
@@ -65,10 +71,27 @@ def trial(seq, save=False):
                 transact(doc, lambda dd: play(dd, what))
             except Exception:
                 continue
-            if SAVE_EACH:   # the fuzz run saves the live document at every check (fullFrom); a save is state too
+            if SIG_EACH:   # the fuzz run reads the signature (element maps included) after every step
+                signature(doc)
+            if MODE == "open":    # probe: save, open a copy, close it (no recompute of the copy)
+                import shutil
+                doc.saveAs("%s/replay-cur.FCStd" % OUT); shutil.copyfile("%s/replay-cur.FCStd" % OUT, "%s/replay-copy.FCStd" % OUT)
+                App.closeDocument(App.openDocument("%s/replay-copy.FCStd" % OUT).Name)
+            elif MODE == "empty":   # probe: a new empty document, closed again
+                App.closeDocument(App.newDocument("Probe").Name)
+            elif MODE == "openrc":   # probe: open a copy, recompute it, close it, no save of the live document
+                import shutil
+                doc.saveAs("%s/replay-cur.FCStd" % OUT); shutil.copyfile("%s/replay-cur.FCStd" % OUT, "%s/replay-copy.FCStd" % OUT)
+                d2 = App.openDocument("%s/replay-copy.FCStd" % OUT); d2.recompute(); App.closeDocument(d2.Name)
+            elif FULL_EACH:   # the fuzz run's full check: save, open a copy, recompute it, close it
+                fullFrom(doc)
+            elif SAVE_EACH:   # the fuzz run saves the live document at every check (fullFrom); a save is state too
                 doc.saveAs("%s/replay-cur.FCStd" % OUT)
             if what.startswith("delete ") or healed:
                 doc.undo(); doc.recompute()
+            if TRACE:
+                sh = doc.getObject("Plate").Shape
+                print("TRACE", _k, what, None if sh.isNull() else repr(sh.Volume), flush=True)
         live = signature(doc)
         rec, _s = freshCheck(doc, live, st.params, 0)
         if save:
@@ -82,7 +105,7 @@ def trial(seq, save=False):
 seq = list(STEPS_IN)
 print("steps", len(seq), "reproduces:", trial(seq))
 n = 2
-while len(seq) >= 2:
+while len(seq) >= 2 and not TRACE:
     chunk = max(1, len(seq) // n); cut = False
     for i in range(0, len(seq), chunk):
         t = seq[:i] + seq[i + chunk:]
@@ -93,5 +116,7 @@ while len(seq) >= 2:
         if chunk == 1:
             break
         n = min(len(seq), n * 2)
-print("MINIMAL", [(k, w) for k, w, _h in seq])
-trial(seq, True)
+if not TRACE:
+    print("MINIMAL", [(k, w) for k, w, _h in seq])
+    trial(seq, True)
+import sys; sys.stdout.flush()

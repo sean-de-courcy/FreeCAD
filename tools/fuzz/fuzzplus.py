@@ -6,7 +6,8 @@
 #     property, each sketch's variant, the suppressed set, the studio-list order) is built into a NEW document by the
 #     template, with no edit history, and volume, area, solids and faces by surface type are compared with the edited
 #     document. A history-dependent result (the ops#818 class) shows up as a difference.
-# Verdicts for the fresh check: OK; WARN (only the face count by type differs); LOUD (error states differ);
+# Verdicts for the fresh check: OK; WARN (only the face count by type differs); LOUD_LIVE / LOUD_FRESH / LOUD (red only in
+# the edited document / only in the fresh build (a template pick) / both differ);
 # BEYOND (a 1e-6 jitter of the vector changes the fresh result: a case boundary); SILENT (V or A differs, no error).
 #
 # Run: FUZZ_SEED=<n> FUZZ_STEPS=<n> [FUZZ_HEAL=1] [FUZZ_OUT=<dir>] FreeCADCmd tools/fuzz/fuzzplus.py
@@ -261,8 +262,14 @@ class Studio:
         ztop2 = 10 + float(boss2.Length)
         inD = lambda p: Dx - E < p.x < Dx + Dw + E and Dy - E < p.y < Dy + Dh + E
         sh = boss2.Shape
-        sides = ["Face%d" % i for i, f in enumerate(sh.Faces, 1)
-                 if abs(f.normalAt(0, 0).z) < 1e-6 and inD(f.CenterOfMass) and f.CenterOfMass.z > 10]
+        def onSide(f):
+            bb = f.BoundBox
+            if abs(f.normalAt(0, 0).z) > 1e-6 or bb.ZMin < 10 - E or bb.ZMax > ztop2 + E:
+                return False
+            xs = (abs(bb.XMin - Dx) < E and abs(bb.XMax - Dx) < E) or (abs(bb.XMin - Dx - Dw) < E and abs(bb.XMax - Dx - Dw) < E)
+            ys = (abs(bb.YMin - Dy) < E and abs(bb.YMax - Dy) < E) or (abs(bb.YMin - Dy - Dh) < E and abs(bb.YMax - Dy - Dh) < E)
+            return (xs and bb.YMin > Dy - E and bb.YMax < Dy + Dh + E) or (ys and bb.XMin > Dx - E and bb.XMax < Dx + Dw + E)
+        sides = ["Face%d" % i for i, f in enumerate(sh.Faces, 1) if onSide(f)]
         topf = ["Face%d" % i for i, f in enumerate(sh.Faces, 1)
                 if abs(f.normalAt(0, 0).z - 1) < 1e-6 and abs(f.CenterOfMass.z - ztop2) < 1e-6 and inD(f.CenterOfMass)]
         dr = self.feat("Draft", "Boss2Draft", Base=(boss2, sides), NeutralPlane=(boss2, topf[:1]), Angle=3)
@@ -282,9 +289,9 @@ class Studio:
         self.p(c1, "Size", 0.5, 2, "prop")
         doc.recompute()
         zb = 10 + float(boss.Length)
-        Cx = self.v("BossSk", "Cx", -35)
+        Cx, Cy, Cr = self.v("BossSk", "Cx", -35), self.v("BossSk", "Cy", 18), self.v("BossSk", "Cr", 8)
         rim = self.edgesWhere(boss, lambda e: hasattr(e.Curve, "Radius") and all(abs(x.Point.z - zb) < 1e-6 for x in e.Vertexes)
-                              and e.Vertexes[0].Point.x < 0 and abs(e.Curve.Center.x - Cx) < 1e-6)
+                              and abs(e.Curve.Center.x - Cx) < 1e-6 and abs(e.Curve.Center.y - Cy) < 1e-6 and abs(e.Curve.Radius - Cr) < 1e-6)
         last = self.body.Tip
         f2 = self.feat("Fillet", "BossFillet", Base=(last, self.mapEdges(boss, last, rim)), Radius=1.5)
         self.p(f2, "Radius", 0.5, 3, "prop")
@@ -506,7 +513,11 @@ def freshCheck(doc, live, params, k):
         return rec, state
     rec["fresh_diff"] = d
     if "red" in d or "null" in d:
-        rec["fresh"] = "LOUD"
+        if "red" in d:   # LOUD_LIVE: the edited document has a red feature the fresh build doesn't (the candidate kind)
+            live_only = set(d["red"][0]) - set(d["red"][1]); fresh_only = set(d["red"][1]) - set(d["red"][0])
+            rec["fresh"] = "LOUD_LIVE" if live_only and not fresh_only else "LOUD_FRESH" if fresh_only and not live_only else "LOUD"
+        else:
+            rec["fresh"] = "LOUD"
     elif set(d) <= {"ftypes"}:
         rec["fresh"] = "WARN"
     else:
@@ -654,6 +665,8 @@ def main():
                 rec.update(what="undo %d + redo %d" % (depth, depth), undo_diffs=du, redo_diffs=dr)
                 if du or dr:
                     fails += 1; tally["undo_fail"] += 1
+                    rec["undo_matches"] = [len(hist) - 1 - i for i, h in enumerate(hist) if not compare(s_u, h)]   # depth that would match
+                    rec["undo_count"] = doc.UndoCount; rec["hist_len"] = len(hist)
                     doc.saveAs("%s/%s-fail%d.FCStd" % (OUT, TAG, k))
                 emit(**rec); continue
             fn = {"param": lambda d: stepParam(d, r2, params), "move": lambda d: stepMove(d, r2),
@@ -681,7 +694,7 @@ def main():
                 tally["fresh_" + r["fresh"]] += 1
                 if r["fresh"] not in ("OK",):
                     rec["state"] = state
-            if (diffs or rec.get("fresh") in ("SILENT", "LOUD")) and SAVED[0] < 5:
+            if (diffs or rec.get("fresh") in ("SILENT", "LOUD", "LOUD_LIVE")) and SAVED[0] < 5:
                 SAVED[0] += 1
                 doc.saveAs("%s/%s-fail%d.FCStd" % (OUT, TAG, k))
         except Exception as e:

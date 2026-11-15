@@ -14,7 +14,7 @@ for spec in "$@"; do
     case $spec in h*) heal=1; n=${spec#h};; esac
     tag=plus$n; [ $heal = 1 ] && tag=plush$n
     echo "=== $(date -u +%H:%M:%SZ) seed $n heal=$heal steps=$STEPS"
-    FREECAD_USER_HOME="$UH" FUZZ_OUT="$OUT" FUZZ_SEED=$n FUZZ_STEPS=$STEPS FUZZ_HEAL=$heal FUZZ_TAG=$tag FUZZ_STOPAT=${FUZZ_STOPAT:-SILENT,LOUD} \
+    FREECAD_USER_HOME="$UH" FUZZ_OUT="$OUT" FUZZ_SEED=$n FUZZ_STEPS=$STEPS FUZZ_HEAL=$heal FUZZ_TAG=$tag FUZZ_STOPAT=${FUZZ_STOPAT:-SILENT,LOUD_LIVE} \
         pixi run --manifest-path "$WS/pixi.toml" "$WS/build/release/bin/FreeCADCmd" "$WS/tools/fuzz/fuzzplus.py" \
         > "$OUT/$tag.log" 2>&1
     grep '^FUZZ' "$OUT/$tag.log" || echo "seed $n: no summary (see $tag.log)"
