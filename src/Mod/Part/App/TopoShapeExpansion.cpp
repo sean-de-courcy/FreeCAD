@@ -122,6 +122,9 @@
 #include <Geom2d_Curve.hxx>
 #include <Geom2dAdaptor_Curve.hxx>
 #include <BndLib_Add2dCurve.hxx>
+#include <BRepAlgoAPI_Cut.hxx>
+#include <BRepPrimAPI_MakeBox.hxx>
+#include <Bnd_Box.hxx>
 #include <Bnd_Box2d.hxx>
 #include <GeomConvert.hxx>
 #include <GeomFill_BezierCurves.hxx>
@@ -6602,38 +6605,66 @@ TopoShape makeThickSolidByGroups(
     }
     return {};
 }
-// The fallback for an inward shell OCCT hands back as the solid it was given, valid and without
-// a cavity (ops#811): the shell needs a face no offset face becomes. With a removed face that is
-// a piece of a plane beside a step, the cavity under the step's wall ends on the removed face's
-// own plane, continued into the solid; with the Intersection join and a hole near a side wall
-// OCCT gives up the same way. The cavity is composed instead: the solid offset inward as a
-// whole (all offset faces intersected, corners sharp), and from each removed face's image a
-// prism back to the face, which opens the cavity there. The shell is the solid without it.
-// The prism is the cavity's true end only where the walls around the image stand square on
-// the removed face (planes along its normal, cylinders about it): a leaning wall would be cut
-// thinner towards the face, so that returns a null shape. The solid's own faces that touch
-// the removed face are held to the same (a chamfer narrower than its offset leaves no face in
-// the offset solid, and its wall would come out thinner than asked). Two removed faces that
-// touch return a null shape too: their prisms leave the corner between them standing. A face
-// of the solid that touches no removed face must stay the thickness away from every prism (a
-// groove or a hole just above the open face, a step lower than the wall: the prism is no
-// offset of theirs, and their wall would be thinner than asked). So do a removed face that is
-// not planar and every mode but the skin.
+// The fallback for an inward shell OCCT's thick-solid builder does not build (ops#811): the
+// solid handed back as it was given, valid and without a cavity, or the kept faces falling
+// apart where makeThickSolidByGroups() has no answer. The builder offsets the kept faces and
+// closes the cavity with what is left of each removed face, so it has no answer where the
+// cavity needs more of that face's surface than the face covers: beside a step the cavity runs
+// on under the step's wall, and its ceiling there lies on the removed face's own plane,
+// continued into the solid.
+// The cavity is built as a solid of its own instead: the whole solid offset inward (all offset
+// faces intersected, corners sharp, as Onshape's are) with the removed faces held at offset 0,
+// so that OCCT extends and trims them like any other offset face. The shell is the solid
+// without it. That covers leaning walls, chamfers at the open face, removed faces that touch,
+// pockets and bosses on the open face, each beside a step or not.
+// The result is taken only where the kept faces keep their walls: no face of the cavity closer
+// to a kept face than the thickness. (A step lower than the thickness loses its wall's offset
+// face, and the cavity runs on under its top, leaving a roof thinner than asked; a round on the
+// open face's edge smaller than the thickness loses the wall beside it.) Around an open face
+// that distance is no measure: beside a step the cavity runs under the wall within the
+// thickness of its foot, in Onshape's shell too, and under a step exactly as high as the
+// thickness it passes the wall's foot altogether. So a face touching a removed face is held
+// only where it lies farther from that face's box than the thickness. Anything else returns a
+// null shape.
 
-// Does <face> run along <direction>: a plane holding it, or a cylinder about it?
-bool runsAlong(const TopoDS_Face& face, const gp_Dir& direction)
+// BRepOffsetAPI_MakeOffsetShape's join algorithm with an offset of their own for some faces
+class OffsetShapeWithFaceOffsets: public BRepOffsetAPI_MakeOffsetShape
 {
-    const BRepAdaptor_Surface surface(face);
-    const double angular = Precision::Angular();
-    if (surface.GetType() == GeomAbs_Plane) {
-        return surface.Plane().Axis().Direction().IsNormal(direction, angular);
+public:
+    void perform(
+        const TopoDS_Shape& shape,
+        double offset,
+        double tol,
+        bool selfInter,
+        const TopTools_ListOfShape& faces,
+        double faceOffset
+    )
+    {
+        NotDone();
+        myLastUsedAlgo = OffsetAlgo_JOIN;
+        myOffsetShape.Initialize(
+            shape,
+            offset,
+            tol,
+            BRepOffset_Skin,
+            Standard_True,
+            selfInter ? Standard_True : Standard_False,
+            GeomAbs_Intersection,
+            Standard_False
+        );
+        for (TopTools_ListIteratorOfListOfShape it(faces); it.More(); it.Next()) {
+            myOffsetShape.SetOffsetOnFace(TopoDS::Face(it.Value()), faceOffset);
+        }
+        myOffsetShape.MakeOffsetShape();
+        if (!myOffsetShape.IsDone()) {
+            return;
+        }
+        myShape = myOffsetShape.Shape();
+        Done();
     }
-    if (surface.GetType() == GeomAbs_Cylinder) {
-        return surface.Cylinder().Axis().Direction().IsParallel(direction, angular);
-    }
-    return false;
-}
-TopoShape makeThickSolidByOffsetCut(
+};
+
+TopoShape makeThickSolidByFaceOffsets(
     const TopoShape& self,
     const TopoShape& shape,
     const TopTools_ListOfShape& remFace,
@@ -6648,120 +6679,123 @@ TopoShape makeThickSolidByOffsetCut(
         if (offset >= 0 || BRepOffset_Mode(offsetMode) != BRepOffset_Skin) {
             return {};
         }
+        const double thickness = -offset;
         TopTools_IndexedDataMapOfShapeListOfShape vertexFaces;
         TopExp::MapShapesAndAncestors(shape.getShape(), TopAbs_VERTEX, TopAbs_FACE, vertexFaces);
-        TopTools_MapOfShape besideRemoved;  // the removed faces and the faces touching them
+        TopTools_MapOfShape removed;
+        TopTools_MapOfShape besideRemoved;  // the faces touching a removed face
         for (TopTools_ListIteratorOfListOfShape it(remFace); it.More(); it.Next()) {
-            const TopoDS_Face removed = TopoDS::Face(it.Value());
-            const BRepAdaptor_Surface surface(removed);
-            if (surface.GetType() != GeomAbs_Plane) {
-                return {};
-            }
-            const gp_Dir normal = surface.Plane().Axis().Direction();
-            for (TopExp_Explorer xp(removed, TopAbs_VERTEX); xp.More(); xp.Next()) {
+            removed.Add(it.Value());
+            for (TopExp_Explorer xp(it.Value(), TopAbs_VERTEX); xp.More(); xp.Next()) {
                 const TopTools_ListOfShape* touching = vertexFaces.Seek(xp.Current());
                 if (!touching) {
                     return {};
                 }
                 for (TopTools_ListIteratorOfListOfShape face(*touching); face.More(); face.Next()) {
                     besideRemoved.Add(face.Value());
-                    if (face.Value().IsSame(removed)) {
-                        continue;
-                    }
-                    for (TopTools_ListIteratorOfListOfShape other(remFace); other.More(); other.Next()) {
-                        if (other.Value().IsSame(face.Value())) {
-                            return {};  // two removed faces that touch
-                        }
-                    }
-                    if (!runsAlong(TopoDS::Face(face.Value()), normal)) {
-                        return {};
-                    }
                 }
             }
         }
-        BRepOffsetAPI_MakeOffsetShape mkOffset;
-        mkOffset.PerformByJoin(
-            shape.getShape(),
-            offset,
-            tol,
-            BRepOffset_Skin,
-            Standard_True,
-            selfInter ? Standard_True : Standard_False,
-            GeomAbs_Intersection
-        );
+        // Not on KernelBudget's worker: where this offset crashes inside OCCT, the main thread
+        // gets an exception and the worker would end the process.
+        OffsetShapeWithFaceOffsets mkOffset;
+        mkOffset.perform(shape.getShape(), offset, tol, selfInter, remFace, 0.0);
         if (!mkOffset.IsDone() || mkOffset.Shape().IsNull()) {
             return {};
         }
-        TopoShape inner(self.Tag, self.Hasher, self.getHistoryAlgorithm());
+        TopoShape cavity(self.Tag, self.Hasher, self.getHistoryAlgorithm());
         MapperMaker mapper(mkOffset);
-        inner.makeShapeWithElementMap(mkOffset.Shape(), mapper, {shape}, op);
-        if (!inner.hasSubShape(TopAbs_SOLID)) {
-            inner = inner.makeElementSolid();
+        cavity.makeShapeWithElementMap(mkOffset.Shape(), mapper, {shape}, op);
+        if (!cavity.hasSubShape(TopAbs_SOLID)) {
+            cavity = cavity.makeElementSolid();
         }
-        if (!inner.isValid()) {
+        if (!cavity.hasSubShape(TopAbs_SOLID) || !cavity.isValid()) {
             return {};
         }
-        std::vector<TopoShape> parts {inner};
-        for (TopTools_ListIteratorOfListOfShape it(remFace); it.More(); it.Next()) {
-            const TopoDS_Face removed = sameFaceIn(shape.getShape(), it.Value());
-            if (removed.IsNull()) {
+        {
+            GProp_GProps props;
+            BRepGProp::VolumeProperties(cavity.getShape(), props);
+            if (props.Mass() <= 0) {
                 return {};
             }
-            // out of the solid, from the image back to the face
-            gp_Dir out = BRepAdaptor_Surface(removed).Plane().Axis().Direction();
-            if (BRepAdaptor_Surface(removed).Plane().Position().Direct()
-                != (removed.Orientation() == TopAbs_FORWARD)) {
-                out.Reverse();
+        }
+        // what the removed faces became: where the cavity opens
+        TopTools_MapOfShape images;
+        for (TopTools_ListIteratorOfListOfShape it(remFace); it.More(); it.Next()) {
+            int found = 0;
+            for (bool generated : {true, false}) {
+                // a copy: the maker hands out one list for both
+                const TopTools_ListOfShape list = generated ? mkOffset.Generated(it.Value())
+                                                            : mkOffset.Modified(it.Value());
+                for (TopTools_ListIteratorOfListOfShape gen(list); gen.More(); gen.Next()) {
+                    if (gen.Value().ShapeType() == TopAbs_FACE
+                        && cavity.findShape(gen.Value())) {
+                        images.Add(gen.Value());
+                        ++found;
+                    }
+                }
             }
-            const gp_Vec back(gp_Vec(out) * -offset);
-            TopTools_IndexedDataMapOfShapeListOfShape edgeFaces;
-            TopExp::MapShapesAndAncestors(inner.getShape(), TopAbs_EDGE, TopAbs_FACE, edgeFaces);
-            int images = 0;
-            const TopTools_ListOfShape& generated = mkOffset.Generated(it.Value());
-            for (TopTools_ListIteratorOfListOfShape gen(generated); gen.More(); gen.Next()) {
-                if (gen.Value().ShapeType() != TopAbs_FACE) {
-                    continue;
-                }
-                const int index = inner.findShape(gen.Value());
-                if (!index) {
-                    return {};
-                }
-                // the walls around the image stand square on the removed face
-                for (TopExp_Explorer xp(gen.Value(), TopAbs_EDGE); xp.More(); xp.Next()) {
-                    const TopTools_ListOfShape* around = edgeFaces.Seek(xp.Current());
-                    if (!around) {
-                        return {};
-                    }
-                    for (TopTools_ListIteratorOfListOfShape wall(*around); wall.More(); wall.Next()) {
-                        if (!wall.Value().IsSame(gen.Value())
-                            && !runsAlong(TopoDS::Face(wall.Value()), out)) {
-                            return {};
-                        }
-                    }
-                }
-                TopoShape prism(self.Tag, self.Hasher, self.getHistoryAlgorithm());
-                prism.makeElementPrism(inner.getSubTopoShape(TopAbs_FACE, index), back, op);
-                // every other face of the solid keeps its wall beside the prism
-                for (TopExp_Explorer xp(shape.getShape(), TopAbs_FACE); xp.More(); xp.Next()) {
-                    if (besideRemoved.Contains(xp.Current())) {
-                        continue;
-                    }
-                    BRepExtrema_DistShapeShape distance(prism.getShape(), xp.Current());
-                    if (!distance.IsDone() || distance.Value() < -offset - 1e-6) {
-                        return {};
-                    }
-                }
-                parts.push_back(prism);
-                ++images;
-            }
-            if (!images) {
+            if (!found) {
                 return {};  // the face's image is gone: the cavity would not open there
             }
         }
-        TopoShape cavity(self.Tag, self.Hasher, self.getHistoryAlgorithm());
-        cavity.makeElementFuse(parts, op);
-        // one wall where the offset solid and a prism continue each other
-        cavity = cavity.makeElementRefine(op, RefineFail::shapeUntouched);
+        // Every kept face keeps its wall. A face touching a removed face is held only where it
+        // is farther from that face's box than the thickness.
+        TopTools_ListOfShape aroundOpenings;
+        for (TopTools_ListIteratorOfListOfShape it(remFace); it.More(); it.Next()) {
+            Bnd_Box box;
+            BRepBndLib::AddOptimal(it.Value(), box, Standard_False, Standard_False);
+            if (box.IsVoid()) {
+                return {};
+            }
+            box.Enlarge(thickness);
+            aroundOpenings.Append(BRepPrimAPI_MakeBox(box.CornerMin(), box.CornerMax()).Shape());
+        }
+        struct CavityFace
+        {
+            TopoDS_Shape face;
+            Bnd_Box box;
+        };
+        std::vector<CavityFace> cavityFaces;
+        for (TopExp_Explorer xp(cavity.getShape(), TopAbs_FACE); xp.More(); xp.Next()) {
+            CavityFace entry {xp.Current(), Bnd_Box()};
+            BRepBndLib::Add(entry.face, entry.box, Standard_False);
+            cavityFaces.push_back(entry);
+        }
+        const double least = thickness - std::max(1e-6, 1e-5 * thickness);
+        for (TopExp_Explorer xp(shape.getShape(), TopAbs_FACE); xp.More(); xp.Next()) {
+            if (removed.Contains(xp.Current())) {
+                continue;
+            }
+            TopoDS_Shape held = xp.Current();
+            if (besideRemoved.Contains(held)) {
+                TopTools_ListOfShape faces;
+                faces.Append(held);
+                BRepAlgoAPI_Cut away;
+                away.SetArguments(faces);
+                away.SetTools(aroundOpenings);
+                away.Build();
+                if (!away.IsDone() || away.HasErrors()) {
+                    return {};
+                }
+                held = away.Shape();
+                if (!TopExp_Explorer(held, TopAbs_FACE).More()) {
+                    continue;
+                }
+            }
+            Bnd_Box reach;
+            BRepBndLib::Add(held, reach, Standard_False);
+            reach.Enlarge(thickness);
+            for (const auto& entry : cavityFaces) {
+                if (reach.IsOut(entry.box)) {
+                    continue;
+                }
+                BRepExtrema_DistShapeShape distance(entry.face, held);
+                if (!distance.IsDone() || distance.Value() < least) {
+                    return {};
+                }
+            }
+        }
         TopoShape result(self.Tag, self.Hasher, self.getHistoryAlgorithm());
         result.makeElementCut({shape, cavity}, op);
         if (result.isNull() || !result.hasSubShape(TopAbs_SOLID) || !result.isValid()) {
@@ -6774,10 +6808,10 @@ TopoShape makeThickSolidByOffsetCut(
         return result;
     }
     catch (Standard_Failure& e) {
-        FC_WARN("thick solid by offset and cut failed: " << e.GetMessageString());
+        FC_WARN("thick solid by face offsets failed: " << e.GetMessageString());
     }
     catch (Base::Exception& e) {
-        FC_WARN("thick solid by offset and cut failed: " << e.what());
+        FC_WARN("thick solid by face offsets failed: " << e.what());
     }
     return {};
 }
@@ -6897,17 +6931,19 @@ TopoShape& TopoShape::makeElementThickSolid(
     // where it fails too, the plain mode's failure is the one reported.
     const bool fallsApart = !mkThickPtr->IsDone()
         && mkThickPtr->MakeOffset().Error() == BRepOffset_NotConnectedShell;
-    if (!intersection && !fallsApart && !built(*mkThickPtr)) {
+    bool good = !fallsApart && built(*mkThickPtr);
+    if (!intersection && !fallsApart && !good) {
         auto withAll = build(true, join);
         if (built(*withAll)) {
             mkThickPtr = withAll;
+            good = true;
         }
     }
     // OCCT's Arc join gives an invalid outward shell, in both modes, where an open face has a
     // hole with sharp corners (a rectangular through pocket: ops#807). Onshape's outward shell
     // keeps sharp corners anyway (oracle 25, SL1), so there the Intersection join is built
     // instead. Inward, or where that fails too, the Arc join's failure is the one reported.
-    if (offset > 0 && join == JoinType::arc && !fallsApart && !built(*mkThickPtr)) {
+    if (offset > 0 && join == JoinType::arc && !fallsApart && !good) {
         // The Intersection join extends curved neighbours instead of rounding them: its result is
         // taken only where it stays within the solid's box grown by the thickness.
         // Both boxes from the geometry alone (no display mesh, no tolerances), the margin the
@@ -6934,6 +6970,7 @@ TopoShape& TopoShape::makeElementThickSolid(
             auto sharp = build(withIntersection, JoinType::intersection);
             if (built(*sharp) && within(sharp->Shape())) {
                 mkThickPtr = sharp;
+                good = true;
                 Part::thickSolidJoinFallback = true;
                 FC_WARN("thickness: the Arc join gives no valid outward shell here; built with the "
                         "Intersection join (sharp corners)");
@@ -6961,25 +6998,27 @@ TopoShape& TopoShape::makeElementThickSolid(
             *this = byGroups;
             return *this;
         }
-        // Nothing builds: OCCT's own failure is the one reported.
     }
-    // Inward, the solid handed back as its own shell is never the result (ops#811): Onshape
-    // shells an L-block from its step's top whole, so the shell is composed where it can be,
-    // and where it can't, the feature fails rather than show the solid as shelled. Outward
-    // the volume tells nothing (a 6 x 6 x 8 box's band of 1 has the box's 288), so that
-    // result stands as before.
-    if (offset < 0 && unchanged(mkThick)) {
+    // Inward, where OCCT builds no shell (it fails, its result is invalid, or it hands the
+    // solid back as its own shell), the cavity is built with the removed faces held in place
+    // and cut from the solid (ops#811): Onshape shells an L-block from its step's top whole.
+    // Where that has no answer either, OCCT's own failure is the one reported, and the solid
+    // handed back is never the result: the feature fails rather than show the solid as
+    // shelled. Outward the volume tells nothing (a 6 x 6 x 8 box's band of 1 has the box's
+    // 288), so that result stands as before.
+    if (offset < 0 && !good) {
         TopoShape composed
-            = makeThickSolidByOffsetCut(*this, shape, remFace, offset, tol, selfInter, offsetMode, op);
+            = makeThickSolidByFaceOffsets(*this, shape, remFace, offset, tol, selfInter, offsetMode, op);
         if (!composed.isNull()
-            && std::fabs(volumeOf(composed.getShape()) - volumeBefore)
-                > 1e-7 * std::fabs(volumeBefore)) {
+            && volumeOf(composed.getShape()) - volumeBefore < -1e-7 * std::fabs(volumeBefore)) {
             *this = composed;
             return *this;
         }
-        throw Standard_Failure(
-            "thick solid: the walls run into each other and no shell was built"
-        );
+        if (unchanged(mkThick)) {
+            throw Standard_Failure(
+                "thick solid: the walls run into each other and no shell was built"
+            );
+        }
     }
     MapperMaker mapper(mkThick);
     return makeShapeWithElementMap(
