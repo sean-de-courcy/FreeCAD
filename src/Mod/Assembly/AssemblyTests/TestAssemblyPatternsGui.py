@@ -77,6 +77,24 @@ class TestAssemblyPatternsGui(AssembliesGuiBase):
         self.assertIsNotNone(edge)
         return doc, asm, seed, edge
 
+    def testOpenAsksForDirectionQuietly(self):
+        """ops#801: a pattern just made, no direction picked yet, is not an error (no traceback,
+        not Invalid); its dialog says to pick a direction."""
+        doc, asm, seed, edge = self.model()
+        Gui.Selection.clearSelection()
+        Gui.Selection.addSelection(doc.Name, asm.Name, f"{seed.Name}.")
+        Gui.runCommand("Assembly_CreatePatternLinear")
+        pump(0.3)
+        pattern = [o for o in asm.getObject("Joints").Group if AssemblyPattern.isPattern(o)][0]
+        self.assertNotIn("Invalid", pattern.State)
+        self.assertNotIn("Error", pattern.State)
+        self.assertEqual(list(pattern.Instances), [])
+        panel = AssemblyPattern.activePanel
+        self.assertIsNotNone(panel)
+        self.assertIn("pick a direction", panel.message.text())
+        Gui.Control.closeDialog()
+        pump(0.2)
+
     def testLinearPatternJourney(self):
         doc, asm, seed, edge = self.model()
         doc.UndoMode = 1

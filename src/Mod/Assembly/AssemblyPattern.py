@@ -112,6 +112,12 @@ def patternLabel(assembly, kind):
     return f"{base} {n}"
 
 
+def missingPick(fp):
+    """True while a direction the pattern needs has never been picked (FreeCAD-CH ops#801)."""
+    ref = fp.Direction
+    return not ref or ref[0] is None
+
+
 def referenceAxis(fp, second=False):
     """(point, unit direction) of the pattern's Direction reference (Direction2 with second) in the
     assembly's frame. Raises RuntimeError with the reason when the reference is missing or its
@@ -335,7 +341,7 @@ class InstancePattern:
         """Places the copies at the pattern's placements; how far the copy that moved most went (mm,
         the farthest point of its shape). Raises when the direction is lost (the solver reports
         it; the copies stay where they are)."""
-        if fp.Suppressed:
+        if fp.Suppressed or missingPick(fp):
             return 0.0
         transforms = self.transforms(fp)
         held = self.copiesBySeed(fp)
@@ -476,6 +482,12 @@ class InstancePattern:
             if not self.seeds(fp):
                 self.reconcile(fp)  # the copies of a deleted seed go
                 raise RuntimeError(translate("Assembly", "{0}: pick the instances to pattern").format(fp.Label))
+            # FreeCAD-CH (ops#801): no direction picked yet (a pattern just made, its dialog asking
+            # for one) is not an error printed with a traceback: no copies yet, the dialog says what
+            # to pick. A picked reference that is gone still raises
+            if missingPick(fp):
+                self.reconcile(fp)
+                return
             # Raises when the direction is lost, before anything changes: the copies stay
             self.transforms(fp)
         self.reconcile(fp)
@@ -751,6 +763,8 @@ class TaskInstancePattern(QtCore.QObject if App.GuiUp else object):
         layout.addRow(self.message)
 
         self.refresh()
+        if missingPick(pattern):
+            self.message.setText(self.lastError())  # ops#801: what to pick, said in the dialog
         self.setField("seeds" if not pattern.Seeds else "direction" if not pattern.Direction else "")
         Gui.Selection.clearSelection()
         # Picks with their whole path from the root, as the joint dialog takes them
@@ -830,7 +844,7 @@ class TaskInstancePattern(QtCore.QObject if App.GuiUp else object):
         if self.assembly is not None and "Touched" in self.assembly.State:
             self.doc.recompute()
         self.refresh()
-        if "Invalid" in self.pattern.State or "Error" in self.pattern.State:
+        if "Invalid" in self.pattern.State or "Error" in self.pattern.State or missingPick(self.pattern):
             self.message.setText(self.lastError())
         else:
             self.message.setText("")
