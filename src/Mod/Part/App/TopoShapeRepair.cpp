@@ -2913,7 +2913,7 @@ bool healSliverCornersEnabled()
     }
     return App::GetApplication()
         .GetParameterGroupByPath("User parameter:BaseApp/Preferences/Mod/Part/Boolean")
-        ->GetBool("HealSliverCorners", false);
+        ->GetBool("HealSliverCorners", true);
 }
 
 SliverHeal healSliverCorners(

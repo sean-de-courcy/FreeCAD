@@ -235,7 +235,7 @@ PartExport SliverHeal healSliverCorners(
     const std::function<bool(const TopoDS_Shape&)>& check = {}
 );
 
-/** Whether Booleans heal their sliver corners: off by default. The parameter
+/** Whether Booleans heal their sliver corners: on by default. The parameter
  * "User parameter:BaseApp/Preferences/Mod/Part/Boolean", "HealSliverCorners", unless the
  * environment says otherwise: FREECAD_CH_HEAL_SLIVER_CORNERS "1" or "on", "0" or "off". Read at
  * each Boolean. */
