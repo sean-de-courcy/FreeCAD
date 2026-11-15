@@ -444,6 +444,23 @@ TEST(NameAncestry, madeFromPiecesOfTheSameSources)
             generated({top, cylinder}, 8, "FUS", 'E')
         )
     );
+    //   the only edge its sources made holds the two a piece makes in its place, which their
+    //   connected elements tell apart (review 1); an edge that had a sibling keeps its own
+    const auto vertex = sketchVertex({"g1v1"}, 7);
+    const auto other = sketchVertex({"g1v2"}, 7);
+    const auto arc = section({}, {left, cylinder}, 8, "FUS", 0, 'E', {"GEN"}, {vertex});
+    EXPECT_TRUE(NameAncestry::isMadeFromPiecesOf(arc, junction));
+    const auto sibling = section({}, {top, cylinder}, 8, "FUS", 0, 'E', {"GEN"}, {vertex});
+    EXPECT_TRUE(NameAncestry::isMadeFromPiecesOf(arc, sibling));
+    EXPECT_FALSE(NameAncestry::isMadeFromPiecesOf(onLeft, sibling));
+    EXPECT_FALSE(
+        NameAncestry::isMadeFromPiecesOf(
+            section({}, {left, cylinder}, 8, "FUS", 0, 'E', {"GEN"}, {other}),
+            sibling
+        )
+    );
+    //   a pattern's copy of the edge made from pieces is no such edge
+    EXPECT_FALSE(NameAncestry::isMadeFromPiecesOf(stepInstance(onLeft, 16, "2", 'E'), junction));
     //   a source generated from the old one is no piece of it
     const auto after = top + "|" + section({}, {}, 12, "FUS", 0, 'F', {"GEN"});
     EXPECT_FALSE(NameAncestry::isMadeFromPiecesOf(generated({after, cylinder}, 8, "FUS", 'E'), junction));
