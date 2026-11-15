@@ -64,6 +64,7 @@ SET(AssemblyTests_SRCS
     AssemblyTests/TestCommandCreateView.py
     AssemblyTests/TestCommandInsertLink.py
     AssemblyTests/TestFloatingSolve.py
+    AssemblyTests/TestGroundedUndo.py
     AssemblyTests/TestJointRecords.py
     AssemblyTests/TestRigidCachePointers.py
     AssemblyTests/TestOnshapeJointsGui.py
