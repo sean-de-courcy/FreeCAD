@@ -73,6 +73,7 @@
 #include <gp_Pln.hxx>
 #include <gp_Pnt2d.hxx>
 
+#include <App/Datums.h>
 #include <App/Document.h>
 #include <App/DocumentObject.h>
 #include <App/ElementNamingUtils.h>
@@ -141,6 +142,48 @@ bool isVertex(const char* sub)
 {
     const char* element = Base::Tools::isNullOrEmpty(sub) ? nullptr : Data::findElementName(sub);
     return element && std::string_view(element).starts_with("Vertex");
+}
+
+// Onshape's names for a studio's default geometry in a field (ops#640 gaps3 row 24): Top, Front and
+// Right for an Origin's XY, XZ and YZ planes, Origin for its point, as the Features list shows them
+// (FeaturesView.cpp, defaultGeometry). The Labels stay FreeCAD's; one the user renamed shows as named.
+QString entryLabel(const App::DocumentObject* obj)
+{
+    const QString label = QString::fromUtf8(obj->Label.getValue());
+    auto datum = freecad_cast<const App::DatumElement*>(obj);
+    if (!datum || !datum->isOriginFeature()) {
+        return label;
+    }
+    struct Name
+    {
+        const char* role;
+        const char* label;  // the LocalCoordinateSystem's default Label (Datums.cpp, getSetupData)
+        const char* onshape;
+    };
+    static constexpr std::array<Name, 4> names {{
+        {App::LocalCoordinateSystem::PlaneRoles[0], "XY-plane", QT_TRANSLATE_NOOP("PartDesignGui::ReferenceField", "Top")},
+        {App::LocalCoordinateSystem::PlaneRoles[1], "XZ-plane", QT_TRANSLATE_NOOP("PartDesignGui::ReferenceField", "Front")},
+        {App::LocalCoordinateSystem::PlaneRoles[2], "YZ-plane", QT_TRANSLATE_NOOP("PartDesignGui::ReferenceField", "Right")},
+        {App::LocalCoordinateSystem::PointRoles[0], "Origin-Point", QT_TRANSLATE_NOOP("PartDesignGui::ReferenceField", "Origin")},
+    }};
+    for (const Name& name : names) {
+        if (std::strcmp(datum->Role.getValue(), name.role) != 0) {
+            continue;
+        }
+        // The default Label, translated or not, with the number a second Origin's gets
+        for (const QString& base :
+             {QString::fromLatin1(name.label),
+              QCoreApplication::translate("App::LocalCoordinateSystem", name.label)}) {
+            if (label.startsWith(base)) {
+                const QString rest = label.mid(base.size());
+                if (std::ranges::all_of(rest, [](QChar c) { return c.isDigit(); })) {
+                    return ReferenceField::tr(name.onshape);
+                }
+            }
+        }
+        return label;
+    }
+    return label;
 }
 
 // Onshape's words for an element of an object: "Face of Pad" for Pad's `Face6`; another kind of
@@ -1102,7 +1145,7 @@ void ReferenceField::reload()
         QSignalBlocker block(entryList);
         entryList->clear();
         for (std::size_t i = 0; i < objs.size(); ++i) {
-            const QString label = QString::fromUtf8(objs[i]->Label.getValue());
+            const QString label = entryLabel(objs[i]);
             const QString name = QString::fromLatin1(objs[i]->getNameInDocument());
             auto item = new QListWidgetItem(entryList);
             item->setData(IndexRole, static_cast<int>(i));
@@ -1213,7 +1256,7 @@ void ReferenceField::reload()
                     }
                 }
             }
-            QString text = obj ? QString::fromUtf8(obj->Label.getValue()) : QString();
+            QString text = obj ? entryLabel(obj) : QString();
             if (!elements.isEmpty()) {
                 text += QStringLiteral(":") + elements.join(QStringLiteral(", "));
             }
@@ -1304,7 +1347,7 @@ void ReferenceField::reload()
         QString text = QString::fromStdString(element);
         if ((isSingle() || isProfile()) && slot.obj) {
             // The object varies: `Pad:Face6`, or `DatumPlane` alone; a profile's `Sketch (whole)`
-            const QString name = QString::fromUtf8(slot.obj->Label.getValue());
+            const QString name = entryLabel(slot.obj);
             if (!element.empty() && options.elementWords) {
                 text = elementInWords(element, name);
             }
