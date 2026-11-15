@@ -9368,6 +9368,10 @@ TopoShape& TopoShape::makeElementChamfer(
         std::string kinkAt;
         std::vector<std::vector<TopoDS_Shape>> runs;
         if (FilletFallback::kinkedContour(makerContours(mkChamfer), &kinkAt, &runs)) {
+            if (setbacksDiffer && !uniform) {
+                // The construction builds one width: the pass with the width on every edge
+                continue;
+            }
             std::string reason;
             if (constructOverKink(*this, input, inputEdges, request, runs, "The chamfer", op, reason)) {
                 return *this;
