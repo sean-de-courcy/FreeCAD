@@ -332,6 +332,10 @@ const Entry table[] = {
     // Onshape's m opens Mate: the Fixed joint (Fastened) takes M from Perpendicular (ops#640
     // rank 60)
     {"Assembly_CreateJointFixed", "M"},
+    // Onshape's i inserts a part (GB16, gaps3 row 8): upstream's own key, held by the table so
+    // the keymap owns it. Sketcher's I (coincident) is ForEdit in sketch edit, where Assembly's
+    // commands are off (a task dialog is open), as for M
+    {"Assembly_InsertLink", "I"},
     {"Assembly_CreateJointPerpendicular", ""},
     {"Assembly_SolveAssembly", ""},
     {"Assembly_CreateJointScrew", ""},
