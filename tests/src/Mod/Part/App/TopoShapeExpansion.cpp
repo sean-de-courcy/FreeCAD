@@ -1813,11 +1813,90 @@ TEST_F(TopoShapeExpansionTest, makeElementBooleanFuseV1)
     ));
 }
 
+namespace
+{
+// Which corner of a box a point of a drafted box lies at: the side of the box's centre (cx, cy)
+// in x and in y, and bottom (z 0) or top (z 1). The draft moves the top corners, not which
+// corner each one is
+std::string draftCorner(const gp_Pnt& p, double cx, double cy)
+{
+    return std::string {p.X() > cx ? '+' : '-', p.Y() > cy ? '+' : '-', p.Z() > 0.5 ? 't' : 'b'};
+}
+
+std::string draftCorners(const TopoShape& element, double cx, double cy)
+{
+    std::vector<std::string> corners;
+    for (const auto& vertex : element.getSubTopoShapes(TopAbs_VERTEX)) {
+        corners.push_back(draftCorner(BRep_Tool::Pnt(TopoDS::Vertex(vertex.getShape())), cx, cy));
+    }
+    std::sort(corners.begin(), corners.end());
+    std::string key;
+    for (const auto& corner : corners) {
+        key += corner;
+    }
+    return key;
+}
+
+// Checks that each edge or vertex of the drafted box has exactly the names `expected` gives the
+// box's elements at the same corners (ops#845: the draft names them after the base's own). A box
+// made of separate faces holds each edge once per face, and the draft's edge is the image of each
+std::string draftKeepsBaseNamesAt(const std::vector<std::string>& elements)
+{
+    std::string text;
+    for (const auto& element : elements) {
+        text += (text.empty() ? "" : ", ") + element;
+    }
+    return text;
+}
+
+testing::AssertionResult draftKeepsBaseNames(
+    const TopoShape& result,
+    const TopoShape& box,
+    TopAbs_ShapeEnum type,
+    double cx,
+    double cy,
+    const std::function<std::vector<MappedName>(const std::string&)>& expected
+)
+{
+    const char* typeName = type == TopAbs_EDGE ? "Edge" : "Vertex";
+    std::map<std::string, std::vector<std::string>> boxElements;
+    auto boxShapes = box.getSubTopoShapes(type);
+    for (size_t i = 0; i < boxShapes.size(); ++i) {
+        boxElements[draftCorners(boxShapes[i], cx, cy)].push_back(typeName + std::to_string(i + 1));
+    }
+    auto shapes = result.getSubTopoShapes(type);
+    if (shapes.size() != boxElements.size()) {
+        return testing::AssertionFailure() << shapes.size() << " " << typeName << "s, the box has "
+                                           << boxElements.size();
+    }
+    for (size_t i = 0; i < shapes.size(); ++i) {
+        auto found = boxElements.find(draftCorners(shapes[i], cx, cy));
+        if (found == boxElements.end()) {
+            return testing::AssertionFailure() << typeName << i + 1 << " is at no box element";
+        }
+        std::vector<MappedName> names;
+        for (const auto& boxElement : found->second) {
+            for (const auto& name : expected(boxElement)) {
+                names.push_back(name);
+            }
+        }
+        std::string element = typeName + std::to_string(i + 1);
+        auto check = elementHasNames(result, element.c_str(), names);
+        if (!check) {
+            return check << " (" << element << ", the box's " << draftKeepsBaseNamesAt(found->second)
+                         << ")";
+        }
+    }
+    return testing::AssertionSuccess();
+}
+}  // namespace
+
 TEST_F(TopoShapeExpansionTest, makeElementDraft)
 {  // Draft as in Draft Angle or sloped sides for removing shapes from a mold.
     // Arrange
     auto [cube1, cube2] = CreateTwoCubes();
     TopoShape cube1TS {cube1, 1L};
+    const TopoShape box {cube1, 1L};  // the cube as it was: makeElementDraft replaces cube1TS
     std::vector<TopoShape> subShapes = cube1TS.getSubTopoShapes(TopAbs_FACE);
     std::vector<TopoShape> faces {subShapes[0], subShapes[1], subShapes[2], subShapes[3]};
     const gp_Dir pullDirection {0, 0, 1};
@@ -1864,9 +1943,13 @@ TEST_F(TopoShapeExpansionTest, makeElementDraft)
         elementAt(result, "Face", Base::Vector3d(0.5, 0.5, 1)).c_str(),
         {unmappedName("Face6", 1, "DFT")}
     ));
-    //   the edges and vertices have no history: each is named after the faces it bounds (UPP)
-    EXPECT_TRUE(upperNamed(result, "Edge", 1, "DFT"));
-    EXPECT_TRUE(upperNamed(result, "Vertex", 1, "DFT"));
+    //   each edge and vertex is the draft's image of the cube's at the same corners, and keeps
+    //   its unmapped name with the op, as the bottom and top faces do (ops#845)
+    auto unmapped = [](const std::string& element) {
+        return std::vector<MappedName> {unmappedName(element, 1, "DFT")};
+    };
+    EXPECT_TRUE(draftKeepsBaseNames(result, box, TopAbs_EDGE, 0.5, 0.5, unmapped));
+    EXPECT_TRUE(draftKeepsBaseNames(result, box, TopAbs_VERTEX, 0.5, 0.5, unmapped));
 }
 
 TEST_F(TopoShapeExpansionTest, makeElementDraftTopoShapes)
@@ -1935,9 +2018,18 @@ TEST_F(TopoShapeExpansionTest, makeElementDraftTopoShapes)
         elementAt(result, "Face", Base::Vector3d(1.5, 0.5, 1)).c_str(),
         {cube2TS.getMappedName(IndexedName::fromConst("Face", 6))}
     ));
-    //   the edges and vertices have no history: each is named after the faces it bounds (UPP)
-    EXPECT_TRUE(upperNamed(result, "Edge", 7, "DFT"));
-    EXPECT_TRUE(upperNamed(result, "Vertex", 7, "DFT"));
+    //   each edge and vertex is the draft's image of the cube's at the same corners, and keeps
+    //   that element's names as they are, as the bottom and top faces do (ops#845). The cube is
+    //   a compound of separate faces, so an edge has one name per face, a vertex one per face too
+    auto kept = [&](const std::string& element) {
+        std::vector<MappedName> names;
+        for (const auto& [name, ids] : cube2TS.getElementMappedNames(IndexedName(element.c_str()))) {
+            names.push_back(name);
+        }
+        return names;
+    };
+    EXPECT_TRUE(draftKeepsBaseNames(result, cube2TS, TopAbs_EDGE, 1.5, 0.5, kept));
+    EXPECT_TRUE(draftKeepsBaseNames(result, cube2TS, TopAbs_VERTEX, 1.5, 0.5, kept));
 }
 
 TEST_F(TopoShapeExpansionTest, linearizeEdge)
