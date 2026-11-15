@@ -271,9 +271,14 @@ private:
     /// cached as (its document still has that object under the ID recorded with it). Never reads
     /// through the pointer: it may be freed.
     bool isRigidCacheLive(App::DocumentObject* obj) const;
-    /// Rebuilds the rigid caches when an object in them was deleted since they were built (they
-    /// are rebuilt only by a solve, but read at any time: getGroundedParts, getConnectedParts).
+    /// Rebuilds the rigid caches when an object in them was deleted since they were built, or when
+    /// their inputs changed (ops#789: a rigid group's members, suppression or error, a pattern's
+    /// clusters). They are rebuilt by a solve, but read at any time: getGroundedParts,
+    /// getConnectedParts.
     void refreshStaleRigidCaches();
+    /// FreeCAD-CH (ops#789): the inputs rebuildRigidClusters reads, as IDs and flags. Reads the
+    /// document only, never a cached pointer, and changes nothing.
+    std::vector<long> rigidInputsSignature();
     /// Drops rigidPlacementCache's entries for objects no longer live.
     void pruneRigidPlacementCache();
 
@@ -289,6 +294,8 @@ private:
     /// The IDs of cached objects that had left the document at a rebuild: one that comes back
     /// (undo) makes the caches stale again.
     std::vector<long> rigidDroppedIds;
+    /// rigidInputsSignature() at the last rebuild of the rigid caches
+    std::vector<long> rigidSignature;
     std::vector<std::pair<App::DocumentObject*, double>> objMasses;
     std::vector<App::DocumentObject*> draggedParts;
     std::vector<App::DocumentObject*> motions;
