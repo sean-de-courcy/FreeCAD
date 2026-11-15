@@ -176,15 +176,20 @@ class TestDressUpRelinkHome(unittest.TestCase):
         self.assertEqual(self.chamfer.getStatusString(), "Valid")
 
     def testAGuessedPickComesBackAsItWas(self):
-        """ops#818: a pick the solver holds provisionally, its original's name gone. The rib is
-        moved 0.5 in from the boss's side, so the two sides are no longer one face: the draft's
-        top edge on the boss's side has another name, and the chamfer's pick is found again by
-        geometry (tier 3, a warning). While the boss is below the draft that pick is found on
-        the boss too, by geometry again, and its name there is no name of the draft's shape.
-        Back on the draft it is the reference it was: the same four edges, the same warning
-        and the same volume, not three edges."""
+        """ops#818: a pick the solver holds provisionally, its original's name gone. The boss
+        sketch's side at y = -12 is drawn again in the same place, a new sketch element, and the
+        old one deleted: the boss's top edge above it has another name, and the chamfer's pick
+        is found again by geometry (tier 3, a warning). While the boss is below the draft that
+        pick is found on the boss too, by geometry again, and its name there is no name of the
+        draft's shape. Back on the draft it is the reference it was: the same four edges, the
+        same warning and the same volume, not three edges. (Moving the rib off the boss's side
+        used to make the guess; since ops#845 the draft's top edges keep their names then.)"""
         self.build()
-        self.doc.getObject("RibSk").setDatum(9, App.Units.Quantity("-11.5 mm"))  # its y
+        sk = self.doc.getObject("BossSk")
+        sk.addGeometry(Part.LineSegment(V(14, -12, 0), V(24, -12, 0)), False)
+        sk.delGeometry(0)  # the others move down one: 0 the side at x = 24, 2 at x = 14, 3 the new
+        sk.addConstraint(Sketcher.Constraint("Coincident", 2, 2, 3, 1))
+        sk.addConstraint(Sketcher.Constraint("Coincident", 3, 2, 0, 1))
         self.doc.recompute()
         self.assertAllFour()
 

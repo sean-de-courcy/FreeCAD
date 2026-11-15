@@ -11658,6 +11658,38 @@ TopoShape& TopoShape::makeElementRevolution(
     return *this;
 }
 
+// A draft's history for naming (FreeCAD-CH ops#845). BRepOffsetAPI_DraftAngle::Modified() answers
+// for faces only, so the edges and vertices the draft moves had no source, and were named after
+// the faces around them: a rim edge between a drafted side and the untouched top took the top
+// face's name, which changes whenever the profile sketch gains or loses an edge (a Sketcher
+// split), and every reference to the rim broke. The modifier knows each edge's and vertex's
+// image (a draft keeps the topology), so they are named after the base's own edge or vertex.
+struct MapperDraft: MapperMaker
+{
+    BRepOffsetAPI_DraftAngle& draft;
+    explicit MapperDraft(BRepOffsetAPI_DraftAngle& maker)
+        : MapperMaker(maker)
+        , draft(maker)
+    {}
+    const std::vector<TopoDS_Shape>& modified(const TopoDS_Shape& s) const override
+    {
+        MapperMaker::modified(s);
+        if (!_res.empty() || (s.ShapeType() != TopAbs_EDGE && s.ShapeType() != TopAbs_VERTEX)) {
+            return _res;
+        }
+        try {
+            const TopoDS_Shape image = draft.ModifiedShape(s);
+            if (!image.IsNull() && !image.IsSame(s)) {
+                _res.push_back(image);
+            }
+        }
+        catch (const Standard_Failure&) {
+            // not a sub-shape of the drafted shape: no image
+        }
+        return _res;
+    }
+};
+
 TopoShape& TopoShape::makeElementDraft(
     const TopoShape& shape,
     const std::vector<TopoShape>& _faces,
@@ -11710,7 +11742,7 @@ TopoShape& TopoShape::makeElementDraft(
         [mkDraft](const Message_ProgressRange& range) { mkDraft->Build(range); },
         KernelBudget::Inputs::Shared
     );
-    return makeElementShape(*mkDraft, shape, op);
+    return makeShapeWithElementMap(mkDraft->Shape(), MapperDraft(*mkDraft), {shape}, op);
 }
 
 TopoShape& TopoShape::makeElementFace(

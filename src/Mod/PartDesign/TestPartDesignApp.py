@@ -105,6 +105,10 @@ from PartDesignTests.TestMultiTransform import TestMultiTransform
 from PartDesignTests.TestPatternRules import TestPatternRules  # FreeCAD-CH, ops#640
 from PartDesignTests.TestFacePattern import TestFacePattern  # FreeCAD-CH, ops#655 T8
 from PartDesignTests.TestDraftRules import TestDraftNeedsNeutralPlane  # FreeCAD-CH, ops#640
+from PartDesignTests.TestDraftSplitNaming import (  # FreeCAD-CH, ops#845
+    TestDraftRimThroughSplitOwners,
+    TestDraftRimThroughSplitBody,
+)
 from PartDesignTests.TestHoleDepth import TestHoleDepth  # FreeCAD-CH, ops#640
 from PartDesignTests.TestBoolean import TestBoolean
 from PartDesignTests.TestBaseFeature import TestBaseFeature
