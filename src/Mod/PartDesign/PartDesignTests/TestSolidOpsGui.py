@@ -46,6 +46,15 @@ class TestSolidOpsGui(unittest.TestCase):
         for cmd in ("PartDesign_Thicken", "PartDesign_ScalePart", "PartDesign_OffsetSurface"):
             self.assertIn(cmd, names)
 
+    def testCommandIconsExist(self):
+        # ops#796: the icons sit under icons/tools/ in Part.qrc; a wrong path showed text-only buttons
+        from PySide import QtCore
+
+        for kind in G.KINDS.values():
+            icon = Gui.Command.get(kind["command"]).getInfo()["pixmap"]
+            self.assertEqual(icon, kind["icon"])
+            self.assertTrue(QtCore.QFile(icon).exists(), icon)
+
     def testThickenFromTheSelectedFaceAddsToTheBody(self):
         self.selectTop()
         Gui.runCommand("PartDesign_Thicken")
