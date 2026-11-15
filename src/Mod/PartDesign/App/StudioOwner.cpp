@@ -161,7 +161,10 @@ bool studioWholePartLink(const App::Property* prop)
 {
     const char* name = prop ? prop->getName() : nullptr;
     auto link = freecad_cast<const App::PropertyLinkBase*>(prop);
-    if (!name || !link) {
+    // Of a reader outside every Body only (an owner): reconcile and the read at its place serve
+    // no other
+    auto reader = link ? freecad_cast<const App::DocumentObject*>(link->getContainer()) : nullptr;
+    if (!name || !reader || Body::findBodyOf(reader)) {
         return false;
     }
     const std::string propName = name;
