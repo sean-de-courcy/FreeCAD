@@ -4302,7 +4302,18 @@ CmdPartDesignMultiTransform::CmdPartDesignMultiTransform()
 void CmdPartDesignMultiTransform::activated(int iMsg)
 {
     Q_UNUSED(iMsg);
-    PartDesign::Body* pcActiveBody = PartDesignGui::getBody(true);
+    // FreeCAD-CH (ops#803): the selection's part, as the other transforms (walk bugs 1): a
+    // selected pattern converts in its own Body, a studio feature goes in its step's part
+    PartDesign::Body* pcActiveBody = nullptr;
+    for (auto obj : getSelection().getObjectsOfType(PartDesign::Transformed::getClassTypeId())) {
+        if (!obj->isDerivedFrom<PartDesign::MultiTransform>()) {
+            pcActiveBody = PartDesign::Body::findBodyOf(obj);
+            break;
+        }
+    }
+    if (!pcActiveBody) {
+        pcActiveBody = transformBody();
+    }
 
     if (!pcActiveBody) {
         return;
