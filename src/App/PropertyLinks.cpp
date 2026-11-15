@@ -1303,8 +1303,26 @@ bool PropertyLinkBase::_updateElementFingerprints(App::DocumentObject* feature,
     if (owner && owner->isRestoring()) {
         return holdsElements;
     }
+    // A record is refreshed in place, with no change of the value (nothing is touched), but an
+    // open transaction keeps the record from before it (ops#850): undo restores the property
+    // through Paste(), records included, and without this it would restore the edit's inputs
+    // under the record of the edit's result. Two undos in a row with one recompute after them then
+    // brought back a suppression and a move at once, and the pass-through veto (ops#549) broke the
+    // pick. Once per call, before the first write; never while undoing or redoing.
+    bool captured = false;
+    auto capture = [&]() {
+        if (captured) {
+            return;
+        }
+        captured = true;
+        auto document = owner ? owner->getDocument() : nullptr;
+        if (document && document->hasPendingTransaction() && !document->isPerformingTransaction()) {
+            aboutToSetValue();
+        }
+    };
     if (fingerprints.size() != subs.size()) {
         // The list was rebuilt: the old fingerprints can't be matched to the references.
+        capture();
         fingerprints.assign(subs.size(), std::string());
     }
     // The targets' names are read once for the whole list's twin tests, and each object's
@@ -1388,13 +1406,20 @@ bool PropertyLinkBase::_updateElementFingerprints(App::DocumentObject* feature,
                 if (feature && closure.size() > 1 && closure[1] == feature) {
                     auto held = old;
                     if (takeWorld(Data::ElementFingerprint::fromString(text), held)) {
-                        fingerprints[i] = held.toString();
+                        auto taken = held.toString();
+                        if (taken != fingerprints[i]) {
+                            capture();
+                            fingerprints[i] = std::move(taken);
+                        }
                     }
                 }
                 continue;
             }
         }
-        fingerprints[i] = std::move(text);
+        if (text != fingerprints[i]) {
+            capture();
+            fingerprints[i] = std::move(text);
+        }
     }
     return holdsElements;
 }

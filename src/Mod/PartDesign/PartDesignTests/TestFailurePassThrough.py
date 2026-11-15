@@ -2339,6 +2339,60 @@ class FailurePassThroughBase:
         edge = chamfer.Base[0].Shape.getElement(chamfer.Base[1][0])
         self.assertTrue(all(abs(v.Point.z - 14) < TOL for v in edge.Vertexes), chamfer.Base[1])
 
+    def testUndoOfAMoveAndASuppressionTogether(self):
+        """ops#850: the chamfer on the block's top edge, then two edits, each its own transaction
+        with its recompute: the block thicker (the edge moves up) and the hole suppressed. Undone
+        both with one recompute after them, as two Ctrl+Z do, the chamfer is the model's before the
+        edits again; redone both, the edits'. The record refreshed by each edit's recompute is
+        restored with the reference: kept as the edit left it, it saw the suppression switched and
+        the edge moved at once, and the veto (rule PS) broke the pick."""
+        if not self.solver:
+            self.skipTest("rule PS is the reference solver's")
+        self.doc.UndoMode = 1
+        block = self.block()
+        hole = self.hole()
+        boss = self.boss(hole)
+        self.recompute()
+        top = elementWhere(
+            boss.Shape,
+            "Edge",
+            lambda e: isinstance(e.Curve, Part.Line)
+            and all(abs(v.Point.y) < TOL and abs(v.Point.z - 10) < TOL for v in e.Vertexes),
+        )
+        chamfer = self.body.newObject("PartDesign::Chamfer", "TopChamfer")
+        chamfer.Base = (boss, [top])
+        chamfer.Size = 1
+        self.recompute()
+        edgeChamfer = 0.5 * 1**2 * 20
+        before = BLOCK - HOLE + BOSS - edgeChamfer
+        self.assertValid(chamfer)
+        self.assertVolume(chamfer, before)
+
+        for name, edit in (("thicker", lambda: setattr(block, "Length", 12)),
+                           ("suppress", lambda: setattr(hole, "Suppressed", True))):
+            self.doc.openTransaction(name)
+            edit()
+            self.recompute()
+            self.doc.commitTransaction()
+        after = BLOCK * 1.2 + BOSS - edgeChamfer
+        self.assertValid(chamfer)
+        self.assertVolume(chamfer, after)
+
+        self.doc.undo()
+        self.doc.undo()
+        self.recompute()
+        self.assertValid(chamfer)
+        self.assertFalse(hole.Suppressed)
+        self.assertVolume(chamfer, before)
+        edge = chamfer.Base[0].Shape.getElement(chamfer.Base[1][0])
+        self.assertTrue(all(abs(v.Point.z - 10) < TOL for v in edge.Vertexes), chamfer.Base[1])
+
+        self.doc.redo()
+        self.doc.redo()
+        self.recompute()
+        self.assertValid(chamfer)
+        self.assertVolume(chamfer, after)
+
     def testReopenedWhileSuppressed(self):
         """Saved and reopened with the hole suppressed, a sketch on the top still follows the
         block: the record keeps the world it was taken in (ops#549 PS)."""
