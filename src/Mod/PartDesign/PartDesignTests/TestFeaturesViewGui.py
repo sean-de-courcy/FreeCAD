@@ -878,6 +878,33 @@ class TestFeaturesViewGui(unittest.TestCase):
         self.assertEqual(names, ["featureRollToEnd"])
         self.assertEqual(self.tips(), ["Pocket1", "PocketB"])
 
+    def testSketchRowExportDxf(self):
+        """Onshape's sketch row offers Export as DXF/DWG (onshape-facts DX8, gaps3 row 22): here
+        Export DXF..., on a sketch row only; it runs Sketcher_ExportDxf on that sketch"""
+        names = self.popupAction(self.list, self.rowRect("PadA").center(), "")
+        self.assertNotIn("featureExportDxf", names)
+        self.assertIn("featureDelete", names)
+        # Triggered: the export's dialog opens for the row's sketch (it is closed unanswered)
+        seen = []
+
+        def close():
+            box = QtWidgets.QApplication.activeModalWidget()
+            if box is None:
+                if len(seen) == 0:
+                    QtCore.QTimer.singleShot(50, close)
+                return
+            import SketcherDxfGui
+
+            target = SketcherDxfGui.export_target()
+            seen.append((box.windowTitle(), target[0].Label if target else None))
+            box.reject()
+
+        QtCore.QTimer.singleShot(50, close)
+        names = self.popupAction(self.list, self.rowRect("SkB").center(), "featureExportDxf")
+        pump(0.3)
+        self.assertIn("featureExportDxf", names)
+        self.assertEqual(seen, [("Export DXF", "SkB")])
+
     def testSketchThatCouldNotSolveIsRed(self):
         """Onshape's list reads a sketch with conflicting constraints red (PL1d), though the sketch
         solves the rest and its pad builds (a warning, not an error, to the document): SkA's bottom
