@@ -276,28 +276,40 @@ std::vector<std::string> outsideFiles(const Document& doc, const std::string& ta
 
 void warnOutside(const Document& doc, const std::string& target)
 {
-    // The last list warned per document (by Uid), so a document warns again only when it changes
-    static std::mutex mutex;
-    static std::map<std::string, std::string> warned;
-    const auto names = outsideFiles(doc, target);
-    std::string list;
-    for (const auto& name : names) {
-        list += (list.empty() ? "" : ", ") + name;
-    }
-    const std::string key = doc.Uid.getValueStr();
-    {
-        std::lock_guard<std::mutex> lock(mutex);
-        auto& last = warned[key];
-        if (last == list) {
-            return;
+    // A warning that fails (a path that doesn't convert, a file system error) never stops the save
+    try {
+        if (!contains(target)) {
+            return;  // a copy saved elsewhere leaves the document's last warning as it was
         }
-        last = list;
+        // The last list warned per document and file, so a save warns again only when it changes
+        static std::mutex mutex;
+        static std::map<std::string, std::string> warned;
+        const auto names = outsideFiles(doc, target);
+        std::string list;
+        for (const auto& name : names) {
+            list += (list.empty() ? "" : ", ") + name;
+        }
+        const std::string key = doc.Uid.getValueStr() + "|" + target;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            auto& last = warned[key];
+            if (last == list) {
+                return;
+            }
+            last = list;
+        }
+        if (!list.empty()) {
+            Base::Console().warning("%s uses files outside the team folder (%s); the other "
+                                    "computer will not find them.\n",
+                                    fileName(Base::FileInfo::stringToPath(target)).c_str(),
+                                    list.c_str());
+        }
     }
-    if (!list.empty()) {
-        Base::Console().warning("%s uses files outside the team folder (%s); the other computer "
-                                "will not find them.\n",
-                                fileName(Base::FileInfo::stringToPath(target)).c_str(),
-                                list.c_str());
+    catch (const std::exception& error) {
+        Base::Console().log("Team folder: the outside-files check failed: %s\n", error.what());
+    }
+    catch (...) {
+        Base::Console().log("Team folder: the outside-files check failed\n");
     }
 }
 
