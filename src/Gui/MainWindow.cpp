@@ -88,6 +88,7 @@
 #include <DAGView/DAGView.h>
 #include <TaskView/TaskView.h>
 
+#include "DocumentPresenceGui.h"
 #include "MainWindow.h"
 #include "Action.h"
 #include "Assistant.h"
@@ -511,6 +512,9 @@ MainWindow::MainWindow(QWidget* parent, Qt::WindowFlags f)
          .order = 50,
          .persistentVisibility = true}
     );
+
+    // FreeCAD-CH (ops#640, folder sync item 6): who else has the active document open
+    DocumentPresenceGui::start(this);
 
     d->sizeLabel = new DimensionWidget(statusBar());
     addStatusBarItem(

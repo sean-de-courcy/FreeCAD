@@ -158,6 +158,7 @@ SET(Document_CPP_SRCS
     Annotation.cpp
     BackupPolicy.cpp
     TeamFolder.cpp
+    DocumentPresence.cpp
     Document.cpp
     RecoverySnapshot.cpp
     DocumentObject.cpp
@@ -223,6 +224,7 @@ SET(Document_HPP_SRCS
     Annotation.h
     BackupPolicy.h
     TeamFolder.h
+    DocumentPresence.h
     Document.h
     RecoverySnapshot.h
     DepEdge.h
