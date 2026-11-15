@@ -4350,7 +4350,10 @@ class DocumentTeamFolderCases(unittest.TestCase):
         self._saves(self.team, 2)
         self.group.SetBool("UseFCBakExtension", False)
         self._saves(self.team, 3)
-        made = [name for name in os.listdir(self.team) if not name.startswith(".st")]
+        # .fcch is design A's folder, which syncs on purpose: presence writes its markers to
+        # .fcch/open while a document is open (B5); it is checked below as one that travels
+        made = [name for name in os.listdir(self.team)
+                if not name.startswith(".st") and name != ".fcch"]
         backups = [name for name in made if name != "Frame.FCStd"]
         self.assertTrue(any(name.endswith(".FCBak") for name in backups), made)
         self.assertTrue(any(name.endswith(".FCStd1") for name in backups), made)
@@ -4362,6 +4365,9 @@ class DocumentTeamFolderCases(unittest.TestCase):
         # What must travel: the document, a conflict copy (A2 reads it), design A's .fcch folder
         for name in ("Frame.FCStd", "frame.fcstd",
                      "Frame.sync-conflict-20261115-101010-ABCDEFG.FCStd", ".fcch"):
+            self.assertFalse(self._ignored(name), name + " would not sync")
+        # and the presence markers inside it (B5: who has a document open, on every computer)
+        for name in (".fcch/open", ".fcch/open/Frame.FCStd-host-1234.json"):
             self.assertFalse(self._ignored(name), name + " would not sync")
 
     def testFiveLocalBackupsInsideTheFolder(self):
