@@ -435,8 +435,9 @@ class TestAssemblyPatterns(AssemblyTestBase):
             shutil.rmtree(folder, ignore_errors=True)
 
     def test_direction_follows_a_part_turned_inside_a_subassembly(self):
-        """ops#832 review r2: the way kept is the element's own: a part turned half round inside
-        the referenced container turns the pattern's way with it"""
+        """ops#832 reviews r2, r3: the way is kept through a container (a pocket that shortens the
+        edge keeps it), and it is the element's own: a part turned half round inside the
+        referenced container turns the pattern's way with it"""
         body = self.doc.addObject("PartDesign::Body", "Blk")
         box = body.newObject("PartDesign::AdditiveBox", "BlkBox")
         box.Length, box.Width, box.Height = 20, 20, 10
@@ -456,6 +457,15 @@ class TestAssemblyPatterns(AssemblyTestBase):
         )
         pattern.Count, pattern.Distance = 3, 25.0
         self.doc.recompute()
+        self.assertLinear(pattern, self.seed, 3, 25.0, way)
+        # The way is kept through the container (review r3): read on the body itself
+        self.assertEqual(pattern.Proxy.senses["Direction"][0], body.Name)
+        # A pocket that shortens the edge keeps it
+        cut = body.newObject("PartDesign::SubtractiveBox", "BlkPocket")
+        cut.Length, cut.Width, cut.Height = 10, 20, 3
+        cut.Placement = App.Placement(App.Vector(10, 0, 0), App.Rotation())
+        self.doc.recompute()
+        self.assertEqual(self.assembly.solve(), 0)
         self.assertLinear(pattern, self.seed, 3, 25.0, way)
         inner.Placement = App.Placement(App.Vector(), App.Rotation(App.Vector(0, 0, 1), 180))
         self.doc.recompute()
