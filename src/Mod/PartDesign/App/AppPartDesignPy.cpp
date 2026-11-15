@@ -2541,6 +2541,14 @@ private:
         App::Part* studio = list->studio();
         PartDesign::Body* body = nullptr;
         std::set<std::string> labels;
+        // Only in a studio with no other part: an empty part beside others is a record the list
+        // keeps or retires (Pieces), not the studio's starting part
+        int parts = 0;
+        for (auto obj : doc->getObjectsOfType(PartDesign::Body::getClassTypeId())) {
+            if (App::Part::getPartOfObject(obj, false) == studio) {
+                ++parts;
+            }
+        }
         for (auto obj : doc->getObjectsOfType(PartDesign::Body::getClassTypeId())) {
             auto other = static_cast<PartDesign::Body*>(obj);
             if (App::Part::getPartOfObject(other, false) != studio) {
@@ -2549,7 +2557,7 @@ private:
             labels.insert(other->Label.getValue());
             // (its id is the reconcile's default, its name: no step reads it, a step would be in
             // its Group)
-            if (!body && studio && other->Group.getValues().empty()
+            if (!body && studio && parts == 1 && other->Group.getValues().empty()
                 && !other->StudioMadeBy.getValue()
                 && other->getInList().size() <= 1) {
                 body = other;
