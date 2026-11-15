@@ -308,6 +308,29 @@ PartExport bool contactOnPartOfAnEdge(
     std::string* where = nullptr
 );
 
+/** Whether one of OCCT's contours runs through a kink: two consecutive edges of it whose directions
+ * at their common vertex differ by more than 1e-4 rad (ops#762). OCCT 8.0.1 carries a contour on
+ * past a vertex wherever the faces at the vertex's other edges meet within 0.1 rad
+ * (ChFi3d's FaceTangency(), which reads ChFi3d::IsTangentFaces() with its fixed 0.1 rad), with no
+ * test of the two edges' own directions short of a turn-back. Its round or chamfer then ends each
+ * edge's strip in a cross-section at the vertex and closes the wedge between the two
+ * cross-sections with planes: a valid solid with a tooth left at the kink, where the exact result
+ * is the two strips meeting in a mitre (as OCCT itself builds from 0.1 rad on). A regular polygon's
+ * rim does it from 63 sides on. The dress-up runs the exact construction alone there, below the
+ * limit too, and fails with an error where it refuses.
+ *
+ * @param contours OCCT's contours as the maker reports them after Add(), each in its order
+ * @param where If not null and the answer is true, receives where, for the error message
+ * @param runs If not null, receives the contours cut at their kinks of more than 0.01 rad (OCCT's
+ * own tolerance for edges that carry on): the tangent chains proper, each in its order (a closed
+ * contour's last and first edges in one run where they carry on)
+ */
+PartExport bool kinkedContour(
+    const std::vector<std::vector<TopoDS_Shape>>& contours,
+    std::string* where = nullptr,
+    std::vector<std::vector<TopoDS_Shape>>* runs = nullptr
+);
+
 /// Names a construction as through the fillet's own history (op), from base, into result
 PartExport void finish(
     TopoShape& result,

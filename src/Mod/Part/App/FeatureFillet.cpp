@@ -143,6 +143,23 @@ App::DocumentObjectExecReturn* Fillet::execute()
                 const auto& edge = TopoDS::Edge(inputEdges[k].getShape());
                 mkFillet.Add(radii[k].first, radii[k].second, edge);
             }
+            // OCCT carries a contour on over a slight corner and leaves a tooth there, in a valid
+            // solid (ops#762); the exact construction takes one radius only
+            std::vector<std::vector<TopoDS_Shape>> contours;
+            for (int i = 1; i <= mkFillet.NbContours(); ++i) {
+                contours.emplace_back();
+                for (int j = 1; j <= mkFillet.NbEdges(i); ++j) {
+                    contours.back().push_back(mkFillet.Edge(i, j));
+                }
+            }
+            std::string kinkAt;
+            if (FilletFallback::kinkedContour(contours, &kinkAt)) {
+                return new App::DocumentObjectExecReturn(
+                    "The fillet runs over a slight corner between its edges (" + kinkAt
+                    + "), where OCCT's round leaves a tooth; with one radius on every edge it is "
+                      "built exactly"
+                );
+            }
             if (mkFillet.Shape().IsNull()) {
                 return new App::DocumentObjectExecReturn("Resulting shape is null");
             }
