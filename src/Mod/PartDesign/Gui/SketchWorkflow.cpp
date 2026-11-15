@@ -81,6 +81,8 @@ using namespace PartDesignGui;
 namespace PartDesignGui
 {
 bool refuseNewPartOutsideStudio(App::Document* doc);
+// FreeCAD-CH (ops#796): Utils.cpp's: Onshape's "Sketch N" under its keymap
+void nameNewFeature(App::DocumentObject* feature);
 }
 
 namespace
@@ -359,6 +361,7 @@ public:
         sketchAtTheBar(activeBody->getDocument()->getObject(FeatName.c_str()), activeBody);
         auto Feat = activeBody->getDocument()->getObject(FeatName.c_str());
         FCMD_OBJ_CMD(Feat, "Label = 'Sketch'");
+        PartDesignGui::nameNewFeature(Feat);
         FCMD_OBJ_CMD(Feat, "AttachmentSupport = " << supportString);
         if (sketchFilter.match()) {
             FCMD_OBJ_CMD(
@@ -758,6 +761,7 @@ private:
         sketchAtTheBar(activeBody->getDocument()->getObject(FeatName.c_str()), activeBody);
         auto sketch = doc->getObject(FeatName.c_str());
         FCMD_OBJ_CMD(sketch, "Label = 'Sketch'");
+        PartDesignGui::nameNewFeature(sketch);
 
         if (!hasSketch && support.getSize() > 0) {
             if (auto* pcAttach = sketch->getExtensionByType<Part::AttachExtension>()) {
@@ -984,6 +988,7 @@ private:
         sketchAtTheBar(partDesignBody->getDocument()->getObject(FeatName.c_str()), partDesignBody);
         auto Feat = doc->getObject(FeatName.c_str());
         FCMD_OBJ_CMD(Feat, "Label = 'Sketch'");
+        PartDesignGui::nameNewFeature(Feat);
         FCMD_OBJ_CMD(Feat, "AttachmentSupport = " << supportString);
         FCMD_OBJ_CMD(
             Feat,
@@ -1027,6 +1032,7 @@ void createSketchToPickPlane(Gui::Document* guidocument, PartDesign::Body* activ
         return;
     }
     FCMD_OBJ_CMD(sketch, "Label = 'Sketch'");
+    PartDesignGui::nameNewFeature(sketch);
     // No plane yet: the first pick in the Sketch plane field gives it one
     FCMD_OBJ_CMD(
         sketch,
@@ -1107,6 +1113,7 @@ bool createSketchOnStudioPlane(Gui::Document* guidocument, PartDesign::Body* act
         return true;
     }
     FCMD_OBJ_CMD(sketch, "Label = 'Sketch'");
+    PartDesignGui::nameNewFeature(sketch);
     FCMD_OBJ_CMD(sketch, "AttachmentSupport = (" << Gui::Command::getObjectCmd(own) << ",[''])");
     FCMD_OBJ_CMD(
         sketch,

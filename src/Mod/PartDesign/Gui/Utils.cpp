@@ -24,6 +24,7 @@
 
 
 #include <algorithm>
+#include <cctype>
 #include <set>
 #include <QMessageBox>
 #include <gp_Pln.hxx>
@@ -346,6 +347,91 @@ void nameNewPart(PartDesign::Body* body, App::Part* studioHint)
     }
     label = Base::Tools::escapeEncodeString(label);
     Gui::cmdAppObjectArgs(body, "Label = '%s'", label.c_str());
+}
+
+// FreeCAD-CH (ops#796, terminology): under the Onshape keymap a feature a tool makes is labelled
+// as Onshape names it, "<word> N" ("Extrude 1", "Sketch 2", "Plane 1"), the lowest N no label of
+// the document has (labels are unique in a document by default; Onshape counts per Part Studio).
+// Only a label still FreeCAD's default (the object's name, or its name's stem plus digits) is
+// changed, so a second call, or a feature the person renamed, keeps its label. Types without an
+// Onshape word keep FreeCAD's label. The label only: names, types and properties stay
+// (notes\terminology.md). Declared where it is used (no header names it)
+std::string onshapeFeatureWord(const App::DocumentObject* feature);
+std::string onshapeFeatureWord(const App::DocumentObject* feature)
+{
+    static const std::vector<std::pair<std::string, std::string>> words = {
+        {"PartDesign::Pad", "Extrude"},
+        {"PartDesign::Pocket", "Extrude"},
+        {"PartDesign::Revolution", "Revolve"},
+        {"PartDesign::Groove", "Revolve"},
+        {"PartDesign::AdditivePipe", "Sweep"},
+        {"PartDesign::SubtractivePipe", "Sweep"},
+        {"PartDesign::AdditiveLoft", "Loft"},
+        {"PartDesign::SubtractiveLoft", "Loft"},
+        {"PartDesign::Fillet", "Fillet"},
+        {"PartDesign::Chamfer", "Chamfer"},
+        {"PartDesign::Draft", "Draft"},
+        {"PartDesign::Thickness", "Shell"},
+        {"PartDesign::Hole", "Hole"},
+        {"PartDesign::Mirrored", "Mirror"},
+        {"PartDesign::LinearPattern", "Linear pattern"},
+        {"PartDesign::PolarPattern", "Circular pattern"},
+        {"PartDesign::CurvePattern", "Curve pattern"},
+        {"PartDesign::Boolean", "Boolean"},
+        {"PartDesign::Plane", "Plane"},
+        {"Sketcher::SketchObject", "Sketch"},
+    };
+    if (!feature) {
+        return {};
+    }
+    const std::string type(feature->getTypeId().getName());
+    for (const auto& [name, word] : words) {
+        if (name == type) {
+            return word;
+        }
+    }
+    return {};
+}
+
+void nameNewFeature(App::DocumentObject* feature);
+void nameNewFeature(App::DocumentObject* feature)
+{
+    if (!feature || !feature->isAttachedToDocument() || !Gui::ForkKeymap::isOnshape()) {
+        return;
+    }
+    const std::string word = onshapeFeatureWord(feature);
+    if (word.empty()) {
+        return;
+    }
+    const std::string name = feature->getNameInDocument();
+    const std::string current = feature->Label.getValue();
+    std::string stem = name;
+    while (!stem.empty() && std::isdigit(static_cast<unsigned char>(stem.back()))) {
+        stem.pop_back();
+    }
+    const bool isDefault = current == name
+        || (current.size() >= stem.size() && current.compare(0, stem.size(), stem) == 0
+            && std::all_of(current.begin() + stem.size(), current.end(), [](char c) {
+                   return std::isdigit(static_cast<unsigned char>(c));
+               }));
+    if (!isDefault) {
+        return;
+    }
+    std::set<std::string> taken;
+    for (App::DocumentObject* obj : feature->getDocument()->getObjects()) {
+        if (obj != feature) {
+            taken.insert(obj->Label.getValue());
+        }
+    }
+    std::string label;
+    for (int n = 1;; ++n) {
+        label = word + " " + std::to_string(n);
+        if (!taken.contains(label)) {
+            break;
+        }
+    }
+    label = Base::Tools::escapeEncodeString(label);
+    Gui::cmdAppObjectArgs(feature, "Label = '%s'", label.c_str());
 }
 
 // FreeCAD-CH (ops#640, r7 fixes): under the typed tabs a new part is made only in a Part Studio

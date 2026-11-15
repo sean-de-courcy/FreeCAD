@@ -104,6 +104,13 @@ FC_LOG_LEVEL_INIT("PartDesign", true, true)
 using namespace std;
 using namespace Attacher;
 
+namespace PartDesignGui
+{
+// FreeCAD-CH (ops#796, terminology): Utils.cpp's (no header names it): a new feature's label
+// in Onshape's words ("Extrude 1"), under its keymap
+void nameNewFeature(App::DocumentObject* feature);
+}  // namespace PartDesignGui
+
 static void copyPlacementExpressions(App::DocumentObject* target, const App::DocumentObject* source)
 {
     if (!target || !source) {
@@ -226,6 +233,7 @@ void UnifiedDatumCommand(Gui::Command& cmd, Base::Type type, std::string name)
             if (!Feat) {
                 return;
             }
+            PartDesignGui::nameNewFeature(Feat);  // "Plane 1" (ops#796)
 
             // test if current selection fits a mode.
             if (support.getSize() > 0) {
@@ -827,6 +835,7 @@ static void finishFeature(
     }
 
     // A tool started while its dialog is open drops it when the user gave it nothing (rank 24, F2)
+    PartDesignGui::nameNewFeature(feature);
     PartDesignGui::TaskDlgFeatureParameters::noteCreated(feature);
     // The feature's own Body: a new Extrude may have gone to another part (hands-on check A-1)
     PartDesign::Body* featureBody = PartDesign::Body::findBodyOf(feature);
@@ -2170,6 +2179,7 @@ static bool prepareStudioOwner(Gui::Command* cmd, const std::string& which, doub
         if (sketch) {
             FCMD_OBJ_HIDE(sketch);
         }
+        PartDesignGui::nameNewFeature(owner);
         PartDesignGui::TaskDlgFeatureParameters::noteCreated(owner);
         if (!remove || (!target && (revolved || hole))) {
             // Picked again on every change of the tool until the person chooses (Q1f). A Groove
@@ -3208,6 +3218,7 @@ static bool makeStudioDressUp(
             );
             Gui::cmdAppDocument(doc, "recompute()");
         }
+        PartDesignGui::nameNewFeature(owner);
         PartDesignGui::TaskDlgFeatureParameters::noteCreated(owner);
         if (!PartDesignGui::setEdit(owner)) {
             throw Base::RuntimeError("The studio feature's dialog didn't open");
@@ -3983,6 +3994,7 @@ static bool prepareStudioPartMirror(Gui::Command* cmd)
             );
             Gui::cmdAppDocument(doc, "recompute()");
         }
+        PartDesignGui::nameNewFeature(owner);
         PartDesignGui::TaskDlgFeatureParameters::noteCreated(owner);
         cmd->doCommand(cmd->Gui, "Gui.Selection.clearSelection()");
         if (!PartDesignGui::setEdit(owner)) {
@@ -4544,6 +4556,7 @@ static bool makeStudioBoolean(Gui::Command* cmd)
             );
             Gui::cmdAppDocument(doc, "recompute()");
         }
+        PartDesignGui::nameNewFeature(owner);
         PartDesignGui::TaskDlgFeatureParameters::noteCreated(owner);
         if (!PartDesignGui::setEdit(owner)) {
             throw Base::RuntimeError("The Boolean's dialog didn't open");

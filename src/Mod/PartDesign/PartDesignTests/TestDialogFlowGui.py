@@ -433,6 +433,33 @@ class TestRound6PolishGui(DialogFlowCase):
         finally:
             self.setKeymap(saved)
 
+    def testNewFeaturesAreNamedAsOnshape(self):
+        """ops#796: under the Onshape keymap a pad from the Extrude tool is "Extrude 1", a pocket
+        then "Extrude 2" (Onshape's one word for both, the lowest N free); the names stay
+        FreeCAD's, and a feature the person renamed keeps its label. FreeCAD's keymap keeps the
+        name as the label."""
+        self.enclosure()
+        made = []
+        for command in ("PartDesign_Pad", "PartDesign_Pocket"):
+            before = {o.Name for o in self.doc.Objects}
+            self.runCommand(command, self.lidSk)
+            [feature] = [o for o in self.doc.Objects if o.Name not in before and o.TypeId.startswith("PartDesign::P")]
+            self.close(ok=True)
+            made.append(feature)
+        self.assertEqual([f.Label for f in made], ["Extrude 1", "Extrude 2"])
+        self.assertEqual([f.TypeId for f in made], ["PartDesign::Pad", "PartDesign::Pocket"])
+        made[0].Label = "Lid"
+        self.assertEqual(made[0].Label, "Lid")
+        saved = self.setKeymap("FreeCAD")
+        try:
+            before = {o.Name for o in self.doc.Objects}
+            self.runCommand("PartDesign_Pad", self.lidSk)
+            [feature] = [o for o in self.doc.Objects if o.Name not in before and o.TypeId == "PartDesign::Pad"]
+            self.close(ok=True)
+            self.assertEqual(feature.Label, feature.Name)
+        finally:
+            self.setKeymap(saved)
+
     def testTheOperationRowReadsOnshapesWordsOnTop(self):
         """J2/J9: the lid pad's and the lid pocket's operation rows read New, Add, Remove,
         Intersect, the part they act on in the tooltips; the row is in the first box, above the
