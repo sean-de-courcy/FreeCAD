@@ -70,6 +70,11 @@ def point(sk, tag, x, y):
     named(sk, Sketcher.Constraint("DistanceY", -1, 1, g, 1, y), tag + "y")
 
 
+def dressOwner():
+    """Fillet/Chamfer as studio owners: TRUTH_OWNER_DRESS, default TRUTH_OWNER's value (1)"""
+    return os.environ.get("TRUTH_OWNER_DRESS", os.environ.get("TRUTH_OWNER", "1")) == "1"
+
+
 class Builder:
     PATTERNS = ("LinearPattern", "PolarPattern", "Mirrored")
 
@@ -96,7 +101,16 @@ class Builder:
         # members (the in-Body path, ops#844). A pattern's originals stay Body members (owner=False).
         if owner is None:
             owner = os.environ.get("TRUTH_OWNER", "1") == "1"
-        if owner and kind in self.OWNABLE and not self.body.Shape.isNull():
+        if dressOwner() and kind in ("Fillet", "Chamfer") and "Base" in props:
+            # In a listed studio the GUI makes a Fillet or Chamfer a studio owner too (Command.cpp makeStudioDressUp):
+            # no Base, its picks as StudioPickIds on the part's shown shape (the Body's Tip: dressupGetSelected), a
+            # step <name>_at_Part in the Body (the ops#808 path). TRUTH_OWNER_DRESS=0 keeps the Body member
+            base, edges = props.pop("Base")
+            f = self.doc.addObject("PartDesign::" + kind, name)
+            f.StudioPickIds = [PartDesign.studioPickId(base, e) for e in edges]
+            for k, x in props.items():
+                setattr(f, k, x)
+        elif owner and kind in self.OWNABLE and not self.body.Shape.isNull():
             f = self.doc.addObject("PartDesign::" + kind, name)
             f.StudioScope = [self.body.StudioPartId or self.body.Name]
             for k, x in props.items():
@@ -689,7 +703,11 @@ def apply(doc, tpl, key, v, p=None):
         else:
             datum(o, prop, v)
     elif how == "edges":
-        o.Base = (doc.getObject("Box"), edgeSet(doc.getObject("Box"), v))
+        box = doc.getObject("Box")
+        if not doc.getObject("Part").hasObject(o):   # a studio owner (outside the Body): its picks are ids
+            o.StudioPickIds = [PartDesign.studioPickId(box, e) for e in edgeSet(box, v)]
+        else:
+            o.Base = (box, edgeSet(box, v))
     else:
         if prop is None:
             prop = "Radius" if hasattr(o, "Radius") else "Size"
