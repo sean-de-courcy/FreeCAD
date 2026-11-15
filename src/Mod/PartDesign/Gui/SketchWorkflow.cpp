@@ -43,6 +43,9 @@
 #include "WorkflowManager.h"
 #include "ui_DlgReference.h"
 #include <Mod/PartDesign/App/Body.h>
+#include <App/GeoFeatureGroupExtension.h>
+#include <Mod/PartDesign/App/StudioEdit.h>
+#include <Mod/PartDesign/App/StudioList.h>
 #include <Mod/PartDesign/App/DatumPlane.h>
 #include <Mod/PartDesign/App/ShapeBinder.h>
 #include <Mod/Part/App/AttachExtension.h>
@@ -54,6 +57,7 @@
 
 #include <App/Document.h>
 #include <App/ElementNamingUtils.h>
+#include <Base/Console.h>
 #include <App/DocumentObserver.h>
 #include <App/Link.h>
 #include <App/Origin.h>
@@ -81,6 +85,25 @@ bool refuseNewPartOutsideStudio(App::Document* doc);
 
 namespace
 {
+/// FreeCAD-CH (ops#794): a new sketch in a studio with a history list goes at the list's bar, as
+/// Onshape's history puts it where it is made. Left to the list's adoption, a Body member made by
+/// a command joins after the entry before it in its own Body, so a sketch on one part's face went
+/// above the later features of the studio's other parts. Inside the command's transaction
+void sketchAtTheBar(App::DocumentObject* sketch, PartDesign::Body* body)
+{
+    if (!sketch || !body) {
+        return;
+    }
+    auto studio = freecad_cast<App::Part*>(App::GeoFeatureGroupExtension::getGroupOfObject(body));
+    if (!PartDesign::StudioList::of(body->getDocument(), studio, false)
+        || PartDesign::StudioList::holding(sketch)) {
+        return;
+    }
+    std::string why;
+    if (!PartDesign::studioInsert(sketch, -1, &why)) {
+        Base::Console().log("New Sketch: the sketch stays at its Body's place (%s)\n", why.c_str());
+    }
+}
 struct RejectException
 {
 };
@@ -333,6 +356,7 @@ public:
 
         guidocument->openCommand(QT_TRANSLATE_NOOP("Command", "Sketch on Face"));
         FCMD_OBJ_CMD(activeBody, "newObject('Sketcher::SketchObject','" << FeatName << "')");
+        sketchAtTheBar(activeBody->getDocument()->getObject(FeatName.c_str()), activeBody);
         auto Feat = activeBody->getDocument()->getObject(FeatName.c_str());
         FCMD_OBJ_CMD(Feat, "Label = 'Sketch'");
         FCMD_OBJ_CMD(Feat, "AttachmentSupport = " << supportString);
@@ -731,6 +755,7 @@ private:
         App::Document* doc = activeBody->getDocument();
         std::string FeatName = doc->getUniqueObjectName("Sketch");
         FCMD_OBJ_CMD(activeBody, "newObject('Sketcher::SketchObject','" << FeatName << "')");
+        sketchAtTheBar(activeBody->getDocument()->getObject(FeatName.c_str()), activeBody);
         auto sketch = doc->getObject(FeatName.c_str());
         FCMD_OBJ_CMD(sketch, "Label = 'Sketch'");
 
@@ -956,6 +981,7 @@ private:
         }
 
         FCMD_OBJ_CMD(partDesignBody, "newObject('Sketcher::SketchObject','" << FeatName << "')");
+        sketchAtTheBar(partDesignBody->getDocument()->getObject(FeatName.c_str()), partDesignBody);
         auto Feat = doc->getObject(FeatName.c_str());
         FCMD_OBJ_CMD(Feat, "Label = 'Sketch'");
         FCMD_OBJ_CMD(Feat, "AttachmentSupport = " << supportString);
@@ -994,6 +1020,7 @@ void createSketchToPickPlane(Gui::Document* guidocument, PartDesign::Body* activ
     }
     std::string FeatName = appdocument->getUniqueObjectName("Sketch");
     FCMD_OBJ_CMD(activeBody, "newObject('Sketcher::SketchObject','" << FeatName << "')");
+    sketchAtTheBar(activeBody->getDocument()->getObject(FeatName.c_str()), activeBody);
     auto sketch = appdocument->getObject(FeatName.c_str());
     if (!sketch) {
         guidocument->abortCommand();
@@ -1073,6 +1100,7 @@ bool createSketchOnStudioPlane(Gui::Document* guidocument, PartDesign::Body* act
     }
     std::string FeatName = appdocument->getUniqueObjectName("Sketch");
     FCMD_OBJ_CMD(activeBody, "newObject('Sketcher::SketchObject','" << FeatName << "')");
+    sketchAtTheBar(activeBody->getDocument()->getObject(FeatName.c_str()), activeBody);
     auto sketch = appdocument->getObject(FeatName.c_str());
     if (!sketch) {
         guidocument->abortCommand();

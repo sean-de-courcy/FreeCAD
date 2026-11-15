@@ -239,6 +239,30 @@ class TestStudioRevolveHoleGui(StudioDialog, unittest.TestCase):
         self.assertAlmostEqual(self.volume("A"), QA - 48, places=4)
         self.assertAlmostEqual(self.volume("B"), QA, places=4)
 
+    def testNewSketchGoesAtTheBar(self):
+        """ops#794: the two-box studio's history is ASk, APad, BSk, BPad. New Sketch on A's top
+        face makes a sketch in A that goes at the bar, the history's end, as Onshape puts a new
+        sketch where it is made; then a Pocket of it follows it there. It went right after APad,
+        A's last entry, above B's features: every sketch above every feature of later parts."""
+        view = Gui.getDocument(self.doc.Name).ActiveView
+        view.setActiveObject("pdbody", self.body("A"))
+        a = self.body("A")
+        top = [i for i, f in enumerate(a.Shape.Faces, 1)
+               if abs(f.BoundBox.ZMin - 10) < 1e-9 and abs(f.BoundBox.ZMax - 10) < 1e-9][0]
+        Gui.Selection.clearSelection()
+        Gui.Selection.addSelection(self.doc.Name, "S", "A.Face%d" % top)
+        before = set(self.objects())
+        Gui.runCommand("PartDesign_NewSketch")
+        pump(0.8)
+        sk = [self.doc.getObject(n) for n in set(self.objects()) - before
+              if self.doc.getObject(n).TypeId == "Sketcher::SketchObject"]
+        self.assertEqual(len(sk), 1, "no sketch made")
+        Gui.ActiveDocument.resetEdit()
+        self.doc.recompute()
+        pump(0.3)
+        PartDesign.studioReconcile(self.list)  # a member the list doesn't hold is adopted here
+        self.assertEqual(self.entries(), ["ASk", "APad", "BSk", "BPad", sk[0].Name])
+
     # ------------------------------------------------------- the per-Body path's freeze
     def testThroughAllInABodyWithoutBaseReturns(self):
         """The per-Body path (a studio with no list and StudioListOnFirstUse off, the test hook):
