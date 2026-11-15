@@ -1273,6 +1273,14 @@ void ProfileBased::getUpToFaceFromLinkSub(TopoShape& upToFace, const App::Proper
             "The face link names several faces; select a single face"
         ));
     }
+    // A studio owner's face: as the part has it just before the owner (ops#848, Onshape UT5)
+    if (subs.size() == 1) {
+        auto owner = freecad_cast<App::DocumentObject*>(refFace.getContainer());
+        if (TopoShape at = studioElementAt(owner, ref, subs[0]); at.hasSubShape(TopAbs_FACE)) {
+            upToFace = at;
+            return;
+        }
+    }
     upToFace = Part::Feature::getTopoShape(
         ref,
         Part::ShapeOption::NeedSubElement | Part::ShapeOption::ResolveLink

@@ -49,6 +49,17 @@ PartDesignExport Part::TopoShape studioPartShapeAt(
     bool& isPart
 );
 
+/// An owner's link to one element of a solid feature of a studio part (linked, element), read at
+/// owner's place (FreeCAD-CH ops#848, Onshape UT5: an up-to face is read as it is at the feature,
+/// so a face a later-inserted Draft tilts is followed): the element as the part's last solid
+/// before owner has it, traced by name from linked. Null when owner is no studio owner, linked is
+/// that last solid or no solid of a studio part, or the element can't be traced there: the caller then reads linked itself, as before
+PartDesignExport Part::TopoShape studioElementAt(
+    const App::DocumentObject* owner,
+    const App::DocumentObject* linked,
+    const std::string& element
+);
+
 /// Whether prop is an up-to link (UpToFace/2, UpToShape/2) that names parts of a studio whole: every
 /// entry without an element, on a Body or a solid feature of one, of a reader outside every Body. Such a link is read at the
 /// reader's place whatever it names (studioPartShapeAt()) and reconcile re-targets it, so it is no
