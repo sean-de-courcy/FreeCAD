@@ -1149,6 +1149,88 @@ class TestForkKeymapGui(unittest.TestCase):
         self.assertEqual(fired, [])
         self.escapeTool()
 
+    def testHTogglesShowMatesModeInAssemblyEdit(self):
+        """Onshape's h toggles Show mates mode, off by default (oracle 24, G3-7; gaps3 row 8).
+        While it is on, only the mates of the instances under the cursor or selected show; off,
+        each mate has its own visibility back. Designed model: an assembly of three 10 mm
+        boxes, BoxA grounded, a Fixed joint BoxA-BoxB and one BoxB-BoxC (hidden by the user)."""
+        if "AssemblyWorkbench" not in Gui.listWorkbenches():
+            self.skipTest("no Assembly")
+        doc = App.newDocument("ForkKeymapShowMates")
+        try:
+            Gui.activateWorkbench("AssemblyWorkbench")
+            import CommandShowMatesMode
+            import JointObject
+
+            assembly = doc.addObject("Assembly::AssemblyObject", "Assembly")
+            group = assembly.newObject("Assembly::JointGroup", "Joints")
+            boxes = {}
+            for i, name in enumerate(("BoxA", "BoxB", "BoxC")):
+                box = assembly.newObject("Part::Box", name)
+                box.Placement.Base = App.Vector(20 * i, 0, 0)
+                boxes[name] = box
+            doc.recompute()  # the joints' picks read the boxes' shapes
+            ground = group.newObject("App::FeaturePython", "Ground")
+            JointObject.GroundedJoint(ground, boxes["BoxA"])
+            joints = {}
+            for a, b in (("BoxA", "BoxB"), ("BoxB", "BoxC")):
+                joint = group.newObject("App::FeaturePython", f"Fixed{a[-1]}{b[-1]}")
+                JointObject.Joint(joint, 0)
+                joint.Proxy.setJointConnectors(
+                    joint, [[boxes[a], ["Face2", "Vertex6"]], [boxes[b], ["Face1", "Vertex1"]]]
+                )
+                joints[joint.Name] = joint
+            doc.recompute()
+            Gui.ActiveDocument = Gui.getDocument(doc.Name)
+            Gui.ActiveDocument.setEdit(assembly.Name)
+            self.assertTrue(waitFor(lambda: Gui.ActiveDocument.getInEdit() is not None))
+            pump(0.5)
+            for joint in joints.values():
+                if joint.ViewObject:
+                    joint.ViewObject.Visibility = True
+            joints["FixedBC"].ViewObject.Visibility = False  # the user's own hide
+            self.assertEqual(toolKey("Assembly_ToggleShowMatesMode"), "H")
+
+            def shown():
+                return sorted(n for n, j in joints.items() if j.ViewObject.Visibility)
+
+            Gui.Selection.clearSelection()
+            self.assertFalse(CommandShowMatesMode.isShowMatesModeOn())  # off by default
+            self.press(QtCore.Qt.Key_H)
+            self.assertTrue(waitFor(CommandShowMatesMode.isShowMatesModeOn), "H didn't turn it on")
+            self.assertEqual(shown(), [])  # nothing under the cursor, nothing selected
+            # the pointer over BoxB (its preselection): both of BoxB's mates
+            Gui.Selection.setPreselection(assembly, "BoxB.Face3")
+            pump(0.3)
+            self.assertEqual(shown(), ["FixedAB", "FixedBC"])
+            Gui.Selection.clearPreselection()
+            pump(0.3)
+            self.assertEqual(shown(), [])
+            Gui.Selection.addSelection(doc.Name, assembly.Name, "BoxC.Face1")
+            pump(0.3)
+            self.assertEqual(shown(), ["FixedBC"])  # BoxC's mate, though the user hid it
+            Gui.Selection.addSelection(doc.Name, assembly.Name, "BoxA.Face1")
+            pump(0.3)
+            self.assertEqual(shown(), ["FixedAB", "FixedBC"])
+            Gui.Selection.clearSelection()
+            pump(0.3)
+            self.assertEqual(shown(), [])
+            self.press(QtCore.Qt.Key_H)
+            self.assertTrue(waitFor(lambda: not CommandShowMatesMode.isShowMatesModeOn()), "H again")
+            self.assertEqual(shown(), ["FixedAB"])  # each mate's own visibility back
+        finally:
+            import CommandShowMatesMode
+
+            CommandShowMatesMode.setShowMatesMode(False)
+            if Gui.Control.activeDialog():
+                Gui.Control.closeDialog()
+            guiDoc = Gui.getDocument(doc.Name)
+            if guiDoc.getInEdit():
+                guiDoc.resetEdit()
+            pump()
+            App.closeDocument(doc.Name)
+            Gui.ActiveDocument = Gui.getDocument(self.doc.Name)
+
     def testFFitsTheViewInAssemblyEdit(self):
         """In assembly edit, F fits the view, not a Fixed joint (Assembly's joints are ForEdit, so
         the tie rule gave them F): Assembly's F, Z, W, Y and the BOM's O are cleared under the
