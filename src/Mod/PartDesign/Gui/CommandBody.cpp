@@ -970,6 +970,7 @@ CmdPartDesignToggleModelTree::CmdPartDesignToggleModelTree()
     );
     sWhatsThis = "PartDesign_ToggleModelTree";
     sStatusTip = sToolTipText;
+    sPixmap = "tree-doc-single";  // a toolbar button needs an icon (ops#796)
     eType = ForEdit | NoTransaction;
 }
 
