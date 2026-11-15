@@ -169,8 +169,9 @@ class TestHole(unittest.TestCase):
         """A diameter change never rewrites the user's hole cut values (ops#823). A diameter
         above the cut diameter made an unthreaded hole replace them with its rules of thumb
         (1.7 d for a countersink, 1.6 d and 0.9 d for a counterbore), kept after the diameter
-        came back, with no message. The diameter above the cut is an error instead, and the
-        hole builds the user's cut again once the diameter is back below it."""
+        came back, with no message. As in Onshape, a diameter at or above the cut diameter is
+        an error instead, and the hole builds the user's cut again once the diameter is back
+        below it."""
         cutDiameter, cutDepth, length = 8.83, 2.5, 10
         for cut in ("Counterbore", "Countersink"):
             self.Hole.Diameter = 6
@@ -196,6 +197,14 @@ class TestHole(unittest.TestCase):
             self.assertAlmostEqual(self.Hole.HoleCutDiameter.Value, cutDiameter, msg=cut)
             self.assertAlmostEqual(self.Hole.HoleCutDepth.Value, expectedDepth, msg=cut)
             self.assertFalse(self.Hole.isValid(), cut)
+
+            # a cut as wide as the hole is an error too; just below it builds
+            self.Hole.Diameter = cutDiameter
+            self.Doc.recompute()
+            self.assertFalse(self.Hole.isValid(), cut)
+            self.Hole.Diameter = cutDiameter - 0.001
+            self.Doc.recompute()
+            self.assertTrue(self.Hole.isValid(), cut)
 
             d = 8.14
             self.Hole.Diameter = d
