@@ -327,6 +327,21 @@ def lowest_along(shape, direction, origin, count=40):
     return lowest
 
 
+def lowest_off_caps(shape, direction, origin, count=40):
+    """lowest_along, with planar caps taken by their vertexes only: a plane's parameter range
+    reaches past a turned rectangle"""
+    lowest = min((vertex.Point - origin).dot(direction) for vertex in shape.Vertexes)
+    for face in shape.Faces:
+        if face.Surface.TypeId == "Part::GeomPlane":
+            continue
+        u0, u1, v0, v1 = face.ParameterRange
+        for i in range(count + 1):
+            for j in range(count + 1):
+                point = face.valueAt(u0 + (u1 - u0) * i / count, v0 + (v1 - v0) * j / count)
+                lowest = min(lowest, (point - origin).dot(direction))
+    return lowest
+
+
 def helix_edge(pitch, height, radius, angle=0.0):
     """A right-handed helix about Z from (radius, 0, 0), on a cone of `angle` degrees widening
     upwards, as Part.makeHelix makes it, but as one B-spline of degree 6 continuous in its fourth
@@ -738,6 +753,41 @@ class SweepFrenetTest(unittest.TestCase):
         (ops#465)"""
         for line in (0.01, 0.1, 1.0):
             self.assertStaysOnItsSide(same_side_arcs_edge(line))
+
+    def testFrenetStraightEdgeBetweenArcs(self):
+        """Three edges in XY: a quarter of a unit circle, a straight cubic B-spline edge of 1 mm
+        along its end tangent (collinear poles) and another quarter circle bending the same way,
+        and the same with a line edge in the middle. Along the whole straight edge OCCT's Frenet
+        frame takes a normal of its own, and the edges' frames are made to agree from it: turned 37
+        degrees about (1, 2, 3), the rectangle beside the spine came out on the far side of it,
+        down to -2.55 times its scale, with no refusal; the line edge kept it (fork PR 377's round
+        2 review, c7a; ops#507). On a planar spine Frenet's binormal is the plane's normal, so the
+        rectangle 0.5 to 2.5 times its scale along it, centred across, stays there all along: its
+        lowest point is 0.5 times the scale from the spine's plane, and its volume, by Pappus with
+        the centroid on the plane's normal through the spine, is its area times the spine's
+        length"""
+        first = Part.ArcOfCircle(Part.Circle(V(0, 1, 0), V(0, 0, 1), 1), -math.pi / 2, 0.0)
+        second = Part.ArcOfCircle(Part.Circle(V(0, 2, 0), V(0, 0, 1), 1), 0.0, math.pi / 2)
+        straight = Part.BSplineCurve()
+        straight.buildFromPolesMultsKnots(
+            [V(1, 1 + i / 3.0, 0) for i in range(4)], [4, 4], [0.0, 1.0], False, 3
+        )
+        scale = 0.1
+        for middle in (straight.toShape(), Part.makeLine(V(1, 1, 0), V(1, 2, 0))):
+            wire = Part.Wire([first.toShape(), middle, second.toShape()])
+            self.assertAlmostEqual(wire.Length, math.pi + 1, places=9)
+            for rotation in (App.Rotation(), TURN):
+                spine = Part.Wire(wire.transformGeometry(rotation.toMatrix()).Edges)
+                normal = rotation.multVec(V(0, 0, 1))
+                sweep = self.sweep(spine, rectangle_on_side(spine, normal, scale))
+                self.assertTrue(sweep.isValid(), sweep.getStatusString())
+                self.assertSound(sweep.Shape)
+                lowest = lowest_off_caps(sweep.Shape, normal, start_frame(spine)[0])
+                self.assertAlmostEqual(lowest / scale, 0.5, delta=1e-3)
+                area = 2.0 * scale * scale
+                self.assertAlmostEqual(
+                    sweep.Shape.Volume / (area * spine.Length), 1.0, delta=1e-3
+                )
 
     def testFrenetStraightStartOfAPlanarSpine(self):
         """A planar spine in YZ whose first span is straight along Z: there OCCT's Frenet frame
