@@ -480,6 +480,21 @@ public:
         return bodyOf(obj) && parkedReason(obj, why);
     }
 
+    bool passesFailureThrough(const App::DocumentObject* obj) const override
+    {
+        // Failed while its output is the failure's pass-through: the error alone stays set while
+        // the recompute that fixes it writes its own shape. One that passes the empty shape (a
+        // parked lead) is no shape input of anything, and the references below it are judged as
+        // in a Body without it (design notes\park-design.md 5 (R), decision 275 (4))
+        // The cheap tests first: this runs for every object of every record's closure
+        if (!obj || !obj->isError()) {
+            return false;
+        }
+        auto feature = freecad_cast<const Feature*>(obj);
+        return feature && feature->failurePassedThrough() && Body::isSolidFeature(feature)
+            && bodyOf(feature) != nullptr && !feature->Shape.getShape().isNull();
+    }
+
     void shapeInputChain(const App::DocumentObject* target,
                          std::vector<ChainFeature>& out) const override
     {
@@ -512,15 +527,7 @@ public:
                 const bool suppressed = feature->passesBaseThrough();
                 const bool claimed = bodyOf(feature) != nullptr;
                 if (claimed || suppressed) {
-                    // Failed while its output is the failure's pass-through: the error alone
-                    // stays set while the recompute that fixes it writes its own shape. One that
-                    // passes the empty shape (a parked lead) is no shape input of anything, and
-                    // the references below it are judged as in a Body without it (design
-                    // notes\park-design.md 5 (R), decision 275 (4))
-                    out.push_back({feature,
-                                   claimed && feature->isError() && feature->failurePassedThrough()
-                                       && !feature->Shape.getShape().isNull(),
-                                   suppressed});
+                    out.push_back({feature, passesFailureThrough(feature), suppressed});
                 }
                 std::vector<App::Property*> props;
                 feature->getPropertyList(props);

@@ -241,6 +241,28 @@ bool digestCacheActive(const DigestCache& cache)
     return cache.depth > 0 && cache.mode != DigestCache::Off
         && cache.owner == std::this_thread::get_id();
 }
+
+// Whether a record with these marks was taken while every object of `failures` (IDs) was passing
+// its base through after a failure (ops#814): each has a mark flagged failed, and none that isn't
+// (two documents' objects sharing the ID: the record can't tell which was the chain's). False
+// for a record without marks.
+bool takenUnderFailures(const std::vector<Data::ElementFingerprint::Mark>& marks,
+                        const std::vector<long>& failures)
+{
+    for (const long tag : failures) {
+        bool flagged = false;
+        bool unflagged = false;
+        for (const auto& mark : marks) {
+            if (mark.tag == tag) {
+                (mark.failed ? flagged : unflagged) = true;
+            }
+        }
+        if (!flagged || unflagged) {
+            return false;
+        }
+    }
+    return true;
+}
 }  // namespace
 
 PlacementDigestScope::PlacementDigestScope()
@@ -2081,10 +2103,12 @@ bool solveElementReferences(DocumentObject* feature,
     };
 
     // Rule PT (ops#549): the features this target's shape is built on that can pass their base
-    // through, read once. A failure among them puts every entry under the veto (PT1: kept only
-    // at the saved place or covering it); a suppression only an entry whose record was taken
-    // with another set suppressed (PS, a switch: PT1s, within it too). A record taken in the
-    // current world is judged by the ordinary rules.
+    // through, read once. A failure among them puts an entry under the veto (PT1: kept only
+    // at the saved place or covering it) unless its record was taken while every one of them
+    // was already passing its base through (ops#814: the record is of the model as it is, and
+    // an edit made below a red feature is judged as any other); a suppression only an entry
+    // whose record was taken with another set suppressed (PS, a switch: PT1s, within it too).
+    // A record taken in the current world is judged by the ordinary rules.
     enum class PassThrough
     {
         None,
@@ -2093,6 +2117,7 @@ bool solveElementReferences(DocumentObject* feature,
     };
     std::optional<std::vector<RecomputeContinuation::ChainFeature>> chain;
     std::vector<std::pair<long, bool>> chainWorld;
+    std::vector<long> chainFailures;
     const DocumentObject* chainFailure = nullptr;
     auto readChain = [&]() -> const std::vector<RecomputeContinuation::ChainFeature>& {
         if (!chain) {
@@ -2101,8 +2126,11 @@ bool solveElementReferences(DocumentObject* feature,
                 rule->shapeInputChain(feature, *chain);
             }
             for (const auto& link : *chain) {
-                if (link.failed && !chainFailure) {
-                    chainFailure = link.object;
+                if (link.failed) {
+                    chainFailures.push_back(link.object->getID());
+                    if (!chainFailure) {
+                        chainFailure = link.object;
+                    }
                 }
                 chainWorld.emplace_back(link.object->getID(), link.suppressed);
             }
@@ -2115,13 +2143,13 @@ bool solveElementReferences(DocumentObject* feature,
         if (readChain().empty()) {
             return PassThrough::None;
         }
-        if (chainFailure) {
-            return PassThrough::Failure;
-        }
         auto [it, added] = passThroughs.emplace(&entry, PassThrough::None);
         if (added) {
             const auto saved = Data::ElementFingerprint::fromString(entry.oldFingerprint);
-            if (Data::passThroughWorldSwitched(saved.marks, chainWorld)) {
+            if (chainFailure && !takenUnderFailures(saved.marks, chainFailures)) {
+                it->second = PassThrough::Failure;
+            }
+            else if (Data::passThroughWorldSwitched(saved.marks, chainWorld)) {
                 it->second = PassThrough::Switch;
             }
         }
@@ -2179,7 +2207,16 @@ bool solveElementReferences(DocumentObject* feature,
     // the record
     auto passThroughEvidence = [&](const SolverEntry& entry, PassThrough rule) {
         if (rule == PassThrough::Failure) {
-            return "'" + std::string(chainFailure->Label.getValue())
+            // The nearest failure the record wasn't taken under
+            const auto saved = Data::ElementFingerprint::fromString(entry.oldFingerprint);
+            const DocumentObject* failure = chainFailure;
+            for (const auto& link : readChain()) {
+                if (link.failed && !takenUnderFailures(saved.marks, {link.object->getID()})) {
+                    failure = link.object;
+                    break;
+                }
+            }
+            return "'" + std::string(failure->Label.getValue())
                 + "' failed and passes its base through: kept only where it was";
         }
         const auto saved = Data::ElementFingerprint::fromString(entry.oldFingerprint);

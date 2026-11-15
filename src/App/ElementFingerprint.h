@@ -268,10 +268,21 @@ struct AppExport ElementFingerprint
         /// taken (App::DocumentObject::passesBaseThrough()): the record's world (ops#549 PS).
         /// Written `<tag>:<mark>:s`.
         bool suppressed = false;
+        /// The object's output was its base, passed through after it failed, when the record was
+        /// taken (App::RecomputeContinuation::passesFailureThrough()): the record's world too
+        /// (ops#814). Written `<tag>:<mark>:f`, or `:sf` with `suppressed`.
+        bool failed = false;
+
+        /// The flags as one number, 0 for an object that made its own output
+        int world() const
+        {
+            return (suppressed ? 1 : 0) | (failed ? 2 : 0);
+        }
 
         friend bool operator==(const Mark& a, const Mark& b)
         {
-            return a.tag == b.tag && a.mark == b.mark && a.suppressed == b.suppressed;
+            return a.tag == b.tag && a.mark == b.mark && a.suppressed == b.suppressed
+                && a.failed == b.failed;
         }
     };
     /// The marks of the target's closure (version 7): only a reference's record has them; empty

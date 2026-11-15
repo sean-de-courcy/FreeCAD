@@ -2339,6 +2339,100 @@ class FailurePassThroughBase:
         edge = chamfer.Base[0].Shape.getElement(chamfer.Base[1][0])
         self.assertTrue(all(abs(v.Point.z - 14) < TOL for v in edge.Vertexes), chamfer.Base[1])
 
+    def testAnEditBelowAFailedFeatureMovesAReference(self):
+        """ops#814: a chamfer on the block's top edge, taken on a boss after the hole, follows
+        the block's thickness while the hole is failed, as a model built in that state does and
+        as it does while the hole is suppressed. The failure's recompute judged the reference
+        (kept where it was) and its record took that world: the edits after it are judged by
+        the ordinary rules. The hole computing again keeps the chamfer on its edge."""
+        if not self.solver:
+            self.skipTest("rule PT is the reference solver's")
+        block = self.block()
+        hole = self.hole()
+        holeSketch = hole.Profile[0]
+        boss = self.boss(hole)
+        self.recompute()
+        top = elementWhere(
+            boss.Shape,
+            "Edge",
+            lambda e: isinstance(e.Curve, Part.Line)
+            and all(abs(v.Point.y) < TOL and abs(v.Point.z - 10) < TOL for v in e.Vertexes),
+        )
+        chamfer = self.body.newObject("PartDesign::Chamfer", "TopChamfer")
+        chamfer.Base = (boss, [top])
+        chamfer.Size = 1
+        self.recompute()
+        self.assertValid(chamfer)
+        edgeChamfer = 0.5 * 1**2 * 20
+        self.assertVolume(chamfer, BLOCK - HOLE + BOSS - edgeChamfer)
+
+        def assertOnTheTopEdge(z):
+            edge = chamfer.Base[0].Shape.getElement(chamfer.Base[1][0])
+            self.assertTrue(
+                all(abs(v.Point.y) < TOL and abs(v.Point.z - z) < TOL for v in edge.Vertexes),
+                chamfer.Base[1],
+            )
+
+        empty = models.sketch(self.doc, "Empty", [], self.body)
+        hole.Profile = (empty, [])
+        self.recompute()
+        self.assertFailed(hole)
+        self.assertValid(chamfer)
+        self.assertVolume(chamfer, BLOCK + BOSS - edgeChamfer)
+
+        for length in (12, 14):
+            block.Length = length
+            self.recompute()
+            self.assertFailed(hole)
+            self.assertValid(chamfer)
+            self.assertVolume(chamfer, BLOCK * length / 10 + BOSS - edgeChamfer)
+            assertOnTheTopEdge(length)
+
+        # The hole's sketch follows the top, and the hole computes again
+        holeSketch.Placement = App.Placement(V(0, 0, 14), App.Rotation())
+        hole.Profile = (holeSketch, [])
+        self.recompute()
+        self.assertValid(hole, chamfer)
+        self.assertVolume(chamfer, BLOCK * 1.4 - HOLE + BOSS - edgeChamfer)
+        assertOnTheTopEdge(14)
+
+    def testAFailureAfterTheRecordStillKeepsOnlyWhereItWas(self):
+        """Rule PT's veto stands for a record taken before the failure (ops#549, ops#814): the
+        hole fails in the recompute that also makes the block taller, so the chamfer's edge is
+        judged against the record of the model with the hole, and breaks; the hole computing
+        again brings it back."""
+        if not self.solver:
+            self.skipTest("rule PT is the reference solver's")
+        block = self.block()
+        hole = self.hole()
+        holeSketch = hole.Profile[0]
+        boss = self.boss(hole)
+        self.recompute()
+        top = elementWhere(
+            boss.Shape,
+            "Edge",
+            lambda e: isinstance(e.Curve, Part.Line)
+            and all(abs(v.Point.y) < TOL and abs(v.Point.z - 10) < TOL for v in e.Vertexes),
+        )
+        chamfer = self.body.newObject("PartDesign::Chamfer", "TopChamfer")
+        chamfer.Base = (boss, [top])
+        chamfer.Size = 1
+        self.recompute()
+        self.assertValid(chamfer)
+
+        empty = models.sketch(self.doc, "Empty", [], self.body)
+        hole.Profile = (empty, [])
+        block.Length = 12
+        self.recompute()
+        self.assertFailed(hole)
+        self.assertFalse(chamfer.isValid(), "the chamfer's edge moved in the failing recompute")
+
+        holeSketch.Placement = App.Placement(V(0, 0, 12), App.Rotation())
+        hole.Profile = (holeSketch, [])
+        self.recompute()
+        self.assertValid(hole, chamfer)
+        self.assertVolume(chamfer, BLOCK * 1.2 - HOLE + BOSS - 0.5 * 1**2 * 20)
+
     def testReopenedWhileSuppressed(self):
         """Saved and reopened with the hole suppressed, a sketch on the top still follows the
         block: the record keeps the world it was taken in (ops#549 PS)."""
