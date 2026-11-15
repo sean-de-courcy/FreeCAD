@@ -105,7 +105,9 @@ public:
      * sections, but in the first one, which says how the element was made, at least one linked
      * name is a split piece of \a oldName's (isPieceOf()), or is itself made from pieces of it;
      * the other linked names and every other field are equal (the flags and the linked names
-     * compared as sets). E.g. a boss's junction edge with a plate's top face,
+     * compared as sets). One exception: where \a oldName was the only element its sources made
+     * (no duplicate counter, no connected elements), \a name may carry them: a piece that makes
+     * two elements in its place tells them apart so. E.g. a boss's junction edge with a plate's top face,
      * `_;{<top>, <cylinder>};<boss>;FUS;0;E;0;GEN;_`, once a wall inserted before the boss has cut
      * the top in two: `_;{<top>|<split>, <cylinder>};<boss>;FUS;0;E;0;GEN;_`. The same feature
      * made the element in the same way from what is left of the same sources; an edge that runs
