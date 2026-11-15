@@ -2547,8 +2547,9 @@ private:
                 continue;
             }
             labels.insert(other->Label.getValue());
+            // (its id is the reconcile's default, its name: no step reads it, a step would be in
+            // its Group)
             if (!body && studio && other->Group.getValues().empty()
-                && std::string(other->StudioPartId.getValue()).empty()
                 && !other->StudioMadeBy.getValue()
                 && other->getInList().size() <= 1) {
                 body = other;
