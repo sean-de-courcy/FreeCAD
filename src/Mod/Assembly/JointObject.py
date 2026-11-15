@@ -915,10 +915,11 @@ class Joint:
                     self.updateJCSPlacements(joint)
 
             if joint.JointType in JointUsingPreSolve:
-                # FreeCAD-CH (ops#640, design C1): a new Fastened mate is unflipped whatever the
-                # parts' positions, as Onshape's (GC-B1); Flip primary axis flips it. Before, the
-                # closer of the two directions was taken, so parts already facing came out flipped.
-                self.preSolve(joint, unflipped=joint.JointType == "Fixed")
+                # FreeCAD-CH (ops#826; Onshape's UI, GC-B1 and AR6): a new mate takes the pose closer
+                # to the parts' current one: two top faces stay unflipped (GC-B1, the boxes overlap),
+                # a bottom face onto a top face comes out flipped, face to face (AR6, primaryAxis-
+                # Alignment true, the Pin upright). Design C1 had forced unflipped, which hung AR6's Pin.
+                self.preSolve(joint)
             elif joint.JointType in JointParallelForbidden:
                 self.preventParallel(joint)
 
@@ -976,23 +977,24 @@ class Joint:
     def secondOffset(self, joint, plc2):
         """FreeCAD-CH (ops#683, design C2): Onshape's mate (oracle 12, GB31) is
             first connector = second x Reorient x Flip x Translate(Offset2.Base) x Rotate(Offset2.Rotation)
-        so the offset runs along the first connector's axes, flipped or not. The flip is the parts'
-        pose (matchJCS: first x Flip = second x offset), so the offset is conjugated by it here.
+        so the offset runs along the first connector's axes, flipped or not (AR6: the flipped Pin's
+        offset +3 sinks it into Blk). The flip is the parts' pose (matchJCS: first x Flip = second x
+        result), so the result is the relation followed by the pose's flip.
         plc2 is the second connector without its offset, in its part."""
         turns = int(getattr(joint, "Reorient", 0)) % 4
         reorient = App.Placement(App.Vector(), App.Rotation(App.Vector(0, 0, 1), 90 * turns))
         offset = joint.Offset2
+        pose = App.Placement()  # matchJCS's flip of the pose: Reference1 x pose = Reference2 x result
         if joint.JointType in JointUsingPreSolve and self.isPoseFlipped(joint, plc2, reorient, offset):
-            flip = App.Placement(App.Vector(), App.Rotation(App.Vector(1, 0, 0), 180))
-            rel = reorient * flip * offset * flip
-        else:
-            rel = reorient * offset
-        # FreeCAD-CH (ops#826; oracle 26, MO1): Onshape's relation holds between the picks, whatever
-        # part is grounded. Reference1 is the second pick when the references were swapped, so the
-        # stored pair needs the inverse: first pick = second pick x rel, i.e. Reference1 = Reference2 x rel^-1
+            pose = App.Placement(App.Vector(), App.Rotation(App.Vector(1, 0, 0), 180))
+        rel = reorient * pose * offset  # Onshape's: first pick = second pick x rel
+        # FreeCAD-CH (ops#826; oracle 26, MO1, AR6): Onshape's relation holds between the picks,
+        # whatever part is grounded. Reference1 is the second pick when the references were swapped:
+        # second x pose = first x rel^-1 x pose. The pose's flip stays outside the inverse (AR6: Pin
+        # picked first onto a Blk grounded before, offset +3 -> 3 into Blk, as unswapped).
         if getattr(joint, "PicksSwapped", False):
-            return rel.inverse()
-        return rel
+            rel = rel.inverse()
+        return rel * pose
 
     def isPoseFlipped(self, joint, plc2, reorient, offset):
         """Whether the parts sit with the first connector's Z against the second's (Flip primary)"""

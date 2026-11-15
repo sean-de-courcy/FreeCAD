@@ -229,9 +229,10 @@ class TestMateOffsetsGui(unittest.TestCase):
         self.commit(panel)
         self.assertPlacement(onshape(IDENTITY, (50, -5, -5)), "unflipped")
 
-    def test_new_mate_unflipped_even_facing(self):
-        """GC-B1: a new mate is unflipped whatever the parts' positions. A turned upside down
-        first (its top facing -z, as B's top would face it) still gets the unflipped mate."""
+    def test_new_mate_closest_pose_when_facing(self):
+        """ops#826 (oracle 26, AR6, U2): a new mate takes the pose closer to the parts' own. A
+        turned upside down first (its top facing -z, against B's top) comes out flipped, face to
+        face, as Flip primary from the upright start; U2: an upside-down Pin stayed hanging."""
         self.a.Placement = App.Placement(
             App.Vector(0, 20, 30), App.Rotation(App.Vector(1, 0, 0), 180)
         )
@@ -243,7 +244,7 @@ class TestMateOffsetsGui(unittest.TestCase):
         pump()
         self.assertEqual(len(panel.refs), 2)
         self.commit(panel)
-        self.assertPlacement(onshape(IDENTITY, (50, -5, -5)), "unflipped from a facing start")
+        self.assertPlacement(onshape(FLIPPED, (50, 15, 15)), "flipped from a facing start")
 
     def test_flip_primary_as_onshape(self):
         panel = self.openFastened()
