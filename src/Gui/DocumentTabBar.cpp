@@ -28,6 +28,7 @@
 #include <vector>
 
 #include <QAction>
+#include <QActionGroup>
 #include <QApplication>
 #include <QComboBox>
 #include <QDialog>
@@ -38,6 +39,7 @@
 #include <QKeyEvent>
 #include <QLineEdit>
 #include <QListWidget>
+#include <QHBoxLayout>
 #include <QVBoxLayout>
 #include <QMdiArea>
 #include <QMdiSubWindow>
@@ -69,6 +71,7 @@
 
 #include "DocumentTabBar.h"
 #include "VariableStudioView.h"
+#include "Action.h"
 #include "ActiveObjectList.h"
 #include "Application.h"
 #include "BitmapFactory.h"
@@ -281,6 +284,7 @@ private:
     QTabBar* typed;
     QToolButton* managerButton = nullptr;
     QToolButton* plusButton = nullptr;
+    QToolButton* newDocumentButton = nullptr;  // "+" after the document tabs: new or open (ops#796)
     bool selectorHidden = false;  // applyKeymap() hid the Workbench toolbar
     bool stripPlaced = false;  // placeStrip() has put the strip first once
     QTimer timer;
@@ -334,12 +338,82 @@ Controller::Controller(MainWindow* mw)
     strip->setObjectName(QStringLiteral("FreeCADCH_DocumentStrip"));
     strip->setWindowTitle(QApplication::translate("DocumentTabs", "Documents"));
     strip->setMovable(false);
-    documents = new QTabBar(strip);
+    // The tabs and a "+" right after the last one (ops#796, like a browser's new-tab button: a
+    // menu of New document, Open... and the recent files), in
+    // one row that takes the strip's width: the tabs shrink and scroll before "+" is pushed out
+    auto row = new QWidget(strip);
+    row->setObjectName(QStringLiteral("FreeCADCH_DocumentRow"));
+    row->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+    auto rowLayout = new QHBoxLayout(row);
+    rowLayout->setContentsMargins(0, 0, 0, 0);
+    rowLayout->setSpacing(4);
+    documents = new QTabBar(row);
     documents->setObjectName(QStringLiteral("FreeCADCH_DocumentTabBar"));
     documents->setTabsClosable(true);
     documents->setExpanding(false);
     documents->setDocumentMode(true);
-    strip->addWidget(documents);
+    documents->setUsesScrollButtons(true);
+    documents->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+    rowLayout->addWidget(documents);
+    newDocumentButton = new QToolButton(row);
+    newDocumentButton->setObjectName(QStringLiteral("FreeCADCH_NewDocument"));
+    newDocumentButton->setText(QStringLiteral("+"));
+    newDocumentButton->setToolTip(QApplication::translate("DocumentTabs", "New or open document"));
+    newDocumentButton->setAutoRaise(true);
+    newDocumentButton->setPopupMode(QToolButton::InstantPopup);
+    {
+        // New document (Std_New), Open... (Std_Open), then File > Open Recent's entries
+        auto menu = new QMenu(newDocumentButton);
+        menu->setObjectName(QStringLiteral("FreeCADCH_NewDocumentMenu"));
+        const std::pair<const char*, const char*> entries[] = {
+            {QT_TRANSLATE_NOOP("DocumentTabs", "New document"), "Std_New"},
+            {QT_TRANSLATE_NOOP("DocumentTabs", "Open..."), "Std_Open"},
+        };
+        for (const auto& [text, command] : entries) {
+            QAction* action = menu->addAction(QApplication::translate("DocumentTabs", text));
+            // FreeCADCH_NewDocumentAction, FreeCADCH_OpenDocumentAction
+            action->setObjectName(
+                QStringLiteral("FreeCADCH_%1DocumentAction").arg(QLatin1String(command).mid(4))
+            );
+            action->setProperty("command", QLatin1String(command));
+            if (Command* cmd = Application::Instance->commandManager().getCommandByName(command)) {
+                if (cmd->getPixmap()) {
+                    action->setIcon(BitmapFactory().iconFromTheme(cmd->getPixmap()));
+                }
+            }
+            const std::string name = command;
+            connect(action, &QAction::triggered, this, [name] {
+                Application::Instance->commandManager().runCommandByName(name.c_str());
+            });
+        }
+        QAction* recentStart = menu->addSeparator();
+        connect(menu, &QMenu::aboutToShow, menu, [menu, recentStart] {
+            // The recent files as File > Open Recent lists them (its own actions, so a click opens
+            // the file the same way); rebuilt each time, since the list changes
+            const QList<QAction*> all = menu->actions();
+            for (int i = static_cast<int>(all.indexOf(recentStart)) + 1; i < all.size(); ++i) {
+                menu->removeAction(all[i]);
+            }
+            bool any = false;
+            Command* cmd = Application::Instance->commandManager().getCommandByName("Std_RecentFiles");
+            if (auto group = cmd ? qobject_cast<ActionGroup*>(cmd->getAction()) : nullptr) {
+                for (QAction* recent : group->groupAction()->actions()) {
+                    if (recent->isSeparator()) {
+                        break;  // the files come first; "Clear Recent Files" follows
+                    }
+                    if (recent->isVisible() && !recent->text().isEmpty()) {
+                        menu->addAction(recent);
+                        any = true;
+                    }
+                }
+            }
+            recentStart->setVisible(any);
+        });
+        newDocumentButton->setMenu(menu);
+    }
+    rowLayout->addWidget(newDocumentButton, 0, Qt::AlignVCenter);
+    rowLayout->addStretch(1);
+    strip->addWidget(row);
     mw->addToolBar(Qt::TopToolBarArea, strip);
     placeStrip();
     connect(documents, &QTabBar::tabBarClicked, this, &Controller::onDocumentClicked);
@@ -667,6 +741,30 @@ void Controller::sizeButtons()
             "QToolButton { border: 1px solid palette(mid); border-radius: 4px;"
             " background: palette(button); }"
             " QToolButton:hover { background: palette(midlight); }"
+            " QToolButton::menu-indicator { image: none; width: 0px; }"
+        ));
+    }
+    // The new-or-open "+" (ops#796): a square as high as a document tab, its glyph large and
+    // bold; flat until hovered, in the palette's colours (the stylesheet's, dark included)
+    if (newDocumentButton && documents) {
+        int side = documents->count() > 0 ? documents->tabRect(0).height()
+                                          : documents->sizeHint().height();
+        side = std::max(side, documents->fontMetrics().height() + 8);
+        QFont font = mw->font();
+        if (font.pointSizeF() > 0) {
+            font.setPointSizeF(font.pointSizeF() * 1.5);
+        }
+        else if (font.pixelSize() > 0) {
+            font.setPixelSize(font.pixelSize() * 3 / 2);
+        }
+        font.setBold(true);
+        newDocumentButton->setFont(font);
+        newDocumentButton->setFixedSize(side, side);
+        newDocumentButton->setStyleSheet(QStringLiteral(
+            "QToolButton { border: 1px solid transparent; border-radius: 4px;"
+            " background: transparent; color: palette(button-text); padding: 0px; }"
+            " QToolButton:hover { border: 1px solid palette(mid); background: palette(midlight); }"
+            " QToolButton:pressed { background: palette(mid); }"
             " QToolButton::menu-indicator { image: none; width: 0px; }"
         ));
     }

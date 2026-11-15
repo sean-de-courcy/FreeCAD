@@ -41,7 +41,7 @@ import FreeCAD as App
 import FreeCADGui as Gui
 import Part
 
-from PySide import QtWidgets
+from PySide import QtGui, QtWidgets
 
 Tabs = App.DocumentTabs
 GuiTabs = Gui.DocumentTabs
@@ -352,6 +352,44 @@ class TestDocumentTabsGui(unittest.TestCase):
         self.assertFalse(mdiTabs.isVisible())
         self.assertEqual(mdiTabs.sizeHint().height(), 0)  # QMdiArea sizes its viewport by it
         self.assertIsNone(mw.findChild(QtWidgets.QToolBar, "FreeCADCH_Modes"))
+
+    def testNewDocumentPlusAfterTheLastDocument(self):
+        """ops#796: the strip on top has a "+" right after the last document tab, tooltip "New or
+        open document", with a menu: New document (Std_New: one new document), Open... (Std_Open;
+        its file dialog isn't opened here), then the recent files; with one tab or many."""
+        mw = Gui.getMainWindow()
+        strip = mw.findChild(QtWidgets.QTabBar, "FreeCADCH_DocumentTabBar")
+        plus = mw.findChild(QtWidgets.QToolButton, "FreeCADCH_NewDocument")
+        self.assertIsNotNone(plus)
+        self.assertEqual(plus.text(), "+")
+        self.assertEqual(plus.toolTip(), "New or open document")
+        menu = plus.menu()
+        self.assertIsNotNone(menu)
+        texts = [a.text() for a in menu.actions() if not a.isSeparator()]
+        self.assertEqual(texts[:2], ["New document", "Open..."])
+        menu.aboutToShow.emit()  # the recent files are listed as the menu opens, nothing else
+        texts = [a.text() for a in menu.actions() if not a.isSeparator() and a.isVisible()]
+        self.assertNotIn("Clear Recent Files", texts)
+        new = menu.findChild(QtGui.QAction, "FreeCADCH_NewDocumentAction")
+        openAction = menu.findChild(QtGui.QAction, "FreeCADCH_OpenDocumentAction")
+        self.assertEqual(new.property("command"), "Std_New")
+        self.assertEqual(openAction.property("command"), "Std_Open")
+        for extra in range(2):
+            pump(0.2)
+            self.assertTrue(plus.isVisible())
+            self.assertGreater(strip.count(), 0)
+            last = strip.tabRect(strip.count() - 1)
+            right = strip.mapTo(plus.parentWidget(), last.topRight()).x()
+            self.assertGreaterEqual(plus.geometry().left(), right)  # after the last tab
+            self.assertLess(plus.geometry().left() - right, 3 * plus.width())  # and beside it
+            before = set(App.listDocuments())
+            new.trigger()
+            pump(0.3)
+            added = [n for n in App.listDocuments() if n not in before]
+            self.assertEqual(len(added), 1)
+            self.docs.extend(added)
+            self.assertEqual(App.ActiveDocument.Name, added[0])
+            self.assertIn(App.ActiveDocument.Label, [strip.tabText(i) for i in range(strip.count())])
 
     def testCreatePartStudioAndUndo(self):
         """"+" > Create Part Studio: an App::Part "Part Studio 3" right of the active tab, made
