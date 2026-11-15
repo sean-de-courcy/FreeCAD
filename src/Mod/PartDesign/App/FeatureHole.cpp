@@ -51,8 +51,14 @@
 #include <Geom_Circle.hxx>
 #include <IntCurvesFace_ShapeIntersector.hxx>
 #include <gp_Lin.hxx>
+#include <gp_Ax2.hxx>
+#include <gp_Pln.hxx>
+#include <BRepAlgoAPI_Common.hxx>
+#include <BRepGProp.hxx>
+#include <GProp_GProps.hxx>
 #include <GC_MakeArcOfCircle.hxx>
 #include <Geom_TrimmedCurve.hxx>
+#include <Precision.hxx>
 #include <Standard_Version.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Face.hxx>
@@ -147,33 +153,113 @@ std::vector<double> axisCrossings(const TopoDS_Shape& solid, const gp_Pnt& from,
     return params;
 }
 
-// Start from part (Onshape's default): the distance along `dir` from the profile plane to where
-// the part begins ahead of it on the hole axes, the earliest of the holes'. A centre in or on the
-// part starts at the plane (a sketch on the part's face, or inside the part), and so does one
-// whose axis meets no part ahead: never behind the plane, so a hole drilled away from the part
-// doesn't start at the part's far face (E-fix review)
+// Whether the disk of `radius` about `centre`, normal to `dir`, lies wholly on material just
+// past it along `dir` (ops#828, HC5): a slice a hair past the disk is all inside the solid
+bool diskOnMaterial(
+    const TopoDS_Shape& solid,
+    BRepClass3d_SolidClassifier& classifier,
+    const gp_Pnt& centre,
+    const gp_Dir& dir,
+    double radius
+)
+{
+    constexpr double hair = 1e-4;
+    const gp_Pnt at = centre.Translated(gp_Vec(dir) * hair);
+    // quick rejection: the centre and points round the rim
+    const gp_Ax2 frame(at, dir);
+    const gp_Vec x(frame.XDirection());
+    const gp_Vec y(frame.YDirection());
+    for (int i = 0; i <= 16; ++i) {
+        const double angle = 2.0 * std::numbers::pi * i / 16.0;
+        const double r = i == 16 ? 0.0 : radius * (1.0 - 1e-6);
+        classifier.Perform(at.Translated(r * (std::cos(angle) * x + std::sin(angle) * y)),
+                           Precision::Confusion());
+        if (classifier.State() != TopAbs_IN) {
+            return false;
+        }
+    }
+    // then exactly: the disk's common with the solid is the whole disk
+    const TopoDS_Face disk = BRepBuilderAPI_MakeFace(
+        BRepBuilderAPI_MakeWire(BRepBuilderAPI_MakeEdge(gp_Circ(frame, radius))).Wire()
+    );
+    BRepAlgoAPI_Common common(disk, solid);
+    if (!common.IsDone()) {
+        return false;
+    }
+    GProp_GProps props;
+    BRepGProp::SurfaceProperties(common.Shape(), props);
+    const double full = std::numbers::pi * radius * radius;
+    return std::fabs(props.Mass() - full) <= 1e-6 * full + Precision::Confusion();
+}
+
+// Start from part (Onshape's default, ops#828 HC5): the distance along `dir` from the profile
+// plane to the highest level, at or past the plane, where the start disk (`radius`: the hole cut
+// diameter, or the hole's for a simple hole) lies wholly on material; the earliest of the holes'.
+// The candidates are the plane itself and the planes of the part's faces normal to the axis, so a
+// countersink whose disk overhangs a boss's edge drops to the face below. With no such level, the
+// old rule: where the axis meets the part ahead of the plane (0 on or in it, or meeting none), never
+// behind the plane, so a hole drilled away from the part doesn't start at its far face (E-fix review)
 double startFromPart(
     const Part::TopoShape& base,
     const std::vector<gp_Pnt>& centres,
-    const gp_Dir& dir
+    const gp_Dir& dir,
+    double radius
 )
 {
     if (base.isNull() || base.countSubShapes(TopAbs_SOLID) == 0) {
         return 0.0;
     }
-    std::optional<double> first;
-    BRepClass3d_SolidClassifier classifier(base.getShape());
-    for (const gp_Pnt& centre : centres) {
-        classifier.Perform(centre, Precision::Confusion());
-        if (classifier.State() == TopAbs_IN || classifier.State() == TopAbs_ON) {
-            return 0.0;
+    const TopoDS_Shape& solid = base.getShape();
+    // the levels of the part's planar faces normal to the axis, as distances along `dir` from a
+    // point on the profile plane
+    std::vector<gp_Pln> planes;
+    for (const auto& sub : base.getSubTopoShapes(TopAbs_FACE)) {
+        BRepAdaptor_Surface surface(TopoDS::Face(sub.getShape()));
+        if (surface.GetType() == GeomAbs_Plane
+            && surface.Plane().Axis().Direction().IsParallel(dir, Precision::Angular())) {
+            planes.push_back(surface.Plane());
         }
-        for (double param : axisCrossings(base.getShape(), centre, dir)) {
-            if (param >= -Precision::Confusion()) {
-                first = first ? std::min(*first, param) : param;
+    }
+    std::optional<double> first;
+    BRepClass3d_SolidClassifier classifier(solid);
+    for (const gp_Pnt& centre : centres) {
+        std::vector<double> levels {0.0};
+        for (const gp_Pln& plane : planes) {
+            const double t = gp_Vec(centre, plane.Location()).Dot(gp_Vec(dir));
+            if (t > Precision::Confusion()) {
+                levels.push_back(t);
+            }
+        }
+        std::ranges::sort(levels);
+        levels.erase(
+            std::unique(levels.begin(), levels.end(), [](double a, double b) {
+                return std::fabs(a - b) <= Precision::Confusion();
+            }),
+            levels.end()
+        );
+        std::optional<double> start;
+        for (double t : levels) {
+            if (diskOnMaterial(solid, classifier, centre.Translated(gp_Vec(dir) * t), dir, radius)) {
+                start = t;
                 break;
             }
         }
+        if (!start) {
+            classifier.Perform(centre, Precision::Confusion());
+            if (classifier.State() == TopAbs_IN || classifier.State() == TopAbs_ON) {
+                start = 0.0;
+            }
+            else {
+                for (double param : axisCrossings(solid, centre, dir)) {
+                    if (param >= -Precision::Confusion()) {
+                        start = param;
+                        break;
+                    }
+                }
+            }
+        }
+        const double t = start.value_or(0.0);
+        first = first ? std::min(*first, t) : t;
     }
     return first.value_or(0.0);
 }
@@ -812,6 +898,20 @@ Hole::Hole()
     );
 }
 
+double Hole::startDiskRadius() const
+{
+    // FreeCAD-CH (ops#828, HC5): the start disk, the widest at the hole's top: the hole cut's
+    // diameter for a counterbore, countersink or counterdrill, else the hole's
+    const std::string holeCutType = HoleCutType.getValueAsString();
+    const std::string threadType = ThreadType.getValueAsString();
+    if (holeCutType == "Countersink" || holeCutType == "Counterbore" || holeCutType == "Counterdrill"
+        || isDynamicCountersink(threadType, holeCutType)
+        || isDynamicCounterbore(threadType, holeCutType)) {
+        return HoleCutDiameter.getValue() / 2.0;
+    }
+    return Diameter.getValue() / 2.0;
+}
+
 double Hole::getStartOffset() const
 {
     const char* startType = StartType.getValueAsString();
@@ -840,7 +940,12 @@ double Hole::getStartOffset() const
         catch (const Base::Exception&) {
             return 0.0;
         }
-        return startFromPart(base, holeCentres(profileShape, BaseProfileType.getValue()), direction);
+        return startFromPart(
+            base,
+            holeCentres(profileShape, BaseProfileType.getValue()),
+            direction,
+            startDiskRadius()
+        );
     }
 
     TopLoc_Location identity;
@@ -2234,7 +2339,8 @@ App::DocumentObjectExecReturn* Hole::execute()
             startOffset = startFromPart(
                 base,
                 holeCentres(profileshape, BaseProfileType.getValue()),
-                holeDirection
+                holeDirection,
+                startDiskRadius()
             );
         }
         else if (std::strcmp(startType, "Profile plane") != 0) {
@@ -2335,10 +2441,65 @@ App::DocumentObjectExecReturn* Hole::execute()
         double xPosCounter = 0.0;
         double zPosCounter = 0.0;
 
+        // The profile's edges: a point equal to the last adds none, and one straight on from the
+        // last edge extends it (FreeCAD-CH ops#828: the upward clearance and the wall below it,
+        // as wide, are one edge, so the faces' places in the profile stay as they were)
+        gp_Pnt edgeStart;
+        bool edgePending = false;
+        const auto flushEdge = [&]() {
+            if (edgePending) {
+                mkWire.Add(BRepBuilderAPI_MakeEdge(edgeStart, lastPoint));
+                edgePending = false;
+            }
+        };
+        const auto addEdge = [&](const gp_Pnt& point) {
+            if (point.IsEqual(lastPoint, Precision::Confusion())) {
+                return;
+            }
+            if (edgePending) {
+                const gp_Vec before(edgeStart, lastPoint);
+                const gp_Vec after(lastPoint, point);
+                if (before.IsParallel(after, Precision::Angular()) && before.Dot(after) > 0.0) {
+                    lastPoint = point;
+                    return;
+                }
+                flushEdge();
+            }
+            edgeStart = lastPoint;
+            lastPoint = point;
+            edgePending = true;
+        };
+
         if (TaperedAngleVal <= 0.0 || TaperedAngleVal > Base::toRadians(180.0)) {
             return new App::DocumentObjectExecReturn(
                 QT_TRANSLATE_NOOP("Exception", "Hole error: Invalid taper angle")
             );
+        }
+
+        // FreeCAD-CH (ops#828, TW2 and HC5): started from the part, as in Onshape, the hole also
+        // clears its start disk upward, through all, so material above the start (a boss over a
+        // countersink) is cut too: the profile starts above the start. Not from a plane or offset.
+        if (std::strcmp(startType, "Part") == 0) {
+            const double clearRadius = startDiskRadius();
+            double up = 0.0;
+            if (holeRun) {
+                Bnd_Box box;
+                if (!base.isNull()) {
+                    BRepBndLib::Add(base.getShape(), box);
+                }
+                BRepBndLib::Add(profileshape.getShape(), box);
+                box.SetGap(0.0);
+                up = 2.02 * std::sqrt(box.SquareExtent());
+            }
+            else {
+                up = getThroughAllLength();
+            }
+            firstPoint = toPnt(up * zDir);
+            lastPoint = firstPoint;
+            gp_Pnt newPoint = toPnt(clearRadius * xDir + up * zDir);
+            addEdge(newPoint);
+            newPoint = toPnt(clearRadius * xDir);
+            addEdge(newPoint);
         }
 
         if (isCountersink || isCounterbore || isCounterdrill) {
@@ -2382,14 +2543,12 @@ App::DocumentObjectExecReturn* Hole::execute()
 
             // Top point
             gp_Pnt newPoint = toPnt(holeCutRadius * xDir);
-            mkWire.Add(BRepBuilderAPI_MakeEdge(lastPoint, newPoint));
-            lastPoint = newPoint;
+            addEdge(newPoint);
 
             // Bottom of counterbore
             if (holeCutDepth > 0.0) {
                 newPoint = toPnt(holeCutRadius * xDir - holeCutDepth * zDir);
-                mkWire.Add(BRepBuilderAPI_MakeEdge(lastPoint, newPoint));
-                lastPoint = newPoint;
+                addEdge(newPoint);
             }
 
             // Compute intersection of tapered edge and line at bottom of counterbore hole
@@ -2410,13 +2569,11 @@ App::DocumentObjectExecReturn* Hole::execute()
 
             lengthCounter = zPosCounter;
             newPoint = toPnt(xPosCounter * xDir + zPosCounter * zDir);
-            mkWire.Add(BRepBuilderAPI_MakeEdge(lastPoint, newPoint));
-            lastPoint = newPoint;
+            addEdge(newPoint);
         }
         else {
             gp_Pnt newPoint = toPnt(radius * xDir);
-            mkWire.Add(BRepBuilderAPI_MakeEdge(lastPoint, newPoint));
-            lastPoint = newPoint;
+            addEdge(newPoint);
             lengthCounter = 0.0;
         }
 
@@ -2428,12 +2585,10 @@ App::DocumentObjectExecReturn* Hole::execute()
         double zPosDrill = 0.0;
         if (drillPoint == "Flat") {
             gp_Pnt newPoint = toPnt(radiusBottom * xDir + -length * zDir);
-            mkWire.Add(BRepBuilderAPI_MakeEdge(lastPoint, newPoint));
-            lastPoint = newPoint;
+            addEdge(newPoint);
 
             newPoint = toPnt(-length * zDir);
-            mkWire.Add(BRepBuilderAPI_MakeEdge(lastPoint, newPoint));
-            lastPoint = newPoint;
+            addEdge(newPoint);
         }
         else if (drillPoint == "Angled") {
             double drillPointAngle = Base::toRadians((180.0 - DrillPointAngle.getValue()) / 2.0);
@@ -2465,29 +2620,26 @@ App::DocumentObjectExecReturn* Hole::execute()
                 }
 
                 newPoint = toPnt(xPosDrill * xDir + zPosDrill * zDir);
-                mkWire.Add(BRepBuilderAPI_MakeEdge(lastPoint, newPoint));
-                lastPoint = newPoint;
+                addEdge(newPoint);
 
                 newPoint = toPnt(-length * zDir);
-                mkWire.Add(BRepBuilderAPI_MakeEdge(lastPoint, newPoint));
-                lastPoint = newPoint;
+                addEdge(newPoint);
             }
             else {
                 xPosDrill = radiusBottom;
                 zPosDrill = -length;
 
                 newPoint = toPnt(xPosDrill * xDir + zPosDrill * zDir);
-                mkWire.Add(BRepBuilderAPI_MakeEdge(lastPoint, newPoint));
-                lastPoint = newPoint;
+                addEdge(newPoint);
 
                 // the end point is the size of the drill tip
                 newPoint = toPnt((-length - radius * tan(drillPointAngle)) * zDir);
-                mkWire.Add(BRepBuilderAPI_MakeEdge(lastPoint, newPoint));
-                lastPoint = newPoint;
+                addEdge(newPoint);
             }
         }
 
-        mkWire.Add(BRepBuilderAPI_MakeEdge(lastPoint, firstPoint));
+        addEdge(firstPoint);
+        flushEdge();
 
         TopoDS_Wire wire = mkWire.Wire();
 
@@ -3046,14 +3198,14 @@ void Hole::addCutType(const CutDimensionSet& dimensions)
     }
 }
 
-bool Hole::isDynamicCounterbore(const std::string& thread, const std::string& holeCutType)
+bool Hole::isDynamicCounterbore(const std::string& thread, const std::string& holeCutType) const
 {
     CutDimensionKey key {thread, holeCutType};
     return HoleCutTypeMap.count(key)
         && HoleCutTypeMap.find(key)->second.cut_type == CutDimensionSet::Counterbore;
 }
 
-bool Hole::isDynamicCountersink(const std::string& thread, const std::string& holeCutType)
+bool Hole::isDynamicCountersink(const std::string& thread, const std::string& holeCutType) const
 {
     CutDimensionKey key {thread, holeCutType};
     return HoleCutTypeMap.count(key)

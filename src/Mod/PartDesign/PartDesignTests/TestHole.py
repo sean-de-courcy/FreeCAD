@@ -21,7 +21,7 @@
 #   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  *
 #   USA                                                                   *
 # **************************************************************************
-from math import pi
+from math import acos, pi, sqrt
 import os
 import tempfile
 import unittest
@@ -164,6 +164,123 @@ class TestHole(unittest.TestCase):
         self.Hole.Tapered = 0
         self.Doc.recompute()
         self.assertAlmostEqual(self.Hole.Shape.Volume, 10**3 - pi * 3**2 * 10 - 24.7400421)
+
+    # FreeCAD-CH ops#828 (truth walk TW2, oracle facts HC1-HC5): started from the part, a hole
+    # starts at the highest level where its start disk (the cut's diameter, or d for a simple
+    # hole) lies wholly on material, and clears that disk upward to the top of all material.
+    # A 30 x 30 x 8 plate with a boss of radius 6 and height 10 on it, the hole at (15, 15).
+    PLATE, BOSS_R, BOSS_H = 8.0, 6.0, 10.0
+    HOLE_R, CUT_R, CBORE_DEPTH = 2.5, 5.0, 3.0
+
+    @staticmethod
+    def _lens(r1, r2, c):
+        """The area of two circles' overlap, radii r1 and r2, centres c apart."""
+        if c >= r1 + r2:
+            return 0.0
+        if c <= abs(r1 - r2):
+            return pi * min(r1, r2) ** 2
+        return (
+            r1**2 * acos((c**2 + r1**2 - r2**2) / (2 * c * r1))
+            + r2**2 * acos((c**2 + r2**2 - r1**2) / (2 * c * r2))
+            - 0.5 * sqrt((-c + r1 + r2) * (c + r1 - r2) * (c - r1 + r2) * (c + r1 + r2))
+        )
+
+    def _csinkExtra(self):
+        """The 90 degree countersink's volume past the hole's cylinder."""
+        R, r = self.CUT_R, self.HOLE_R
+        k = R - r
+        return pi * k / 3 * (R**2 + R * r + r**2) - pi * r**2 * k
+
+    def _bossHole(self, offset, cut, sketchZ, start="Part"):
+        """The plate, a boss `offset` from the hole's axis, and a through-all hole sketched at
+        height `sketchZ`; returns the volume the hole cut."""
+        self.Box.Length = 30
+        self.Box.Width = 30
+        self.Box.Height = self.PLATE
+        boss = self.Doc.addObject("PartDesign::AdditiveCylinder", "Boss")
+        boss.Radius = self.BOSS_R
+        boss.Height = self.BOSS_H
+        boss.Placement.Base = App.Vector(15 + offset, 15, self.PLATE)
+        self.Body.addObject(boss)
+        self.Body.removeObject(self.Hole)
+        self.Body.addObject(self.Hole)  # after the boss
+        self.HoleSketch.deleteAllGeometry()
+        self.HoleSketch.addGeometry(Part.Circle(App.Vector(15, 15, 0), App.Vector(0, 0, 1), 1))
+        self.HoleSketch.MapReversed = False  # the hole drills down
+        self.HoleSketch.AttachmentOffset.Base.z = sketchZ
+        self.Hole.Diameter = 2 * self.HOLE_R
+        self.Hole.ThreadType = 0
+        self.Hole.HoleCutType = cut
+        if cut != "None":
+            self.Hole.HoleCutDiameter = 2 * self.CUT_R
+            self.Hole.HoleCutCountersinkAngle = 90
+            self.Hole.HoleCutDepth = self.CBORE_DEPTH
+        self.Hole.DepthType = "ThroughAll"
+        self.Hole.DrillPoint = "Flat"
+        self.Hole.Tapered = False
+        self.Hole.StartType = start
+        self.Doc.recompute()
+        self.assertTrue(self.Hole.isValid(), self.Hole.getStatusString())
+        self.assertIs(self.Hole.BaseFeature, boss)
+        before = 30 * 30 * self.PLATE + pi * self.BOSS_R**2 * self.BOSS_H
+        self.assertAlmostEqual(boss.Shape.Volume, before, places=6)
+        return before - self.Hole.Shape.Volume
+
+    def testSimpleHoleClearsUpwardThroughBoss(self):
+        # HC1: d through the plate and up through the boss over it
+        cut = self._bossHole(8, "None", self.PLATE)
+        lens = self._lens(self.HOLE_R, self.BOSS_R, 8)
+        self.assertGreater(lens, 0)
+        self.assertAlmostEqual(cut, pi * self.HOLE_R**2 * self.PLATE + lens * self.BOSS_H, places=5)
+        self.assertAlmostEqual(self.Hole.Shape.BoundBox.ZMax, self.PLATE + self.BOSS_H)
+
+    def testCounterboreClearsUpwardThroughBoss(self):
+        # HC2: the counterbore at the plate top, its diameter cleared up through the boss
+        cut = self._bossHole(8, "Counterbore", self.PLATE)
+        down = pi * self.HOLE_R**2 * (self.PLATE - self.CBORE_DEPTH)
+        down += pi * self.CUT_R**2 * self.CBORE_DEPTH
+        lens = self._lens(self.CUT_R, self.BOSS_R, 8)
+        self.assertAlmostEqual(cut, down + lens * self.BOSS_H, places=5)
+
+    def testCountersinkClearsUpwardThroughBoss(self):
+        # TW2: the countersink at the plate top, D cleared up through the boss
+        cut = self._bossHole(8, "Countersink", self.PLATE)
+        down = pi * self.HOLE_R**2 * self.PLATE + self._csinkExtra()
+        lens = self._lens(self.CUT_R, self.BOSS_R, 8)
+        self.assertAlmostEqual(cut, down + lens * self.BOSS_H, places=5)
+
+    def testCountersinkWhollyOnBossTopStaysThere(self):
+        # HC3: the D disk lies wholly on the boss top: the countersink is there, nothing above
+        cut = self._bossHole(0, "Countersink", self.PLATE + self.BOSS_H)
+        expected = pi * self.HOLE_R**2 * (self.PLATE + self.BOSS_H) + self._csinkExtra()
+        self.assertAlmostEqual(cut, expected, places=5)
+
+    def testCountersinkOverhangingBossDropsToPlate(self):
+        # HC3: the D disk overhangs the boss's edge: the countersink drops to the plate top and
+        # a D cylinder clears up through the boss
+        cut = self._bossHole(3, "Countersink", self.PLATE + self.BOSS_H)
+        down = pi * self.HOLE_R**2 * self.PLATE + self._csinkExtra()
+        lens = self._lens(self.CUT_R, self.BOSS_R, 3)
+        self.assertAlmostEqual(cut, down + lens * self.BOSS_H, places=5)
+
+    def testCountersinkSketchedInAirFromPart(self):
+        # HC4: sketched above everything, from the part: as if sketched on the plate top
+        cut = self._bossHole(8, "Countersink", self.PLATE + self.BOSS_H + 5)
+        down = pi * self.HOLE_R**2 * self.PLATE + self._csinkExtra()
+        lens = self._lens(self.CUT_R, self.BOSS_R, 8)
+        self.assertAlmostEqual(cut, down + lens * self.BOSS_H, places=5)
+
+    def testCountersinkFromSketchPlaneClearsNothingAbove(self):
+        # HC4 and HC3: from the sketch plane the start stays there: in air no countersink is
+        # cut, only d through all; on the plate top nothing above it is cleared
+        cut = self._bossHole(8, "Countersink", self.PLATE + self.BOSS_H + 5, "Profile plane")
+        lens = self._lens(self.HOLE_R, self.BOSS_R, 8)
+        self.assertAlmostEqual(cut, pi * self.HOLE_R**2 * self.PLATE + lens * self.BOSS_H, places=5)
+        self.HoleSketch.AttachmentOffset.Base.z = self.PLATE
+        self.Doc.recompute()
+        before = 30 * 30 * self.PLATE + pi * self.BOSS_R**2 * self.BOSS_H
+        down = pi * self.HOLE_R**2 * self.PLATE + self._csinkExtra()
+        self.assertAlmostEqual(before - self.Hole.Shape.Volume, down, places=5)
 
     def testDiameterChangeKeepsUserCutValues(self):
         """A diameter change never rewrites the user's hole cut values (ops#823). A diameter

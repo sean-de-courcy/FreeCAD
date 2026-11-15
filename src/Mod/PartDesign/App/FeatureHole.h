@@ -131,8 +131,8 @@ public:
     void Restore(Base::XMLReader& reader) override;
 
     virtual void updateProps();
-    bool isDynamicCounterbore(const std::string& thread, const std::string& holeCutType);
-    bool isDynamicCountersink(const std::string& thread, const std::string& holeCutType);
+    bool isDynamicCounterbore(const std::string& thread, const std::string& holeCutType) const;
+    bool isDynamicCountersink(const std::string& thread, const std::string& holeCutType) const;
     double getThreadPitch() const;
     double getStartOffset() const;
 
@@ -302,6 +302,7 @@ private:
     double getCountersinkAngle() const;
     double getThreadClassClearance() const;
     double getThreadRunout(int mode = 1) const;
+    double startDiskRadius() const;
     double getThreadProfileAngle();
     /// `oldPitch`, when not 0, is the pitch of the size a thread type change leaves (ops#405 N1);
     /// `byDiameter` is for a type change that leaves no known pitch (from "None"): the closest
