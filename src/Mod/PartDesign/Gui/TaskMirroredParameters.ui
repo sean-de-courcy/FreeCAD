@@ -31,7 +31,7 @@
      <item>
       <widget class="QLabel" name="labelPlane">
        <property name="text">
-        <string>Plane</string>
+        <string>Mirror plane</string>
        </property>
       </widget>
      </item>

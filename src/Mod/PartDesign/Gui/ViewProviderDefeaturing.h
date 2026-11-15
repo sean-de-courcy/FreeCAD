@@ -37,7 +37,7 @@ public:
     ViewProviderDefeaturing()
     {
         sPixmap = "PartDesign_Defeaturing.svg";
-        menuName = tr("Defeaturing Parameters");
+        menuName = tr("Delete Face Parameters");
     }
 
     const std::string& featureName() const override;

@@ -67,8 +67,8 @@ std::string loftTaskIconName(ViewProviderLoft* view)
 
 QString loftTaskTitle(ViewProviderLoft* view)
 {
-    return isSubtractiveLoft(view) ? TaskLoftParameters::tr("Subtractive Loft Parameters")
-                                   : TaskLoftParameters::tr("Additive Loft Parameters");
+    return isSubtractiveLoft(view) ? TaskLoftParameters::tr("Loft (remove) Parameters")
+                                   : TaskLoftParameters::tr("Loft Parameters");
 }
 
 // A sketch is taken whole, unless one of its points or regions is picked: the loft takes the

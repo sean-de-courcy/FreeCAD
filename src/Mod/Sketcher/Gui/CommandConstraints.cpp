@@ -4954,7 +4954,7 @@ CmdSketcherConstrainHorizontal::CmdSketcherConstrainHorizontal()
 {
     sAppModule = "Sketcher";
     sGroup = "Sketcher";
-    sMenuText = QT_TR_NOOP("Horizontal Constraint");
+    sMenuText = QT_TR_NOOP("Horizontal");  // FreeCAD-CH (ops#796): Onshape's word
     sToolTipText = QT_TR_NOOP("Constrains the selected elements horizontally");
     sWhatsThis = "Sketcher_ConstrainHorizontal";
     sStatusTip = sToolTipText;
@@ -4999,7 +4999,7 @@ CmdSketcherConstrainVertical::CmdSketcherConstrainVertical()
 {
     sAppModule = "Sketcher";
     sGroup = "Sketcher";
-    sMenuText = QT_TR_NOOP("Vertical Constraint");
+    sMenuText = QT_TR_NOOP("Vertical");  // FreeCAD-CH (ops#796): Onshape's word
     sToolTipText = QT_TR_NOOP("Constrains the selected elements vertically");
     sWhatsThis = "Sketcher_ConstrainVertical";
     sStatusTip = sToolTipText;
@@ -5331,7 +5331,7 @@ CmdSketcherConstrainBlock::CmdSketcherConstrainBlock()
 {
     sAppModule = "Sketcher";
     sGroup = "Sketcher";
-    sMenuText = QT_TR_NOOP("Block Constraint");
+    sMenuText = QT_TR_NOOP("Fix");  // FreeCAD-CH (ops#796): Onshape's word
     sToolTipText = QT_TR_NOOP("Constrains the selected edges as fixed");
     sWhatsThis = "Sketcher_ConstrainBlock";
     sStatusTip = sToolTipText;
@@ -5652,7 +5652,7 @@ CmdSketcherConstrainCoincidentUnified::CmdSketcherConstrainCoincidentUnified(con
 {
     sAppModule = "Sketcher";
     sGroup = "Sketcher";
-    sMenuText = QT_TR_NOOP("Coincident Constraint");
+    sMenuText = QT_TR_NOOP("Coincident");  // FreeCAD-CH (ops#796): Onshape's word
     sToolTipText = QT_TR_NOOP("Constrains the selected elements to be coincident");
     sWhatsThis = "Sketcher_ConstrainCoincidentUnified";
     sStatusTip = sToolTipText;
@@ -6211,7 +6211,7 @@ CmdSketcherConstrainCoincident::CmdSketcherConstrainCoincident()
 {
     sAppModule = "Sketcher";
     sGroup = "Sketcher";
-    sMenuText = QT_TR_NOOP("Coincident Constraint");
+    sMenuText = QT_TR_NOOP("Coincident");  // FreeCAD-CH (ops#796): Onshape's word
     sToolTipText = QT_TR_NOOP("Constrains the selected elements to be coincident");
     sWhatsThis = "Sketcher_ConstrainCoincident";
     sStatusTip = sToolTipText;
@@ -6335,7 +6335,7 @@ CmdSketcherConstrainConcentric::CmdSketcherConstrainConcentric()
 {
     sAppModule = "Sketcher";
     sGroup = "Sketcher";
-    sMenuText = QT_TR_NOOP("Concentric Constraint");
+    sMenuText = QT_TR_NOOP("Concentric");  // FreeCAD-CH (ops#796): Onshape's word
     sToolTipText = QT_TR_NOOP("Constrains the selected circles, arcs or ellipses to share a centre, "
                               "or puts their centre on the selected point");
     sWhatsThis = "Sketcher_ConstrainConcentric";
@@ -7727,7 +7727,7 @@ CmdSketcherConstrainParallel::CmdSketcherConstrainParallel()
 {
     sAppModule = "Sketcher";
     sGroup = "Sketcher";
-    sMenuText = QT_TR_NOOP("Parallel Constraint");
+    sMenuText = QT_TR_NOOP("Parallel");  // FreeCAD-CH (ops#796): Onshape's word
     sToolTipText = QT_TR_NOOP("Constrains the selected lines to be parallel");
     sWhatsThis = "Sketcher_ConstrainParallel";
     sStatusTip = sToolTipText;
@@ -7892,7 +7892,7 @@ CmdSketcherConstrainPerpendicular::CmdSketcherConstrainPerpendicular(const char*
 {
     sAppModule = "Sketcher";
     sGroup = "Sketcher";
-    sMenuText = QT_TR_NOOP("Perpendicular Constraint");
+    sMenuText = QT_TR_NOOP("Perpendicular");  // FreeCAD-CH (ops#796): Onshape's word
     sToolTipText = QT_TR_NOOP("Constrains the selected lines to be perpendicular");
     sWhatsThis = "Sketcher_ConstrainPerpendicular";
     sStatusTip = sToolTipText;
@@ -7926,7 +7926,7 @@ public:
     CmdSketcherConstrainNormal()
         : CmdSketcherConstrainPerpendicular("Sketcher_ConstrainNormal")
     {
-        sMenuText = QT_TR_NOOP("Normal Constraint");
+        sMenuText = QT_TR_NOOP("Normal");  // FreeCAD-CH (ops#796): Onshape's word
         sToolTipText = QT_TR_NOOP("Constrains the selected line to be normal to the selected "
                                   "curve (through the centre of a circle or an arc)");
         sWhatsThis = "Sketcher_ConstrainNormal";
@@ -11322,7 +11322,7 @@ CmdSketcherConstrainEqual::CmdSketcherConstrainEqual()
 {
     sAppModule = "Sketcher";
     sGroup = "Sketcher";
-    sMenuText = QT_TR_NOOP("Equal Constraint");
+    sMenuText = QT_TR_NOOP("Equal");  // FreeCAD-CH (ops#796): Onshape's word
     sToolTipText =
         QT_TR_NOOP("Constrains the selected edges or circles to be equal");
     sWhatsThis = "Sketcher_ConstrainEqual";
@@ -11575,7 +11575,7 @@ CmdSketcherConstrainSymmetric::CmdSketcherConstrainSymmetric()
 {
     sAppModule = "Sketcher";
     sGroup = "Sketcher";
-    sMenuText = QT_TR_NOOP("Symmetric Constraint");
+    sMenuText = QT_TR_NOOP("Symmetric");  // FreeCAD-CH (ops#796): Onshape's word
     sToolTipText = QT_TR_NOOP("Constrains the selected elements to be symmetric");
     sWhatsThis = "Sketcher_ConstrainSymmetric";
     sStatusTip = sToolTipText;
@@ -12234,7 +12234,7 @@ CmdSketcherConstrainMidpoint::CmdSketcherConstrainMidpoint()
 {
     sAppModule = "Sketcher";
     sGroup = "Sketcher";
-    sMenuText = QT_TR_NOOP("Midpoint Constraint");
+    sMenuText = QT_TR_NOOP("Midpoint");  // FreeCAD-CH (ops#796): Onshape's word
     sToolTipText = QT_TR_NOOP("Constrains a point to the midpoint of a line, or of two points: "
                               "select a point and a line, or the two points and then the midpoint");
     sWhatsThis = "Sketcher_ConstrainMidpoint";

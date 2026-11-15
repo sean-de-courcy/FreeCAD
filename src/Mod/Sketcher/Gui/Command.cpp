@@ -169,7 +169,7 @@ CmdSketcherNewSketch::CmdSketcherNewSketch()
 {
     sAppModule = "Sketcher";
     sGroup = "Sketcher";
-    sMenuText = QT_TR_NOOP("New Sketch");
+    sMenuText = QT_TR_NOOP("Sketch");  // FreeCAD-CH (ops#796): Onshape's word
     sToolTipText = QT_TR_NOOP("Creates a new sketch");
     sWhatsThis = "Sketcher_NewSketch";
     sStatusTip = sToolTipText;

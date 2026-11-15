@@ -141,6 +141,43 @@ TEXTS = {
     "PartDesign_LinearPattern": "Linear pattern",
     "PartDesign_PolarPattern": "Circular pattern",
     "PartDesign_CurvePattern": "Curve pattern",
+    # ops#796, the terminology pass
+    "PartDesign_NewSketch": "Sketch",
+    "PartDesign_Groove": "Revolve (remove)",
+    "PartDesign_AdditivePipe": "Sweep",
+    "PartDesign_SubtractivePipe": "Sweep (remove)",
+    "PartDesign_AdditiveLoft": "Loft",
+    "PartDesign_SubtractiveLoft": "Loft (remove)",
+    "PartDesign_Boolean": "Boolean",
+    "PartDesign_Split": "Split",
+    "PartDesign_Body": "New part",
+}
+
+# ops#796: commands that need not have an action in the main window: read from the command itself
+COMMAND_TEXTS = {
+    "PartDesign_Plane": "Plane",
+    "PartDesign_Defeaturing": "Delete face",
+    "Sketcher_NewSketch": "Sketch",
+    "Sketcher_ToggleConstruction": "Construction",
+    "Sketcher_ConstrainCoincidentUnified": "Coincident",
+    "Sketcher_ConstrainHorizontal": "Horizontal",
+    "Sketcher_ConstrainVertical": "Vertical",
+    "Sketcher_ConstrainParallel": "Parallel",
+    "Sketcher_ConstrainPerpendicular": "Perpendicular",
+    "Sketcher_ConstrainEqual": "Equal",
+    "Sketcher_ConstrainSymmetric": "Symmetric",
+    "Sketcher_ConstrainBlock": "Fix",
+    "Sketcher_CreateArc": "Center point arc",
+    "Sketcher_Create3PointArc": "3 point arc",
+    "Sketcher_CreateCircle": "Center point circle",
+    "Sketcher_Create3PointCircle": "3 point circle",
+    "Sketcher_CreateRectangle": "Corner rectangle",
+    "Sketcher_CreateRectangle_Center": "Center point rectangle",
+    "Sketcher_Trimming": "Trim",
+    "Sketcher_Extend": "Extend",
+    "Sketcher_Split": "Split",
+    "Sketcher_Projection": "Use",
+    "Sketcher_Intersection": "Intersect",
 }
 
 
@@ -230,6 +267,16 @@ class TestToolbarsGui(unittest.TestCase):
         actions = {a.objectName(): a for a in Gui.getMainWindow().findChildren(QtGui.QAction)}
         self.assertIn("Shell", actions["PartDesign_Thickness"].toolTip())
         self.assertIn("circular pattern", actions["PartDesign_PolarPattern"].toolTip().lower())
+
+    def test_command_menu_texts_are_onshapes_words(self):
+        """ops#796: the commands' own menu texts, for tools not on a main-window toolbar."""
+        import SketcherGui  # noqa: F401  (registers the Sketcher commands)
+
+        for name, text in COMMAND_TEXTS.items():
+            with self.subTest(name):
+                command = Gui.Command.get(name)
+                self.assertIsNotNone(command, name)
+                self.assertEqual(command.getInfo()["menuText"].replace("&", ""), text)
 
     def test_command_names_are_unchanged(self):
         """The words change in menus only: the commands keep their names."""

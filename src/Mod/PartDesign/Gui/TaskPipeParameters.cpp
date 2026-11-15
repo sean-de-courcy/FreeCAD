@@ -100,20 +100,20 @@ std::string pipeTaskIconName(ViewProviderPipe* view)
 
 QString pipeTaskTitle(ViewProviderPipe* view)
 {
-    return isSubtractivePipe(view) ? TaskPipeParameters::tr("Subtractive Pipe Parameters")
-                                   : TaskPipeParameters::tr("Additive Pipe Parameters");
+    return isSubtractivePipe(view) ? TaskPipeParameters::tr("Sweep (remove) Parameters")
+                                   : TaskPipeParameters::tr("Sweep Parameters");
 }
 
 QString pipeOrientationTitle(ViewProviderPipe* view)
 {
-    return isSubtractivePipe(view) ? TaskPipeOrientation::tr("Subtractive Pipe Section Orientation")
-                                   : TaskPipeOrientation::tr("Additive Pipe Section Orientation");
+    return isSubtractivePipe(view) ? TaskPipeOrientation::tr("Sweep (remove) Profile Orientation")
+                                   : TaskPipeOrientation::tr("Sweep Profile Orientation");
 }
 
 QString pipeScalingTitle(ViewProviderPipe* view)
 {
-    return isSubtractivePipe(view) ? TaskPipeScaling::tr("Subtractive Pipe Section Transformation")
-                                   : TaskPipeScaling::tr("Additive Pipe Section Transformation");
+    return isSubtractivePipe(view) ? TaskPipeScaling::tr("Sweep (remove) Profile Transformation")
+                                   : TaskPipeScaling::tr("Sweep Profile Transformation");
 }
 
 // A sketch is taken whole, unless one of its points or regions is picked: the pipe takes the
@@ -480,7 +480,7 @@ void TaskPipeParameters::createFields()
     // The path: its edges, or a sketch or wire whole; a pick of another object starts the path
     // on it, a pick in the tree takes it whole (ops#162 B9, B10)
     ReferenceField::Options spine = pathOptions(pipeT);
-    spine.label = tr("Path to sweep along");
+    spine.label = tr("Sweep path");  // FreeCAD-CH (ops#796): Onshape's words
     auto spineSelf = std::make_shared<QPointer<ReferenceField>>();
     auto writeSpine = [this, spineSelf](App::DocumentObject* obj,
                                         const std::vector<std::string>& subs) {

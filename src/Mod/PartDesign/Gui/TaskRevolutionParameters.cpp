@@ -1392,7 +1392,7 @@ TaskDlgRevolutionParameters::TaskDlgRevolutionParameters(ViewProviderRevolution*
 {
     assert(RevolutionView);
     Content.push_back(
-        new TaskRevolutionParameters(RevolutionView, "PartDesign_Revolution", tr("Revolution Parameters"))
+        new TaskRevolutionParameters(RevolutionView, "PartDesign_Revolution", tr("Revolve Parameters"))
     );
     addResultBox();
     Content.push_back(preview);
@@ -1427,7 +1427,7 @@ TaskDlgGrooveParameters::TaskDlgGrooveParameters(ViewProviderGroove* GrooveView)
 {
     assert(GrooveView);
     Content.push_back(
-        new TaskRevolutionParameters(GrooveView, "PartDesign_Groove", tr("Groove Parameters"))
+        new TaskRevolutionParameters(GrooveView, "PartDesign_Groove", tr("Revolve (remove) Parameters"))
     );
     addResultBox();
     Content.push_back(preview);
