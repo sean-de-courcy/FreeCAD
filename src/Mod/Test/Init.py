@@ -41,4 +41,5 @@ FreeCAD.__unit_test__ += [
     "TestLiteralFractions",
     "TestNotificationArea",
     "TestDocumentTabs",
+    "TestPresence",
 ]
