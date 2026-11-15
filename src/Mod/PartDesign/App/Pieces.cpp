@@ -898,18 +898,27 @@ std::vector<Body*> makePieces(App::DocumentObject* entry, std::string* why)
         }
         return leftoverSolids(entry).isNull();
     };
-    if (quiet()) {
+    const auto nothingToMake = [&]() {
         std::string text;
         if (!list->reconcile(&text)) {
             return fail(text);
         }
-        doc->recompute();
-        return made;
+        doc->recompute({}, /*force=*/true);
+        return std::vector<Body*>();
+    };
+    if (quiet()) {
+        return nothingToMake();
     }
     {
         CommandGuard guard(entry);
         touchAll();
         doc->recompute({}, /*force=*/true);
+    }
+    // The same once it is computed (a moved row, a suppression, a value changed outside a
+    // dialog): the flag silenced nothing, so the second recompute of the history that would
+    // make the entry loud again has nothing to say
+    if (quiet()) {
+        return nothingToMake();
     }
     // A refusal after the recompute under the guard: computed again outside it, so that entry
     // stays loud (its checks passed meanwhile)
