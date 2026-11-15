@@ -6628,7 +6628,9 @@ TopoShape makeThickSolidByGroups(
 // thickness it passes the wall's foot altogether. So a face touching a removed face is held
 // only where it lies farther than the thickness from that face's edges, measured along the
 // removed face's normal and across it. And the cavity must open through each removed face
-// (OCCT's offset can come back as a fragment of it). Anything else returns a null shape.
+// (OCCT's offset can come back as a fragment of it), and each of its faces must lie by the
+// kept face it is the offset of (OCCT can leave one untrimmed across the cavity). Anything
+// else returns a null shape.
 
 // BRepOffsetAPI_MakeOffsetShape's join algorithm with an offset of their own for some faces
 class OffsetShapeWithFaceOffsets: public BRepOffsetAPI_MakeOffsetShape
@@ -6758,6 +6760,33 @@ TopoShape makeThickSolidByFaceOffsets(
                 return {};
             }
         }
+        // Each face of the cavity lies by the kept face it is the offset of: OCCT's offset can
+        // leave one untrimmed, running on across the cavity as a slab of material (the tilted
+        // top of a small half-round step). Where offset faces meet in a sharp corner they run
+        // on past their own face, by the thickness at a right angle, so three times that is
+        // allowed.
+        for (TopExp_Explorer xp(shape.getShape(), TopAbs_FACE); xp.More(); xp.Next()) {
+            if (removed.Contains(xp.Current())) {
+                continue;
+            }
+            Bnd_Box own;
+            const TopTools_ListOfShape offsets = mkOffset.Generated(xp.Current());
+            for (TopTools_ListIteratorOfListOfShape gen(offsets); gen.More(); gen.Next()) {
+                if (gen.Value().ShapeType() != TopAbs_FACE || !cavity.findShape(gen.Value())) {
+                    continue;
+                }
+                if (own.IsVoid()) {
+                    BRepBndLib::AddOptimal(xp.Current(), own, Standard_False, Standard_False);
+                    own.Enlarge(3 * thickness);
+                }
+                Bnd_Box offsetBox;
+                BRepBndLib::AddOptimal(gen.Value(), offsetBox, Standard_False, Standard_False);
+                if (offsetBox.IsVoid() || own.IsOut(offsetBox.CornerMin())
+                    || own.IsOut(offsetBox.CornerMax())) {
+                    return {};
+                }
+            }
+        }
         // Every kept face keeps its wall. A face touching a removed face is held only where it
         // is farther than the thickness from that face's edges: outside boxes along each edge
         // (along its chords, where it is curved), as wide as twice the thickness across the
@@ -6851,44 +6880,51 @@ TopoShape makeThickSolidByFaceOffsets(
             if (removed.Contains(xp.Current())) {
                 continue;
             }
-            TopoDS_Shape held = xp.Current();
-            if (besideRemoved.Contains(held)) {
-                Bnd_Box own;
-                BRepBndLib::Add(held, own, Standard_False);
-                TopTools_ListOfShape tools;
-                for (const auto& around : aroundOpenings) {
-                    if (!own.IsOut(around.box)) {
-                        tools.Append(around.solid);
+            // the cavity's faces nearer to <held> than the thickness
+            auto tooNear = [&cavityFaces, thickness, least](const TopoDS_Shape& held) {
+                Bnd_Box reach;
+                BRepBndLib::Add(held, reach, Standard_False);
+                reach.Enlarge(thickness);
+                for (const auto& entry : cavityFaces) {
+                    if (reach.IsOut(entry.box)) {
+                        continue;
+                    }
+                    BRepExtrema_DistShapeShape distance(entry.face, held);
+                    if (!distance.IsDone() || distance.Value() < least) {
+                        return true;
                     }
                 }
-                if (tools.IsEmpty()) {
-                    return {};
-                }
-                TopTools_ListOfShape faces;
-                faces.Append(held);
-                BRepAlgoAPI_Cut away;
-                away.SetArguments(faces);
-                away.SetTools(tools);
-                away.Build();
-                if (!away.IsDone() || away.HasErrors()) {
-                    return {};
-                }
-                held = away.Shape();
-                if (!TopExp_Explorer(held, TopAbs_FACE).More()) {
-                    continue;
+                return false;
+            };
+            if (!tooNear(xp.Current())) {
+                continue;
+            }
+            if (!besideRemoved.Contains(xp.Current())) {
+                return {};
+            }
+            // by an open face: only the part away from its edges is held
+            Bnd_Box own;
+            BRepBndLib::Add(xp.Current(), own, Standard_False);
+            TopTools_ListOfShape tools;
+            for (const auto& around : aroundOpenings) {
+                if (!own.IsOut(around.box)) {
+                    tools.Append(around.solid);
                 }
             }
-            Bnd_Box reach;
-            BRepBndLib::Add(held, reach, Standard_False);
-            reach.Enlarge(thickness);
-            for (const auto& entry : cavityFaces) {
-                if (reach.IsOut(entry.box)) {
-                    continue;
-                }
-                BRepExtrema_DistShapeShape distance(entry.face, held);
-                if (!distance.IsDone() || distance.Value() < least) {
-                    return {};
-                }
+            if (tools.IsEmpty()) {
+                return {};
+            }
+            TopTools_ListOfShape faces;
+            faces.Append(xp.Current());
+            BRepAlgoAPI_Cut away;
+            away.SetArguments(faces);
+            away.SetTools(tools);
+            away.Build();
+            if (!away.IsDone() || away.HasErrors()) {
+                return {};
+            }
+            if (TopExp_Explorer(away.Shape(), TopAbs_FACE).More() && tooNear(away.Shape())) {
+                return {};
             }
         }
         TopoShape result(self.Tag, self.Hasher, self.getHistoryAlgorithm());

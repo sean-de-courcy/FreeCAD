@@ -1044,35 +1044,51 @@ class TestThickness(unittest.TestCase):
                 removed = (16 * 22 + 160 * (1 + slope)) * 16
                 self.assertAlmostEqual(solid.Volume - shell.Volume, removed, places=4)
 
-    def testShellUnderAHalfRoundStepWithATiltedTopIsNeverThinner(self):
-        """A 40 x 60 x 10 block with a half-round step (r 15) at its wall whose top rises from
-        the open face's level at the wall by 0.5 per mm, shelled 2 inward from the block's
-        top: OCCT's offset runs the cavity flat under the step, the roof as thin as the step
-        is high there. Refused: the step's top is held up to 2 from the open face's edge,
-        along the arc of its foot too (ops#811, the review's find). Where a kernel builds
-        it, the roof is left: less is removed than the plain block's cavity."""
+    def testShellUnderAHalfRoundStepWithATiltedTop(self):
+        """A 40 x 60 x 10 block with a half-round step at its wall whose top rises from the
+        open face's level at the wall, shelled 2 inward from the block's top. Radius 15,
+        rising 0.5 per mm: OCCT's offset runs the cavity flat under the step, the roof as
+        thin as the step is high there. Radius 3, rising 0.2 per mm: the step is all within
+        the wall, the cavity is the plain block's 36 x 56 x 8, but OCCT's offset leaves the
+        top's offset face untrimmed, a wedge of 376 mm^3 across the cavity. Both are refused
+        (ops#811, the reviews' finds): the step's top is held up to 2 from the open face's
+        edge, along the arc of its foot too, and no face of the cavity may run on far from
+        the face it is the offset of. Where a kernel builds either, a roof is left under the
+        large step and nothing under the small one."""
         V = FreeCAD.Vector
-        half = Part.makeCylinder(15, 40, V(0, 0, 10)).common(Part.makeBox(15, 30, 40, V(0, -15, 10)))
-        under = Part.Face(
-            Part.makePolygon(
-                [V(-5, -20, 7.5), V(20, -20, 20), V(20, 20, 20), V(-5, 20, 7.5), V(-5, -20, 7.5)]
-            )
-        ).extrude(V(0, 0, -40))
-        solid = Part.makeBox(40, 60, 10, V(0, -30, 0)).fuse(half.common(under)).removeSplitter()
-        self.assertTrue(solid.isValid())
-        opened = [
-            face for face in solid.Faces if abs(face.CenterOfMass.z - 10) < 1e-3 and face.Area > 1000
-        ]
-        self.assertEqual(len(opened), 1)
-        for join in (0, 2):
-            with self.subTest(join=join):
-                try:
-                    shell = solid.makeThickness(opened, -2, 1e-7, False, False, 0, join)
-                except Exception as error:  # the kernel's refusal
-                    self.assertIn("no shell was built", str(error))
-                else:
-                    self.assertTrue(shell.isValid())
-                    self.assertLess(solid.Volume - shell.Volume, 36 * 56 * 8 - 100)
+        for radius, rise, least, most in (
+            (15, 0.5, 0, 36 * 56 * 8 - 100),
+            (3, 0.2, 36 * 56 * 8 - 1e-3, 36 * 56 * 8 + 1e-3),
+        ):
+            with self.subTest(radius=radius):
+                half = Part.makeCylinder(radius, 40, V(0, 0, 10)).common(
+                    Part.makeBox(radius, 2 * radius, 40, V(0, -radius, 10))
+                )
+                low, high = 10 - 5 * rise, 10 + 20 * rise
+                under = Part.Face(
+                    Part.makePolygon(
+                        [V(-5, -20, low), V(20, -20, high), V(20, 20, high), V(-5, 20, low), V(-5, -20, low)]
+                    )
+                ).extrude(V(0, 0, -40))
+                solid = (
+                    Part.makeBox(40, 60, 10, V(0, -30, 0)).fuse(half.common(under)).removeSplitter()
+                )
+                self.assertTrue(solid.isValid())
+                opened = [
+                    face
+                    for face in solid.Faces
+                    if abs(face.CenterOfMass.z - 10) < 1e-3 and face.Area > 1000
+                ]
+                self.assertEqual(len(opened), 1)
+                for join in (0, 2):
+                    try:
+                        shell = solid.makeThickness(opened, -2, 1e-7, False, False, 0, join)
+                    except Exception as error:  # the kernel's refusal
+                        self.assertIn("no shell was built", str(error))
+                    else:
+                        self.assertTrue(shell.isValid())
+                        self.assertGreater(solid.Volume - shell.Volume, least)
+                        self.assertLess(solid.Volume - shell.Volume, most)
 
     def testShellBesideAStepWithARoundOnTheOpenFaceIsRefused(self):
         """The L-block with a round of 0.5 or 1 on the open face's side edge (y 0, z 10), which
