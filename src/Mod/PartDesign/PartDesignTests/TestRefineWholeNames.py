@@ -24,10 +24,10 @@
 ops#806).
 
 A rib that ends flush with a plate's top face and reaches into the plate is fused in two steps:
-the fusion cuts the top face along the rib's outline (the piece is named `<top>|...;FUS;...;MOD`),
-then the refine merges the piece, the rib's top and the strips between them into one face. That
-face kept only the piece's names, so every element a later feature generated on it was named from
-the piece: a boss's junction edge with the plate, far from the rib and unchanged, got another name
+the fusion cuts the top face along the rib's outline (the piece is named `<top>|...;FUS;...;MOD`;
+a face that is only trimmed keeps its name), then the refine merges the piece, the rib's top and
+the strips between them into one face. That face kept only the piece's names, so every element a
+later feature generated on it was named from the piece: a boss's junction edge with the plate, far from the rib and unchanged, got another name
 when the rib was inserted before the boss, and a fillet on it lost its edge.
 
 The models (designed, no file): a plate 80 x 50 x 10 with its top at z 10.
@@ -37,7 +37,8 @@ The models (designed, no file): a plate 80 x 50 x 10 with its top at z 10.
   keeps its name first where the rib is flush (it is the old face and more).
 - The grooves: full-width grooves cut the top face into pieces, a flush fill bridges two of them.
   Expected: with one groove the bridged face holds all that is left of the top face and takes its
-  name again; with two grooves a piece stays outside, and no face is the top face.
+  name again, also where the fill is wider than the groove and cuts the pieces once more; with
+  two grooves a piece stays outside, and no face is the top face.
 - The wall: a wall across the plate standing above the top face. The top face stays in two
   pieces: neither takes its name.
 """
@@ -85,9 +86,15 @@ class TestRefineWholeNames(unittest.TestCase):
         return self.feature("Pad", "Plate", self.sketch("PlateSk", 0, [(0, -25, 80, 25)]), TOP)
 
     def names(self, feature, element):
-        """The element's names in full form, in the map's order"""
-        found = feature.Shape.ElementReverseMap.get(element, [])
-        return [App.expandMappedName(n) for n in ([found] if isinstance(found, str) else found)]
+        """The element's names in full form: its first name (the one later features link),
+        then the others in byte order"""
+        shape = feature.Shape
+        first = App.expandMappedName(shape.getElementMappedName(element))
+        found = shape.ElementReverseMap.get(element, [])
+        others = [App.expandMappedName(n) for n in ([found] if isinstance(found, str) else found)]
+        self.assertIn(first, others)
+        others.remove(first)
+        return [first] + others
 
     def topAt(self, feature, x, y):
         """The face in the plate's top plane that holds (x, y)"""
@@ -158,26 +165,28 @@ class TestRefineWholeNames(unittest.TestCase):
         self.assertEqual(after[0][0], before[0][0])
         self.assertEqual(after[1], before[1])
 
-    def testRibBelowOrAboveTheTopChangesNoName(self):
-        for height in (2.5, 3.5):
-            with self.subTest(height=height):
-                before, after, _ = self.rib(height, 5)
-                self.assertEqual(after, before)
-                self.tearDown()
-                self.setUp()
+    def testRibBelowTheTopChangesNoName(self):
+        before, after, _ = self.rib(2.5, 5)
+        self.assertEqual(after, before)
+
+    def testRibAboveTheTopChangesNoName(self):
+        """The rib trims the top face (one piece): no name changes"""
+        before, after, _ = self.rib(3.5, 5)
+        self.assertEqual(after, before)
 
     # ------------------------------------------------------------------ the grooves
 
-    def grooves(self, positions):
+    def grooves(self, positions, over=0):
         """The plate's top name, then full-width grooves at the x positions and a flush fill
-        that bridges the first groove between y -10 and 10"""
+        that bridges the first groove between y -10 and 10, `over` wider than it on each side"""
         plate = self.plate()
         top = self.names(plate, self.topAt(plate, 40, 0))
         self.assertEqual(len(top), 1)
         cuts = [(x, -25, x + 4, 25) for x in positions]
         self.feature("Pocket", "Grooves", self.sketch("GrooveSk", TOP, cuts), 3)
         x = positions[0]
-        fill = self.feature("Pad", "Fill", self.sketch("FillSk", TOP - 3, [(x, -10, x + 4, 10)]), 3)
+        fillSketch = self.sketch("FillSk", TOP - 3, [(x - over, -10, x + 4 + over, 10)])
+        fill = self.feature("Pad", "Fill", fillSketch, 3)
         return top[0], fill
 
     def testFilledGrooveMakesTheTopFaceWhole(self):
@@ -188,6 +197,16 @@ class TestRefineWholeNames(unittest.TestCase):
         names = self.names(fill, face)
         self.assertEqual(names[0], top, "the top face's name is back, first")
         self.assertGreaterEqual(sum(n.startswith(top + "|") for n in names), 1, names)
+
+    def testFillWiderThanTheGrooveMakesTheTopFaceWhole(self):
+        """The fill reaches 2 mm into both pieces: its fusion cuts each piece again, so the
+        merged face holds pieces of pieces. The top face's own name comes first, before a
+        groove piece's (review r1)"""
+        top, fill = self.grooves([20], over=2)
+        face = self.topAt(fill, 10, 0)
+        self.assertEqual(face, self.topAt(fill, 60, 0), "both sides are one face")
+        names = self.names(fill, face)
+        self.assertEqual(names[0], top, "the top face's name is back, first")
 
     def testAPieceLeftOutsideKeepsTheNameAway(self):
         """Two grooves, three pieces: the fill bridges two, the third stays apart"""
