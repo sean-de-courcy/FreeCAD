@@ -3067,7 +3067,7 @@ class BodyReorderBase:
         self.body.reorderObject([fillet], block.Profile[0], True)
         self.assertIsNone(fillet.BaseFeature)
         self.recompute()
-        self.assertTrue(fillet.isError())
+        self.assertIn("Invalid", fillet.State)
         return block, fillet
 
     def testDressUpMovedToTheTopAndBack(self):
