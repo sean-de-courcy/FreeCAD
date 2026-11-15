@@ -435,6 +435,12 @@ void StartupProcess::reapplyPackColours()
         };
         auto onshape = loadView("FreeCAD-CH Onshape");
         auto light = loadView("FreeCAD Light");
+        constexpr unsigned long unset = 0x12345678ul;  // not a colour any pack or default uses
+        // Until the packs carry the Onshape colours there is nothing to re-apply: leave the marker
+        // unset, so the re-apply runs once they do.
+        if (onshape.isNull() || onshape->GetUnsigned("SelectionColor", unset) == unset) {
+            return;
+        }
         const std::string theme = App::GetApplication()
                                       .GetParameterGroupByPath(
                                           "User parameter:BaseApp/Preferences/MainWindow"
@@ -453,7 +459,6 @@ void StartupProcess::reapplyPackColours()
             {"DefaultShapeColor", true, {2914369023ul, 0xCCCCCCFFul}},
             {"DefaultShapeLineColor", true, {255ul}},
         };
-        constexpr unsigned long unset = 0x12345678ul;  // not a colour any pack or default uses
         for (const auto& key : keys) {
             if (key.lightOnly && !isLight) {
                 continue;
@@ -476,6 +481,9 @@ void StartupProcess::reapplyPackColours()
             }
         }
         general->SetInt("CHColourPackApplied", version);
+    }
+    catch (const Base::Exception& e) {
+        Base::Console().warning("Colour re-apply: %s\n", e.what());
     }
     catch (const std::exception& e) {
         Base::Console().warning("Colour re-apply: %s\n", e.what());

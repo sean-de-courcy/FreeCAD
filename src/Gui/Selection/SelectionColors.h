@@ -31,14 +31,14 @@ namespace Gui::SelectionColors
 {
 inline SbColor highlightFallbackColor()
 {
-    // FreeCAD-CH (ops#796): Onshape's hover orange, #FFC685.
-    return SbColor(1.0f, 198.0f / 255.0f, 133.0f / 255.0f);
+    // Keep this aligned with the generic Selection preferences page defaults.
+    return SbColor(10.0f / 255.0f, 200.0f / 255.0f, 1.0f);
 }
 
 inline SbColor selectionFallbackColor()
 {
-    // FreeCAD-CH (ops#796): Onshape's selection orange, #FFA90A.
-    return SbColor(1.0f, 169.0f / 255.0f, 10.0f / 255.0f);
+    // Keep this aligned with the generic Selection preferences page defaults.
+    return SbColor(0.0f, 171.0f / 255.0f, 1.0f);
 }
 
 inline SbColor viewPreferenceColor(const char* key, const SbColor& fallback)
