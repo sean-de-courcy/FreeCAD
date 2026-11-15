@@ -229,6 +229,9 @@ void acceptReference(PropertyLinkBase* prop, int localIndex)
         resolution.index = i;
         resolution.sub = reference.subs[i];
         resolution.shadow = reference.shadows[i];
+        // The element held is the reference now: a re-target record's original isn't put back
+        // over it (N1 3.2; ops#818)
+        resolution.clearRetarget = true;
         list.push_back(std::move(resolution));
     }
     if (list.empty()) {
