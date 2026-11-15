@@ -221,7 +221,7 @@ std::pair<double, double> coveringRange(
         low = std::min(low, a);
         high = std::max(high, b);
     }
-    if (!periodic || period <= 0 || high - low >= period) {
+    if (!periodic || period <= 0) {
         return {low, high};
     }
     for (auto& [a, b] : ranges) {
@@ -238,6 +238,12 @@ std::pair<double, double> coveringRange(
         else {
             merged.push_back(r);
         }
+    }
+    if (merged.back().second - merged.front().first >= period
+        && std::any_of(merged.begin(), merged.end(), [&](const auto& r) {
+               return r.second - r.first >= period;
+           })) {
+        return {low, low + period};  // one piece goes all round
     }
     double gap = merged.front().first + period - merged.back().second;
     std::size_t after = 0;  // the range starts at merged[after], after the largest gap
