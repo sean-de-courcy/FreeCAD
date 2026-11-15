@@ -53,7 +53,7 @@ class TestSolidOpsGui(unittest.TestCase):
         # one (a group button shows its current child's).
         from PySide import QtWidgets
 
-        TEXT_BUTTONS = {"PartDesign_ToggleModelTree"}  # the "Model Tree" toggle is text by design
+        GROUPS = set()
         previous = Gui.activeWorkbench().name()
         Gui.activateWorkbench("PartDesignWorkbench")
         try:
@@ -78,7 +78,7 @@ class TestSolidOpsGui(unittest.TestCase):
                         seen[a.objectName()] = "toolbar"
                         button = tb.widgetForAction(a)
                         if button and not button.icon().isNull():
-                            TEXT_BUTTONS.add(a.objectName())  # a group shows its child's icon
+                            GROUPS.add(a.objectName())  # a group shows its child's icon
                 for b in tb.findChildren(QtWidgets.QToolButton):
                     if b.menu():
                         walk(b.menu(), "menu")
@@ -90,7 +90,7 @@ class TestSolidOpsGui(unittest.TestCase):
             for name, where in sorted(seen.items()):
                 pixmap = Gui.Command.get(name).getInfo().get("pixmap", "")
                 if not pixmap:
-                    if where == "toolbar" and name not in TEXT_BUTTONS:
+                    if where == "toolbar" and name not in GROUPS:
                         bad.append(name + ": toolbar button without an icon")
                 elif Gui.getIcon(pixmap).pixmap(32, 32).toImage() == placeholder:
                     bad.append("%s: icon %s not found" % (name, pixmap))
