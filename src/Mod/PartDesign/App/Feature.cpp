@@ -1127,6 +1127,21 @@ void Feature::onBaseFeatureRerouted(
 namespace
 {
 
+/// Whether base's shape, as it stands, has an element of the mapped name
+bool holdsName(const App::DocumentObject* base, const std::string& mapped)
+{
+    auto feature = freecad_cast<const Part::Feature*>(base);
+    if (!feature || mapped.empty()) {
+        return false;
+    }
+    const auto& shape = feature->Shape.getShape();
+    if (shape.isNull()) {
+        return false;
+    }
+    const std::string name = Data::ComplexGeoData::elementMapPrefix() + mapped;
+    return static_cast<bool>(shape.getElementName(name.c_str()).index);
+}
+
 // The relink in a reference solver document (ops#7, Task 2 PR 6): the link moves to the new base
 // with every reference marked missing, keeping its old mapped name (the shadow) and its saved
 // fingerprint, and the solver then resolves them against the new base. An index name never
@@ -1140,12 +1155,15 @@ namespace
 // With \a home (a dress-up's Base, ops#818) each reference also keeps what it was on the base it
 // leaves, in its re-target record: that base, the element's mapped name and index, its
 // fingerprint and its guess record. When the link comes back to that base the reference is
-// written as it was there, whatever the solver made of it meanwhile (as the re-target rule's
-// restore, N1 3.2): a move and its undo give the same references. The name it got on the base in
-// between isn't carried back: where the solver found it there by geometry, that name is another
-// element's history (a draft's edge on the boss before the draft), which the first base's shape
-// doesn't hold. A reference moved on again keeps the record of its first base. A user's pick, a
-// repair and accepting a guess end the record, as every setter does.
+// written as it was there (as the re-target rule's restore, N1 3.2), unless the name it has now
+// is an element of that base's shape as it stands: a move and its undo give the same references.
+// The name it got on the base in between is carried back only when the first base has it (an
+// element both leave alone, also after an edit the solver followed in between). Where the solver
+// found it in between by geometry, that name is another element's history (a draft's edge on the
+// boss before the draft), which the first base's shape doesn't hold. At a reorder the first base
+// still has its shape from before, so a name it has only once it recomputes counts as not held,
+// and the reference comes back as it was. A reference moved on again keeps the record of its
+// first base. A repair, accepting a guess and a pick of another element end the record.
 bool relinkAsMissing(
     App::PropertyLinkSub& link,
     const Part::TopoShape& oldShape,
@@ -1204,7 +1222,11 @@ bool relinkAsMissing(
             if (first && !was.isTarget(first->getID())) {
                 first = nullptr;
             }
-            if (first == newBase && !was.origName.empty() && !was.origIndex.empty()) {
+            if (first == newBase && holdsName(newBase, mapped)) {
+                // Back on the base it left, which has the name the reference has now
+                was = App::RetargetRecord();
+            }
+            else if (first == newBase && !was.origName.empty() && !was.origIndex.empty()) {
                 // Back on the base it left: the reference it was there
                 mapped = was.origName;
                 index = was.origIndex;
@@ -1246,10 +1268,10 @@ bool relinkAsMissing(
     if (home) {
         // The setter passed the shadows on: the records and fingerprints are set beside them
         link.setElementRecords(std::move(records));
+        // (every one: the setter pairs entries by position, and a restored reference without a
+        // fingerprint must not keep the one measured on the base in between)
         for (std::size_t i = 0; i < fingerprints.size(); ++i) {
-            if (!fingerprints[i].empty()) {
-                link.setElementFingerprint(i, fingerprints[i]);
-            }
+            link.setElementFingerprint(i, fingerprints[i]);
         }
     }
     // A new base that hasn't computed yet (insert at the roll-back bar, ops#127): its first shape
