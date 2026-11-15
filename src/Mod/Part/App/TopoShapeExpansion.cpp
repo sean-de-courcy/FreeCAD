@@ -11248,8 +11248,8 @@ long lastTagOf(std::string_view name)
  * The rule: a face of \a result merged from several faces of \a input (\a mapper's modified
  * lists) that holds a piece `X|<split>` takes the name X again when no face outside the merge
  * holds a piece of the same split of X: the merged face then contains all of X the split left.
- * A piece of a piece comes back level by level. The whole names come first, the one with the
- * fewest splits left on it before the others, then the one named by the older feature (the
+ * A piece of a piece comes back level by level. The whole names come first, each piece's
+ * deepest whole name before the levels above it, then the one named by the older feature (the
  * smaller tag; a feature inserted earlier in the history is the newer one, so the names of what
  * was there stay first), then in the input's order. The pieces' own names stay on the face
  * after them, for references made to them.
@@ -11372,7 +11372,7 @@ void restoreWholeFaceNames(TopoShape& result, const TopoShape& input, const Topo
         const std::set<int> inside(faces.begin(), faces.end());
         struct Whole
         {
-            std::size_t splitsLeft;
+            std::size_t rank;
             long tag;
             Data::MappedName name;
             Data::ElementIDRefs sids;
@@ -11389,9 +11389,12 @@ void restoreWholeFaceNames(TopoShape& result, const TopoShape& input, const Topo
             for (std::size_t k = 0; k < undone; ++k) {
                 const std::string& name = piece.levels[k].first;
                 if (seen.insert(name).second) {
-                    // The splits the name still carries below the ones undone here
+                    // The splits undone below it in its own chain: each chain's deepest whole
+                    // name ranks first, whatever splits it still carries that can't be undone
+                    // (a plate's top cut by an earlier groove, `<top>|...CUT`, is the face
+                    // later features knew: it comes before the rib's top; review r2)
                     whole.push_back(
-                        {piece.levels.size() - 1 - k, lastTagOf(name), Data::MappedName(name), piece.sids}
+                        {undone - 1 - k, lastTagOf(name), Data::MappedName(name), piece.sids}
                     );
                 }
             }
@@ -11406,7 +11409,7 @@ void restoreWholeFaceNames(TopoShape& result, const TopoShape& input, const Topo
             continue;
         }
         std::ranges::stable_sort(whole, [](const Whole& a, const Whole& b) {
-            return std::tie(a.splitsLeft, a.tag) < std::tie(b.splitsLeft, b.tag);
+            return std::tie(a.rank, a.tag) < std::tie(b.rank, b.tag);
         });
         NameList names;
         for (Whole& entry : whole) {
@@ -11426,7 +11429,8 @@ void restoreWholeFaceNames(TopoShape& result, const TopoShape& input, const Topo
     }
 }
 
-/// restoreWholeFaceNames(), which never fails the refine: the names stay as they were
+/// restoreWholeFaceNames(), which never fails the refine: a failure is a warning, and the face
+/// it stopped at keeps the names set so far
 void restoreWholeFaceNamesSafely(
     TopoShape& result,
     const TopoShape& input,
@@ -11438,6 +11442,9 @@ void restoreWholeFaceNamesSafely(
     }
     catch (const Base::Exception& e) {
         FC_WARN("refine: whole face names not restored: " << e.what());
+    }
+    catch (const Standard_Failure& e) {
+        FC_WARN("refine: whole face names not restored: " << e.GetMessageString());
     }
     catch (const std::exception& e) {
         FC_WARN("refine: whole face names not restored: " << e.what());
