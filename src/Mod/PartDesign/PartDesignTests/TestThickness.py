@@ -1204,15 +1204,43 @@ class TestThickness(unittest.TestCase):
                 self.assertTrue(shell.isValid())
                 self.assertLess(abs(shell.Volume - expected.Volume), 1e-6 * expected.Volume)
                 self.assertLess(shell.cut(expected).Volume + expected.cut(shell).Volume, 1e-4)
-                # every face is the solid's own or named through the thickness, none by the
-                # index of an intermediate shape (the review's find: FaceN;_;1;MKR)
-                names = shell.ElementReverseMap
-                for i in range(1, len(shell.Faces) + 1):
-                    name = names.get("Face" + str(i))
-                    self.assertTrue(name, i)
-                    name = name if isinstance(name, str) else name[0]
-                    if "THK" not in name:
-                        self.assertRegex(name, r"^Face\d+;_;0;MKR")
+                # the same as a PartDesign feature: the designed shell, every face named
+                body = self.Doc.addObject("PartDesign::Body", "Body")
+                block = body.newObject("PartDesign::AdditiveBox", "Block")
+                block.Length, block.Width, block.Height = 40, 20, 10
+                step = body.newObject("PartDesign::AdditiveBox", "Step")
+                step.Length, step.Width, step.Height = 20, 20, 10
+                step.Placement.Base = FreeCAD.Vector(0, 0, 10)
+                step.Refine = True
+                if any(isinstance(face.Surface, Part.Cylinder) for face in cut.Faces):
+                    under = body.newObject("PartDesign::SubtractiveCylinder", "Under")
+                    under.Radius, under.Height = 1, 7
+                    under.Placement.Base = FreeCAD.Vector(30, 10, 0)
+                else:
+                    under = body.newObject("PartDesign::SubtractiveBox", "Under")
+                    under.Length, under.Width, under.Height = 2, 2, 7
+                    under.Placement.Base = FreeCAD.Vector(38, 18, 0)
+                self.Doc.recompute()
+                self.assertAlmostEqual(under.Shape.Volume, solid.Volume, places=6)
+                opened = [
+                    "Face" + str(i)
+                    for i, face in enumerate(under.Shape.Faces, 1)
+                    if isinstance(face.Surface, Part.Plane)
+                    and face.distToShape(Part.Vertex(FreeCAD.Vector(30, 5, 10)))[0] < 1e-7
+                ]
+                self.assertEqual(len(opened), 1)
+                thickness = body.newObject("PartDesign::Thickness", "Thickness")
+                thickness.Base = (under, opened)
+                thickness.Value = 2
+                thickness.Reversed = True
+                thickness.Join = "Intersection"
+                self.Doc.recompute()
+                self._assertShell(thickness, expected)
+                names = thickness.Shape.ElementReverseMap
+                for i in range(1, len(thickness.Shape.Faces) + 1):
+                    self.assertIn("Face" + str(i), names)
+                FreeCAD.closeDocument(self.Doc.Name)
+                self.Doc = FreeCAD.newDocument("PartDesignTestThickness")
 
     def tearDown(self):
         # closing doc
