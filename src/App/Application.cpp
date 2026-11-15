@@ -178,6 +178,7 @@
 
 #include "SafeMode.h"
 #include "TeamFolder.h"
+#include "DocumentPresence.h"
 
 #ifdef FC_OS_WIN32
 #include <windows.h>
@@ -3313,6 +3314,8 @@ void Application::initApplication()
 
     // FreeCAD-CH (ops#640, folder sync item 2): the team folder's ignore list, now and on change
     TeamFolder::watchPreference();
+    // FreeCAD-CH (ops#640, folder sync item 6): presence markers of open team-folder documents
+    DocumentPresence::start();
 
     // seed randomizer
     srand(time(nullptr));

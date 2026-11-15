@@ -57,6 +57,7 @@
 #include "RecoverySnapshot.h"
 #include "StringHasher.h"
 #include "TeamFolder.h"
+#include "DocumentPresence.h"
 
 
 // using Base::GetConsole;
@@ -378,6 +379,70 @@ PyObject* ApplicationPy::sActiveDocument(PyObject* /*self*/, PyObject* args)
 
     Py_INCREF(Py_None);
     return Py_None;
+}
+
+// FreeCAD-CH (ops#640, folder sync item 6): who else has a team-folder document open
+namespace
+{
+std::string takeUtf8(char* text)
+{
+    std::string result(text);
+    PyMem_Free(text);
+    return result;
+}
+}  // namespace
+
+PyObject* ApplicationPy::sPresence(PyObject* /*self*/, PyObject* args)
+{
+    char* path = nullptr;
+    if (!PyArg_ParseTuple(args, "et", "utf-8", &path)) {
+        return nullptr;
+    }
+    const std::string file = takeUtf8(path);
+    PY_TRY
+    {
+        Py::List list;
+        for (const auto& marker : DocumentPresence::others(file)) {
+            Py::Dict dict;
+            dict.setItem("file", Py::String(marker.file));
+            dict.setItem("user", Py::String(marker.user));
+            dict.setItem("host", Py::String(marker.host));
+            dict.setItem("pid", Py::Long(marker.pid));
+            dict.setItem("time", Py::Long(marker.time));
+            dict.setItem("path", Py::String(marker.path));
+            list.append(dict);
+        }
+        return Py::new_reference_to(list);
+    }
+    PY_CATCH;
+}
+
+PyObject* ApplicationPy::sPresenceMessage(PyObject* /*self*/, PyObject* args)
+{
+    char* path = nullptr;
+    if (!PyArg_ParseTuple(args, "et", "utf-8", &path)) {
+        return nullptr;
+    }
+    const std::string file = takeUtf8(path);
+    PY_TRY
+    {
+        return Py::new_reference_to(
+            Py::String(DocumentPresence::describe(DocumentPresence::others(file))));
+    }
+    PY_CATCH;
+}
+
+PyObject* ApplicationPy::sRefreshPresence(PyObject* /*self*/, PyObject* args)
+{
+    if (!PyArg_ParseTuple(args, "")) {
+        return nullptr;
+    }
+    PY_TRY
+    {
+        DocumentPresence::refresh();
+        Py_Return;
+    }
+    PY_CATCH;
 }
 
 // FreeCAD-CH (ops#640, folder sync item 2)

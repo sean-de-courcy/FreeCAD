@@ -81,6 +81,7 @@
 #include "PreferencePages/DlgSettingsCacheDirectory.h"
 #include "DocumentPy.h"
 #include "DocumentTabBar.h"
+#include "DocumentPresenceGui.h"
 #include "DocumentRecovery.h"
 #include "EditableDatumLabelPy.h"
 #include "EditorView.h"
@@ -824,6 +825,13 @@ void Application::open(const char* FileName, const char* Module)
                 }
 
                 if (!handled) {
+                    // FreeCAD-CH (ops#640, folder sync item 6): someone else has it open
+                    wc.restoreCursor();
+                    const bool go = DocumentPresenceGui::confirmOpen(filepath, getMainWindow());
+                    wc.setWaitCursor();
+                    if (!go) {
+                        return;
+                    }
                     Command::doCommand(Command::App, "FreeCAD.openDocument('%s')", unicodepath.c_str());
                     Gui::Application::checkForRecomputes();
                 }
