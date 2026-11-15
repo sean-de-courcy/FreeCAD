@@ -638,6 +638,34 @@ std::optional<Finding> turnOver(const TopoDS_Edge& edge)
     }
 }
 
+/// A point of \a edge, not a line, that is straight at all its samples (a B-spline or Bezier edge
+/// with collinear poles), if it is one: there Frenet's frame isn't defined anywhere and OCCT's
+/// takes a normal of its own, which turnOver() leaves as it is. Inside a wire of several edges,
+/// OCCT makes the edges' trihedrons agree at their vertices from that normal: on a planar spine of
+/// a quarter arc, a straight cubic B-spline edge and a quarter arc bending the same way, turned 37
+/// degrees about (1, 2, 3), the rectangle beside it came out turned over on the far side of the
+/// spine, where a line edge in its place kept it (fork PR 377's round 2 review, c7a; ops#507)
+std::optional<gp_Pnt> wholeStraight(const TopoDS_Edge& edge)
+{
+    if (BRep_Tool::Degenerated(edge)) {
+        return std::nullopt;
+    }
+    const BRepAdaptor_Curve curve(edge);
+    if (curve.GetType() == GeomAbs_Line) {
+        return std::nullopt;
+    }
+    const double length = GCPnts_AbscissaPoint::Length(curve);
+    if (length <= 0) {
+        return std::nullopt;
+    }
+    for (const double u : sampleParameters(curve, 1, length)) {
+        if (!straightAt(curve, u, length)) {
+            return std::nullopt;
+        }
+    }
+    return curve.Value((curve.FirstParameter() + curve.LastParameter()) / 2);
+}
+
 /// The spine's tangent at its point nearest to \a point, and the distance to it
 std::optional<std::pair<gp_Vec, double>> nearestTangent(const TopoDS_Wire& spine, const gp_Pnt& point)
 {
@@ -860,6 +888,17 @@ Part::SweepFrenet::Mode Part::SweepFrenet::setMode(
     std::optional<Finding> found;
     for (TopExp_Explorer xp(spine, TopAbs_EDGE); xp.More() && !found; xp.Next()) {
         found = turnOver(TopoDS::Edge(xp.Current()));
+    }
+    // A whole straight edge that isn't a line, among other edges of a planar spine: OCCT's own
+    // normal along it decides which way the rest of the frame faces (wholeStraight()). The plane's
+    // normal as binormal is Frenet's frame on a planar spine. Off a plane, the frame along the
+    // straight edge has no Frenet meaning to keep, and it is left as it is (ops#507, debt)
+    if (!found && spine.NbChildren() > 1 && planeNormal(spine, Precision::Confusion())) {
+        for (TopExp_Explorer xp(spine, TopAbs_EDGE); xp.More() && !found; xp.Next()) {
+            if (const auto where = wholeStraight(TopoDS::Edge(xp.Current()))) {
+                found = Finding {*where, -1, true};
+            }
+        }
     }
     if (!found) {
         return Mode::Asked;
