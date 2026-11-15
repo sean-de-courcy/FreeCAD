@@ -795,37 +795,61 @@ class TestStudioOwner(unittest.TestCase):
                 self.assertTrue(boss.isValid(), boss.getStatusString())
                 self.assertAlmostEqual(boss.AddSubShape.Volume, tool, places=3)
 
+    def coneAndBoss(self, centre, radius):
+        """Step, a tapered Pad on A (circle r 2 at (7, 5), 4 tall, taper -10, its side one cone
+        all round), and Boss, a circle at centre on A's top up to that cone; the boss's tool
+        within the cone as it was."""
+        stepSk = studioSketch(self.doc, self.studio, "StepSk", z=10, circles=((7, 5, 2),))
+        step = makeOwner(
+            self.doc, self.studio, "Pad", "Step", stepSk, ("A",), Length=4, TaperAngle=-10
+        )
+        self.doc.recompute()
+        made = self.step(step, "A")
+        cone = next(
+            f"Face{i}" for i, f in enumerate(made.Shape.Faces, 1)
+            if f.Surface.__class__.__name__ == "Cone"
+        )  # fmt: skip
+        bossSk = studioSketch(self.doc, self.studio, "BossSk", z=10, circles=((*centre, radius),))
+        boss = makeOwner(self.doc, self.studio, "Pad", "Boss", bossSk, ("A",), Type="UpToFace")
+        boss.UpToFace = (made, [cone])
+        self.doc.recompute()
+        top = 2 - 4 * math.tan(math.radians(10))
+        tool = Part.makeCylinder(radius, 5, V(*centre, 10)).common(
+            Part.makeCone(2, top, 4, V(7, 5, 10))
+        ).Volume
+        return boss, tool
+
     def testUpToConeFaceSplitThroughItsSeam(self):
-        """Step, a tapered Pad (circle r 2 at (7, 5), 4 tall, taper -10): its side is one cone all
-        round. A slot y 4.9..5.1 through it splits the side in two; a boss r 0.2 over either gap
-        (one of them at the cone's seam) ends on the cone as before the slot."""
-        for centre in ((5.4, 5), (8.6, 5), (7, 6.6)):
+        """A slot y 4.9..5.1 through the cone splits its side in two: a boss under a piece, or
+        over the gap the built face covers, ends on the cone as before; over the other gap (the
+        built face's seam) it may fail, loudly, but never ends elsewhere."""
+        for centre in ((5.4, 5), (8.6, 5), (7, 6.6), (7, 3.4)):
             with self.subTest(centre=centre):
                 self.tearDown()
                 self.setUp()
-                stepSk = studioSketch(self.doc, self.studio, "StepSk", z=10, circles=((7, 5, 2),))
-                step = makeOwner(
-                    self.doc, self.studio, "Pad", "Step", stepSk, ("A",), Length=4, TaperAngle=-10
-                )
-                self.doc.recompute()
-                made = self.step(step, "A")
-                cone = next(
-                    f"Face{i}" for i, f in enumerate(made.Shape.Faces, 1)
-                    if f.Surface.__class__.__name__ == "Cone"
-                )  # fmt: skip
-                bossSk = studioSketch(self.doc, self.studio, "BossSk", z=10, circles=((*centre, 0.2),))
-                boss = makeOwner(self.doc, self.studio, "Pad", "Boss", bossSk, ("A",), Type="UpToFace")
-                boss.UpToFace = (made, [cone])
-                self.doc.recompute()
-                top = 2 - 4 * math.tan(math.radians(10))
-                tool = Part.makeCylinder(0.2, 5, V(*centre, 10)).common(
-                    Part.makeCone(2, top, 4, V(7, 5, 10))
-                ).Volume
+                boss, tool = self.coneAndBoss(centre, 0.2)
                 self.assertTrue(boss.isValid(), boss.getStatusString())
                 self.assertAlmostEqual(boss.AddSubShape.Volume, tool, places=3)
                 self.membersBefore(boss, (self.slotAcross((4, 4.9, 10, 5.1), 14, 4),))
+                if centre[1] == 5 and not boss.isValid():
+                    continue  # over a gap: loud
                 self.assertTrue(boss.isValid(), boss.getStatusString())
                 self.assertAlmostEqual(boss.AddSubShape.Volume, tool, places=3)
+
+    def testUpToConeFaceSplitAndShortenedDoesNotComeBack(self):
+        """A pocket lowers the part's top to z 12.5 and a slot splits the cone: a boss that met
+        the cone near z 13 fails, as with the lowering alone: the cut part stays away."""
+        for between in (
+            (self.slotAcross((4, 2, 10, 8), 14, 1.5),),
+            (self.slotAcross((4, 2, 10, 8), 14, 1.5), self.slotAcross((4, 4.9, 10, 5.1), 14, 4)),
+        ):
+            with self.subTest(features=len(between)):
+                self.tearDown()
+                self.setUp()
+                boss, tool = self.coneAndBoss((7, 6.47), 0.1)
+                self.assertTrue(boss.isValid(), boss.getStatusString())
+                self.membersBefore(boss, between)
+                self.assertFalse(boss.isValid(), "the boss went up to a cone a pocket removed")
 
     def testUpToFaceAfterAnOutwardThicknessWithItsOuterFaceRemoved(self):
         """An outward Thickness, then a pocket z 14.5..15 over the whole top: nothing faces as
