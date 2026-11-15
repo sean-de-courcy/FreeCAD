@@ -91,7 +91,6 @@ bool confirmOpen(const std::string& fileName, QWidget* parent)
 void start(MainWindow* mainWindow)
 {
     auto* widget = new QLabel(mainWindow->statusBar());
-    widget->setObjectName(QStringLiteral("PresenceLabel"));
     label() = widget;
     mainWindow->addStatusBarItem(
         widget,
