@@ -3303,6 +3303,84 @@ void Application::initCrashReporter()
     }
 }
 
+namespace
+{
+
+// FreeCAD-CH (ops#640, folder sync item 7; notes/folder-sync.md 2.5): FreeCAD's own folders belong
+// to one computer. Inside the team folder, Syncthing would copy this computer's settings, cache and
+// recovery files to every other computer. Warns once per folder and team folder.
+void warnSettingsInTeamFolder()
+{
+    const std::string team = TeamFolder::folder();
+    if (team.empty()) {
+        return;
+    }
+    static std::set<std::string> warned;
+    const std::string macroPath =
+        GetApplication()
+            .GetParameterGroupByPath("User parameter:BaseApp/Preferences/Macro")
+            ->GetASCII("MacroPath", "");
+    const std::pair<const char*, std::string> places[] = {
+        {"settings folder", Application::getUserConfigPath()},
+        {"data folder", Application::getUserAppDataDir()},
+        {"cache folder", Application::getUserCachePath()},
+        {"macro folder", Application::getUserMacroDir()},
+        {"macro path (Preferences, Macro)", macroPath},
+    };
+    for (const auto& [what, path] : places) {
+        if (path.empty() || !TeamFolder::contains(path)) {
+            continue;
+        }
+        if (!warned.insert(team + '\n' + path).second) {
+            continue;
+        }
+        const std::string shown =
+            Base::FileInfo::pathToString(Base::FileInfo::stringToPath(path).make_preferred());
+        Base::Console().warning(
+            "FreeCAD-CH: the %s '%s' is inside the team folder '%s': Syncthing would copy this "
+            "computer's files to every other computer. Move it out of the team folder.\n",
+            what,
+            shown.c_str(),
+            team.c_str()
+        );
+    }
+}
+
+// Checks again when the team folder or the macro path is set while FreeCAD-CH runs.
+class SettingsInTeamFolderWatcher: public ParameterGrp::ObserverType
+{
+public:
+    void OnChange(Base::Subject<const char*>& /*caller*/, const char* reason) override
+    {
+        if (!reason) {
+            return;
+        }
+        const std::string name(reason);
+        if (name == "TeamFolder" || name == "MacroPath") {
+            warnSettingsInTeamFolder();
+        }
+    }
+};
+
+void watchSettingsInTeamFolder()
+{
+    // Never deleted, as TeamFolder's own watcher: the parameter groups outlive static destructors
+    static auto* watcher = [] {
+        auto* created = new SettingsInTeamFolderWatcher;
+        GetApplication()
+            .GetParameterGroupByPath("User parameter:BaseApp/Preferences/Document")
+            ->Attach(created);
+        GetApplication()
+            .GetParameterGroupByPath("User parameter:BaseApp/Preferences/Macro")
+            ->Attach(created);
+        return created;
+    }();
+    (void)watcher;
+    warnSettingsInTeamFolder();
+}
+
+}  // namespace
+
 void Application::initApplication()
 {
     // interpreter and Init script ==========================================================
@@ -3339,6 +3417,8 @@ void Application::initApplication()
 
     // FreeCAD-CH (ops#640, folder sync item 2): the team folder's ignore list, now and on change
     TeamFolder::watchPreference();
+    // FreeCAD-CH (ops#640, folder sync item 7): FreeCAD's own folders outside the team folder
+    watchSettingsInTeamFolder();
     // FreeCAD-CH (ops#640, folder sync item 6): presence markers of open team-folder documents
     DocumentPresence::start();
 
