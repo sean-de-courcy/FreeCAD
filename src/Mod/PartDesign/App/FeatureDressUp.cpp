@@ -758,7 +758,7 @@ Part::TopoShape reapplyDressUpRun(
     Part::TopoShape* raw
 )
 {
-    DressUpRun run {base, edges, Part::TopoShape()};
+    DressUpRun run {base, edges, Part::TopoShape(), false, false, Part::TopoShape()};
     run.keep = raw != nullptr;
     DressUpRun* outer = dressUpRun;
     dressUpRun = &run;
