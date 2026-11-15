@@ -1575,7 +1575,7 @@ class TestDimensionInPlaceGui(SketcherGuiTestCase):
 
     def constraint_list_item(self, index):
         """The constraint list's row for constraint `index` (0-based; its row reads
-        "<index + 1>-<type> (<value>)")."""
+        "<index + 1>-<type> (<value>)", or "<name> (<value>)" for a named one)."""
         from PySide import QtWidgets
 
         lists = [
@@ -1585,7 +1585,8 @@ class TestDimensionInPlaceGui(SketcherGuiTestCase):
         ]
         self.assertEqual(len(lists), 1, "Expected the sketch's constraint list")
         view = lists[0]
-        name = f"{index + 1}-"
+        given = self.sketch.Constraints[index].Name
+        name = f"{given} (" if given else f"{index + 1}-"
         for row in range(view.count()):
             item = view.item(row)
             if item.text().startswith(name):
@@ -1664,3 +1665,174 @@ class TestDimensionInPlaceGui(SketcherGuiTestCase):
         self.assertEqual(self.expressions(), {})
         self.assertAlmostEqual(self.sketch.Constraints[index].Value, 50.0, places=9)
         self.assert_point(self.line_end(), 50, 0)
+
+    # D50-D53: the review's rounds on the kept text (ops#684 F1-F3, the dropped-text note) ------
+
+    def label_point(self, index):
+        """A viewport point that preselects constraint `index`'s label, or None: off screen the
+        label has no pick area (SoDatumLabel sizes it in GLRender, and the off-screen view never
+        renders; an off-screen image of the view, view.saveImage, hung there)."""
+        import SketcherGui
+
+        name = f"Constraint{index + 1}"
+
+        def find():
+            constraint = self.sketch.Constraints[index]
+            line = self.sketch.Geometry[constraint.First]
+            middle = (line.StartPoint + line.EndPoint) * 0.5
+            centre = self.view.getPointOnViewport(
+                V(middle.x + constraint.LabelPosition, middle.y + constraint.LabelDistance, 0)
+            )
+            for radius in range(0, 41, 2):
+                for dy in range(-radius, radius + 1, 2):
+                    for dx in range(-radius, radius + 1, 2):
+                        if max(abs(dx), abs(dy)) != radius:
+                            continue
+                        coin = (int(centre[0]) + dx, int(centre[1]) + dy)
+                        info = SketcherGui.getActiveSketchPreselection(coin)
+                        if info and name in (info.get("SubElementNames") or []):
+                            return self.viewport_to_qpoint(self.view, self.viewport, coin)
+            return None
+
+        return find()
+
+    def edit_in_place(self, index, steps, allowed_modal=None):
+        """A double-click on constraint `index`'s label, answering its field with `steps`.
+        Skips when the label can't be picked here."""
+        label = self.label_point(index)
+        if label is None:
+            self.skipTest("The datum label isn't pickable here (off screen, never rendered)")
+        self.move(self.viewport, label)
+        state = self.answer_fields(steps, allowed_modal=allowed_modal)
+        self.click(self.viewport, label)
+        self.click(self.viewport, label)
+        self.wait_answered(state, len(steps))
+        return state
+
+    def add_kept_distance(self, schema, expression, comment=None):
+        """Line 0 anchored, with a Distance (constraint 2) bound to `expression` (and its
+        `comment`, the typed text), in a document of the given units; then sketch edit. The path
+        is the GUI's (`Constraints[2]`, as the formula editor and the field write it): the field
+        doesn't see an expression set at `.Constraints[2]`."""
+        self.use_units(schema)
+        self.add_line()
+        self.sketch.addConstraint(Sketcher.Constraint("Distance", 0, 10.0))
+        if comment is None:
+            self.sketch.setExpression("Constraints[2]", expression)
+        else:
+            self.sketch.setExpression("Constraints[2]", expression, comment)
+        self.doc.recompute()
+        self.start_edit()
+
+    def test_d50_formula_cancel_keeps_the_kept_text(self):
+        """D50 (review F1): a Distance kept as (1/8) in, edited in place; = and Cancel in the
+        formula editor bring the field back showing (1/8) in again, not the rounded 0.13 in, and
+        Enter keeps the expression and its 3.175 mm."""
+        self.add_kept_distance(INCH, "(1/8) in", "(1/8) in")
+        formula = {}
+        state = self.edit_in_place(
+            2,
+            [
+                {"act": self.type_equals(formula, text=None, button="reject")},
+                {"key": QtCore.Qt.Key_Return},
+            ],
+            allowed_modal="DlgExpressionInput",
+        )
+
+        self.assertTrue(formula.get("opened"), "Expected = to open the formula editor")
+        self.assertEqual(state["seen"][0]["text_before"], "(1/8) in")
+        self.assertEqual(state["seen"][1]["text_before"], "(1/8) in")
+        self.assertFalse(state["seen"][1]["open_after"], state["seen"][1]["tooltip"])
+        self.doc.recompute()
+        self.assertEqual(len(self.expressions()), 1, self.expressions())
+        self.assertAlmostEqual(self.sketch.Constraints[2].Value, INCH_MM / 8, places=9)
+        self.assertEqual(self.edit_from_list(2, None, accept=False), "(1/8) in")
+
+    def test_d51_unchanged_constant_formula_keeps_its_value(self):
+        """D51 (review F2): a dimensionless constant formula, 1/8 (0.125 mm), in an inch
+        document. OK on it unchanged, in the dialog and in place, keeps the expression as it was
+        and 0.125 mm; it isn't read as typed text, (1 / 8) in, 3.175 mm."""
+        self.add_kept_distance(INCH, "1/8")
+        before = self.expressions()
+        self.assertAlmostEqual(self.sketch.Constraints[2].Value, 0.125, places=9)
+
+        self.edit_from_list(2, None, accept=True)
+        self.doc.recompute()
+        self.assertEqual(self.expressions(), before)
+        self.assertAlmostEqual(self.sketch.Constraints[2].Value, 0.125, places=9)
+
+        label = self.label_point(2)
+        if label is None:
+            return  # the in-place half needs a pickable label (D50)
+        self.edit_in_place(2, [{"key": QtCore.Qt.Key_Return}])
+        self.doc.recompute()
+        self.assertEqual(self.expressions(), before)
+        self.assertAlmostEqual(self.sketch.Constraints[2].Value, 0.125, places=9)
+
+    def test_d52_configured_dimension_opens_bound(self):
+        """D52 (review F3): a configured dimension (ops#671) can't have its expression taken out
+        for the edit (the configuration's write hook refuses it). The dialog opens on it anyway,
+        bound, as before ops#684; Cancel leaves the expression, the value and no open
+        transaction."""
+        import PartDesign
+
+        studio = self.doc.addObject("App::Part", "S")
+        body = self.doc.addObject("PartDesign::Body", "A")
+        studio.addObject(body)
+        self.doc.removeObject(self.sketch.Name)
+        self.sketch = body.newObject("Sketcher::SketchObject", "Sketch")
+        self.add_line()
+        self.sketch.addConstraint(Sketcher.Constraint("Distance", 0, 10.0))
+        self.sketch.renameConstraint(2, "w")
+        self.doc.recompute()
+        size = PartDesign.configAddList(studio, "Size", ["Small", "Large"])
+        PartDesign.configConfigure(self.sketch, "Constraints.w", size)
+        self.doc.recompute()
+        self.assertTrue(PartDesign.configIsConfigured(self.sketch, "Constraints.w"))
+        before = self.expressions()
+        self.assertEqual(len(before), 1, before)
+        self.start_edit()
+
+        self.edit_from_list(2, None, accept=False)
+        self.doc.recompute()
+        self.assertEqual(self.expressions(), before)
+        self.assertAlmostEqual(self.sketch.Constraints[2].Value, 10.0, places=9)
+        self.assertEqual(self.doc.UndoCount, self.undo_start, "Expected nothing recorded")
+
+    def test_d53_unchanged_angle_formula_is_kept(self):
+        """D53 (the review's dropped-text note): an Angle bound to the constant 30 + 5 (35 deg).
+        OK on it unchanged keeps the expression; it was dropped before (the field's value
+        applied, the expression taken out for the edit never put back)."""
+        self.add_line(end=V(10, 10, 0), anchored=False)
+        self.sketch.addConstraint(Sketcher.Constraint("Angle", 0, math.radians(45)))
+        self.sketch.setExpression("Constraints[0]", "30 + 5")
+        self.doc.recompute()
+        before = self.expressions()
+        self.assertAlmostEqual(self.sketch.Constraints[0].Value, math.radians(35), places=9)
+        self.start_edit()
+
+        self.edit_from_list(0, None, accept=True)
+        self.doc.recompute()
+        self.assertEqual(self.expressions(), before)
+        self.assertAlmostEqual(self.sketch.Constraints[0].Value, math.radians(35), places=9)
+
+    def test_d54_inch_fraction_inside_an_expression_is_kept(self):
+        """D54 (ops#684, both halves): 10 mm + (1/32) in typed in a mm document is 10 mm and a
+        thirty-second of an inch, kept as typed."""
+        self.assert_kept("10 mm + (1/32) in", MM, "10 mm + (1/32) in", 10 + INCH_MM / 32)
+
+    def test_d55_dialog_typed_fraction_keeps_its_text(self):
+        """D55 (ops#684): 1/8 typed in the dialog (not in place) on a Distance of 10 in an inch
+        document keeps its text, (1/8) in, 3.175 mm. The dialog hides before its OK is handled,
+        and the hidden field writes its rounded value over the text (0.12 in, 3.048 mm)."""
+        self.use_units(INCH)
+        self.add_line()
+        self.sketch.addConstraint(Sketcher.Constraint("Distance", 0, 10.0))
+        self.doc.recompute()
+        self.start_edit()
+
+        self.edit_from_list(2, "1/8")
+        self.doc.recompute()
+        self.assertEqual(len(self.expressions()), 1, self.expressions())
+        self.assertAlmostEqual(self.sketch.Constraints[2].Value, INCH_MM / 8, places=9)
+        self.assertEqual(self.edit_from_list(2, None, accept=False), "(1/8) in")
