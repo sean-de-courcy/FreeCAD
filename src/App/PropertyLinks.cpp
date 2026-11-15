@@ -5940,11 +5940,60 @@ public:
         }
 
         if (relative) {
-            return std::string(docDir.relativeFilePath(path).toUtf8().constData());
+            return std::string(relativeToCanonical(docDir, path).toUtf8().constData());
         }
         else {
             return std::string(path.toUtf8().constData());
         }
+    }
+
+    // `path` as the file system resolves it (links, junctions, macOS's /var -> /private/var):
+    // its longest existing part made canonical, the rest appended as spelled
+    static QString canonicalSpelling(const QString& path)
+    {
+        QString parent = QDir::cleanPath(path);
+        QString tail;
+        while (true) {
+            const QString canonical = QFileInfo(parent).canonicalFilePath();
+            if (!canonical.isEmpty()) {
+                return tail.isEmpty() ? canonical : QDir::cleanPath(canonical + QLatin1Char('/') + tail);
+            }
+            const QFileInfo info(parent);
+            const QString up = info.absolutePath();
+            if (up == parent || info.fileName().isEmpty()) {
+                return path;
+            }
+            tail = tail.isEmpty() ? info.fileName() : info.fileName() + QLatin1Char('/') + tail;
+            parent = up;
+        }
+    }
+
+    // FreeCAD-CH (ops#640): `docDir` is canonical, so `path` is made canonical too before the
+    // two are compared; otherwise a link reached through a symbolic link (on macOS every
+    // temporary folder) climbs to the root. The part below the shared folder keeps the link's
+    // own spelling (its case), as the link was made.
+    static QString relativeToCanonical(const QDir& docDir, const QString& path)
+    {
+        const QString relative = docDir.relativeFilePath(canonicalSpelling(path));
+        if (QDir::isAbsolutePath(relative)) {
+            return relative;  // another drive: no relative path
+        }
+        QStringList parts = relative.split(QLatin1Char('/'));
+        const QStringList spelled = QDir::cleanPath(path).split(QLatin1Char('/'));
+        qsizetype below = 0;
+        while (below < parts.size() && parts[parts.size() - 1 - below] != QLatin1String("..")) {
+            ++below;
+        }
+        if (below <= spelled.size()) {
+            for (qsizetype i = 0; i < below; ++i) {
+                const QString& own = spelled[spelled.size() - below + i];
+                QString& part = parts[parts.size() - below + i];
+                if (own.compare(part, Qt::CaseInsensitive) == 0) {
+                    part = own;
+                }
+            }
+        }
+        return parts.join(QLatin1Char('/'));
     }
 
     static DocInfoPtr

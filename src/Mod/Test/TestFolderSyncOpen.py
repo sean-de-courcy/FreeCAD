@@ -134,6 +134,50 @@ class TestOneFileOneDocument(unittest.TestCase):
         self.assertIsNotNone(linked)
         self.assertEqual(linked.Document.Name, a.Name)
 
+    def alias(self):
+        """A second name for the test folder: a symbolic link, or a junction on Windows (no admin
+        rights needed). macOS gives every temporary folder one (/var -> /private/var)."""
+        alias = self.root + "-alias"
+        if os.name == "nt":
+            import subprocess
+
+            made = subprocess.run(
+                ["cmd", "/c", "mklink", "/J", alias, self.root], capture_output=True
+            ).returncode == 0
+        else:
+            try:
+                os.symlink(self.root, alias)
+                made = True
+            except OSError:
+                made = False
+        if not made:
+            self.skipTest("could not make a link to the test folder")
+        self.addCleanup(lambda: os.rmdir(alias) if os.name == "nt" else os.unlink(alias))
+        return alias
+
+    def testALinkThroughALinkedFolderStaysRelative(self):
+        """B and A both reached through a linked folder: B saves its link to A as
+        `Parts/A.FCStd`, not as a path climbing out to the link (ops#640, macOS CI)."""
+        alias = self.alias()
+        a = FreeCAD.openDocument(os.path.join(alias, "Parts", "A.FCStd"))
+        b = FreeCAD.newDocument("AliasB")
+        b.saveAs(os.path.join(alias, "B.FCStd"))
+        b.addObject("App::Link", "Link").LinkedObject = a.getObject("Marker")
+        b.recompute()
+        b.save()
+        FreeCAD.closeDocument(b.Name)
+        FreeCAD.closeDocument(a.Name)
+        import zipfile
+
+        with zipfile.ZipFile(self.path("B.FCStd")) as z:
+            xml = z.read("Document.xml").decode("utf-8")
+        self.assertIn('file="Parts/A.FCStd"', xml)
+
+        b = FreeCAD.openDocument(self.path("B.FCStd"))
+        linked = b.getObject("Link").LinkedObject
+        self.assertIsNotNone(linked)
+        self.assertEqual(linked.Name, "Marker")
+
 
 if __name__ == "__main__":
     unittest.main()
