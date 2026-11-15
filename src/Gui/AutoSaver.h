@@ -78,6 +78,9 @@ private:
     int soonTimerId {0};
     bool soonPending {false};
     double lastSaveSeconds {-1.0};  // the last snapshot's time, -1 before the first
+    /// FreeCAD-CH (ops#769): since when a slow pass has waited for a pause in the user's input;
+    /// invalid while none waits. A pass that has waited a whole timeout saves anyway
+    QElapsedTimer waitingForPause;
     void scheduleQueuedRetry();
     void slotDocumentBecameStable(const App::Document&);
     using Connection = fastsignals::connection;
@@ -127,6 +130,9 @@ protected:
     void startSoonPass(const std::string& name);
     int soonDelay(const AutoSaveProperty& saver) const;
     double expectedSeconds(const AutoSaveProperty& saver) const;
+    /// ops#769: true, and the pass moved to the next pause, when @p saver's snapshot would freeze
+    /// the window while the user is at work
+    bool postponeUntilPause(AutoSaveProperty& saver);
     /// The user's input (keys, clicks, drags, the wheel): a slow soon pass waits for a pause in it
     bool eventFilter(QObject* watched, QEvent* event) override;
 
