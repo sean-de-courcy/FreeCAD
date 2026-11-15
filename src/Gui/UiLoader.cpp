@@ -99,6 +99,7 @@ Py::Object wrapFromWidgetFactory(
     wrap.loadWidgetsModule();
 
     const char* typeName = wrap.getWrapperName(widget);
+    Gui::PythonWrapper::dropStaleWrapper(widget);  // just made (ops#790)
     return wrap.fromQWidget(widget, typeName);
 }
 
@@ -621,6 +622,8 @@ Py::Object UiLoaderPy::load(const Py::Tuple& args)
                 wrap.loadWidgetsModule();
 
                 const char* typeName = wrap.getWrapperName(widget);
+                // the loader has just made the widget and its children (ops#790)
+                Gui::PythonWrapper::dropStaleWrapper(widget);
                 Py::Object pyWdg = wrap.fromQWidget(widget, typeName);
                 wrap.createChildrenNameAttributes(*pyWdg, widget);
                 wrap.setParent(*pyWdg, parent);
