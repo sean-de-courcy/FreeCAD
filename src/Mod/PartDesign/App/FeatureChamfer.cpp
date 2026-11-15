@@ -68,8 +68,8 @@ PartDesignExport void dressUpReappliedFrom(const Part::TopoShape& raw,
 PartDesignExport bool studioDressUpTake(const DressUp* step,
                                         const Part::TopoShape& base,
                                         const std::vector<Part::TopoShape>& edges,
-                                        Part::TopoShape& raw,
-                                        Part::TopoShape& refined);
+                                        Part::TopoShape& raw);
+PartDesignExport const DressUp* dressUpTriedFor(const DressUp* step);
 // FeatureDressUp.cpp (FreeCAD-CH ops#654 P8a; declared where used)
 PartDesignExport App::DocumentObjectExecReturn* studioDressUpOwnerRun(DressUp* owner);
 PartDesignExport bool studioDressUpStepPassesThrough(DressUp* step);
@@ -228,20 +228,6 @@ App::DocumentObjectExecReturn* Chamfer::build()
     if (!reapplying) {
         this->positionByBaseFeature();
     }
-    // ops#796: a studio step's owner built it already, on this base and these edges
-    if (Part::TopoShape raw, refined;
-        !reapplying && StudioOwner.getValue() && studioDressUpTake(this, TopShape, edges, raw, refined)) {
-        this->rawShape = raw;
-        if (!isSingleSolidRuleSatisfied(refined.getShape())) {
-            return new App::DocumentObjectExecReturn(QT_TRANSLATE_NOOP(
-                "Exception",
-                "Result has multiple solids: enable 'Allow Compound' in the active body."
-            ));
-        }
-        this->Shape.setValue(getSolid(refined));
-        return App::DocumentObject::StdReturn;
-    }
-
     // The chamfer's largest distance along a face, for the check of what it drops (ops#603). By
     // distance and angle, the distance on the other face grows without bound as the angle and the
     // edge's opening near 180 degrees: unknown, so that check doesn't run (PR review r1, T2)
@@ -277,6 +263,22 @@ App::DocumentObjectExecReturn* Chamfer::build()
             Part::SignalException sig;
 
             Part::FilletFallback::Recorder recorder;
+            // ops#796: a studio step's owner built it already, on this base and these edges,
+            // with these parameters, and checked it: the step goes on from the shape before the
+            // refine
+            if (Part::TopoShape raw;
+                !reapplying && StudioOwner.getValue() && studioDressUpTake(this, TopShape, edges, raw)) {
+                this->rawShape = raw;
+                shape = refineShapeIfActive(raw);
+                if (!isSingleSolidRuleSatisfied(shape.getShape())) {
+                    return new App::DocumentObjectExecReturn(QT_TRANSLATE_NOOP(
+                        "Exception",
+                        "Result has multiple solids: enable 'Allow Compound' in the active body."
+                    ));
+                }
+                this->Shape.setValue(getSolid(shape));
+                return App::DocumentObject::StdReturn;
+            }
             std::vector<Part::TopoShape> passEdges = edges;
             // ops#655: with tangent propagation off, an edge whose tangent chain goes on is cut
             // Onshape's way after the others are chamfered (GB13); by equal distance only, since
@@ -365,7 +367,12 @@ App::DocumentObjectExecReturn* Chamfer::build()
                 );
             }
             if (reapplying) {
-                dressUpReappliedFrom(shape, refineShapeIfActive(shape), !recorder.built());
+                auto owner = freecad_cast<Chamfer*>(const_cast<DressUp*>(dressUpTriedFor(this)));
+                dressUpReappliedFrom(
+                    shape,
+                    owner ? owner->refineShapeIfActive(shape) : refineShapeIfActive(shape),
+                    !recorder.built()
+                );
                 return App::DocumentObject::StdReturn;
             }
             // store shape before refinement
