@@ -65,14 +65,25 @@ public:
 private Q_SLOTS:
     void onClosed(bool);
     void onRuled(bool);
+    void onStartCondition(int);
+    void onStartMagnitude(double);
+    void onEndCondition(int);
+    void onEndMagnitude(double);
+    void onAddConnection(bool);
+    void onRemoveConnection();
+    void onConnectionRow();
 
 protected:
     void changeEvent(QEvent* e) override;
+    bool eventFilter(QObject* watched, QEvent* event) override;
 
 private:
     void onSelectionChanged(const Gui::SelectionChanges& msg) override;
     void updateUI();
     void createFields();
+    /// ops#640: the Connections list from the property, and the hint under it
+    void fillConnections();
+    void connectionHint(const QString& text);
 
 private:
     QWidget* proxy;
@@ -80,6 +91,10 @@ private:
 
     ReferenceField* profileField = nullptr;
     ReferenceField* sectionsField = nullptr;
+    /// ops#640: the first vertex of a connection being added, until its partner is picked
+    App::DocumentObject* pendingObject = nullptr;
+    std::string pendingVertex;
+    bool picking = false;
     /// What the edit shows: the profile and the sections, also those picked during it
     /// (ops#162 B13).
     EditVisibility shown;

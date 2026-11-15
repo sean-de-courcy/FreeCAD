@@ -473,11 +473,14 @@ SET(Command_CPP_SRCS
     CommandWindow.cpp
     CommandTest.cpp
     CommandView.cpp
+    CommandViewTools.cpp
     CommandStructure.cpp
     CommandLink.cpp
     CommandPyImp.cpp
     ShortcutManager.cpp
     ForkKeymap.cpp
+    DocumentTabBar.cpp
+    VariableStudioView.cpp
     CommandCompleter.cpp
     CommandActionPy.cpp
 )
@@ -489,6 +492,8 @@ SET(Command_SRCS
     CommandT.h
     ShortcutManager.h
     ForkKeymap.h
+    DocumentTabBar.h
+    VariableStudioView.h
     CommandCompleter.h
     CommandActionPy.h
 )
@@ -497,6 +502,7 @@ SOURCE_GROUP("Command" FILES ${Command_SRCS})
 # The dialog sources
 SET(Dialog_CPP_SRCS
     Clipping.cpp
+    SectionView.cpp
     DemoMode.cpp
     Dialogs/DlgAbout.cpp
     Dialogs/DlgActivateWindowImp.cpp
@@ -541,6 +547,7 @@ SET(Dialog_CPP_SRCS
 
 SET(Dialog_HPP_SRCS
     Clipping.h
+    SectionView.h
     DemoMode.h
     Dialogs/DlgAbout.h
     Dialogs/DlgActivateWindowImp.h
@@ -948,6 +955,7 @@ SET(Navigation_CPP_SRCS
     Navigation/OpenCascadeNavigationStyle.cpp
     Navigation/OpenSCADNavigationStyle.cpp
     Navigation/TinkerCADNavigationStyle.cpp
+    Navigation/OnshapeNavigationStyle.cpp
     Navigation/TouchpadNavigationStyle.cpp
     Navigation/GestureNavigationStyle.cpp
     Navigation/NavigationAnimator.cpp
@@ -1081,6 +1089,8 @@ SET(Inventor_CPP_SRCS
     Inventor/SoFCScreenSpaceGroup.cpp
     Inventor/SoFCBackgroundGradient.cpp
     Inventor/SoFCBoundingBox.cpp
+    Inventor/SoSectionCap.cpp
+    Inventor/SoFCDelayedGroup.cpp
     Inventor/SoNaviCube.cpp
     Inventor/SoMouseWheelEvent.cpp
     Inventor/SoFCTransform.cpp
@@ -1123,6 +1133,8 @@ SET(Inventor_SRCS
     Inventor/SoFCScreenSpaceGroup.h
     Inventor/SoFCBackgroundGradient.h
     Inventor/SoFCBoundingBox.h
+    Inventor/SoSectionCap.h
+    Inventor/SoFCDelayedGroup.h
     Inventor/SoNaviCube.h
     Inventor/SoMouseWheelEvent.h
     Inventor/SoFCTransform.h
@@ -1331,6 +1343,7 @@ SET(FreeCADGui_CPP_SRCS
     AutoSaver.cpp
     BitmapFactory.cpp
     Document.cpp
+    NamedViews.cpp
     DocumentModel.cpp
     DocumentPyImp.cpp
     DocumentObserver.cpp

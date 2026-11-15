@@ -173,9 +173,10 @@ void DlgSettingsNavigation::loadSettings()
     ParameterGrp::handle hGrp = App::GetApplication().GetParameterGroupByPath(
         "User parameter:BaseApp/Preferences/View"
     );
+    // FreeCAD-CH (ops#640): the default is Onshape's mouse
     std::string model = hGrp->GetASCII(
         "NavigationStyle",
-        std::string {CADNavigationStyle::getClassTypeId().getName()}.c_str()
+        std::string {OnshapeNavigationStyle::getClassTypeId().getName()}.c_str()
     );
     int index = ui->comboNavigationStyle->findData(QByteArray(model.c_str()));
     if (index > -1) {
@@ -186,7 +187,9 @@ void DlgSettingsNavigation::loadSettings()
     orbitStyle = Base::clamp(orbitStyle, 0, ui->comboOrbitStyle->count() - 1);
     ui->comboOrbitStyle->setCurrentIndex(ui->comboOrbitStyle->findData(orbitStyle));
 
-    index = hGrp->GetInt("RotationMode", 0);
+    // FreeCAD-CH (ops#640): 1, Drag at cursor, as NavigationStyle::initialize() and
+    // View3DSettings default it
+    index = hGrp->GetInt("RotationMode", 1);
     ui->comboRotationMode->setCurrentIndex(index);
 
     bool showNaviCube = hGrp->GetBool("ShowNaviCube", true);

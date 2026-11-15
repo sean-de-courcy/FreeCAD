@@ -1,0 +1,377 @@
+# SPDX-License-Identifier: LGPL-2.1-or-later
+# FreeCAD-CH ops#640 (walk bugs 1): Revolve, Groove and Hole in a studio make owners
+#
+# The Windows walk (ops#640, 2026-11-14) found Revolve's "Add" building a new part, a Hole on the
+# plate failing with "the active Body does not contain a base shape", a Hole landing on the wrong
+# part, and its "Through all" freezing the GUI. All of it came from one cause: Revolve, Groove
+# and Hole kept the per-Body command path, so they went into the active Body (the studio's empty
+# first part, or the last part made) instead of becoming studio features that act on the part
+# their tool meets, as Extrude does (TestStudioFeatureGui).
+#
+# Designed geometry only: two 20 x 20 x 10 boxes, A (x 0..20) and B (x 30..50), in the studio S
+# (TestStudioFeatureGui.twoBoxStudio). Expected volumes come from the boxes and the tools.
+
+import math
+import unittest
+
+import FreeCAD as App
+import FreeCADGui as Gui
+import Part
+import PartDesign
+from PySide import QtWidgets
+
+from PartDesignTests.TestExpressionFieldsGui import pump, waitFor
+from PartDesignTests.TestStudio import xyPlane
+from PartDesignTests.TestStudioFeatureGui import QA, StudioDialog, twoBoxStudio
+
+V = App.Vector
+
+
+class TestStudioRevolveHoleGui(StudioDialog, unittest.TestCase):
+    def setUp(self):
+        self.openStudio(*twoBoxStudio("StudioRevolveHoleGui"))
+
+    def runOwner(self, command, profile, typeId, active):
+        view = Gui.getDocument(self.doc.Name).ActiveView
+        view.setActiveObject("pdbody", self.body(active) if active else None)
+        Gui.Selection.clearSelection()
+        Gui.Selection.addSelection(self.doc.Name, profile.Name)
+        before = set(self.objects())
+        Gui.runCommand(command)
+        self.waitForPanel()
+        made = [self.doc.getObject(n) for n in set(self.objects()) - before]
+        made = [o for o in made if o.TypeId == typeId and not getattr(o, "StudioOwner", None)]
+        self.assertEqual(len(made), 1, [o.Name for o in made])
+        owner = made[0]
+        bodies = [o for o in self.doc.Objects if o.TypeId == "PartDesign::Body"]
+        self.assertFalse([b.Name for b in bodies if owner in b.Group], "the feature is in a Body")
+        self.assertIn(owner.Name, self.entries(), "the feature is no studio feature")
+        return owner
+
+    def circleInA(self, name, centre, radius):
+        """A sketch in Body A on A's top plane (z = 10), one circle."""
+        body = self.body("A")
+        s = body.newObject("Sketcher::SketchObject", name)
+        s.AttachmentSupport = xyPlane(body)
+        s.MapMode = "FlatFace"
+        s.AttachmentOffset = App.Placement(V(0, 0, 10), App.Rotation())
+        s.addGeometry(Part.Circle(V(centre[0], centre[1], 0), V(0, 0, 1), radius))
+        self.doc.recompute()
+        return s
+
+    def depthType(self, text):
+        combo = self.visible(QtWidgets.QComboBox, "DepthType")
+        self.assertIsNotNone(combo, "no Depth type box")
+        combo.setCurrentIndex(combo.findText(text))
+        pump(0.5)
+
+    # ------------------------------------------------------------------------------- Hole
+    def testHoleOnBCutsBNotTheActivePart(self):
+        """A Hole whose sketch is in A, with A active, over B: an owner cutting B only (the walk's
+        finding 4: it went into the active part and cut nothing there, no error)."""
+        owner = self.runOwner("PartDesign_Hole", self.circleInA("HoleSk", (40, 10), 2), "PartDesign::Hole", "A")
+        self.close(ok=True)
+        self.assertTrue(owner.isValid(), owner.getStatusString())
+        self.assertEqual(PartDesign.studioScopeIds(owner), ["B"])
+        self.assertAlmostEqual(self.volume("A"), QA, places=4)
+        self.assertLess(self.volume("B"), QA - 1)
+
+    def testHoleThroughAll(self):
+        """Through all from the panel, with no part active: B loses pi r^2 * 10 (the walk's
+        findings 2 and 3: "no base shape", then the GUI froze)."""
+        owner = self.runOwner("PartDesign_Hole", self.circleInA("HoleSk", (40, 10), 2), "PartDesign::Hole", None)
+        self.depthType("Through all")
+        diameter = self.visible(QtWidgets.QWidget, "Diameter")
+        diameter.setProperty("rawValue", 4.0)
+        pump(0.5)
+        self.close(ok=True)
+        self.assertTrue(owner.isValid(), owner.getStatusString())
+        self.assertEqual(PartDesign.studioScopeIds(owner), ["B"])
+        self.assertAlmostEqual(self.volume("A"), QA, places=4)
+        self.assertAlmostEqual(self.volume("B"), QA - math.pi * 4 * 10, places=3)
+
+    def testHoleOverNothingFailsLoudly(self):
+        """Over no part: no scope, the feature fails loudly (Onshape's Remove with nothing to cut)."""
+        owner = self.runOwner("PartDesign_Hole", self.circleInA("HoleSk", (25, 10), 2), "PartDesign::Hole", "A")
+        self.close(ok=True)
+        self.assertEqual(PartDesign.studioScopeIds(owner), [])
+        self.assertFalse(owner.isValid())
+        self.assertVolumes(A=QA, B=QA)
+
+    # ---------------------------------------------------------------------------- Revolve
+    def testRevolveOnAsTopAdds(self):
+        """A 6 x 6 profile in B on the XZ plane at u 0..6, v 10..16, about the sketch's vertical
+        axis: a cylinder r 6 h 6 on A's top face (global z axis). The axis picked in the panel:
+        Add, scope A (the walk's finding 1: "Add" became a new part). A = QA + pi 36 * 6."""
+        body = self.body("B")
+        s = body.newObject("Sketcher::SketchObject", "BossSk")
+        s.AttachmentSupport = [(body.Origin.OriginFeatures[4], "")]
+        s.MapMode = "FlatFace"
+        pts = [V(0, 10, 0), V(6, 10, 0), V(6, 16, 0), V(0, 16, 0)]
+        for i in range(4):
+            s.addGeometry(Part.LineSegment(pts[i], pts[(i + 1) % 4]))
+        self.doc.recompute()
+        owner = self.runOwner("PartDesign_Revolution", s, "PartDesign::Revolution", "B")
+        axis = self.visible(QtWidgets.QComboBox, "axis")
+        self.assertIsNotNone(axis, "no axis box")
+        texts = [axis.itemText(i) for i in range(axis.count())]
+        vertical = [i for i, t in enumerate(texts) if "Vertical" in t]
+        self.assertTrue(vertical, texts)
+        axis.setCurrentIndex(vertical[0])
+        axis.activated.emit(vertical[0])  # a click's signal: the box acts on activated only
+        pump(0.5)
+        self.waitForResult("Add")
+        self.assertEqual(self.ticks(), [("A", True), ("B", False)])
+        self.close(ok=True)
+        self.assertTrue(owner.isValid(), owner.getStatusString())
+        self.assertEqual(PartDesign.studioScopeIds(owner), ["A"])
+        self.assertEqual(self.madeParts(owner), [])
+        self.assertAlmostEqual(self.volume("A"), QA + math.pi * 36 * 6, places=3)
+        self.assertAlmostEqual(self.volume("B"), QA, places=4)
+
+    def testGrooveCutsThePartItsRingMeets(self):
+        """ops#791: a 4 x 3 profile in B on the XZ plane at u 8..12, v 6..9, grooved about the
+        sketch's vertical axis (global z) picked in the panel: a ring r 8..12, z 6..9 around the
+        origin, whose quarter in x, y >= 0 lies inside A. The Groove has no tool until the axis
+        is picked; then it cuts the part the ring meets, A, and not B or the active part (it
+        failed "No merge scope selected": the part was looked for only when the dialog opened).
+        A = QA - pi (144 - 64) * 3 / 4."""
+        body = self.body("B")
+        s = body.newObject("Sketcher::SketchObject", "RingSk")
+        s.AttachmentSupport = [(body.Origin.OriginFeatures[4], "")]
+        s.MapMode = "FlatFace"
+        pts = [V(8, 6, 0), V(12, 6, 0), V(12, 9, 0), V(8, 9, 0)]
+        for i in range(4):
+            s.addGeometry(Part.LineSegment(pts[i], pts[(i + 1) % 4]))
+        self.doc.recompute()
+        owner = self.runOwner("PartDesign_Groove", s, "PartDesign::Groove", "B")
+        axis = self.visible(QtWidgets.QComboBox, "axis")
+        self.assertIsNotNone(axis, "no axis box")
+        texts = [axis.itemText(i) for i in range(axis.count())]
+        vertical = [i for i, t in enumerate(texts) if "Vertical" in t]
+        self.assertTrue(vertical, texts)
+        axis.setCurrentIndex(vertical[0])
+        axis.activated.emit(vertical[0])  # a click's signal
+        pump(0.5)
+        self.assertTrue(waitFor(lambda: PartDesign.studioScopeIds(owner) == ["A"]),
+                        PartDesign.studioScopeIds(owner))
+        self.close(ok=True)
+        self.assertTrue(owner.isValid(), owner.getStatusString())
+        self.assertEqual(PartDesign.studioScopeIds(owner), ["A"])
+        self.assertAlmostEqual(self.volume("A"), QA - math.pi * 80 * 3 / 4, places=3)
+        self.assertAlmostEqual(self.volume("B"), QA, places=4)
+
+    def testNewSketchOnAFaceAfterReopenTakesTheFacesPart(self):
+        """ops#793: the two-box studio saved, closed and reopened (no part is active then). A's
+        top face selected, New Sketch: the sketch goes in A with no "Active Body Required"
+        question (Onshape asks nothing: a sketch on a face is the face's part's), and a Pocket of
+        a 4 x 4 square on it, 3 deep, cuts A: A = QA - 48 (the walk found the question, and the
+        pocket after answering it failed "No merge scope selected")."""
+        import os
+        import tempfile
+
+        from PySide import QtCore
+
+        path = os.path.join(tempfile.mkdtemp(prefix="i793"), "two.FCStd")
+        self.doc.saveAs(path)
+        App.closeDocument(self.doc.Name)
+        pump(0.3)
+        self.doc = App.openDocument(path)
+        self.studio = self.doc.getObject("S")
+        self.list = PartDesign.studioList(self.studio, True)
+        Gui.activateWorkbench("PartDesignWorkbench")
+        App.setActiveDocument(self.doc.Name)
+        Gui.setActiveDocument(self.doc.Name)
+        pump(0.5)
+        view = Gui.getDocument(self.doc.Name).ActiveView
+        self.assertIsNone(view.getActiveObject("pdbody"), "a part is active after the reopen")
+        asked = []
+
+        def watch():
+            w = QtWidgets.QApplication.activeModalWidget()
+            if w is not None:
+                asked.append(w.windowTitle() or type(w).__name__)
+                w.reject()
+
+        timer = QtCore.QTimer()
+        timer.timeout.connect(watch)
+        timer.start(100)
+        try:
+            a = self.body("A")
+            top = [i for i, f in enumerate(a.Shape.Faces, 1)
+                   if abs(f.BoundBox.ZMin - 10) < 1e-9 and abs(f.BoundBox.ZMax - 10) < 1e-9][0]
+            Gui.Selection.clearSelection()
+            Gui.Selection.addSelection(self.doc.Name, "S", "A.Face%d" % top)
+            before = set(self.objects())
+            Gui.runCommand("PartDesign_NewSketch")
+            pump(0.8)
+        finally:
+            timer.stop()
+        self.assertEqual(asked, [], "a question before the sketch")
+        sketches = [self.doc.getObject(n) for n in set(self.objects()) - before
+                    if self.doc.getObject(n).TypeId == "Sketcher::SketchObject"]
+        self.assertEqual(len(sketches), 1, "no sketch made")
+        sk = sketches[0]
+        self.assertIn(sk, a.Group, "the sketch isn't in the face's part")
+        sk.addGeometry([Part.LineSegment(p, q) for p, q in zip(
+            [V(5, 5, 0), V(9, 5, 0), V(9, 9, 0), V(5, 9, 0)],
+            [V(9, 5, 0), V(9, 9, 0), V(5, 9, 0), V(5, 5, 0)])], False)
+        Gui.ActiveDocument.resetEdit()
+        self.doc.recompute()
+        pump(0.3)
+        Gui.Selection.clearSelection()
+        Gui.Selection.addSelection(self.doc.Name, sk.Name)
+        before = set(self.objects())
+        Gui.runCommand("PartDesign_Pocket")
+        self.waitForPanel()
+        made = [self.doc.getObject(n) for n in set(self.objects()) - before
+                if self.doc.getObject(n).TypeId == "PartDesign::Pocket"
+                and not getattr(self.doc.getObject(n), "StudioOwner", None)]
+        self.assertEqual(len(made), 1, [o.Name for o in made])
+        owner = made[0]
+        length = self.visible(QtWidgets.QWidget, "lengthEdit")
+        self.assertIsNotNone(length, "no length box")
+        length.setProperty("rawValue", 3.0)
+        pump(0.3)
+        self.close(ok=True)
+        self.doc.recompute()
+        self.assertTrue(owner.isValid(), owner.getStatusString())
+        self.assertAlmostEqual(self.volume("A"), QA - 48, places=4)
+        self.assertAlmostEqual(self.volume("B"), QA, places=4)
+
+    def testNewSketchGoesAtTheBar(self):
+        """ops#794: the two-box studio's history is ASk, APad, BSk, BPad. New Sketch on A's top
+        face makes a sketch in A that goes at the bar, the history's end, as Onshape puts a new
+        sketch where it is made; then a Pocket of it follows it there. It went right after APad,
+        A's last entry, above B's features: every sketch above every feature of later parts."""
+        view = Gui.getDocument(self.doc.Name).ActiveView
+        view.setActiveObject("pdbody", self.body("A"))
+        a = self.body("A")
+        top = [i for i, f in enumerate(a.Shape.Faces, 1)
+               if abs(f.BoundBox.ZMin - 10) < 1e-9 and abs(f.BoundBox.ZMax - 10) < 1e-9][0]
+        Gui.Selection.clearSelection()
+        Gui.Selection.addSelection(self.doc.Name, "S", "A.Face%d" % top)
+        before = set(self.objects())
+        Gui.runCommand("PartDesign_NewSketch")
+        pump(0.8)
+        sk = [self.doc.getObject(n) for n in set(self.objects()) - before
+              if self.doc.getObject(n).TypeId == "Sketcher::SketchObject"]
+        self.assertEqual(len(sk), 1, "no sketch made")
+        Gui.ActiveDocument.resetEdit()
+        self.doc.recompute()
+        pump(0.3)
+        PartDesign.studioReconcile(self.list)  # a member the list doesn't hold is adopted here
+        self.assertEqual(self.entries(), ["ASk", "APad", "BSk", "BPad", sk[0].Name])
+
+    # ------------------------------------------------------- the per-Body path's freeze
+    def testThroughAllInABodyWithoutBaseReturns(self):
+        """The per-Body path (a studio with no list and StudioListOnFirstUse off, the test hook):
+        a Hole in an empty Body E, its sketch on A's top. Choosing Through all made Hole::onChanged
+        throw "Base property not set" out of the panel's slot, and the GUI froze (ops#782). Now
+        the choice returns at once and the Hole fails at its recompute. Run behind a timeout:
+        before the fix it never returns."""
+        group = App.ParamGet("User parameter:BaseApp/Preferences/Mod/PartDesign")
+        group.SetBool("StudioListOnFirstUse", False)
+        doc, studio = twoBoxStudio("HoleNoBase")
+        try:
+            empty = doc.addObject("PartDesign::Body", "E")
+            studio.addObject(empty)
+            a = doc.getObject("A")
+            s = empty.newObject("Sketcher::SketchObject", "HoleSk")
+            s.AttachmentSupport = xyPlane(a)
+            s.MapMode = "FlatFace"
+            s.AttachmentOffset = App.Placement(V(0, 0, 10), App.Rotation())
+            s.addGeometry(Part.Circle(V(10, 10, 0), V(0, 0, 1), 3))
+            doc.recompute()
+            App.setActiveDocument(doc.Name)
+            Gui.setActiveDocument(doc.Name)
+            Gui.getDocument(doc.Name).ActiveView.setActiveObject("pdbody", empty)
+            Gui.Selection.clearSelection()
+            Gui.Selection.addSelection(doc.Name, s.Name)
+            Gui.runCommand("PartDesign_Hole")
+            self.waitForPanel()
+            holes = [o for o in empty.Group if o.TypeId == "PartDesign::Hole"]
+            self.assertEqual(len(holes), 1, [o.Name for o in empty.Group])
+            self.depthType("Through all")
+            self.assertEqual(holes[0].DepthType, "ThroughAll")
+            self.assertFalse(holes[0].isValid())
+            self.assertAlmostEqual(a.Shape.Volume, QA, places=4)
+        finally:
+            group.RemBool("StudioListOnFirstUse")
+            if Gui.Control.activeDialog():
+                Gui.Control.closeDialog()
+                pump()
+            App.closeDocument(doc.Name)
+            pump()
+
+    # ------------------------------------------------------------ a pattern's count (ops#783)
+    def testARawCountStaysInRangeAndCancelWorks(self):
+        """The walk's linear pattern (of a hole there): its macro set the count box (a
+        Gui::UIntSpinBox, which keeps unsigned values offset into Qt's int range) with a raw
+        QSpinBox.setValue(3), a count of 2^31 + 3. The pattern grew Spacings to that size and the
+        GUI froze. Now the count is at most 2500: the box's range is the property's, the raw value
+        lands inside it and computes at once, and Cancel leaves no pattern. A grid over 2500 in
+        all is refused loudly. Run behind a timeout: before the fix it never returns."""
+        import time
+
+        # an Extrude (remove) over B: a Hole's pattern is refused without Reapply before the count
+        from PartDesignTests.TestStudio import sketch
+
+        profile = sketch(self.body("A"), "CutSk", xyPlane(self.body("A")), (33, 8, 37, 12), z=10)
+        self.doc.recompute()
+        owner = self.runOwner("PartDesign_Pocket", profile, "PartDesign::Pocket", "A")
+        self.close(ok=True)
+        before = self.volume("B")
+        Gui.getDocument(self.doc.Name).ActiveView.setActiveObject("pdbody", self.body("B"))
+        Gui.Selection.clearSelection()
+        Gui.Selection.addSelection(self.doc.Name, owner.Name)
+        Gui.runCommand("PartDesign_LinearPattern")
+        self.waitForPanel()
+        [pattern] = [o for o in self.doc.Objects if o.TypeId == "PartDesign::LinearPattern"]
+        name = pattern.Name
+        count = self.visible(QtWidgets.QSpinBox, "spinOccurrences")
+        self.assertIsNotNone(count, "no count box")
+        start = time.monotonic()
+        QtWidgets.QSpinBox.setValue(count, 3)  # the raw int the walk's macro sent
+        pump(0.5)
+        self.doc.recompute()
+        self.assertLess(time.monotonic() - start, 30.0)
+        self.assertLessEqual(pattern.Occurrences, 2500)
+        # two directions of 100: 10000 instances in all, refused loudly
+        pattern.Occurrences = 100
+        pattern.Direction2 = (self.body("B").Origin.OriginFeatures[1], [""])
+        pattern.Occurrences2 = 100
+        self.doc.recompute()
+        self.assertFalse(pattern.isValid())
+        self.assertIn("at most 2500 instances", pattern.getStatusString())
+        self.close(ok=False)
+        self.assertIsNone(self.doc.getObject(name))
+        self.assertAlmostEqual(self.volume("B"), before, places=4)
+
+    def testAPatternOfAStudioFeatureGoesInItsPart(self):
+        """A pattern of a studio feature on B, made with A active: it goes in B and patterns the
+        feature (it went in A, the feature was left out and the pattern stayed empty). An
+        Extrude (remove) 4 x 4, 5 deep at x 33..37 over B, twice 8 apart along X: B loses
+        2 * 80."""
+        from PartDesignTests.TestStudio import sketch
+
+        profile = sketch(self.body("A"), "CutSk", xyPlane(self.body("A")), (33, 8, 37, 12), z=10)
+        self.doc.recompute()
+        owner = self.runOwner("PartDesign_Pocket", profile, "PartDesign::Pocket", "A")
+        self.close(ok=True)
+        self.assertAlmostEqual(self.volume("B"), QA - 80, places=4)
+        Gui.getDocument(self.doc.Name).ActiveView.setActiveObject("pdbody", self.body("A"))
+        Gui.Selection.clearSelection()
+        Gui.Selection.addSelection(self.doc.Name, owner.Name)
+        Gui.runCommand("PartDesign_LinearPattern")
+        self.waitForPanel()
+        [pattern] = [o for o in self.doc.Objects if o.TypeId == "PartDesign::LinearPattern"]
+        self.assertTrue(self.body("B").hasObject(pattern), "the pattern is not in B")
+        self.assertEqual(pattern.Originals, [owner])
+        spacing = self.visible(QtWidgets.QWidget, "spinSpacing")
+        spacing.setProperty("rawValue", 8.0)
+        pump(0.5)
+        self.close(ok=True)
+        self.assertTrue(pattern.isValid(), pattern.getStatusString())
+        self.assertAlmostEqual(self.volume("B"), QA - 160, places=4)
+        self.assertAlmostEqual(self.volume("A"), QA, places=4)

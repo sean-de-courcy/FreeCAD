@@ -24,6 +24,8 @@
  ******************************************************************************/
 
 
+#include <map>
+
 #include <QListIterator>
 #include <QListWidgetItem>
 #include <QTimer>
@@ -117,6 +119,13 @@ const QString TaskFeaturePick::getFeatureStatusString(const featureStatus st)
     return QString();
 }
 
+namespace
+{
+// Per dialog, per origin it shows: whether a new part studio's planes were shown before it
+// (ops#626, rank 52), so they stay after it
+std::map<const TaskFeaturePick*, std::vector<bool>> studioPlanesOf;
+}  // namespace
+
 TaskFeaturePick::TaskFeaturePick(
     std::vector<App::DocumentObject*>& objects,
     const std::vector<featureStatus>& status,
@@ -193,6 +202,8 @@ TaskFeaturePick::TaskFeaturePick(
             Gui::Application::Instance->getViewProvider(origin)
         );
         if (vpo) {
+            // A new part studio's planes stay shown after the dialog (ops#626, rank 52)
+            studioPlanesOf[this].push_back(vpo->isTemporaryVisibility());
             vpo->setTemporaryVisibility(originVisStatus[origin]);
             vpo->setTemporaryScale(Gui::ViewParams::instance()->getDatumTemporaryScaleFactor());
             vpo->setPlaneLabelVisibility(true);
@@ -209,10 +220,22 @@ TaskFeaturePick::TaskFeaturePick(
 
 TaskFeaturePick::~TaskFeaturePick()
 {
-    for (Gui::ViewProviderCoordinateSystem* vpo : origins) {
+    std::vector<bool> studioPlanes;
+    if (auto found = studioPlanesOf.find(this); found != studioPlanesOf.end()) {
+        studioPlanes = found->second;
+        studioPlanesOf.erase(found);
+    }
+    for (std::size_t index = 0; index < origins.size(); ++index) {
+        Gui::ViewProviderCoordinateSystem* vpo = origins[index];
         vpo->resetTemporaryVisibility();
         vpo->resetTemporarySize();
         vpo->setPlaneLabelVisibility(false);
+        // A new part studio's planes, shown before the dialog, stay (ops#626, rank 52), as
+        // SketchWorkflow's attachment dialog leaves them
+        if (index < studioPlanes.size() && studioPlanes[index]) {
+            vpo->setTemporaryVisibility(Gui::DatumElement::Planes);
+            vpo->setPlaneLabelVisibility(true);
+        }
     }
 }
 
@@ -515,6 +538,27 @@ private:
 };
 
 }  // namespace
+
+App::DocumentObject* TaskFeaturePick::copySketchIntoBody(
+    App::DocumentObject* sketch,
+    App::DocumentObject* body,
+    QString* refusal
+)
+{
+    auto activeBody = freecad_cast<PartDesign::Body*>(body);
+    if (!activeBody || !sketch) {
+        return nullptr;
+    }
+    App::DocumentObject* copy = makeCopy(sketch, "", /*independent=*/true, activeBody, refusal);
+    if (!copy) {
+        return nullptr;
+    }
+    activeBody->addObject(copy);
+    if (auto* copied = freecad_cast<Sketcher::SketchObject*>(copy)) {
+        attachInPlace(copied, activeBody);
+    }
+    return copy;
+}
 
 App::DocumentObject* TaskFeaturePick::makeCopy(
     App::DocumentObject* obj,

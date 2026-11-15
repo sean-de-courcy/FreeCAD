@@ -24,6 +24,8 @@
  ***************************************************************************/
 
 
+#include <algorithm>
+#include <cmath>
 #include <sstream>
 #include <QApplication>
 #include <QMessageBox>
@@ -59,6 +61,7 @@
 #include <Mod/Part/App/AttachExtension.h>
 #include <Mod/Part/App/DatumFeature.h>
 #include <Mod/Part/Gui/AttacherTexts.h>
+#include <Mod/Part/Gui/EdgeMidpointMarker.h>
 #include <Mod/Part/Gui/TaskAttacher.h>
 
 #include "TaskAttacher.h"
@@ -98,16 +101,41 @@ const QString makeRefString(const App::DocumentObject* obj, const std::string& s
         + QString::fromLatin1(el.oldName.c_str());
 }
 
+namespace
+{
+
+/** FreeCAD-CH (ops#673): "Normal to edge" on one edge at its middle (MapPathParameter 0.5), what
+ * a midpoint pick makes: Onshape's field reads "Edge point" (SP10-Q10)
+ */
+bool isEdgePoint(const Part::AttachExtension* pcAttach)
+{
+    const std::vector<App::DocumentObject*>& refs = pcAttach->AttachmentSupport.getValues();
+    const std::vector<std::string>& subs = pcAttach->AttachmentSupport.getSubValues();
+    if (refs.size() != 1 || !refs[0] || subs.size() != 1
+        || pcAttach->MapMode.getValue() != mmNormalToPath
+        || std::abs(pcAttach->MapPathParameter.getValue() - 0.5) > 1e-12) {
+        return false;
+    }
+    App::ElementNamePair element;
+    App::GeoFeature::resolveElement(refs[0], subs[0].c_str(), element, true);
+    return element.oldName.starts_with("Edge");
+}
+
+}  // namespace
+
 void TaskAttacher::makeRefStrings(std::vector<QString>& refstrings, std::vector<std::string>& refnames)
 {
     Part::AttachExtension* pcAttach
         = ViewProvider->getObject()->getExtensionByType<Part::AttachExtension>();
     std::vector<App::DocumentObject*> refs = pcAttach->AttachmentSupport.getValues();
     refnames = pcAttach->AttachmentSupport.getSubValues();
+    const bool edgePoint = isEdgePoint(pcAttach);  // FreeCAD-CH (ops#673)
 
     for (size_t r = 0; r < 4; r++) {
         if ((r < refs.size()) && (refs[r])) {
-            refstrings.push_back(makeRefString(refs[r], refnames[r]));
+            refstrings.push_back(
+                edgePoint ? QObject::tr("Edge point") : makeRefString(refs[r], refnames[r])
+            );
             // for Origin or Datum features refnames is empty but we need a non-empty return value
             if (refnames[r].empty()) {
                 refnames[r] = refs[r]->getNameInDocument();
@@ -562,14 +590,38 @@ void TaskAttacher::findCorrectObjAndSubInThisContext(App::DocumentObject*& rootO
     // In this case the selection cannot guarantee the global placement that attacher will find.
 }
 
+namespace
+{
+std::string midpointPickMark;  // FreeCAD-CH (ops#673): see markMidpointPick
+std::string markOf(const App::DocumentObject* obj)
+{
+    return obj && obj->isAttachedToDocument()
+        ? std::string(obj->getDocument()->getName()) + "#" + obj->getNameInDocument()
+        : std::string();
+}
+}  // namespace
+
+void TaskAttacher::markMidpointPick(const App::DocumentObject* obj)
+{
+    midpointPickMark = markOf(obj);
+}
+
 void TaskAttacher::handleInitialSelection()
 {
     // We handle initial selection only if it is not attached yet.
     App::DocumentObject* obj = ViewProvider->getObject();
     Part::AttachExtension* pcAttach = obj->getExtensionByType<Part::AttachExtension>();
     std::vector<App::DocumentObject*> refs = pcAttach->AttachmentSupport.getValues();
+    // FreeCAD-CH (ops#673): attached by the datum command to an edge preselected at its middle
+    const bool markedMidpoint = !midpointPickMark.empty() && midpointPickMark == markOf(obj);
+    midpointPickMark.clear();
 
     if (!refs.empty()) {
+        if (markedMidpoint && refs.size() == 1) {
+            midpointPicks[0] = true;
+            applyMidpointPick();
+            updatePreview();
+        }
         return;
     }
     std::vector<SubAndObjName> subAndObjNamePairs;
@@ -582,8 +634,15 @@ void TaskAttacher::handleInitialSelection()
     for (auto& selObj : sel) {
         std::vector<std::string> subs = selObj.getSubNames();
         std::string objName = selObj.getFeatName();
-        for (auto& sub : subs) {
-            SubAndObjName objSubName = {objName, sub};
+        // FreeCAD-CH (ops#673): an edge preselected at its middle is its midpoint (SP10-Q10)
+        const std::vector<Base::Vector3d> picked = selObj.getPickedPoints();
+        for (std::size_t i = 0; i < subs.size(); ++i) {
+            SubAndObjName objSubName = {objName, subs[i]};
+            objSubName.midpoint = i < picked.size() && selObj.hasPickedPoint(i)
+                && EdgeMidpointMarker::pickedMiddle(
+                       selObj.getDocName(), objName.c_str(), subs[i].c_str(), picked[i]
+                )
+                       .has_value();
             subAndObjNamePairs.push_back(objSubName);
         }
     }
@@ -598,6 +657,14 @@ void TaskAttacher::onSelectionChanged(const Gui::SelectionChanges& msg)
 
     if (msg.Type == Gui::SelectionChanges::AddSelection) {
         SubAndObjName pair = {msg.pObjectName, msg.pSubName};
+        // FreeCAD-CH (ops#673): an edge picked at its middle (the midpoint marker showing). Only a
+        // picked point counts: a tree or Python selection has (0,0,0), which lies on any edge
+        // through the origin (selection parity 11 (3)).
+        pair.midpoint = msg.hasPickedPoint
+            && EdgeMidpointMarker::pickedMiddle(
+                   msg.pDocName, msg.pObjectName, msg.pSubName, Base::Vector3d(msg.x, msg.y, msg.z)
+            )
+                   .has_value();
         addToReference(pair);
 
         Q_EMIT placementUpdated();
@@ -655,6 +722,11 @@ void TaskAttacher::addToReference(const std::vector<SubAndObjName>& pairs)
             refs.push_back(selObj);
             refnames.push_back(subname);
         }
+        // FreeCAD-CH (ops#673)
+        const std::size_t slot = std::min<std::size_t>(iActiveRef, refs.size() - 1);
+        if (slot < midpointPicks.size()) {
+            midpointPicks[slot] = pair.midpoint;
+        }
 
         pcAttach->AttachmentSupport.setValues(refs, refnames);
         // FreeCAD-CH (ops#311): a support picked here takes the Body's origin
@@ -696,6 +768,7 @@ void TaskAttacher::addToReference(const std::vector<SubAndObjName>& pairs)
         }
         pcAttach->MapMode.setValue(mmode);
         selectMapMode(mmode);
+        applyMidpointPick();  // FreeCAD-CH (ops#673)
         updatePreview();
     }
     catch (Base::Exception& e) {
@@ -845,7 +918,40 @@ void TaskAttacher::onModeSelect()
     pcAttach->MapMode.setValue(activeMode);
     userSelectedMode = true;
     applyBoldMode(activeMode);
+    applyMidpointPick();  // FreeCAD-CH (ops#673)
     updatePreview();
+}
+
+// FreeCAD-CH (ops#673, selection parity 11)
+void TaskAttacher::applyMidpointPick(bool updateLabel)
+{
+    if (!ViewProvider) {
+        return;
+    }
+    Part::AttachExtension* pcAttach
+        = ViewProvider->getObject()->getExtensionByType<Part::AttachExtension>();
+    const std::vector<App::DocumentObject*> refs = pcAttach->AttachmentSupport.getValues();
+    const std::vector<std::string> subs = pcAttach->AttachmentSupport.getSubValues();
+    const bool wanted = refs.size() == 1 && midpointPicks[0]
+        && pcAttach->MapMode.getValue() == mmNormalToPath;
+    bool changed = false;
+    if (wanted && !pathParameterByPick) {
+        pathParameterBefore = pcAttach->MapPathParameter.getValue();
+        pathParameterByPick = true;
+        pcAttach->MapPathParameter.setValue(0.5);
+        changed = true;
+    }
+    else if (!wanted && pathParameterByPick) {
+        pcAttach->MapPathParameter.setValue(pathParameterBefore);
+        pathParameterByPick = false;
+        changed = true;
+    }
+    QLineEdit* line = getLine(0);
+    if (updateLabel && changed && line && !refs.empty() && refs[0]) {
+        line->blockSignals(true);
+        line->setText(isEdgePoint(pcAttach) ? tr("Edge point") : makeRefString(refs[0], subs[0]));
+        line->blockSignals(false);
+    }
 }
 
 void TaskAttacher::onRefName(const QString& text, unsigned idx)
@@ -857,6 +963,19 @@ void TaskAttacher::onRefName(const QString& text, unsigned idx)
     QLineEdit* line = getLine(idx);
     if (!line) {
         return;
+    }
+
+    // FreeCAD-CH (ops#673): a removed reference takes its midpoint flag; a typed one has none
+    if (idx < midpointPicks.size()) {
+        if (text.length() == 0) {
+            for (std::size_t r = idx; r + 1 < midpointPicks.size(); ++r) {
+                midpointPicks[r] = midpointPicks[r + 1];
+            }
+            midpointPicks.back() = false;
+        }
+        else {
+            midpointPicks[idx] = false;
+        }
     }
 
     if (text.length() == 0) {
@@ -882,6 +1001,7 @@ void TaskAttacher::onRefName(const QString& text, unsigned idx)
         updateListOfModes();
         pcAttach->MapMode.setValue(getActiveMapMode());
         selectMapMode(getActiveMapMode());
+        applyMidpointPick(false);  // FreeCAD-CH (ops#673): the lines are set below
 
         updatePreview();
 
@@ -990,6 +1110,7 @@ void TaskAttacher::onRefName(const QString& text, unsigned idx)
     updateListOfModes();
     pcAttach->MapMode.setValue(getActiveMapMode());
     selectMapMode(getActiveMapMode());
+    applyMidpointPick(false);  // FreeCAD-CH (ops#673): the typed text stays
 
     updateReferencesUI();
 

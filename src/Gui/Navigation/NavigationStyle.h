@@ -676,6 +676,29 @@ protected:
     SbBool processSoEvent(const SoEvent* const ev) override;
 };
 
+// FreeCAD-CH (ops#640): Onshape's mouse (OnshapeNavigationStyle.cpp)
+class GuiExport OnshapeNavigationStyle: public UserNavigationStyle
+{
+    using inherited = UserNavigationStyle;
+
+    TYPESYSTEM_HEADER_WITH_OVERRIDE();
+
+public:
+    OnshapeNavigationStyle();
+    ~OnshapeNavigationStyle() override;
+    const char* mouseButtons(ViewerMode) override;
+
+protected:
+    SbBool processSoEvent(const SoEvent* const ev) override;
+
+private:
+    bool isDoubleMiddleClick(const SoEvent* const ev) const;
+    void selectPreselected();
+
+    // the last middle click (press and release without a pan); zero when there is none
+    SbTime lastMiddleClickTime {SbTime::zero()};
+};
+
 }  // namespace Gui
 // NOLINTEND(cppcoreguidelines-avoid*, readability-avoid-const-params-in-decls)
 

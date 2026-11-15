@@ -833,6 +833,8 @@ protected:
         float y = 0.0f;
         float z = 0.0f;
         bool logged = false;
+        // FreeCAD-CH (ops#673): x, y, z come from a pick (a 3D pick, or Python given the point)
+        bool hasPickedPoint = false;
 
         App::ElementNamePair elementName;
         App::DocumentObject* pResolvedObject = nullptr;

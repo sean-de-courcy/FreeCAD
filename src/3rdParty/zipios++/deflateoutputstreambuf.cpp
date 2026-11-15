@@ -118,17 +118,23 @@ int DeflateOutputStreambuf::overflow( int c ) {
 
   // Deflate until _invec is empty.
   int err = Z_OK ;
+  bool flushed = true ;
   while ( ( _zs.avail_in > 0 || _zs.avail_out == 0 ) && err == Z_OK ) {
     if ( _zs.avail_out == 0 )
-      flushOutvec() ;
+      flushed = flushOutvec() && flushed ;
 
     err = deflate( &_zs, Z_NO_FLUSH ) ;
   }
 
-  flushOutvec() ;
+  flushed = flushOutvec() && flushed ;
   
   // Update 'put' pointers
   setp( &( _invec[ 0 ] ), &( _invec[ 0 ] ) + _invecsize ) ;
+
+  // FreeCAD-CH (ops#640, A1 fix review 2): a write to the file that went short makes the
+  // stream bad, so the save sees it (upstream dropped flushOutvec's answer)
+  if ( !flushed )
+    return EOF ;
   
   if( err != Z_OK && err != Z_STREAM_END ) {
 #if defined (HAVE_STD_IOSTREAM) && defined (USE_STD_IOSTREAM)

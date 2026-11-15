@@ -679,6 +679,17 @@ protected:
     int getEditingMode() const;
 
 public:
+    /** FreeCAD-CH (ops#640): whether an edit in mode @a ModNum is one undo step, its
+     * transaction opened before the edit starts and closed only by the dialog's OK or Cancel.
+     * Gui::Document::setEdit() then holds the document's step lock (App::Document::lockStep())
+     * until the edit resets: no undo, redo or other transaction behind the open dialog, as
+     * Onshape (Ctrl+Z does nothing with a feature dialog open). Default: false.
+     */
+    virtual bool editHoldsOneStep(int ModNum) const
+    {
+        (void)ModNum;
+        return false;
+    }
     virtual ViewProvider* startEditing(int ModNum = 0);
     bool isEditing() const;
     void finishEditing();

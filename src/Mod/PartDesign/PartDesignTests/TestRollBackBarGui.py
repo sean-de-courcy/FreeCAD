@@ -20,6 +20,7 @@ import FreeCADGui as Gui
 from PySide import QtCore, QtGui
 
 from PartDesignTests.Scenarios import models
+from PartDesignTests.TestExpressionFieldsGui import liveButtonBoxes
 
 V = App.Vector
 BAR = 1002  # TreeWidget::BarType
@@ -835,15 +836,18 @@ class TestRollBackBarGui(unittest.TestCase):
 
     def taskButton(self, which):
         """The task panel's OK or Cancel button (TestReferencePickerGui.taskButton)."""
-        for box in Gui.getMainWindow().findChildren(QtGui.QDialogButtonBox):
-            button = box.button(which)
-            if button is None or not button.isVisible():
+        for box in liveButtonBoxes():
+            try:
+                button = box.button(which)
+                if button is None or not button.isVisible():
+                    continue
+                parent = box.parentWidget()
+                while parent is not None:
+                    if parent.metaObject().className() == "Gui::TaskView::TaskView":
+                        return button
+                    parent = parent.parentWidget()
+            except RuntimeError:  # deleted under its wrapper (TestExpressionFieldsGui.liveButtonBoxes)
                 continue
-            parent = box.parentWidget()
-            while parent is not None:
-                if parent.metaObject().className() == "Gui::TaskView::TaskView":
-                    return button
-                parent = parent.parentWidget()
         self.fail("no task panel button")
 
     def panelWidget(self, kind, name):

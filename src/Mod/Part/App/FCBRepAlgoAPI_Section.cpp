@@ -83,3 +83,11 @@ void FCBRepAlgoAPI_Section::setAutoFuzzy()
 {
     FCBRepAlgoAPIHelper::setAutoFuzzy(this);
 }
+
+void FCBRepAlgoAPI_Section::Build(const Message_ProgressRange& theRange)
+{
+    // A section with a plane: the plane is a face OCCT makes (skipped by the check)
+    FCBRepAlgoAPIHelper::refuseFacesWithoutWidth(myArguments);
+    FCBRepAlgoAPIHelper::refuseFacesWithoutWidth(myTools);
+    BRepAlgoAPI_Section::Build(theRange);
+}

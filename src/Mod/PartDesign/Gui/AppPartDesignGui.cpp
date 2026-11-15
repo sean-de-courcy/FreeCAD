@@ -30,15 +30,24 @@
 #include <Base/Interpreter.h>
 #include <Base/PyObjectBase.h>
 #include <Gui/Application.h>
+#include <Gui/ForkKeymap.h>
 #include <Gui/Language/Translator.h>
+#include <Mod/Part/App/Part2DObject.h>
+#include <Mod/PartDesign/App/Body.h>
+#include <Mod/PartDesign/App/Feature.h>
+#include <functional>
+#include <string>
+#include <QString>
 
 #include "Workbench.h"
+#include "FeaturesView.h"
 #include "ViewProviderBase.h"
 #include "ViewProviderBody.h"
 #include "ViewProviderBoolean.h"
 #include "ViewProviderSplit.h"
 #include "ViewProviderChamfer.h"
 #include "ViewProviderDefeaturing.h"
+#include "ViewProviderFacePattern.h"
 #include "ViewProviderDatumCS.h"
 #include "ViewProviderDatumLine.h"
 #include "ViewProviderDatumPlane.h"
@@ -57,6 +66,7 @@
 #include "ViewProviderPipe.h"
 #include "ViewProviderPocket.h"
 #include "ViewProviderPolarPattern.h"
+#include "ViewProviderCurvePattern.h"
 #include "ViewProviderPrimitive.h"
 #include "ViewProviderRevolution.h"
 #include "ViewProviderScaled.h"
@@ -64,7 +74,32 @@
 #include "ViewProviderSketchBased.h"
 #include "ViewProviderThickness.h"
 #include "ViewProviderTransformed.h"
+#include "ViewProviderStudioList.h"
 
+
+// FreeCAD-CH (ops#640 round 8): declared where they are used (no header names them): the edit
+// status banner's words (TaskView.cpp), and the plain status words (FeaturesView.cpp)
+namespace App
+{
+class DocumentObject;
+}
+namespace Gui::TaskView
+{
+GuiExport void setEditStatusText(
+    std::function<QString(const App::DocumentObject*, const QString&)> text
+);
+}
+namespace Gui
+{
+// FreeCAD-CH (ops#640 polish P8): Onshape's double click in the 3D view (NavigationStyle.cpp)
+GuiExport void setDoubleClickElement(
+    std::function<void(const std::string&, const std::string&, const std::string&)> handler
+);
+}
+namespace PartDesignGui
+{
+QString plainStatusText(const App::DocumentObject* obj, const QString& message);
+}
 
 // use a different name to CreateCommand()
 void CreatePartDesignCommands();
@@ -144,12 +179,14 @@ PyMOD_INIT_FUNC(PartDesignGui)
     PartDesignGui::ViewProviderChamfer       ::init();
     PartDesignGui::ViewProviderFillet        ::init();
     PartDesignGui::ViewProviderDefeaturing   ::init();
+    PartDesignGui::ViewProviderFacePattern   ::init();  // FreeCAD-CH (ops#655 T8)
     PartDesignGui::ViewProviderDraft         ::init();
     PartDesignGui::ViewProviderThickness     ::init();
     PartDesignGui::ViewProviderTransformed   ::init();
     PartDesignGui::ViewProviderMirrored      ::init();
     PartDesignGui::ViewProviderLinearPattern ::init();
     PartDesignGui::ViewProviderPolarPattern  ::init();
+    PartDesignGui::ViewProviderCurvePattern  ::init();
     PartDesignGui::ViewProviderScaled        ::init();
     PartDesignGui::ViewProviderMultiTransform::init();
     PartDesignGui::ViewProviderDatum         ::init();
@@ -167,10 +204,26 @@ PyMOD_INIT_FUNC(PartDesignGui)
     PartDesignGui::ViewProviderLoft          ::init();
     PartDesignGui::ViewProviderHelix         ::init();
     PartDesignGui::ViewProviderBase          ::init();
+    PartDesignGui::ViewProviderStudioList    ::init();  // FreeCAD-CH ops#654
     // clang-format on
 
     // add resources and reloads the translators
     loadPartDesignResource();
+
+    // Under the Onshape keymap a PartDesign feature's dialog banner, or its sketch's, says what
+    // its rows' tooltips say (round 8; review R8-8: other objects keep their words)
+    Gui::TaskView::setEditStatusText([](const App::DocumentObject* obj, const QString& text) {
+        const bool ours = obj
+            && (obj->isDerivedFrom<PartDesign::Feature>() || obj->isDerivedFrom<PartDesign::Body>()
+                || PartDesign::Body::findBodyOf(obj));  // datums, binders, sketches in a Body
+        return ours && Gui::ForkKeymap::isOnshape() ? PartDesignGui::plainStatusText(obj, text)
+                                                    : text;
+    });
+    // FreeCAD-CH (ops#640 polish P8): under the Onshape keymap a double click on an element
+    // tints the feature that made it, and its sketch, in the list and the view
+    Gui::setDoubleClickElement(&PartDesignGui::FeaturesView::showCreatorOf);
+    // FreeCAD-CH (ops#640 round 10): an Assembly tab's list in the Model panel
+    PartDesignGui::FeaturesView::followTabs();
 
     PyMOD_Return(mod);
 }

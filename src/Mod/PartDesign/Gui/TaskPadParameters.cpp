@@ -23,6 +23,9 @@
  ***************************************************************************/
 
 #include <Precision.hxx>
+#include <QComboBox>
+#include <QListView>
+#include <QStandardItemModel>
 
 
 #include <Mod/PartDesign/App/FeaturePad.h>
@@ -67,15 +70,44 @@ TaskPadParameters::TaskPadParameters(ViewProviderPad* PadView, QWidget* parent, 
 
 TaskPadParameters::~TaskPadParameters() = default;
 
+namespace
+{
+// Onshape has no Up to last (FreeCAD-CH ops#640, rank 22): its entry stays in the end type box,
+// hidden and unpickable, unless the feature already ends so (an older file). \a mode and
+// \a index are Modes, the rows' data
+void offerOnlyIfChosen(QComboBox* box, int mode, int index)
+{
+    const int row = box->findData(mode);
+    const bool hide = index != mode;
+    if (auto view = qobject_cast<QListView*>(box->view())) {
+        view->setRowHidden(row, hide);
+    }
+    if (auto model = qobject_cast<QStandardItemModel*>(box->model())) {
+        if (QStandardItem* item = model->item(row)) {
+            item->setEnabled(!hide);
+        }
+    }
+}
+}  // namespace
+
 void TaskPadParameters::translateModeList(QComboBox* box, int index)
 {
+    // Onshape's words and order (FreeCAD-CH ops#640, rank 22): Blind, Up to next, Up to face,
+    // Up to part, Up to vertex, Through all; each row's data is its Mode (\a index is one)
+    auto add = [box](const QString& text, Mode mode) {
+        box->addItem(text, static_cast<int>(mode));
+    };
     box->clear();
-    box->addItem(tr("Dimension"));
-    box->addItem(tr("To last"));
-    box->addItem(tr("To first"));
-    box->addItem(tr("Up to face"));
-    box->addItem(tr("Up to shape"));
-    box->setCurrentIndex(index);
+    add(tr("Blind"), Mode::Dimension);
+    add(tr("Up to last"), Mode::ToLast);
+    add(tr("Up to next"), Mode::ToFirst);
+    add(tr("Up to face"), Mode::ToFace);
+    add(tr("Up to part"), Mode::ToShape);
+    add(tr("Up to vertex"), Mode::ToVertex);
+    // Mode::Appended (ops#640): the end type a Pocket offers too
+    add(tr("Through all"), Mode::Appended);
+    offerOnlyIfChosen(box, static_cast<int>(Mode::ToLast), index);
+    box->setCurrentIndex(rowOfMode(box, static_cast<Mode>(index)));
 }
 
 void TaskPadParameters::updateUI(Side side)
@@ -118,6 +150,13 @@ void TaskPadParameters::onModeChanged(int index, Side side)
             break;
         case Mode::ToShape:
             sideCtrl.Type->setValue("UpToShape");
+            break;
+        case Mode::Appended:
+            sideCtrl.Type->setValue("ThroughAll");
+            break;
+        case Mode::ToVertex:
+            // Up to vertex (ops#640 rank 22): an empty vertex field arms in updateUI()
+            sideCtrl.Type->setValue("UpToVertex");
             break;
     }
 

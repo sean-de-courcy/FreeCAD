@@ -43,10 +43,12 @@
 #include <QByteArray>
 #include <QCursor>
 #include <QMenu>
+#include <QTimer>
 
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <limits>
 
 #include <Base/Interpreter.h>
@@ -60,6 +62,7 @@
 #include "Command.h"
 #include "Action.h"
 #include "Document.h"
+#include "ForkKeymap.h"
 #include "Inventor/SoMouseWheelEvent.h"
 #include "MenuManager.h"
 #include "MouseSelection.h"
@@ -72,6 +75,42 @@
 #include "ViewProviderDocumentObject.h"
 
 using namespace Gui;
+
+namespace Gui
+{
+/// FreeCAD-CH (ops#640 polish P8): Onshape's double click in the 3D view. Under the Onshape keymap
+/// a double click on a preselected element calls this with the element (document, object, its
+/// sub-path), after the clicks' own selection is done; a workbench sets it (PartDesign: tint the
+/// feature that made the element). Declared where it is used (no header names it)
+using DoubleClickElement = std::function<void(const std::string&, const std::string&, const std::string&)>;
+GuiExport void setDoubleClickElement(DoubleClickElement handler);
+}  // namespace Gui
+
+namespace
+{
+Gui::DoubleClickElement& doubleClickElement()
+{
+    static Gui::DoubleClickElement handler;
+    return handler;
+}
+
+/// The element under the second press of a double click, until its release (one at a time)
+struct DoubleClicked
+{
+    bool pending = false;
+    std::string doc, obj, sub;
+};
+DoubleClicked& doubleClicked()
+{
+    static DoubleClicked clicked;
+    return clicked;
+}
+}  // namespace
+
+void Gui::setDoubleClickElement(DoubleClickElement handler)
+{
+    doubleClickElement() = std::move(handler);
+}
 
 NavigationStyleContextMenuReceiver::NavigationStyleContextMenuReceiver(
     ViewProviderDocumentObject* viewProvider,
@@ -490,9 +529,10 @@ void NavigationStyle::initialize()
     this->zoomStep = App::GetApplication()
                          .GetParameterGroupByPath("User parameter:BaseApp/Preferences/View")
                          ->GetFloat("ZoomStep", 0.2f);
+    // FreeCAD-CH (ops#640): the default turns about the point under the cursor, as Onshape does
     long mode = App::GetApplication()
                     .GetParameterGroupByPath("User parameter:BaseApp/Preferences/View")
-                    ->GetInt("RotationMode", 0);
+                    ->GetInt("RotationMode", 1);
     if (mode == 0) {
         setRotationCenterMode(NavigationStyle::RotationCenterMode::WindowCenter);
     }
@@ -2516,13 +2556,36 @@ SbBool NavigationStyle::processClickEvent(const SoMouseButtonEvent* const event)
         if (isDoubleClickCandidate(event)) {
             deferMouseDownEvent(event);
             processed = true;
+            // FreeCAD-CH (ops#640 polish P8): a double click on the first press's element, for
+            // the handler on release
+            auto& clicked = doubleClicked();
+            clicked.pending = ForkKeymap::isOnshape() && doubleClickElement() && !clicked.obj.empty();
         }
         else {
             recordClickCandidate(event);
+            // FreeCAD-CH (ops#640 polish P8): the element under the first press (its click
+            // clears the preselection)
+            const SelectionChanges& pre = Selection().getPreselection();
+            auto& clicked = doubleClicked();
+            clicked.pending = false;
+            clicked.doc = pre.pDocName ? pre.pDocName : "";
+            clicked.obj = pre.pObjectName ? pre.pObjectName : "";
+            clicked.sub = pre.pSubName ? pre.pSubName : "";
         }
     }
     else if (!press) {
         replayDeferredMouseDownEvent();
+        // FreeCAD-CH (ops#640 polish P8): once this release has done its selection (the clicks
+        // toggle the pick twice: nothing stays selected), the handler gets the element
+        auto& clicked = doubleClicked();
+        if (clicked.pending) {
+            clicked.pending = false;
+            QTimer::singleShot(0, [doc = clicked.doc, obj = clicked.obj, sub = clicked.sub]() {
+                if (auto& handler = doubleClickElement()) {
+                    handler(doc, obj, sub);
+                }
+            });
+        }
     }
 
     return processed;
@@ -2593,10 +2656,21 @@ void NavigationStyle::openPopupMenu(const SbVec2s& position)
     Gui::Application::Instance->setupContextMenu("View", &view);
 
     auto contextMenu = new QMenu(viewer->getGLWidget());
+    contextMenu->setObjectName(QStringLiteral("View3DContextMenu"));
     MenuManager::getInstance()->setupContextMenu(&view, *contextMenu);
     contextMenu->setAttribute(Qt::WA_DeleteOnClose);
 
-    auto posAction = !contextMenu->actions().empty() ? contextMenu->actions().front() : nullptr;
+    // Where the entity's own entries and Clarify Selection go: before the menu's first entry; or,
+    // with the fork's Onshape menu, whose last entry is its More submenu (FreeCAD-CH, ops#640),
+    // before that submenu, so that Onshape's entries come first
+    const QList<QAction*> actions = contextMenu->actions();
+    QAction* posAction = actions.empty() ? nullptr : actions.front();
+    const QList<MenuItem*> items = view.getItems();
+    const bool beforeMore = !actions.empty() && !items.empty()
+        && items.last()->command() == "More" && actions.last()->menu() != nullptr;
+    if (beforeMore) {
+        posAction = actions.last();
+    }
 
     QMenu* objectMenu = nullptr;
     QList<QAction*> objectActions;
@@ -2614,7 +2688,10 @@ void NavigationStyle::openPopupMenu(const SbVec2s& position)
             preselectedViewProvider->setupContextMenu(objectMenu, receiver, SLOT(startEditing()));
             objectActions = objectMenu->actions();
             if (!objectActions.empty()) {
-                contextMenu->setDefaultAction(objectActions.front());
+                if (!beforeMore) {
+                    // Onshape's menu has no bold entry
+                    contextMenu->setDefaultAction(objectActions.front());
+                }
 
                 for (auto* action : objectActions) {
                     if (posAction) {
@@ -2685,7 +2762,29 @@ void NavigationStyle::openPopupMenu(const SbVec2s& position)
 
     contextMenu->popup(QCursor::pos());
 
-    rightClickPosition.reset();
+    // The position stays while the menu lives, for the entries that act where the click was
+    // (Select Other, Clarify Selection; FreeCAD-CH ops#640): popup() returns at once, and
+    // WA_DeleteOnClose deletes the menu after its triggered signal. The viewer is the context,
+    // so a view that closed gets no call, and a style the viewer replaced meanwhile is left alone.
+    // A newer menu of this view may be open when an older one is deleted (a right click that
+    // dismisses a menu is replayed to the view on Windows, and the dismissed menu's deletion is
+    // pending while the new one stores its position): the position is the newest menu's, and
+    // only its deletion resets it
+    QObject::connect(contextMenu, &QObject::destroyed, viewer, [this, v = viewer](QObject* gone) {
+        if (v->navigationStyle() != this) {
+            return;
+        }
+        const QList<QMenu*> menus = v->getGLWidget()->findChildren<QMenu*>(
+            QStringLiteral("View3DContextMenu"),
+            Qt::FindDirectChildrenOnly
+        );
+        for (QMenu* menu : menus) {
+            if (menu != gone) {
+                return;
+            }
+        }
+        rightClickPosition.reset();
+    });
 }
 
 PyObject* NavigationStyle::getPyObject()

@@ -360,10 +360,25 @@ void SoDatumLabel::drawImage()
     QFont font(QString::fromLatin1(name.getValue(), -1), size.getValue());
     QFontMetrics fm(font);
     QString str = QString::fromUtf8(s[0].getString());
+    // FreeCAD-CH (ops#640 polish P4): "tag\nvalue" draws Onshape's expression tag, a light-blue
+    // box with the expression, above the value (Sketcher's Show expressions)
+    QString tag;
+    if (const auto cut = str.indexOf(QLatin1Char('\n')); cut >= 0) {
+        tag = str.left(cut);
+        str = str.mid(cut + 1);
+    }
     QRect rect = fm.boundingRect(str);
 
     int w = Gui::QtTools::horizontalAdvance(fm, str);
+    const int valueWidth = w;
     int h = fm.height();
+    const int tagPad = tag.isEmpty() ? 0 : std::max(2, h / 6);
+    const int tagWidth = tag.isEmpty() ? 0 : Gui::QtTools::horizontalAdvance(fm, tag) + 2 * tagPad;
+    const int valueTop = tag.isEmpty() ? 0 : h + tagPad;
+    if (!tag.isEmpty() && w) {
+        w = std::max(w, tagWidth);
+        h += valueTop;
+    }
 
     // No Valid text
     if (!w) {
@@ -384,12 +399,23 @@ void SoDatumLabel::drawImage()
         painter.setRenderHint(QPainter::Antialiasing);
     }
 
-    painter.setPen(QPen(front, 2));
     painter.setFont(font);
-    painter.drawText(0, fm.ascent() + rect.y(), w, rect.height(), Qt::AlignLeft, str);
+    int valueLeft = 0;
+    if (!tag.isEmpty()) {
+        const QRect tagBox((w - tagWidth) / 2, 0, tagWidth, fm.height());
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(QColor(0xD6, 0xE9, 0xFB));
+        painter.drawRoundedRect(tagBox, tagPad, tagPad);
+        painter.setPen(QPen(QColor(0x1F, 0x4E, 0x8C), 2));
+        painter.drawText(tagBox, Qt::AlignCenter, tag);
+        valueLeft = (w - valueWidth) / 2;
+    }
+    painter.setPen(QPen(front, 2));
+    painter.drawText(valueLeft, valueTop + fm.ascent() + rect.y(), valueWidth, rect.height(),
+                     Qt::AlignLeft, str);
     if (strikethrough.getValue()) {
-        int strikepos = fm.ascent() - fm.strikeOutPos();
-        painter.drawLine(0, strikepos, w, strikepos);
+        int strikepos = valueTop + fm.ascent() - fm.strikeOutPos();
+        painter.drawLine(valueLeft, strikepos, valueLeft + valueWidth, strikepos);
     }
     painter.end();
 

@@ -3,9 +3,12 @@
 #include "ElementSolverBatch.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <iomanip>
@@ -14,8 +17,13 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <mutex>
 #include <set>
 #include <sstream>
+#include <string_view>
+#include <thread>
+#include <tuple>
+#include <unordered_map>
 
 #include <Base/Console.h>
 #include <Base/Exception.h>
@@ -37,6 +45,7 @@
 #include "MappedElement.h"
 #include "PropertyExpressionEngine.h"
 #include "PropertyGeo.h"
+#include "PropertyPythonObject.h"
 #include "RecomputeContinuation.h"
 #include "ReferenceReport.h"
 
@@ -67,7 +76,341 @@ std::map<std::string, MigrationCounts> migrationCounts;
 // solveElementReferences() calls, whose writes aren't edits.
 std::map<const Document*, std::set<const DocumentObject*>> editsSinceOpen;
 int solving = 0;
+
+// The digests of one recompute (PlacementDigestScope, ElementSolverEdits.h). A digest depends on
+// its object's own properties, the keys of the objects they link (IDs and document names, which
+// don't change), whether the object's Placement is a source of the target (`source`) and the
+// target's document (keys name another document's objects by it).
+struct DigestCache
+{
+    enum Mode
+    {
+        Off,
+        On,
+        Verify,
+    };
+    struct Key
+    {
+        std::uintptr_t object = 0;
+        std::uintptr_t doc = 0;
+        bool source = false;
+        bool operator<(const Key& other) const
+        {
+            return std::tie(object, doc, source) < std::tie(other.object, other.doc, other.source);
+        }
+    };
+    std::mutex mutex;
+    int depth = 0;
+    std::thread::id owner;
+    Mode mode = On;
+    std::map<Key, std::uint64_t> digests;
+    // Bumped by every forget: a digest made while one ran (another thread's edit) isn't kept
+    std::uint64_t epoch = 0;
+    // For the log at the end of the outermost scope
+    std::uint64_t calls = 0;
+    std::uint64_t made = 0;
+    std::uint64_t reused = 0;
+    std::uint64_t differed = 0;
+    double seconds = 0.0;
+};
+
+DigestCache& digestCache()
+{
+    static DigestCache cache;
+    return cache;
+}
+
+// The cache's depth, read without its mutex by forgetPlacementDigestOf()
+std::atomic<int> digestDepth {0};
+
+// An environment variable, or empty
+std::string environmentValue(const char* name)
+{
+#ifdef _MSC_VER
+    char* value = nullptr;
+    std::size_t size = 0;
+    if (_dupenv_s(&value, &size, name) != 0 || !value) {
+        return {};
+    }
+    std::string text(value);
+    std::free(value);
+    return text;
+#else
+    const char* value = std::getenv(name);
+    return value ? std::string(value) : std::string();
+#endif
+}
+
+// FREECAD_CH_DIGEST_CACHE, or empty
+std::string digestCacheMode()
+{
+    return environmentValue("FREECAD_CH_DIGEST_CACHE");
+}
+
+// The solver profile (SolverSiteTimer, ElementSolverEdits.h): on for the outermost scope's thread
+// while FREECAD_CH_SOLVER_PROFILE was set at its open
+struct SolverProfile
+{
+    std::atomic<bool> on {false};
+    std::thread::id thread;
+    double seconds[static_cast<int>(SolverSite::Count)] = {};
+    std::uint64_t calls[static_cast<int>(SolverSite::Count)] = {};
+};
+
+SolverProfile& solverProfile()
+{
+    static SolverProfile profile;
+    return profile;
+}
+
+// The running solveElementReferences()' measured fingerprints (batchElementFingerprint(),
+// ElementSolverEdits.h), innermost first
+struct BatchFingerprints
+{
+    const PropertyContainer* target = nullptr;
+    std::map<std::string, Data::ElementFingerprint>* measured = nullptr;
+    // A property of the target changed since they were measured
+    bool stale = false;
+    // FREECAD_CH_FINGERPRINT_SHORTCUTS=verify: each one used is measured again and compared
+    bool verify = false;
+    BatchFingerprints* previous = nullptr;
+};
+thread_local BatchFingerprints* runningBatch = nullptr;
+
+struct BatchFingerprintsScope
+{
+    BatchFingerprints batch;
+    BatchFingerprintsScope(const PropertyContainer* target,
+                           std::map<std::string, Data::ElementFingerprint>* measured)
+    {
+        batch.target = target;
+        batch.measured = measured;
+        // FREECAD_CH_FINGERPRINT_SHORTCUTS=off: none kept
+        const std::string mode = environmentValue("FREECAD_CH_FINGERPRINT_SHORTCUTS");
+        batch.stale = mode == "off";
+        batch.verify = mode == "verify";
+        batch.previous = runningBatch;
+        runningBatch = &batch;
+    }
+    ~BatchFingerprintsScope()
+    {
+        runningBatch = batch.previous;
+    }
+    BatchFingerprintsScope(const BatchFingerprintsScope&) = delete;
+    BatchFingerprintsScope& operator=(const BatchFingerprintsScope&) = delete;
+};
+
+BatchFingerprints* batchOf(const PropertyContainer* target)
+{
+    for (auto batch = runningBatch; batch; batch = batch->previous) {
+        if (batch->target == target) {
+            return batch->stale ? nullptr : batch;
+        }
+    }
+    return nullptr;
+}
+
+const char* solverSiteName(int site)
+{
+    static const char* names[] = {"updateRefs",
+                                  "solve",
+                                  "pass1",
+                                  "pass2Frames",
+                                  "pool",
+                                  "measure",
+                                  "solveOwner",
+                                  "writeBack",
+                                  "update",
+                                  "updateCompare",
+                                  "fingerprint",
+                                  "fpResolve",
+                                  "fpGet",
+                                  "fpTwin",
+                                  "fpUpTo",
+                                  "fpClosure",
+                                  "fpSources",
+                                  "fpString",
+                                  "held"};
+    static_assert(sizeof(names) / sizeof(names[0]) == static_cast<int>(SolverSite::Count));
+    return names[site];
+}
+
+// Whether this thread's recompute keeps digests now (the cache's mutex held)
+bool digestCacheActive(const DigestCache& cache)
+{
+    return cache.depth > 0 && cache.mode != DigestCache::Off
+        && cache.owner == std::this_thread::get_id();
+}
 }  // namespace
+
+PlacementDigestScope::PlacementDigestScope()
+{
+    auto& cache = digestCache();
+    std::lock_guard<std::mutex> lock(cache.mutex);
+    if (cache.depth == 0) {
+        cache.owner = std::this_thread::get_id();
+        const std::string text = digestCacheMode();
+        cache.mode = text == "off" ? DigestCache::Off
+            : text == "verify"     ? DigestCache::Verify
+                                   : DigestCache::On;
+        cache.digests.clear();
+        cache.calls = cache.made = cache.reused = cache.differed = 0;
+        cache.seconds = 0.0;
+        auto& profile = solverProfile();
+        profile.on = false;
+        if (!environmentValue("FREECAD_CH_SOLVER_PROFILE").empty()) {
+            profile.thread = cache.owner;
+            std::fill(std::begin(profile.seconds), std::end(profile.seconds), 0.0);
+            std::fill(std::begin(profile.calls), std::end(profile.calls), 0);
+            profile.on = true;
+        }
+    }
+    else if (cache.owner != std::this_thread::get_id()) {
+        return;
+    }
+    ++cache.depth;
+    ++digestDepth;
+    active = true;
+}
+
+PlacementDigestScope::~PlacementDigestScope()
+{
+    if (!active) {
+        return;
+    }
+    auto& cache = digestCache();
+    // Logged after the mutex is released: a console observer may change a property (a forget)
+    std::uint64_t calls = 0;
+    std::uint64_t made = 0;
+    std::uint64_t reused = 0;
+    std::uint64_t differed = 0;
+    double seconds = 0.0;
+    {
+        std::lock_guard<std::mutex> lock(cache.mutex);
+        --digestDepth;
+        if (--cache.depth > 0) {
+            return;
+        }
+        cache.digests.clear();
+        calls = cache.calls;
+        made = cache.made;
+        reused = cache.reused;
+        differed = cache.differed;
+        seconds = cache.seconds;
+    }
+    if (calls > 0) {
+        FC_LOG("placement sources: " << calls << " calls, " << seconds << " s; digests made " << made
+                                     << ", reused " << reused);
+    }
+    auto& profile = solverProfile();
+    if (profile.on.exchange(false)) {
+        std::ostringstream text;
+        for (int site = 0; site < static_cast<int>(SolverSite::Count); ++site) {
+            if (profile.calls[site] > 0) {
+                text << " " << solverSiteName(site) << " " << profile.calls[site] << "x "
+                     << std::fixed << std::setprecision(4) << profile.seconds[site] << ";";
+            }
+        }
+        FC_LOG("solver profile:" << text.str());
+    }
+    if (differed > 0) {
+        FC_ERR("placement digests: " << differed << " kept digests differ from a fresh one");
+    }
+}
+
+SolverSiteTimer::SolverSiteTimer(SolverSite which)
+{
+    auto& profile = solverProfile();
+    if (profile.on.load(std::memory_order_relaxed) && profile.thread == std::this_thread::get_id()) {
+        site = static_cast<int>(which);
+        start = std::chrono::steady_clock::now().time_since_epoch().count();
+    }
+}
+
+SolverSiteTimer::~SolverSiteTimer()
+{
+    auto& profile = solverProfile();
+    if (site < 0 || !profile.on.load(std::memory_order_relaxed)) {
+        return;
+    }
+    const auto ticks = std::chrono::steady_clock::now().time_since_epoch().count() - start;
+    profile.seconds[site] += std::chrono::duration<double>(std::chrono::steady_clock::duration(ticks)).count();
+    ++profile.calls[site];
+}
+
+bool batchElementFingerprint(const GeoFeature* geo,
+                             const std::string& element,
+                             bool& measured,
+                             Data::ElementFingerprint& fingerprint)
+{
+    auto batch = batchOf(geo);
+    if (!batch) {
+        return false;
+    }
+    auto it = batch->measured->find(element);
+    if (it == batch->measured->end()) {
+        return false;
+    }
+    // An element getElementFingerprint() gave nothing for is kept as an invalid fingerprint
+    measured = it->second.isValid();
+    fingerprint = it->second;
+    if (batch->verify) {
+        Data::ElementFingerprint fresh;
+        const bool freshMeasured = geo->getElementFingerprint(element.c_str(), fresh);
+        if (freshMeasured != measured
+            || (measured && fresh.toString() != fingerprint.toString())) {
+            FC_ERR("fingerprint shortcuts: a kept measurement of " << geo->getFullName() << "."
+                                                                   << element << " differs");
+        }
+        measured = freshMeasured;
+        fingerprint = fresh;
+    }
+    return true;
+}
+
+void keepBatchElementFingerprint(const GeoFeature* geo,
+                                 const std::string& element,
+                                 bool measured,
+                                 const Data::ElementFingerprint& fingerprint)
+{
+    if (auto batch = batchOf(geo)) {
+        batch->measured->emplace(element,
+                                 measured ? fingerprint : Data::ElementFingerprint());
+    }
+}
+
+void forgetPlacementDigestOf(const PropertyContainer* container)
+{
+    // The running batches' measurements of the container's shape (batchElementFingerprint())
+    for (auto batch = runningBatch; batch; batch = batch->previous) {
+        if (container && batch->target == container) {
+            batch->stale = true;
+        }
+    }
+    if (container && digestDepth.load(std::memory_order_relaxed) > 0) {
+        forgetPlacementDigest(dynamic_cast<const DocumentObject*>(container));
+    }
+}
+
+void forgetPlacementDigest(const void* obj)
+{
+    auto& cache = digestCache();
+    std::lock_guard<std::mutex> lock(cache.mutex);
+    if (cache.depth == 0 || !obj) {
+        return;
+    }
+    ++cache.epoch;
+    if (cache.digests.empty()) {
+        return;
+    }
+    const auto key = reinterpret_cast<std::uintptr_t>(obj);
+    auto from = cache.digests.lower_bound(DigestCache::Key {key, 0, false});
+    auto to = from;
+    while (to != cache.digests.end() && to->first.object == key) {
+        ++to;
+    }
+    cache.digests.erase(from, to);
+}
 
 void forgetEditsSinceOpen(const Document* doc)
 {
@@ -83,6 +426,9 @@ void noteEditSinceOpen(const DocumentObject* obj)
 
 void noteChangeSinceOpen(const DocumentObject* obj, const Property* prop)
 {
+    // Any change, the solver's own and an output's included: a digest skips outputs by the
+    // property's status, which a change can set
+    forgetPlacementDigest(obj);
     const Document* doc = obj ? obj->getDocument() : nullptr;
     if (!doc || !prop || solving > 0 || doc->testStatus(Document::Restoring)
         || doc->testStatus(Document::Recomputing) || obj->isRecomputing()
@@ -233,6 +579,21 @@ bool indexMadeOnly(const std::string& name, int depth)
 
 void placementSources(const GeoFeature* geo, std::vector<Data::ElementFingerprint::Source>& sources)
 {
+    // The time it takes, for the recompute's log line (PlacementDigestScope)
+    struct Timer
+    {
+        std::chrono::steady_clock::time_point started = std::chrono::steady_clock::now();
+        ~Timer()
+        {
+            const std::chrono::duration<double> spent = std::chrono::steady_clock::now() - started;
+            auto& cache = digestCache();
+            std::lock_guard<std::mutex> lock(cache.mutex);
+            if (cache.depth > 0 && cache.owner == std::this_thread::get_id()) {
+                ++cache.calls;
+                cache.seconds += spent.count();
+            }
+        }
+    } timer;
     sources.clear();
     if (!geo || !geo->isAttachedToDocument()) {
         return;
@@ -384,7 +745,10 @@ void placementSources(const GeoFeature* geo, std::vector<Data::ElementFingerprin
     // record); an App::Link's is folded. A link folds the objects and the elements it names (its
     // saved form carries the records), the expression engine its expressions, any other property
     // its saved form
-    auto digestOf = [&](const DocumentObject* object) {
+    // keepable: no property's saved form can change without a property change (a Python proxy's
+    // state can)
+    auto digestOf = [&](const DocumentObject* object, bool& keepable) {
+        keepable = true;
         const bool source = placed.count(object) > 0;
         const bool derived = source || isA(object, featureType) || isA(object, bodyType);
         std::uint64_t digest = Data::ElementFingerprint::DigestSeed;
@@ -413,6 +777,9 @@ void placementSources(const GeoFeature* geo, std::vector<Data::ElementFingerprin
                 continue;
             }
             fold(name);
+            if (dynamic_cast<PropertyPythonObject*>(property)) {
+                keepable = false;
+            }
             if (auto engine = dynamic_cast<PropertyExpressionEngine*>(property)) {
                 for (const auto& [path, expression] : engine->getExpressions()) {
                     fold(path.toString());
@@ -452,6 +819,54 @@ void placementSources(const GeoFeature* geo, std::vector<Data::ElementFingerprin
         }
         return digest;
     };
+    // Made once per recompute (PlacementDigestScope): kept until a property of the object changes
+    auto keptDigestOf = [&](const DocumentObject* object) {
+        auto& cache = digestCache();
+        const DigestCache::Key key {reinterpret_cast<std::uintptr_t>(object),
+                                    reinterpret_cast<std::uintptr_t>(doc),
+                                    placed.count(object) > 0};
+        bool keep = false;
+        bool verify = false;
+        std::optional<std::uint64_t> kept;
+        std::uint64_t epoch = 0;
+        {
+            std::lock_guard<std::mutex> lock(cache.mutex);
+            if (digestCacheActive(cache)) {
+                auto it = cache.digests.find(key);
+                if (it != cache.digests.end()) {
+                    ++cache.reused;
+                    if (cache.mode != DigestCache::Verify) {
+                        return it->second;
+                    }
+                    kept = it->second;
+                    verify = true;
+                }
+                keep = true;
+                epoch = cache.epoch;
+            }
+        }
+        bool keepable = true;
+        const std::uint64_t digest = digestOf(object, keepable);
+        bool differs = false;
+        if (keep) {
+            std::lock_guard<std::mutex> lock(cache.mutex);
+            if (verify && kept && *kept != digest) {
+                ++cache.differed;
+                differs = true;
+            }
+            if (!kept) {
+                ++cache.made;
+            }
+            if (keepable && cache.epoch == epoch && digestCacheActive(cache)) {
+                cache.digests[key] = digest;
+            }
+        }
+        if (differs) {
+            FC_ERR("placement digest of " << object->getFullName() << " kept " << *kept
+                                          << ", made " << digest);
+        }
+        return digest;
+    };
     // Only beside sources: a record without them never reads rigid, and keeps its form
     std::set<const DocumentObject*> digested;
     for (const DocumentObject* object : namers) {
@@ -462,7 +877,7 @@ void placementSources(const GeoFeature* geo, std::vector<Data::ElementFingerprin
         Data::ElementFingerprint::Source source;
         source.key = keyOf(object);
         source.locus = 'D';
-        source.digest = digestOf(object);
+        source.digest = keptDigestOf(object);
         sources.push_back(std::move(source));
     }
     std::sort(sources.begin(), sources.end(), [](const auto& a, const auto& b) {
@@ -703,6 +1118,41 @@ void brokenFor(const SolverEntry& entry, SolverResolution& resolution)
     resolution.guess = entry.guess;
 }
 
+// Whether \a entry is an attachment's support (the attachment extension's property, told by its
+// name, so the link flags in PropertyLinks.h stay as they are): the one consumer whose pieces of
+// a split face can break (SW19 (a)) or come back to the whole face (SW20 (3)).
+bool isAttachmentSupport(const SolverEntry& entry)
+{
+    const char* name = entry.prop ? entry.prop->getName() : nullptr;
+    return name && std::strcmp(name, "AttachmentSupport") == 0;
+}
+
+// Whether \a entry's old element was made by the reference's own target (SW19 (a), amended by
+// SW20, naming-design.md): its old name's last section carries the target's tag and isn't a
+// modified one (a sweep's cap, `...;SEW;...;LOW`, generated by the sweep), where a face the target
+// only modified (a Pad's top through a Pocket, MOD) was made by an earlier feature.
+bool madeByItsTarget(const SolverEntry& entry)
+{
+    // Its own sections (Data::ownSectionsOf()): the last section's tag and flags are the plain
+    // form's, without the whole history the plain form writes out (ops#640)
+    const std::string name =
+        Data::ownSectionsOf(entry.oldName.empty() ? entry.exactName : entry.oldName);
+    DocumentObject* target = entry.obj;
+    if (target && !entry.prefix.empty()) {
+        target = target->getSubObject(entry.prefix.c_str());
+    }
+    if (name.empty() || !target) {
+        return false;
+    }
+    const Data::DecodedMappedName& decoded = Data::MappedName::getDecodedMappedName(name);
+    if (decoded.empty()) {
+        return false;
+    }
+    const Data::DecodedMappedSection& last = decoded.back();
+    return last.iterationTag == std::to_string(target->getID())
+        && !last.hasMapperFlag(Data::MAPPER_FLAG_MODIFIED);
+}
+
 // The record of a provisional resolution of \a entry (ops#127): the original is the entry's, with
 // its saved fingerprint (ops#133), or the record's when the reference holds one already.
 GuessRecord guessRecordFor(const SolverEntry& entry, const char* kind)
@@ -768,8 +1218,12 @@ bool exactNeedsSolving(const SolverEntry& entry,
     // moved too: nothing at its old place, solveOwner() compares the twins' distances. A marked
     // far cap may have taken another's name from a reordered up-to shell (ops#386, PR 366 round
     // 2): solveOwner() checks that it holds its old centre. Any marked piece may have, while the
-    // pieces slid onto the next face (round 3): solveOwner() checks that it overlaps its old place
-    const std::string plain = plainName(entry.exactName);
+    // pieces slid onto the next face (round 3): solveOwner() checks that it overlaps its old place.
+    // Read in the name's own sections (Data::ownSectionsOf()): the three tests read top-level
+    // sections' flags and lists, and a marked cap's one mark through its own sections, so they
+    // answer as for the plain form. Every exact reference with a record comes here at every
+    // recompute; the plain form of one face of the replica's Case Lid was 4.9e8 characters (ops#640)
+    const std::string plain = Data::ownSectionsOf(entry.exactName);
     // An ordered hit saved among two twins or more that holds its old place (PR 390 round 2k,
     // decision 241): a lone crossing may have taken its gone twin's role exactly there.
     // solveOwner() counts its twins
@@ -862,6 +1316,17 @@ bool samePlacement(const Base::Placement& a, const Base::Placement& b)
     constexpr double angular = 1e-12;
     return a.getPosition().IsEqual(b.getPosition(), confusion)
         && a.getRotation().isSame(b.getRotation(), angular);
+}
+
+// The tag obj's own names carry: a studio step's are its owner's ID (FreeCAD-CH ops#654 S2,
+// notes/stored-tags.md 3), read by name so that App knows no PartDesign class
+long namingTagOf(const DocumentObject* obj)
+{
+    auto owner = freecad_cast<PropertyLink*>(obj->getPropertyByName("StudioOwner"));
+    if (owner && owner->getValue()) {
+        return owner->getValue()->getID();
+    }
+    return obj->getID();
 }
 
 // The equivalence predicate of a reference whose owner has a probe: the probe runs once per
@@ -981,6 +1446,18 @@ std::string twinKey(std::string_view name)
         finishField(true);
     }
     return key;
+}
+
+// A name with its own sections in full and the names they embed left as the map holds them
+// (Data::ownSectionsOf()). twinKey() reads only fields that hold no embedded name (each top-level
+// section's reference IDs, iteration tag and element type), so this form has the plain form's
+// key, at the cost of the name's own text instead of its whole history's. On the replica's Case
+// Lid after its circular pattern, the plain forms of every edge's names, built once per
+// referenced edge, took 129 s per edge of a chamfer's link assignment, and one face's name took
+// gigabytes (ops#640).
+std::string ownSections(const std::string& name)
+{
+    return Data::ownSectionsOf(name);
 }
 
 }  // namespace
@@ -1205,12 +1682,14 @@ bool solveElementReferences(DocumentObject* feature,
             --solving;
         }
     } solvingGuard;
+    SolverSiteTimer solveTimer(SolverSite::Solve);
 
     // Pass 1: the exact lookup, per property.
     SolverBatch batch;
     batch.feature = feature;
     batch.reverse = reverse;
     batch.notify = notify;
+    std::optional<SolverSiteTimer> pass1Timer(std::in_place, SolverSite::Pass1);
     for (auto prop : props) {
         try {
             prop->collectElementReferences(feature, batch);
@@ -1225,7 +1704,10 @@ bool solveElementReferences(DocumentObject* feature,
         }
     }
 
+    pass1Timer.reset();
+
     // Pass 2. Keep the references to feature's elements, by owner.
+    std::optional<SolverSiteTimer> framesTimer(std::in_place, SolverSite::Pass2Frames);
     std::map<std::string, std::vector<const SolverEntry*>> owners;  // by full name
     // The target's frame now and the solver's tolerances, for the entries' frames (ops#557): read
     // at the first record that has a frame
@@ -1339,6 +1821,7 @@ bool solveElementReferences(DocumentObject* feature,
         }
         owners[entry.owner->getFullName()].push_back(&entry);
     }
+    framesTimer.reset();
 
     std::map<const PropertyLinkBase*, std::vector<SolverResolution>> resolutions;
     std::map<const PropertyLinkBase*, std::vector<ReferenceReport::Entry>> reports;
@@ -1347,6 +1830,7 @@ bool solveElementReferences(DocumentObject* feature,
     auto pool = [&](const std::string& type) -> const std::vector<Data::SolveInput::Element>& {
         auto it = pools.find(type);
         if (it == pools.end()) {
+            SolverSiteTimer poolTimer(SolverSite::Pool);
             it = pools.emplace(type, poolOf(geo, type, mapForms)).first;
         }
         return it->second;
@@ -1414,9 +1898,12 @@ bool solveElementReferences(DocumentObject* feature,
     // The target's elements' current fingerprints, measured once per batch: the shape is the
     // same for every owner (ops#105).
     auto measured = std::make_shared<std::map<std::string, Data::ElementFingerprint>>();
+    // And the write-back's records' (batchElementFingerprint())
+    BatchFingerprintsScope batchFingerprints(geo, measured.get());
     auto fingerprintOf = [geo, measured](const std::string& index) {
         auto it = measured->find(index);
         if (it == measured->end()) {
+            SolverSiteTimer measureTimer(SolverSite::Measure);
             Data::ElementFingerprint fingerprint;
             if (!geo->getElementFingerprint(index.c_str(), fingerprint)) {
                 fingerprint = Data::ElementFingerprint();
@@ -1805,6 +2292,7 @@ bool solveElementReferences(DocumentObject* feature,
                 if (!original.isValid()) {
                     // By its name alone: not on a pass-through (ops#549)
                     back = entry->guess.origFingerprint.empty() && entry->guess.kind != "piece"
+                        && entry->guess.kind != "equivalent"
                         && passThroughOf(*entry) == PassThrough::None;
                 }
                 else if (entry->turned || entry->frame) {
@@ -2351,7 +2839,7 @@ bool solveElementReferences(DocumentObject* feature,
                                       std::vector<Data::ElementFingerprint::UpToFace>& all) {
                 return elementUpToFacesFunction(geo, name.c_str(), point, faces, &all);
             };
-            input.targetTag = geo->getID();
+            input.targetTag = namingTagOf(geo);  // FreeCAD-CH ops#654 S2
         }
         if (elementUpToPathFunction) {
             input.upToPathInside = [geo](const std::string& name,
@@ -2390,6 +2878,10 @@ bool solveElementReferences(DocumentObject* feature,
             }
             if (item.policy == Data::SolvePolicy::Equivalent) {
                 item.equivalent = equivalenceOf(*entry);
+                // An attachment's face cut into pieces inside the feature that made it breaks,
+                // as in Onshape (SW19 (a), a sweep's end cap); one a later feature cuts keeps a
+                // piece (SW20, a box top split by a slot); an up-to face keeps either piece.
+                item.piecesBreak = isAttachmentSupport(*entry) && madeByItsTarget(*entry);
             }
             // The old names, plain; their own forms are what `from` is written back in
             auto plainOld = [&mapForms](const std::string& name) {
@@ -2490,7 +2982,9 @@ bool solveElementReferences(DocumentObject* feature,
             input.entries.push_back(std::move(item));
         }
 
+        std::optional<SolverSiteTimer> ownerTimer(std::in_place, SolverSite::SolveOwner);
         auto outcomes = Data::solveOwner(input);
+        ownerTimer.reset();
         for (std::size_t i = 0; i < entries.size(); ++i) {
             const auto& entry = *entries[i];
             const auto& outcome = outcomes[i];
@@ -2697,6 +3191,18 @@ bool solveElementReferences(DocumentObject* feature,
                     resolution.guess = entry.guess;
                     item.kind = resolution.guess.kind;
                 }
+                else if (outcome.equivalentPieces && entry.guess.empty()
+                         && isAttachmentSupport(entry)) {
+                    // A piece standing for pieces that give the consumer one result (an
+                    // attachment kept on a face a later feature split, SW20): it holds the
+                    // piece, and a silent record of the whole element, so that the probe
+                    // returns it there once the split goes and the old name gives the whole
+                    // element again, its fingerprint agreeing (Onshape's SW20 (3)). Only an
+                    // attachment: an up-to face needs no way back (any piece gives the same
+                    // extent, and the whole face does too).
+                    resolution.status = SolverResolution::Status::Guessed;
+                    resolution.guess = guessRecordFor(entry, "equivalent");
+                }
                 resolutions[entry.prop].push_back(resolution);
                 FC_LOG(
                     referenceName(entry.prop)
@@ -2792,6 +3298,7 @@ bool solveElementReferences(DocumentObject* feature,
     }
 
     // Write back, once per property visited, and rebuild its report for this target.
+    SolverSiteTimer writeTimer(SolverSite::WriteBack);
     bool changed = false;
     for (const auto& [prop, touched] : batch.properties) {
         auto& list = resolutions[prop];
@@ -2928,6 +3435,174 @@ bool reboundInPlace(DocumentObject* obj, const std::string& sub, const GuessReco
     );
 }
 
+std::string twinKeyForTesting(const std::string& name, bool plain)
+{
+    return twinKey(plain ? plainName(name) : ownSections(name));
+}
+
+namespace
+{
+void mixInto(std::size_t& hash, std::string_view text)
+{
+    hash ^= std::hash<std::string_view> {}(text) + 0x9e3779b97f4a7c15ULL + (hash << 6) + (hash >> 2);
+}
+
+// The fields of one section that Data::isTwinName() requires equal in a pair of names below its
+// top level (ElementSolver.cpp sameSectionsUpToOrder() with top false: the reference IDs, the
+// iteration tag, the element type, the flags besides ORD and CLS in order, the number of linked
+// names, and each linked name the same up to order), mixed into \a hash. The op code, the Index
+// and the connected elements are left out: the test lets them differ. Nothing for a section that
+// doesn't decode as one.
+bool mixSection(std::size_t& hash, std::string_view section, int depth);
+
+/* A digest of \a name below the top level of a twin test: two names that are the same up to
+ * order (sameUpToOrder() with top false) have the same digest, so a differing digest rules a
+ * pair out and an equal one leaves it to the test. Nothing where a part of the name can't be read
+ * (a reference the table doesn't know, a section that doesn't decode as one, an empty name):
+ * such a name is tested against every name of its twin key. Kept per reference (a table entry
+ * never changes or goes), so each entry is read once (ops#640, R1 of notes/names-bounded.md).
+ */
+std::optional<std::size_t> orderFreeDigest(const std::string& name, int depth)
+{
+    constexpr std::size_t limit = 1000000;
+    thread_local std::unordered_map<std::string, std::size_t> kept;
+    if (depth > 256) {
+        return std::nullopt;
+    }
+    const bool reference =
+        name.size() == Data::NameTable::RefLength && name.front() == Data::NameTable::Marker;
+    if (reference) {
+        if (const auto it = kept.find(name); it != kept.end()) {
+            return it->second;
+        }
+    }
+    const std::string own = Data::ownSectionsOf(name);
+    if (own.empty() || (reference && own == name)) {
+        return std::nullopt;
+    }
+    const auto sections = Data::NameAncestry::splitSections(own);
+    if (sections.empty()) {
+        return std::nullopt;
+    }
+    std::size_t hash = sections.size();
+    for (const auto section : sections) {
+        if (!mixSection(hash, section, depth)) {
+            return std::nullopt;
+        }
+    }
+    if (reference) {
+        if (kept.size() >= limit) {
+            kept.clear();
+        }
+        kept.emplace(name, hash);
+    }
+    return hash;
+}
+
+bool mixSection(std::size_t& hash, std::string_view section, int depth)
+{
+    const Data::DecodedMappedName& decoded =
+        Data::MappedName::getDecodedMappedName(std::string(section));
+    if (decoded.size() != 1) {
+        return false;
+    }
+    const Data::DecodedMappedSection& x = decoded.front();
+    for (const auto& id : x.referenceIDs) {
+        mixInto(hash, id);
+    }
+    mixInto(hash, "|");
+    mixInto(hash, x.iterationTag);
+    mixInto(hash, std::string_view(&x.elementType, 1));
+    for (const auto& flag : x.mapperFlags) {
+        if (flag != "ORD" && flag != "CLS") {
+            mixInto(hash, flag);
+        }
+    }
+    mixInto(hash, std::to_string(x.linkedNames.size()));
+    for (const auto& linked : x.linkedNames) {
+        const auto digest = orderFreeDigest(linked, depth + 1);
+        if (!digest) {
+            return false;
+        }
+        mixInto(hash, std::to_string(*digest));
+    }
+    return true;
+}
+
+// A name in its own sections at the top level of a twin test: the digests of the linked names
+// of each of its sections, which the test requires the same up to order at the top level too
+// (twinKey() holds the rest of what it reads there). Nothing where orderFreeDigest() gives none.
+std::optional<std::size_t> topLinkedDigest(const std::string& own)
+{
+    std::size_t hash = 0;
+    for (const auto section : Data::NameAncestry::splitSections(own)) {
+        const Data::DecodedMappedName& decoded =
+            Data::MappedName::getDecodedMappedName(std::string(section));
+        if (decoded.size() != 1) {
+            return std::nullopt;
+        }
+        mixInto(hash, std::to_string(decoded.front().linkedNames.size()));
+        for (const auto& linked : decoded.front().linkedNames) {
+            const auto digest = orderFreeDigest(linked, 1);
+            if (!digest) {
+                return std::nullopt;
+            }
+            mixInto(hash, std::to_string(*digest));
+        }
+    }
+    return hash;
+}
+
+// A target shape's names of one type by twin key, then by topLinkedDigest(): each element's
+// index and the name's own sections (elementTwinCentroid()). A name without a digest is `loose`:
+// tested against every name of its twin key.
+struct TwinGroup
+{
+    std::unordered_map<std::size_t, std::vector<std::pair<int, std::string>>> byDigest;
+    std::vector<std::pair<int, std::string>> loose;
+};
+using TwinIndex = std::unordered_map<std::string, TwinGroup>;
+thread_local int twinIndexDepth = 0;
+thread_local std::map<std::pair<const Data::ComplexGeoData*, std::string>, TwinIndex> twinIndexes;
+
+TwinIndex makeTwinIndex(const Data::ComplexGeoData* data, const char* type)
+{
+    TwinIndex index;
+    const auto elements = data->countSubElements(type);
+    for (unsigned long i = 1; i <= elements; ++i) {
+        const Data::IndexedName indexed(type, static_cast<int>(i));
+        for (const auto& mapped : data->getElementMappedNames(indexed)) {
+            std::string own = ownSections(mapped.first.toString());
+            TwinGroup& group = index[twinKey(own)];
+            if (const auto digest = topLinkedDigest(own)) {
+                group.byDigest[*digest].emplace_back(static_cast<int>(i), std::move(own));
+            }
+            else {
+                group.loose.emplace_back(static_cast<int>(i), std::move(own));
+            }
+        }
+    }
+    return index;
+}
+}  // namespace
+
+std::optional<std::size_t> twinDigestForTesting(const std::string& name)
+{
+    return topLinkedDigest(ownSections(name));
+}
+
+TwinIndexScope::TwinIndexScope()
+{
+    ++twinIndexDepth;
+}
+
+TwinIndexScope::~TwinIndexScope()
+{
+    if (--twinIndexDepth == 0) {
+        twinIndexes.clear();
+    }
+}
+
 bool elementTwinCentroid(const GeoFeature* geo, const char* element, Base::Vector3d& centroid, int& count)
 {
     count = 0;
@@ -2940,10 +3615,13 @@ bool elementTwinCentroid(const GeoFeature* geo, const char* element, Base::Vecto
     if (!indexed) {
         return false;
     }
-    // The element's names, plain, as the solver sees them (poolOf())
+    // The element's names with their own sections in full and the names they embed as the map
+    // holds them (ownSections()): Data::isTwinName() and Data::isOrderKeyedName() read a
+    // reference as its content and answer as for the plain forms the solver sees (poolOf()),
+    // without building them
     std::vector<std::string> names;
     for (const auto& mapped : data->getElementMappedNames(indexed)) {
-        names.push_back(plainName(mapped.first.toString()));
+        names.push_back(ownSections(mapped.first.toString()));
     }
     if (names.empty()) {
         return false;
@@ -2962,25 +3640,52 @@ bool elementTwinCentroid(const GeoFeature* geo, const char* element, Base::Vecto
     // for child-mapped elements only. Reading the pool's way here cost 3 times more again (round
     // 3), and no model was found where the difference decides; a count that differs is a trade
     // (loud), the ORD pieces' desync D3's (round 2's cloud review, F4).
-    std::set<std::string> twins;
-    const auto elements = data->countSubElements(indexed.getType());
-    for (unsigned long i = 1; i <= elements; ++i) {
-        const Data::IndexedName index(indexed.getType(), static_cast<int>(i));
-        if (index == indexed) {
+    // The names of its type by twin key (makeTwinIndex()), kept while a TwinIndexScope lives: each
+    // reference of a list tests only the names that share a key with one of its own
+    TwinIndex local;
+    const TwinIndex* byKey = &local;
+    if (twinIndexDepth > 0) {
+        const auto slot = std::make_pair(data, std::string(indexed.getType()));
+        auto it = twinIndexes.find(slot);
+        if (it == twinIndexes.end()) {
+            it = twinIndexes.emplace(slot, makeTwinIndex(data, indexed.getType())).first;
+        }
+        byKey = &it->second;
+    }
+    else {
+        local = makeTwinIndex(data, indexed.getType());
+    }
+    std::set<int> found;
+    const auto test = [&](const std::vector<std::pair<int, std::string>>& entries, std::size_t k) {
+        for (const auto& [i, own] : entries) {
+            if (i != indexed.getIndex() && found.count(i) == 0 && Data::isTwinName(own, names[k])) {
+                found.insert(i);
+            }
+        }
+    };
+    for (std::size_t k = 0; k < names.size(); ++k) {
+        const auto it = byKey->find(keys[k]);
+        if (it == byKey->end()) {
             continue;
         }
-        for (const auto& mapped : data->getElementMappedNames(index)) {
-            const std::string plain = plainName(mapped.first.toString());
-            const std::string key = twinKey(plain);
-            bool twin = false;
-            for (std::size_t k = 0; k < names.size() && !twin; ++k) {
-                twin = keys[k] == key && Data::isTwinName(plain, names[k]);
-            }
-            if (twin) {
-                twins.insert(index.toString());
-                break;
+        const TwinGroup& group = it->second;
+        test(group.loose, k);
+        // Only the names whose digest is this name's: another digest rules the pair out
+        // (topLinkedDigest()). A name without one is tested against all.
+        if (const auto digest = topLinkedDigest(names[k])) {
+            if (const auto same = group.byDigest.find(*digest); same != group.byDigest.end()) {
+                test(same->second, k);
             }
         }
+        else {
+            for (const auto& [digest, entries] : group.byDigest) {
+                test(entries, k);
+            }
+        }
+    }
+    std::set<std::string> twins;
+    for (const int i : found) {
+        twins.insert(Data::IndexedName(indexed.getType(), i).toString());
     }
     if (twins.empty()) {
         // Alone, with a name keyed by its order: one twin, so that the solver tells a later pick
@@ -3037,12 +3742,14 @@ bool elementUpToFaces(
     // by this feature. A later Pad's shape keeps an earlier Pad's pieces under their names, and
     // its own up-to faces aren't theirs (review pr398-r3). The piece's name names the extrusion
     // that made it (ops#524)
-    const long tag = geo->getID();
+    const long tag = namingTagOf(geo);  // FreeCAD-CH ops#654 S2: a step names by its owner
+    // Told off the name's own sections (ownSections()): the mark is in a top-level section's
+    // fields, and the plain form, the whole history, is built for a marked piece only
     std::string own;
     for (const auto& mapped : data->getElementMappedNames(indexed)) {
-        std::string name = plainName(mapped.first.toString());
-        if (Data::isMarkedPieceOf(name, tag)) {
-            own = std::move(name);
+        const std::string name = mapped.first.toString();
+        if (Data::isMarkedPieceOf(ownSections(name), tag)) {
+            own = plainName(name);
             break;
         }
     }

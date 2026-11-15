@@ -34,14 +34,20 @@ namespace PartDesign
 
 // Note, TwoAngles has been deprecated by the side definition. We keep it hidden so old
 // files can restore and migrate to SideType="Two sides".
+// Onshape's Up to vertex and Up to part (FreeCAD-CH ops#640 rank 21) are appended, never
+// inserted, since Type and Type2 are restored by index: the vertex or the part in UpToFace.
 const char* Groove::TypeEnums[]
-    = {"Angle", "ThroughAll", "UpToFirst", "UpToFace", "?TwoAngles", nullptr};
+    = {"Angle", "ThroughAll", "UpToFirst", "UpToFace", "?TwoAngles", "UpToVertex", "UpToShape",
+       nullptr};
 
 PROPERTY_SOURCE(PartDesign::Groove, PartDesign::Revolved)
 
 Groove::Groove()
 {
     defineSubtractive();
+    // New / Add / Remove / Intersect on one Revolve, as on an Extrude (FreeCAD-CH ops#640 rank
+    // 20): makeShape takes the Operation's maker; the end types stay the class's
+    allowAllOperations();
     const double fullAngle = 360.0;
     const double emptyAngle = 0.0;
 

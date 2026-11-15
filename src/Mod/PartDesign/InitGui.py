@@ -67,10 +67,32 @@ class PartDesignWorkbench(Workbench):
 
         FreeCADGui.addCommand("PartDesign_Sprocket", CommandSprocket())
 
+        # FreeCAD-CH (notes/derived-design.md): Derived from another document
+        import DerivedFromFileGui
+
+        DerivedFromFileGui.register()
+
     def GetClassName(self):
         return "PartDesignGui::Workbench"
 
 
 Gui.addWorkbench(PartDesignWorkbench())
+
+# FreeCAD-CH (lane solid-ops): Thicken, Scale and Offset surface, registered at startup like the
+# DXF commands; they join the PartDesign menu and toolbar through a WorkbenchManipulator
+try:
+    from PartDesign import SolidOpsGui
+
+    SolidOpsGui.register()
+except Exception as exc:
+    FreeCAD.Console.PrintWarning(f"PartDesign: the Thicken, Scale and Offset commands are not available: {exc}\n")
+
+# FreeCAD-CH ops#655: Transform (move, rotate, copy part), a studio feature
+try:
+    from PartDesign import TransformGui
+
+    TransformGui.register()
+except Exception as exc:
+    FreeCAD.Console.PrintWarning(f"PartDesign: the Transform command is not available: {exc}\n")
 
 FreeCAD.__unit_test__ += ["TestPartDesignGui"]

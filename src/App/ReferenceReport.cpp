@@ -51,7 +51,39 @@ RetargetRecord retargetOf(const PropertyLinkBase* prop, int index)
     return records[index];
 }
 
+// The properties whose owners compute on frozen copies of missing references (ops#656 D4 row 2)
+struct FrozenCopies
+{
+    std::mutex lock;
+    std::set<const PropertyLinkBase*> props;
+};
+
+FrozenCopies& frozenCopies()
+{
+    static FrozenCopies state;
+    return state;
+}
+
 }  // namespace
+
+void ReferenceReport::setKeepsFrozenCopies(const PropertyLinkBase* prop, bool on)
+{
+    auto& state = frozenCopies();
+    std::lock_guard<std::mutex> guard(state.lock);
+    if (on) {
+        state.props.insert(prop);
+    }
+    else {
+        state.props.erase(prop);
+    }
+}
+
+bool ReferenceReport::keepsFrozenCopies(const PropertyLinkBase* prop)
+{
+    auto& state = frozenCopies();
+    std::lock_guard<std::mutex> guard(state.lock);
+    return state.props.contains(prop);
+}
 
 void ReferenceReport::replace(const PropertyLinkBase* prop,
                               const std::string& target,
@@ -681,7 +713,10 @@ bool ReferenceReport::describe(const DocumentObject* obj, Outcome& outcome)
         auto entry = find(slot.prop, slot.localIndex);
         if (Data::hasMissingElement(slot.sub.c_str())) {
             const auto& count = counts[slot.property];
-            if (!slot.partial || count.resolving == 0) {
+            // A sketch's external geometry computes on the frozen copies of its missing
+            // references, every one of them missing too (Onshape's Use: GB33 (b), GB22)
+            const bool frozen = keepsFrozenCopies(slot.prop);
+            if (!frozen && (!slot.partial || count.resolving == 0)) {
                 append(outcome.fatal, missingText(slot, entry));
                 continue;
             }
@@ -689,13 +724,21 @@ bool ReferenceReport::describe(const DocumentObject* obj, Outcome& outcome)
             othersWarned = true;
             if (count.lastMissing == static_cast<int>(s)) {
                 warnings.push_back(
-                    "computed on " + std::to_string(count.resolving) + " of "
-                    + std::to_string(count.total) + " " + plural(count.type)
+                    count.resolving == 0
+                        ? "computed on the frozen geometry of "
+                            + (count.total == 1
+                                   ? "the " + (count.type.empty() ? "element" : count.type)
+                                   : "all " + std::to_string(count.total) + " "
+                                       + plural(count.type))
+                        :"computed on " + std::to_string(count.resolving) + " of "
+                            + std::to_string(count.total) + " " + plural(count.type)
                 );
             }
             continue;
         }
-        if (slot.guess.empty()) {
+        // An attachment kept on a piece of a split face (kind `equivalent`, SW20) is a result, as
+        // Onshape's sketch on the split top is: its record only keeps the way back
+        if (slot.guess.empty() || slot.guess.kind == "equivalent") {
             continue;
         }
         if (foundInPlace(obj, slot)) {

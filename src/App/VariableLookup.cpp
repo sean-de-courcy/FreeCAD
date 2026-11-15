@@ -33,6 +33,8 @@
 #include "ObjectIdentifier.h"
 #include "PropertyExpressionEngine.h"
 #include "VarSet.h"
+#include "VarSetCopy.h"
+#include "VariableChoice.h"
 
 using namespace App;
 
@@ -133,13 +135,17 @@ std::string VariableLookup::checkVariableName(const DocumentObject* holder, cons
         return quoted
             + " isn't a name: use letters, digits and _, and start with a letter or _.";
     }
-    // the parser's own lists, as PropertySheet::isValidAlias uses
-    if (ExpressionParser::isTokenAUnit(name)) {
-        return quoted + " is a unit in expressions, so no expression could use the variable.";
+    // FreeCAD-CH (ops#640, rank 54): a unit or constant name (`t`, `W`, `m`, `e`, `pi`) is
+    // taken, as in Onshape: `#t` becomes `Variables.t`, and the parser reads a unit or constant
+    // name right after '.' as a name (Expression.cpp, afterDotLex). Written alone, `t` is still
+    // the unit. The boolean and None constants stay reserved words, as Onshape keeps its own.
+    for (const char* reserved : {"True", "true", "False", "false", "None"}) {
+        if (name == reserved) {
+            return quoted + " is a constant in expressions; choose another name.";
+        }
     }
-    if (ExpressionParser::isTokenAConstant(name)) {
-        return quoted + " is a constant in expressions, so no expression could use the variable.";
-    }
+    const bool unitOrConstant
+        = ExpressionParser::isTokenAUnit(name) || ExpressionParser::isTokenAConstant(name);
     // The lexer reads any `letter...(` as a call, and only an unknown name fails with "Unknown
     // function"; a known one with another number of arguments (pow, atan2, vector) fails with an
     // argument error, and is a function all the same. A name starting with _ is never one.
@@ -159,7 +165,7 @@ std::string VariableLookup::checkVariableName(const DocumentObject* holder, cons
     if (isFunction) {
         return quoted + " is a function in expressions; choose another name.";
     }
-    if (!ExpressionParser::isTokenAnIndentifier(name)) {
+    if (!unitOrConstant && !ExpressionParser::isTokenAnIndentifier(name)) {
         return quoted + " isn't read as a name in expressions; choose another name.";
     }
     if (holder) {
@@ -173,6 +179,56 @@ std::string VariableLookup::checkVariableName(const DocumentObject* holder, cons
         }
     }
     return {};
+}
+
+namespace
+{
+/// The copy holding imported variables: an App::VarSetCopy still attached to its source. A
+/// detached one is a set of the document's own, a local one (review R6-6)
+const VarSetCopy* importedSet(const DocumentObject* holder)
+{
+    auto copy = freecad_cast<const VarSetCopy*>(holder);
+    return copy && copy->isAttached() ? copy : nullptr;
+}
+}  // namespace
+
+const DocumentObject* App::chosenVariableHolder(const std::vector<VariableRef>& refs)
+{
+    // FreeCAD-CH (ops#640, decision 317): VariableChoice.h has the rule.
+    if (refs.size() < 2) {
+        return nullptr;
+    }
+    std::string chosen;
+    int others = 0;  // the sets among refs that aren't (attached) copies
+    for (const auto& ref : refs) {
+        auto copy = importedSet(ref.holder);
+        if (!copy) {
+            ++others;
+            continue;
+        }
+        const auto& records = copy->Bindings.getValues();
+        auto record = records.find("#" + ref.name);
+        if (record == records.end() || record->second.empty()
+            || (!chosen.empty() && record->second != chosen)) {
+            return nullptr;  // a copy without the choice, or two choices
+        }
+        chosen = record->second;
+    }
+    if (chosen.empty()) {
+        return nullptr;  // no copy among them: nothing was chosen
+    }
+    for (const auto& ref : refs) {
+        if (ref.path() != chosen) {
+            continue;
+        }
+        const bool isCopy = importedSet(ref.holder) != nullptr;
+        // The chosen local set is the only other one; a chosen copy was chosen over one at most.
+        if (isCopy ? others <= 1 : others == 1) {
+            return ref.holder;
+        }
+        return nullptr;
+    }
+    return nullptr;
 }
 
 std::vector<VariableUse> VariableLookup::uses(const Property* prop)
@@ -305,7 +361,12 @@ std::string VariableDisplayScope::shortForm(const DocumentObject* owner, const O
         }
     }
     auto count = counts->second.find(name);
-    if (count == counts->second.end() || count->second != 1) {
+    if (count == counts->second.end() || count->second < 1) {
+        return {};
+    }
+    // FreeCAD-CH (ops#640, decision 317): a name several sets define is shown as `#Name` for the
+    // one the recorded choice makes `#Name` mean (typing it back gives the same path).
+    if (count->second > 1 && chosenVariableHolder(VariableLookup::find(doc, name)) != holder) {
         return {};
     }
     std::pair<std::string, std::string> entry("#" + name, VariableRef {holder, name}.path());

@@ -34,8 +34,10 @@ FCBRepAlgoAPI_Cut::FCBRepAlgoAPI_Cut()
     myOperation = BOPAlgo_CUT;
 }
 
-FCBRepAlgoAPI_Cut::FCBRepAlgoAPI_Cut(const TopoDS_Shape& S1, const TopoDS_Shape& S2)
+FCBRepAlgoAPI_Cut::FCBRepAlgoAPI_Cut(const TopoDS_Shape& S1, const TopoDS_Shape& S2, bool build)
     : FCBRepAlgoAPI_BooleanOperation(S1, S2, BOPAlgo_CUT)
 {
-    Build();
+    if (build) {
+        Build();
+    }
 }

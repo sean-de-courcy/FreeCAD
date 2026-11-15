@@ -220,7 +220,12 @@ class TestCore(AssemblyTestBase):
         # Step 2 : box with placement. Edge + Vertex
         ref = [self.assembly, [box.Name + ".Edge8", box.Name + ".Vertex8"]]
         plc = joint.Proxy.findPlacement(joint, ref)
-        targetPlc = App.Placement(App.Vector(L, W, 0), App.Rotation(0, -90, 270))
+        # FreeCAD-CH (ops#683, C2): Onshape's frame for an edge, Z along it and X the first of the
+        # part's +x, +y, +z not along it: Edge8 runs along the box's +y, so X +x, Y -z, Z +y
+        targetPlc = App.Placement(
+            App.Vector(L, W, 0),
+            App.Rotation(App.Matrix(1, 0, 0, 0, 0, 0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1)),
+        )
         self.assertTrue(plc.isSame(targetPlc, 1e-6), "'{}' failed - Step 2".format(operation))
 
         # Step 3 : box with placement. Vertex
@@ -234,7 +239,11 @@ class TestCore(AssemblyTestBase):
         # Step 4 : box with placement. Face
         ref = [self.assembly, [box.Name + ".Face2", box.Name + ".Face2"]]
         plc = joint.Proxy.findPlacement(joint, ref)
-        targetPlc = App.Placement(App.Vector(L, W / 2, H / 2), App.Rotation(0, -90, 180))
+        # FreeCAD-CH (ops#683, C2): Onshape's frame on the +x face: X +y, Y +z, Z +x (out of it)
+        targetPlc = App.Placement(
+            App.Vector(L, W / 2, H / 2),
+            App.Rotation(App.Matrix(0, 0, 1, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1)),
+        )
         _msg("  plc '{}'".format(plc))
         _msg("  targetPlc '{}'".format(targetPlc))
         self.assertTrue(plc.isSame(targetPlc, 1e-6), "'{}' failed - Step 4".format(operation))

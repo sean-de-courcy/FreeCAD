@@ -602,6 +602,35 @@ def revolvedFaceReach(y0, y1, z0, z1, far=False):
     return abs(d.x) * simpson(lambda z: simpson(lambda y: reach(y, z), y0, y1, 16), z0, z1, 8)
 
 
+def upToOffsetFace(doc, slanted, z, x0=4, x1=8):
+    """FreeCAD-CH P3: a 4 mm wide face x `x0`..`x1`, y -2..2, as a Part::Feature, smaller than and off
+    the centre of a 20 x 20 profile centred on the z axis, so that the line through the profile's
+    centre misses it both ways. In the plane z = `z` (`slanted` False), or z = `z` + x / 4 (normal
+    along (-1, 0, 4)). Onshape's extrusion up to such a face goes to its plane, and an offset moves
+    the plane `offset` along the extrusion, back towards the profile for a positive one (the
+    Onshape facts U1 and U2)."""
+    V = FreeCAD.Vector
+
+    def at(x, y):
+        return V(x, y, z + (x / 4.0 if slanted else 0.0))
+
+    corners = [at(x0, -2), at(x1, -2), at(x1, 2), at(x0, 2)]
+    face = doc.addObject("Part::Feature", "Face")
+    face.Shape = Part.Face(Part.makePolygon(corners + [corners[0]]))
+    return face
+
+
+def upToVertexMarker(doc, z):
+    """FreeCAD-CH: a Part::Feature, a line from (3, 3, z) up to (4, 4, z + 1), whose first vertex
+    (Vertex1) is the up-to vertex at height z. Onshape's extrusion up to a vertex ends on the
+    plane through it parallel to the profile, and an offset moves that plane `offset` along the
+    extrusion, back towards the profile for a positive one (oracle 7c, UV1)."""
+    V = FreeCAD.Vector
+    marker = doc.addObject("Part::Feature", "VertexMarker")
+    marker.Shape = Part.makeLine(V(3, 3, z), V(4, 4, z + 1))
+    return marker
+
+
 def squareSketch(body, name, placement, rectangles):
     """A sketch in `body` at `placement` of closed rectangles (x0, y0, x1, y1) in its plane"""
     import Sketcher
@@ -1823,6 +1852,87 @@ def postInTheGap(test, doc, upTo):
     return base, feature
 
 
+# Pins up to a roof (sweep G5, ops#640): a C-shaped solid, 100 deep (y -50..50), whose section in XZ is
+# a slab z 0..10, a wall x 0..10 and a roof z 20..30, open towards +x; and a k x k grid of 2 x 2 squares
+# 5 apart, x from 25 and y from -35, sketched on the slab's top and padded up to the roof's underside,
+# or sketched on the roof's top and pocketed down to the slab's top. Each pin adds or removes a
+# 2 x 2 x 10 prism, and adds four side faces. A Pad or Pocket over many separate regions up to a face
+# made each region's prism and fused it into the prisms before it: minutes for a few hundred regions.
+PIN_SIDE, PIN_PITCH, PIN_GAP = 2.0, 5.0, 10.0
+C_SECTION = [(0, 0), (100, 0), (100, 10), (10, 10), (10, 20), (100, 20), (100, 30), (0, 30)]
+C_VOLUME = 2100.0 * 100.0
+C_FACES = 10
+
+
+def pinSquares(k):
+    """The k x k grid's squares (x0, y0, x1, y1)"""
+    return [
+        (25 + PIN_PITCH * i, -35 + PIN_PITCH * j, 25 + PIN_PITCH * i + PIN_SIDE,
+         -35 + PIN_PITCH * j + PIN_SIDE)
+        for i in range(k)
+        for j in range(k)
+    ]
+
+
+def cWithPins(doc, squares, kind="Pad", upTo=True):
+    """The C and a Pad (from the slab's top up to the roof's underside) or a Pocket (from the
+    roof's top down to the slab's top) of `squares`; up to the face, or by the gap's length.
+    Returns the C, the pins' sketch, the feature and the CPU seconds its recompute took (this
+    process's, every thread's: other programs' load on the machine doesn't count)."""
+    import time
+
+    body = doc.addObject("PartDesign::Body", "Body")
+    section = body.newObject("Sketcher::SketchObject", "CSection")
+    section.MapMode = "Deactivated"
+    section.Placement = FreeCAD.Placement(
+        FreeCAD.Vector(), FreeCAD.Rotation(FreeCAD.Vector(1, 0, 0), 90)
+    )
+    polygonInSketch(section, C_SECTION)
+    c = body.newObject("PartDesign::Pad", "C")
+    c.Profile = section
+    c.Length = 100
+    c.Midplane = True
+    z = 10 if kind == "Pad" else 30
+    sketch = body.newObject("Sketcher::SketchObject", "Pins")
+    sketch.MapMode = "Deactivated"
+    sketch.Placement = FreeCAD.Placement(FreeCAD.Vector(0, 0, z), FreeCAD.Rotation())
+    # One call, no constraints: a sketch solved after each of 784 lines and coincidences took a
+    # minute to draw
+    lines = []
+    for x0, y0, x1, y1 in squares:
+        corners = [FreeCAD.Vector(x0, y0, 0), FreeCAD.Vector(x1, y0, 0),
+                   FreeCAD.Vector(x1, y1, 0), FreeCAD.Vector(x0, y1, 0)]
+        lines += [Part.LineSegment(corners[i], corners[(i + 1) % 4]) for i in range(4)]
+    sketch.addGeometry(lines, False)
+    doc.recompute()
+    feature = body.newObject("PartDesign::" + kind, kind)
+    feature.Profile = sketch
+    if upTo:
+        feature.Type = "UpToFace"
+        feature.UpToFace = (c, [planarFaceAt(c.Shape, 2, 20 if kind == "Pad" else 10)])
+    else:
+        feature.Type = "Length"
+        feature.Length = PIN_GAP
+    start = time.process_time()
+    doc.recompute()
+    return c, sketch, feature, time.process_time() - start
+
+
+def sideFaceAt(shape, x, y):
+    """The name of the face of shape in the plane x = x (normal along x) whose centre has this y"""
+    found = [
+        "Face%d" % i
+        for i, f in enumerate(shape.Faces, 1)
+        if f.Surface.TypeId == "Part::GeomPlane"
+        and abs(f.normalAt(0, 0).x) > 1 - 1e-9
+        and abs(f.CenterOfMass.x - x) < 1e-6
+        and abs(f.CenterOfMass.y - y) < 1e-6
+    ]
+    if len(found) != 1:
+        raise AssertionError("%d faces at x = %g, y = %g" % (len(found), x, y))
+    return found[0]
+
+
 class TestPad(unittest.TestCase):
     def setUp(self):
         self.Doc = FreeCAD.newDocument("PartDesignTestPad")
@@ -2373,6 +2483,140 @@ class TestPad(unittest.TestCase):
                 finally:
                     FreeCAD.closeDocument(doc.Name)
 
+    def testPadUpToAParallelPlaneIsTheBlindPrism(self):
+        """ops#640 (FSLC #49): up to a face on a plane parallel to the profile, each profile
+        face's prism is the blind one of the plane's distance, made without BRepFeat, and prisms
+        that are apart are joined without a boolean (TopoShape::makeElementPrismUntil). A slab
+        (z 0 to 10) with a post (top at z = 16); the profile at z = 10 holds three slots apart
+        from each other, and an L with a square in its corner, whose bounding boxes overlap
+        (those two are fused). Up to the post's top, a face smaller than the profile: every
+        region rises to z = 16, the same solid as the blind Pad of 6, with every element named
+        and no name twice. With an offset of 1 (Onshape's sign: short of the face) to z = 15."""
+        import math
+
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        xy = [o for o in body.Origin.OriginFeatures if o.Role == "XY_Plane"][0]
+
+        def sketch(name, z):
+            sk = body.newObject("Sketcher::SketchObject", name)
+            sk.AttachmentSupport = (xy, [""])
+            sk.MapMode = "FlatFace"
+            sk.AttachmentOffset = FreeCAD.Placement(FreeCAD.Vector(0, 0, z), FreeCAD.Rotation())
+            return sk
+
+        def rect(sk, x0, y0, x1, y1):
+            pts = [
+                FreeCAD.Vector(x0, y0, 0),
+                FreeCAD.Vector(x1, y0, 0),
+                FreeCAD.Vector(x1, y1, 0),
+                FreeCAD.Vector(x0, y1, 0),
+            ]
+            for i in range(4):
+                sk.addGeometry(Part.LineSegment(pts[i], pts[(i + 1) % 4]), False)
+
+        slabSketch = sketch("SlabSketch", 0.0)
+        rect(slabSketch, -10, 0, 60, 40)
+        slab = body.newObject("PartDesign::Pad", "Slab")
+        slab.Profile = slabSketch
+        slab.Length = 10.0
+        postSketch = sketch("PostSketch", 10.0)
+        rect(postSketch, -8, 1, -3, 6)
+        post = body.newObject("PartDesign::Pad", "Post")
+        post.Profile = postSketch
+        post.Length = 6.0
+        self.Doc.recompute()
+        top = [
+            "Face%d" % i
+            for i, f in enumerate(post.Shape.Faces, 1)
+            if abs(f.CenterOfMass.z - 16.0) < 1e-7 and abs(f.Area - 25.0) < 1e-6
+        ]
+        self.assertEqual(len(top), 1)
+
+        profile = sketch("Regions", 10.0)
+        r, length = 1.0, 6.0
+        for i in range(3):
+            cx, cy = 2.0 + i * 12.0, 3.0
+            a, b = FreeCAD.Vector(cx, cy, 0), FreeCAD.Vector(cx + length, cy, 0)
+            profile.addGeometry(
+                [
+                    Part.LineSegment(FreeCAD.Vector(cx, cy - r, 0), FreeCAD.Vector(cx + length, cy - r, 0)),
+                    Part.ArcOfCircle(
+                        Part.Circle(b, FreeCAD.Vector(0, 0, 1), r), -math.pi / 2, math.pi / 2
+                    ),
+                    Part.LineSegment(FreeCAD.Vector(cx + length, cy + r, 0), FreeCAD.Vector(cx, cy + r, 0)),
+                    Part.ArcOfCircle(
+                        Part.Circle(a, FreeCAD.Vector(0, 0, 1), r), math.pi / 2, 3 * math.pi / 2
+                    ),
+                ],
+                False,
+            )
+        corner = [(2, 10), (22, 10), (22, 14), (6, 14), (6, 30), (2, 30)]  # the L
+        for i in range(6):
+            profile.addGeometry(
+                Part.LineSegment(
+                    FreeCAD.Vector(*corner[i], 0), FreeCAD.Vector(*corner[(i + 1) % 6], 0)
+                ),
+                False,
+            )
+        rect(profile, 10, 18, 20, 28)  # the square, inside the L's bounding box
+        area = 3 * (length * 2 * r + math.pi * r * r) + (20 * 4 + 4 * 16) + 10 * 10
+        self.Doc.recompute()
+        before = post.Shape.Volume
+
+        def summary(pad):
+            self.assertTrue(pad.isValid(), pad.getStatusString())
+            shape = pad.Shape
+            self.assertTrue(shape.isValid())
+            self.assertEqual(len(shape.Solids), 1)
+            names = [
+                shape.getElementMappedName("%s%d" % (kind, i + 1))
+                for kind, count in (
+                    ("Face", len(shape.Faces)),
+                    ("Edge", len(shape.Edges)),
+                    ("Vertex", len(shape.Vertexes)),
+                )
+                for i in range(count)
+            ]
+            self.assertNotIn("", names)
+            self.assertEqual(len(set(names)), len(names))
+            tops = sorted(
+                round(f.Area, 6)
+                for f in shape.Faces
+                if f.Surface.TypeId == "Part::GeomPlane" and abs(f.CenterOfMass.z - 16.0) < 1e-7
+            )
+            return (
+                len(shape.Faces),
+                len(shape.Edges),
+                len(shape.Vertexes),
+                round(shape.Volume, 6),
+                tops,
+            )
+
+        upTo = body.newObject("PartDesign::Pad", "UpTo")
+        upTo.Profile = profile
+        upTo.Type = "UpToFace"
+        upTo.UpToFace = (post, top)
+        self.Doc.recompute()
+        got = summary(upTo)
+        self.assertAlmostEqual(upTo.Shape.Volume, before + area * 6.0, delta=1e-6)
+        # the post's own top and the five regions' tops lie at z = 16
+        self.assertEqual(len(got[4]), 6)
+
+        upTo.Offset = 1.0
+        self.Doc.recompute()
+        self.assertTrue(upTo.isValid(), upTo.getStatusString())
+        self.assertAlmostEqual(upTo.Shape.Volume, before + area * 5.0, delta=1e-6)
+        upTo.Offset = 0.0
+
+        # the blind Pad of the same height is the same solid
+        body.removeObject(upTo)
+        self.Doc.removeObject(upTo.Name)
+        blind = body.newObject("PartDesign::Pad", "Blind")
+        blind.Profile = profile
+        blind.Length = 6.0
+        self.Doc.recompute()
+        self.assertEqual(summary(blind), got)
+
     def testPadUpToFaceLeavesTheBaseAlone(self):
         # ops#347: BRepFeat runs on copies of the base and the up-to face
         base, pad = upToTheLoftSide(self, self.Doc, "Pad")
@@ -2619,6 +2863,79 @@ class TestPad(unittest.TestCase):
                     box = pad.Shape.optimalBoundingBox(False, False)
                     self.assertAlmostEqual(box.XMin, 5, places=6)
                     self.assertAlmostEqual(box.YMax, 4.7, places=6)
+                finally:
+                    FreeCAD.closeDocument(doc.Name)
+
+    def testPadUpToAParallelPlaneEndsInTheProfilesEllipse(self):
+        # ops#751 (the replica's #161, ops#640): a Pad up to a face in a plane parallel to its
+        # profile, whose profile holds a half ellipse. BRepFeat's prism ended the ellipse on the
+        # face as an approximated B-spline (in pieces on the replica); Onshape ends it in one
+        # ELLIPSE edge. Model: a plate 40 x 30 x 5; a post 5 x 5 on it up to z = 20 (its top is
+        # the up-to face, far smaller than the profile); the profile on the plate's top: the half
+        # ellipse about (20, 10), radii 8 along x and 4 along y, closed by its diameter.
+        # Expected: the pad adds (pi 8 4 / 2) times its reach (15; 13 with an offset of 2, which
+        # ends short of the face); its far cap is bounded by the diameter and ONE Ellipse edge of
+        # radii 8 and 4, as long as the profile's; no B-spline edge anywhere
+        V = FreeCAD.Vector
+        arc = Part.ArcOfEllipse(Part.Ellipse(V(28, 10, 0), V(20, 14, 0), V(20, 10, 0)), 0.0, math.pi)
+        for offset, reach in ((0.0, 15.0), (2.0, 13.0)):
+            with self.subTest(offset=offset):
+                doc = FreeCAD.newDocument("PadUpToAParallelPlane")
+                try:
+                    body = doc.addObject("PartDesign::Body", "Body")
+                    xy = [o for o in body.Origin.OutList if o.Role == "XY_Plane"][0]
+
+                    def sketch(name, z, geometry):
+                        sk = body.newObject("Sketcher::SketchObject", name)
+                        sk.AttachmentSupport = [(xy, "")]
+                        sk.MapMode = "FlatFace"
+                        sk.AttachmentOffset = FreeCAD.Placement(V(0, 0, z), FreeCAD.Rotation())
+                        for g in geometry:
+                            sk.addGeometry(g, False)
+                        return sk
+
+                    def rectangle(x1, y1):
+                        pts = [V(0, 0, 0), V(x1, 0, 0), V(x1, y1, 0), V(0, y1, 0)]
+                        return [Part.LineSegment(pts[k], pts[(k + 1) % 4]) for k in range(4)]
+
+                    plate = body.newObject("PartDesign::Pad", "Plate")
+                    plate.Profile = sketch("S1", 0, rectangle(40, 30))
+                    plate.Length = 5
+                    post = body.newObject("PartDesign::Pad", "Post")
+                    post.Profile = sketch("S2", 5, rectangle(5, 5))
+                    post.Length = 15
+                    doc.recompute()
+                    top = [
+                        "Face%d" % (k + 1)
+                        for k, f in enumerate(post.Shape.Faces)
+                        if isinstance(f.Surface, Part.Plane) and abs(f.CenterOfMass.z - 20) < 1e-9
+                    ]
+                    self.assertEqual(len(top), 1)
+                    pad = body.newObject("PartDesign::Pad", "Notch")
+                    pad.Profile = sketch(
+                        "S3", 5, [arc, Part.LineSegment(V(12, 10, 0), V(28, 10, 0))]
+                    )
+                    pad.Type = "UpToFace"
+                    pad.UpToFace = (post, top)
+                    pad.Offset = offset
+                    doc.recompute()
+                    self.assertTrue(pad.isValid(), pad.getStatusString())
+                    self.assertTrue(pad.Shape.isValid())
+                    self.assertAlmostEqual(
+                        pad.Shape.Volume - post.Shape.Volume, math.pi * 8 * 4 / 2 * reach, delta=1e-8
+                    )
+                    kinds = [e.Curve.__class__.__name__ for e in pad.Shape.Edges]
+                    self.assertNotIn("BSplineCurve", kinds)
+                    far = [
+                        e
+                        for e in pad.Shape.Edges
+                        if e.Curve.__class__.__name__ != "Line"
+                        and all(abs(v.Point.z - (5 + reach)) < 1e-9 for v in e.Vertexes)
+                    ]
+                    self.assertEqual([e.Curve.__class__.__name__ for e in far], ["Ellipse"])
+                    self.assertAlmostEqual(far[0].Curve.MajorRadius, 8, places=9)
+                    self.assertAlmostEqual(far[0].Curve.MinorRadius, 4, places=9)
+                    self.assertAlmostEqual(far[0].Length, arc.toShape().Length, delta=1e-9)
                 finally:
                     FreeCAD.closeDocument(doc.Name)
 
@@ -4906,25 +5223,26 @@ class TestPad(unittest.TestCase):
         both ends outside it. The pad is the disk's."""
         pad = self.openCurvePad(circles=[(0, 0, 10)], lines=[((-20, 10), (20, 10))], tangent=True)
         self.assertSolidVolume(pad, 500 * math.pi)
-        self.assertAlmostEqual(pad.Shape.BoundBox.YMax, 10, places=6)
+        self.assertAlmostEqual(pad.Shape.optimalBoundingBox().YMax, 10, places=6)
 
     def testOpenCurvesLineEndingOnTheCircle(self):
         """The line's end at the tangent point."""
         pad = self.openCurvePad(circles=[(0, 0, 10)], lines=[((0, 10), (20, 10))], tangent=True)
         self.assertSolidVolume(pad, 500 * math.pi)
 
-    def testOpenCurvesLineFromALoopStops(self):
+    def testOpenCurvesLineFromALoop(self):
         """Review pro631s-r1fix: a line drawn from a loop's vertex shares the loop's wire (a radius
-        line to a circle's seam point (10, 0); two circles joined between their seam points). The
-        loop would have to be rebuilt from its edges, which renames the faces and reorders a
-        loft's wires: the pad stops with the reason, as it failed before."""
-        for circles, lines in (
-            ([(0, 0, 10)], [((0, 0), (10, 0))]),
-            ([(0, 0, 3), (16, 0, 3)], [((3, 0), (13, 0))]),
+        line to a circle's seam point (10, 0); two circles joined by a line from one's seam point
+        to the other's side). It stopped the pad; the sketch's regions give Onshape's result, the
+        disk and the two disks (feat/profile-regions)."""
+        for circles, lines, solids, volume in (
+            ([(0, 0, 10)], [((0, 0), (10, 0))], 1, 500 * math.pi),
+            ([(0, 0, 3), (16, 0, 3)], [((3, 0), (13, 0))], 2, 2 * 45 * math.pi),
         ):
             pad = self.openCurvePad(circles=circles, lines=lines)
-            self.assertFalse(pad.isValid())
-            self.assertIn(OPEN_CURVES_STOP, pad.getStatusString())
+            self.assertTrue(pad.isValid(), pad.getStatusString())
+            self.assertEqual(len(pad.Shape.Solids), solids)
+            self.assertAlmostEqual(pad.Shape.Volume, volume, places=3)
 
     def testOpenCurvesTwoCirclesAndAStrayLine(self):
         """Two circles of r 3 and a line between them touching neither: two cylinders."""
@@ -4952,24 +5270,24 @@ class TestPad(unittest.TestCase):
         pad = self.openCurvePad(circles=[(0, 0, 10)], lines=[((-15, 0), (15, 0))])
         self.assertSolidVolume(pad, 500 * math.pi)
 
-    def testOpenCurvesClosingARegionStop(self):
+    def testOpenCurvesClosingARegion(self):
         """Review pro631-r1 R2: a 20 x 20 square and a U whose ends lie on its top side (not at
-        its corners). The U closes a 10 x 10 tab that Onshape would add; the pad stops, as
-        before, with the reason, rather than leave the tab out. With the U's ends crossing the
-        side, the same."""
+        its corners). The U closes a 10 x 10 tab that Onshape adds: it stopped the pad; the
+        sketch's regions add the tab (feat/profile-regions). With the U's ends crossing the side,
+        the same."""
         U = [((5, 20), (5, 30)), ((5, 30), (15, 30)), ((15, 30), (15, 20))]
         square = [((0, 0), (20, 0)), ((20, 0), (20, 20)), ((20, 20), (0, 20)), ((0, 20), (0, 0))]
         crossing = [((5, 15), (5, 30)), ((5, 30), (15, 30)), ((15, 30), (15, 15))]
         for lines in (square + U, square + crossing):
             pad = self.openCurvePad(lines=lines)
-            self.assertFalse(pad.isValid())
-            self.assertIn(OPEN_CURVES_STOP, pad.getStatusString())
+            self.assertSolidVolume(pad, 500 * 5)
 
     def testOpenCurvesLoftKeepsTheSectionOrder(self):
         """Review pro631-r1 R1: a loft between two pairs of 10 x 10 squares 40 apart, the
         section with a stray line beside its first square: each square lofts to the one above
         it, two prisms. With the line drawn from that square's corner (one wire with it, the
-        sketch's wire order changed), the loft stops (pro631s-r1fix)."""
+        sketch's wire order changed), the loft stops (pro631s-r1fix): its regions are two loops
+        whose order isn't the sketch's (feat/profile-regions)."""
         body = self.Doc.addObject("PartDesign::Body", "Body")
 
         def squares(x):
@@ -4991,7 +5309,7 @@ class TestPad(unittest.TestCase):
             self.Doc.recompute()
             if not valid:
                 self.assertFalse(loft.isValid())
-                self.assertIn(OPEN_CURVES_STOP, loft.getStatusString())
+                self.assertIn("pick one region of it per section", loft.getStatusString())
                 continue
             self.assertTrue(loft.isValid(), loft.getStatusString())
             self.assertEqual(len(loft.Shape.Solids), 2)
@@ -5100,6 +5418,244 @@ class TestPad(unittest.TestCase):
         self.assertSolidVolume(pipe, 40 * math.pi)
         self.assertAlmostEqual(pipe.Shape.BoundBox.ZLength, 10, places=6)
 
+    def testUpToFaceOffsetBesideTheProfile(self):
+        """FreeCAD-CH P3: a 20 x 20 square up to a smaller face, parallel or slanted, off its
+        centre (x 4..8) or on it (x -2..2), in front of the profile (z = 10) or behind it
+        (z = -10), offset by +2 and -2, as Onshape does (the Onshape facts U1 and U2): the end lies
+        on the face's plane moved `offset` along the extrusion, back towards the profile for +2
+        (Onshape's default) and past the face for -2 (its "opposite direction"). UpToFace is
+        verified with Onshape; UpToShape with one face takes the same code path, unverified with
+        Onshape. Before, +2 went past the face; and a face off the centre line was taken as lying
+        behind the profile, which turned the offset round once more."""
+        cases = [
+            (upTo, slanted, ahead, offset, span)
+            for upTo in ("UpToFace", "UpToShape")
+            for slanted in (False, True)
+            for ahead in (True, False)
+            for offset in (2.0, -2.0)
+            for span in ((4, 8), (-2, 2))
+        ]
+        for upTo, slanted, ahead, offset, span in cases:
+            with self.subTest(upTo=upTo, slanted=slanted, ahead=ahead, offset=offset, span=span):
+                face = upToOffsetFace(self.Doc, slanted, 10.0 if ahead else -10.0, *span)
+                body = self.Doc.addObject("PartDesign::Body", "Body")
+                sketch = squareSketch(body, "Square", FreeCAD.Placement(), [(-10, -10, 10, 10)])
+                pad = body.newObject("PartDesign::Pad", "Pad")
+                pad.Profile = sketch
+                pad.Type = upTo
+                if upTo == "UpToFace":
+                    pad.UpToFace = (face, ["Face1"])
+                else:
+                    pad.UpToShape = [(face, ["Face1"])]
+                pad.Offset = offset
+                self.Doc.recompute()
+                self.assertTrue(pad.isValid(), pad.getStatusString())
+                # the end's distance from the profile at x = 0, and the plane's rise over
+                # x 0..10 on the far side from the profile
+                reach = 10.0 - offset
+                rise = 2.5 if slanted else 0.0
+                box = pad.Shape.BoundBox
+                if ahead:
+                    self.assertAlmostEqual(box.ZMin, 0.0, places=6)
+                    self.assertAlmostEqual(box.ZMax, reach + rise, places=6)
+                else:
+                    self.assertAlmostEqual(box.ZMin, -reach - rise, places=6)
+                    self.assertAlmostEqual(box.ZMax, 0.0, places=6)
+                # the slant's x / 4 averages to 0 over x -10..10
+                self.assertAlmostEqual(pad.Shape.Volume, 400.0 * reach, places=4)
+                self.assertEqual(len(pad.Shape.Solids), 1)
+
+    def testUpToFirstAndLastOffsetSign(self):
+        """FreeCAD-CH P3: up to first and last take the offset as up to a face does, with Onshape's
+        sign (the same code path; unverified with Onshape): a 20 x 20 square at z = 0 under the
+        base box x, y -15..15, z 10..15. Up to last (z = 15) offset +2 ends at z = 13, 8500; -2
+        at z = 17, 9300. Up to first (z = 10) offset -2 ends at z = 12, 8500."""
+        V = FreeCAD.Vector
+        for upTo, offset, top, volume in (
+            ("UpToLast", 2.0, 15.0, 8500.0),
+            ("UpToLast", -2.0, 17.0, 9300.0),
+            ("UpToFirst", -2.0, 15.0, 8500.0),
+        ):
+            with self.subTest(upTo=upTo, offset=offset):
+                block = self.Doc.addObject("Part::Feature", "Block")
+                block.Shape = Part.makeBox(30, 30, 5, V(-15, -15, 10))
+                body = self.Doc.addObject("PartDesign::Body", "Body")
+                base = body.newObject("PartDesign::FeatureBase", "BaseFeature")
+                base.BaseFeature = block
+                sketch = squareSketch(body, "Square", FreeCAD.Placement(), [(-10, -10, 10, 10)])
+                pad = body.newObject("PartDesign::Pad", "Pad")
+                pad.Profile = sketch
+                pad.Type = upTo
+                pad.Offset = offset
+                self.Doc.recompute()
+                self.assertTrue(pad.isValid(), pad.getStatusString())
+                self.assertAlmostEqual(pad.Shape.Volume, volume, places=4)
+                self.assertAlmostEqual(pad.Shape.BoundBox.ZMin, 0.0, places=6)
+                self.assertAlmostEqual(pad.Shape.BoundBox.ZMax, top, places=6)
+
+    def testUpToVertexOffsetSign(self):
+        """FreeCAD-CH: a 20 x 20 square at z = 0 padded up to a vertex at z = 10 or z = -10, offset
+        by +2 and -2, as Onshape does (oracle 7c, UV1, both directions): up to a vertex follows the
+        rule of up to a face, the end on the vertex's plane moved `offset` along the extrusion,
+        back towards the profile for +2 (short of the vertex) and past it for -2. One side, a
+        symmetric pad (each half) and side 2 up to its vertex. Before, +2 went past the vertex."""
+        for ahead in (True, False):
+            for offset in (2.0, -2.0):
+                z = 10.0 if ahead else -10.0
+                reach = 10.0 - offset
+                with self.subTest(case="one side", ahead=ahead, offset=offset):
+                    pad = self.upToVertexPad(z, offset)
+                    box = pad.Shape.BoundBox
+                    self.assertAlmostEqual(box.ZMin, 0.0 if ahead else -reach, places=6)
+                    self.assertAlmostEqual(box.ZMax, reach if ahead else 0.0, places=6)
+                    self.assertAlmostEqual(pad.Shape.Volume, 400.0 * reach, places=4)
+                    self.assertEqual(len(pad.Shape.Solids), 1)
+                    self.Doc.removeObject("Body")
+                if not ahead:
+                    continue
+                with self.subTest(case="symmetric", offset=offset):
+                    pad = self.upToVertexPad(z, offset, SideType="Symmetric")
+                    box = pad.Shape.BoundBox
+                    self.assertAlmostEqual(box.ZMin, -reach, places=6)
+                    self.assertAlmostEqual(box.ZMax, reach, places=6)
+                    self.assertAlmostEqual(pad.Shape.Volume, 800.0 * reach, places=4)
+                    self.Doc.removeObject("Body")
+                with self.subTest(case="side 2", offset=offset):
+                    # side 1 blind 5 up, side 2 up to the vertex at z = -10 below
+                    marker = upToVertexMarker(self.Doc, -z)
+                    body = self.Doc.addObject("PartDesign::Body", "Body")
+                    sketch = squareSketch(body, "Square", FreeCAD.Placement(), [(-10, -10, 10, 10)])
+                    pad = body.newObject("PartDesign::Pad", "Pad")
+                    pad.Profile = sketch
+                    pad.Type = "Length"
+                    pad.Length = 5
+                    pad.SideType = "Two sides"
+                    pad.Type2 = "UpToVertex"
+                    pad.UpToFace2 = (marker, ["Vertex1"])
+                    pad.Offset2 = offset
+                    self.Doc.recompute()
+                    self.assertTrue(pad.isValid(), pad.getStatusString())
+                    box = pad.Shape.BoundBox
+                    self.assertAlmostEqual(box.ZMin, -reach, places=6)
+                    self.assertAlmostEqual(box.ZMax, 5.0, places=6)
+                    self.assertAlmostEqual(pad.Shape.Volume, 400.0 * (5.0 + reach), places=4)
+                    self.Doc.removeObject("Body")
+
+    def testUpToVertexOffsetPastTheProfileFails(self):
+        """FreeCAD-CH: an offset of +10 or more up to a vertex 10 away leaves nothing to extrude
+        (the end at or before the profile plane): the pad fails and says so."""
+        for offset in (10.0, 12.0):
+            with self.subTest(offset=offset):
+                body = self.Doc.addObject("PartDesign::Body", "Body")
+                marker = upToVertexMarker(self.Doc, 10.0)
+                sketch = squareSketch(body, "Square", FreeCAD.Placement(), [(-10, -10, 10, 10)])
+                pad = body.newObject("PartDesign::Pad", "Pad")
+                pad.Profile = sketch
+                pad.Type = "UpToVertex"
+                pad.UpToFace = (marker, ["Vertex1"])
+                pad.Offset = offset
+                self.Doc.recompute()
+                self.assertFalse(pad.isValid())
+                self.assertIn("nothing to extrude", pad.getStatusString())
+                self.Doc.removeObject("Body")
+
+    def assertPinsBuilt(self, feature, pins, kind="Pad"):
+        self.assertTrue(feature.isValid(), feature.getStatusString())
+        shape = feature.Shape
+        self.assertTrue(shape.isValid())
+        self.assertEqual(len(shape.Solids), 1)
+        sign = 1 if kind == "Pad" else -1
+        self.assertAlmostEqual(
+            shape.Volume, C_VOLUME + sign * pins * PIN_SIDE * PIN_SIDE * PIN_GAP, places=4
+        )
+        self.assertEqual(len(shape.Faces), C_FACES + 4 * pins)
+        assertFacesAllNamed(self, shape)
+
+    def testPadUpToFaceOfManyRegionsTakesAboutAsLongAsByLength(self):
+        """Sweep G5 (ops#640): 196 separate squares padded up to a face. Each square's prism was
+        fused into the prisms of the squares before it, and the whole renamed each time: the work
+        grew with the square of the regions (an extra 11.7 s over the Pad by length at 100
+        squares, 0.6 s at 25; FSLC's Finger Grips, 229 slivers, passed the 60 s limit). Now each
+        prism is made on its own and one fuse joins them: the extra is a fraction of the Pad by
+        length's own time."""
+        squares = pinSquares(14)
+        _, _, byLength, plain = cWithPins(self.Doc, squares, upTo=False)
+        self.assertPinsBuilt(byLength, len(squares))
+        self.Doc.removeObject("Body")
+        _, _, upTo, spent = cWithPins(self.Doc, squares)
+        self.assertPinsBuilt(upTo, len(squares))
+        self.assertLess(spent, 3 * plain + 2.0, (spent, plain))
+
+    def testPadUpToFaceOfRegionsSharingASide(self):
+        """Sweep G5 (ops#640): two regions sharing a side, padded up to a face, are one solid (the
+        prisms made one by one are joined by one fuse), refined to one box between slab and roof"""
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        section = body.newObject("Sketcher::SketchObject", "CSection")
+        section.MapMode = "Deactivated"
+        section.Placement = FreeCAD.Placement(
+            FreeCAD.Vector(), FreeCAD.Rotation(FreeCAD.Vector(1, 0, 0), 90)
+        )
+        polygonInSketch(section, C_SECTION)
+        c = body.newObject("PartDesign::Pad", "C")
+        c.Profile = section
+        c.Length = 100
+        c.Midplane = True
+        sketch = squareSketch(
+            body, "Pins", FreeCAD.Placement(FreeCAD.Vector(0, 0, 10), FreeCAD.Rotation()), []
+        )
+        sketch.MapMode = "Deactivated"
+        sketch.MakeInternals = True
+        polygonInSketch(sketch, [(30, 0), (40, 0), (50, 0), (50, 5), (40, 5), (30, 5)])
+        sketch.addGeometry(Part.LineSegment(FreeCAD.Vector(40, 0, 0), FreeCAD.Vector(40, 5, 0)))
+        self.Doc.recompute()
+        self.assertEqual(len(sketch.InternalShape.Faces), 2)
+        pad = body.newObject("PartDesign::Pad", "Pad")
+        pad.Profile = (sketch, ["InternalFace1", "InternalFace2"])
+        pad.Type = "UpToFace"
+        pad.UpToFace = (c, [planarFaceAt(c.Shape, 2, 20)])
+        self.Doc.recompute()
+        self.assertTrue(pad.isValid(), pad.getStatusString())
+        self.assertEqual(len(pad.Shape.Solids), 1)
+        self.assertTrue(pad.Shape.isValid())
+        self.assertAlmostEqual(pad.Shape.Volume, C_VOLUME + 20 * 5 * PIN_GAP, places=4)
+        self.assertEqual(len(pad.Shape.Faces), C_FACES + 4)
+
+    def testPadUpToFaceOfManyRegionsKeepsAReferenceOnAPin(self):
+        """Sweep G5 (ops#640): a point at the centre of a pin's side face, padded up to a face with
+        other pins, stays on that pin's face when another pin in its row is deleted from the
+        sketch (the pieces are named one by one, then fused)"""
+        squares = pinSquares(3)
+        _, sketch, pad, _ = cWithPins(self.Doc, squares)
+        self.assertPinsBuilt(pad, len(squares))
+        x0, y0, x1, y1 = squares[1]  # i = 0, j = 1: the +x side at x = 27, y = -29
+        point = self.Doc.getObject("Body").newObject("PartDesign::Point", "OnPin")
+        point.AttachmentSupport = [(pad, [sideFaceAt(pad.Shape, x1, (y0 + y1) / 2)])]
+        point.MapMode = "CenterOfMass"
+        self.Doc.recompute()
+        expected = FreeCAD.Vector(x1, (y0 + y1) / 2, 15)
+        self.assertLess((point.Placement.Base - expected).Length, 1e-6, point.Placement.Base)
+        sketch.delGeometries([0, 1, 2, 3])  # the pin at i = 0, j = 0, in the same plane x = 27
+        self.Doc.recompute()
+        self.assertPinsBuilt(pad, len(squares) - 1)
+        self.assertTrue(point.isValid(), point.getStatusString())
+        self.assertLess((point.Placement.Base - expected).Length, 1e-6, point.Placement.Base)
+
+    def upToVertexPad(self, z, offset, **values):
+        """A 20 x 20 square at z = 0 padded up to the vertex at height z with `offset`"""
+        marker = upToVertexMarker(self.Doc, z)
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        sketch = squareSketch(body, "Square", FreeCAD.Placement(), [(-10, -10, 10, 10)])
+        pad = body.newObject("PartDesign::Pad", "Pad")
+        pad.Profile = sketch
+        pad.Type = "UpToVertex"
+        pad.UpToFace = (marker, ["Vertex1"])
+        pad.Offset = offset
+        for name, value in values.items():
+            setattr(pad, name, value)
+        self.Doc.recompute()
+        self.assertTrue(pad.isValid(), pad.getStatusString())
+        return pad
+
     def tearDown(self):
         # closing doc
         FreeCAD.closeDocument("PartDesignTestPad")
@@ -5161,12 +5717,12 @@ class TestUpToPlanePlacement(unittest.TestCase):
         self.assertVolume(40)
 
     def testUpToCoordinateSystemPlaneAsShapeWithOffset(self):
-        """A plane alone as the shape is taken as a face, so the offset applies: 1 further, 44
-        (PR 175 review, Low 3)."""
+        """A plane alone as the shape is taken as a face, so the offset applies: 1 short, as
+        Onshape's positive offset (FreeCAD-CH P3), 36 (PR 175 review, Low 3)."""
         self.Pad.Type = "UpToShape"
         self.Pad.UpToShape = [(self.coordinateSystemPlane(), [""])]
         self.Pad.Offset = 1
-        self.assertVolume(44)
+        self.assertVolume(36)
 
     def testUpToOriginXZPlaneAsShape(self):
         """The square turned to face -Y at y = 3, up to the body's XZ origin plane as the shape:

@@ -67,6 +67,7 @@
 #include "Command.h"
 #include "Control.h"
 #include "Document.h"
+#include "DocumentTabBar.h"
 #include "ExpressionCompleter.h"
 #include "ForkKeymap.h"
 #include "Macro.h"
@@ -2847,12 +2848,37 @@ void TreeWidget::mouseDoubleClickEvent(QMouseEvent* event)
             Gui::Document* guidoc = objitem->getOwnerDocument()->document();
             App::Document* appdoc = guidoc->getDocument();
 
-            guidoc->setActiveView(vp);
+            // FreeCAD-CH (ops#640, F6-1): under the typed tabs the view of the item's top parent,
+            // as the selection's (updateItemSelection): an item under an assembly's link stays in
+            // the assembly's tab
+            ViewProviderDocumentObject* viewVp = vp;
+            if (DocumentTabs::isOn()) {
+                std::ostringstream unused;
+                App::DocumentObject* topParent = nullptr;
+                objitem->getSubName(unused, topParent);
+                // not a plain group's (a studio in a Std_Group is its own tab, review F7-1)
+                if (topParent && topParent->isDerivedFrom<App::DocumentObjectGroup>()) {
+                    topParent = nullptr;
+                }
+                if (auto top = topParent ? freecad_cast<ViewProviderDocumentObject*>(
+                                               Application::Instance->getViewProvider(topParent)
+                                           )
+                                         : nullptr) {
+                    viewVp = top;
+                }
+            }
+            guidoc->setActiveView(viewVp);
             auto manager = Application::Instance->macroManager();
             auto lines = manager->getLines();
 
             std::ostringstream ss;
             ss << Command::getObjectCmd(vp->getObject()) << ".ViewObject.doubleClicked()";
+
+            // FreeCAD-CH (ops#640): a double-click beside another feature's open dialog accepts
+            // it first (Onshape); when it stays, nothing happens (the status message says why)
+            if (!guidoc->acceptOpenStep()) {
+                return;
+            }
 
             const char* commandText = vp->getTransactionText();
             if (commandText) {
@@ -3973,6 +3999,14 @@ void TreeWidget::dropEvent(QDropEvent* event)
 
     TargetItemInfo targetInfo = getTargetInfo(event);
     if (!targetInfo.targetItem) {
+        return;
+    }
+
+    // FreeCAD-CH (ops#640): no drop beside an open feature dialog: its openTransaction would be
+    // refused and the drop's commit or abort of transaction 0 would close the dialog's own step
+    if (Command::stepLockedDocument()) {
+        getMainWindow()->showMessage(tr("Finish the open dialog first"), 5000);
+        event->ignore();
         return;
     }
 
@@ -6561,6 +6595,19 @@ void DocumentItem::updateItemSelection(DocumentObjectItem* item)
             return;
         }
     }
+    // FreeCAD-CH (ops#640, F6-1): under the typed tabs the view follows the selected path's top
+    // object (obj, now): an item reached through the active tab's object (Assembly > Link >
+    // Cylinder) stays in that tab, where the child's own tab (its studio) was activated
+    // (not a plain group's: a studio kept in a Std_Group is its own tab, review F7-1)
+    if (DocumentTabs::isOn() && obj != vobj->getObject()
+        && !obj->isDerivedFrom<App::DocumentObjectGroup>()) {
+        if (auto top = freecad_cast<ViewProviderDocumentObject*>(
+                Application::Instance->getViewProvider(obj)
+            )) {
+            getTree()->syncView(top);
+            return;
+        }
+    }
     getTree()->syncView(vobj);
 }
 
@@ -7473,8 +7520,14 @@ void DocumentObjectItem::testStatus(bool resetStatus, QIcon& icon1, QIcon& icon2
         // to black which will lead to unreadable text if the system background
         // hss already a dark color.
         // However, it works if we set the appropriate role to an empty QVariant().
+        // FreeCAD-CH (ops#640 round 7, gap A10): under the Onshape keymap an object in error reads
+        // red, as Onshape's list shows a failed feature or a mate in trouble (the Features list's
+        // colour, PartDesignGui::FeaturesView)
+        const QVariant foreground = ForkKeymap::isOnshape() && pObject->isError()
+            ? QVariant(QBrush(QColor(0xd0, 0x30, 0x30)))
+            : QVariant();
         for (int column = 0; column < this->columnCount(); ++column) {
-            this->setData(column, Qt::ForegroundRole, QVariant());
+            this->setData(column, Qt::ForegroundRole, foreground);
         }
     }
     else {  // invisible
@@ -7483,8 +7536,12 @@ void DocumentObjectItem::testStatus(bool resetStatus, QIcon& icon1, QIcon& icon2
         if (this->treeWidget()) {
             opt.initFrom(this->treeWidget());
         }
+        // An object in error reads red when hidden too (a joint is hidden), FreeCAD-CH (above)
+        const QColor color = ForkKeymap::isOnshape() && pObject->isError()
+            ? QColor(0xd0, 0x30, 0x30)
+            : opt.palette.color(QPalette::Disabled, QPalette::Text);
         for (int column = 0; column < this->columnCount(); ++column) {
-            this->setForeground(column, opt.palette.color(QPalette::Disabled, QPalette::Text));
+            this->setForeground(column, color);
         }
         mode = QIcon::Disabled;
     }
@@ -7569,6 +7626,14 @@ void DocumentObjectItem::setData(int column, int role, const QVariant& value)
         // Explicitly open and commit a transaction since this is a single change here
         // For more details: https://forum.freecad.org/viewtopic.php?f=3&t=72351
         App::Document* doc = obj->getDocument();
+        // FreeCAD-CH (ops#640): beside an open feature dialog the rename is refused and the text
+        // reverts: its openTransaction is refused, and commitTransaction() would commit the
+        // dialog's own step
+        if (doc->isStepLocked()) {
+            getMainWindow()->showMessage(TreeWidget::tr("Finish the open dialog first"), 5000);
+            QTreeWidgetItem::setData(column, role, QString::fromUtf8(label.getValue()));
+            return;
+        }
         doc->openTransaction(str.str().c_str());
         label.setValue(value.toString().toUtf8().constData());
         doc->commitTransaction();

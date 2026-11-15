@@ -83,6 +83,8 @@ set(Part_tests
     parttests/part_test_objects.py
     parttests/regression_tests.py
     parttests/RefineElementMapTest.py
+    parttests/RefineFuseEdgesTest.py
+    parttests/RefineInternalVertexTest.py
     parttests/SplitEdgeNamesTest.py
     parttests/TopoShapeListTest.py
     parttests/ColorPerFaceTest.py
@@ -91,6 +93,8 @@ set(Part_tests
     parttests/TopoShapeTest.py
     parttests/ElementReferenceTest.py
     parttests/FilletFallbackTest.py
+    parttests/GTransformKeepsPlanesTest.py
+    parttests/KernelBudgetTest.py
     parttests/ReferenceFingerprintTest.py
     parttests/InternNamesTest.py
     parttests/ForkReleaseTest.py

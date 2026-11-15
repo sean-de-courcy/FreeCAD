@@ -56,6 +56,9 @@ public:
        add_varargs_method("exportPageAsPdf", &Module::exportPageAsPdf,
             "exportPageAsPdf(DrawPageObject, FilePath) -- print page as Pdf to file."
         );
+        add_varargs_method("exportPagesAsPdf", &Module::exportPagesAsPdf,
+            "exportPagesAsPdf([DrawPageObject, ...], FilePath) -- print the pages, in that order, as one Pdf file."
+        );
         add_varargs_method("exportPageAsSvg", &Module::exportPageAsSvg,
             "exportPageAsSvg(DrawPageObject, FilePath) -- print page as Svg to file."
         );
@@ -200,6 +203,43 @@ private:
             throw Py::Exception();
         }
 
+        return Py::None();
+    }
+
+//!exportPagesAsPdf([PageObject, ...], FullPath)
+    Py::Object exportPagesAsPdf(const Py::Tuple& args)
+    {
+        PyObject* listObj;
+        char* name;
+        if (!PyArg_ParseTuple(args.ptr(), "Oet", &listObj, "utf-8", &name)) {
+            throw Py::TypeError("expected (list of Pages, path)");
+        }
+        std::string filePath = std::string(name);
+        PyMem_Free(name);
+
+        std::vector<TechDraw::DrawPage*> pages;
+        Py::Sequence seq(listObj);
+        for (Py::Sequence::size_type i = 0; i < seq.size(); ++i) {
+            Py::Object entry = seq.getItem(i);
+            PyObject* item = entry.ptr();
+            if (!PyObject_TypeCheck(item, &(App::DocumentObjectPy::Type))) {
+                throw Py::TypeError("expected a list of Technical Drawing Pages");
+            }
+            auto* page = dynamic_cast<TechDraw::DrawPage*>(
+                static_cast<App::DocumentObjectPy*>(item)->getDocumentObjectPtr());
+            if (!page) {
+                throw Py::TypeError("expected a list of Technical Drawing Pages");
+            }
+            pages.push_back(page);
+        }
+
+        try {
+            PagePrinter::printPagesPdf(pages, filePath);
+        }
+        catch (Base::Exception& e) {
+            e.setPyException();
+            throw Py::Exception();
+        }
         return Py::None();
     }
 

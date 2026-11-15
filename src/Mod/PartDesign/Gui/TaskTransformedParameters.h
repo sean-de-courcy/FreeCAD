@@ -157,6 +157,9 @@ protected:
     void showBase();
 
     void addReferenceSelectionGate(AllowSelectionFlags);
+    /// addReferenceSelectionGate(), and a cylindrical face too: Onshape's linear pattern
+    /// Direction steps along its axis (FreeCAD-CH ops#640 rank 27, E-2)
+    void addDirectionSelectionGate(AllowSelectionFlags);
 
     int getUpdateViewTimeout() const;
 

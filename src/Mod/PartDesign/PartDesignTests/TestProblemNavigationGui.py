@@ -256,12 +256,12 @@ class TestProblemNavigationGui(unittest.TestCase):
         self.assertStillHidden()
 
     def addBadSketch(self, bodyName, sketchName, padName, x):
-        """A body whose Pad takes a sketch with two conflicting length constraints on one side:
-        the sketch fails (a problem inside a Pad's row), and so does the Pad."""
+        """A body whose Pad takes a sketch with a malformed constraint (a conflict no longer fails
+        a sketch, ops#640): the sketch fails (a problem inside a Pad's row), and so does the Pad."""
         body = self.doc.addObject("PartDesign::Body", bodyName)
         sketch = models.sketch(self.doc, sketchName, models.rectangle(x, 0, x + 10, 10), body)
         sketch.addConstraint(Sketcher.Constraint("Distance", 0, 10))
-        sketch.addConstraint(Sketcher.Constraint("Distance", 0, 20))
+        sketch.addConstraint(Sketcher.Constraint("Midpoint", 0, 1, 0))  # malformed (ops#640)
         pad = models.pad(body, sketch, 10, padName)
         self.doc.recompute()
         pump()
@@ -309,7 +309,7 @@ class TestProblemNavigationGui(unittest.TestCase):
         body = self.doc.addObject("PartDesign::Body", "Body002")
         sketch = models.sketch(self.doc, "BadSketch", models.rectangle(0, 0, 10, 10), body)
         sketch.addConstraint(Sketcher.Constraint("Distance", 0, 10))
-        sketch.addConstraint(Sketcher.Constraint("Distance", 0, 20))
+        sketch.addConstraint(Sketcher.Constraint("Midpoint", 0, 1, 0))  # malformed (ops#640)
         first = models.pad(body, sketch, 10, "BadPad")
         second = models.pad(body, sketch, 5, "BadPad2")
         self.doc.recompute()

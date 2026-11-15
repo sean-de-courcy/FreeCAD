@@ -22,11 +22,22 @@
  *                                                                         *
  ***************************************************************************/
 
+#include <array>
+#include <cmath>
 #include <cstring>
+#include <vector>
 #include <QAbstractButton>
+#include <QCheckBox>
+#include <QGridLayout>
+#include <QListView>
+#include <QPointer>
 #include <QSignalBlocker>
 #include <QTimer>
+#include <QVBoxLayout>
+#include <Precision.hxx>
+#include <Standard_Failure.hxx>
 
+#include <App/Datums.h>
 #include <App/Document.h>
 #include <App/DocumentObject.h>
 #include <App/Origin.h>
@@ -43,8 +54,10 @@
 #include <Gui/Inventor/Draggers/Gizmo.h>
 #include <Gui/Utilities.h>
 #include <Gui/Inventor/Draggers/SoRotationDragger.h>
+#include <Mod/Part/App/Part2DObject.h>
 #include <Mod/PartDesign/App/FeatureRevolved.h>
 #include <Mod/PartDesign/App/Body.h>
+#include <Mod/PartDesign/App/DatumPoint.h>
 
 #include "ui_TaskRevolutionParameters.h"
 #include "TaskRevolutionParameters.h"
@@ -63,6 +76,69 @@ namespace
 bool isLegacyTwoAngles(const std::string& method)
 {
     return method == "?TwoAngles" || method == "TwoAngles";
+}
+
+// Onshape's Revolve defaults (hands-on B-5, ops#640 rank 21): Full revolve unticked gives 30 deg;
+// Second end position, "Start angle 330 deg" measured the first end's way, is 30 deg the other
+// way here (Angle2 turns against Angle)
+constexpr double fullTurn = 360.0;
+constexpr double blindDefault = 30.0;
+constexpr double secondEndDefault = 30.0;
+
+bool isFullTurn(double angle)
+{
+    return std::fabs(angle) >= fullTurn - Precision::Angular();
+}
+
+// What a Revolve's profile takes (ops#640 rank 21, as an Extrude's): a sketch or other 2D object,
+// whole or by its regions or edges, or planar faces of the solid before. \a why: the refusal
+bool acceptRevolveProfile(
+    const App::DocumentObject* feature,
+    const App::DocumentObject* base,
+    App::DocumentObject* obj,
+    const char* sub,
+    std::string& why
+)
+{
+    if (!obj) {
+        return false;
+    }
+    if (obj == feature) {
+        why = QT_TR_NOOP("The feature can't be its own profile.");
+        return false;
+    }
+    const std::string element(sub ? sub : "");
+    auto startsWith = [&element](const char* prefix) {
+        return element.rfind(prefix, 0) == 0;
+    };
+    if (obj->isDerivedFrom<Part::Part2DObject>()) {
+        if (element.empty() || startsWith("Edge") || startsWith("Face")
+            || startsWith("InternalFace") || startsWith("Wire")) {
+            return true;
+        }
+        why = QT_TR_NOOP("Pick the sketch, its regions or its edges.");
+        return false;
+    }
+    if (obj == base && startsWith("Face")) {
+        auto feat = freecad_cast<Part::Feature*>(obj);
+        try {
+            const Part::TopoShape face(
+                feat ? feat->Shape.getShape().getSubShape(element.c_str(), /*silent=*/true)
+                     : TopoDS_Shape()
+            );
+            if (!face.isNull() && face.isPlanar()) {
+                return true;
+            }
+        }
+        catch (const Base::Exception&) {
+        }
+        catch (const Standard_Failure&) {
+        }
+        why = QT_TR_NOOP("Pick a planar face.");
+        return false;
+    }
+    why = QT_TR_NOOP("Pick a sketch, its regions or edges, or faces of the solid.");
+    return false;
 }
 
 }  // namespace
@@ -85,7 +161,9 @@ TaskRevolutionParameters::TaskRevolutionParameters(
 
     // bind property mirrors
     if (auto rev = getObject<PartDesign::Revolved>()) {
-        isGroove = rev->getAddSubType() == PartDesign::Revolved::Type::Subtractive;
+        // The class, not the Operation: a Revolution can cut and a Groove can add (ops#640 rank
+        // 20), and each keeps its end types (index 1: Up to last, or Through all)
+        isGroove = rev->isDerivedFrom<PartDesign::Groove>();
         this->propSideType = &(rev->SideType);
         this->propReferenceAxis = &(rev->ReferenceAxis);
         this->propReversed = &(rev->Reversed);
@@ -109,10 +187,15 @@ TaskRevolutionParameters::TaskRevolutionParameters(
 
     setFocus();
 
-    // show the parts coordinate system axis for selection
+    // show the parts coordinate system axis for selection; a new part studio's planes stay
+    // (ops#626, rank 52)
     try {
         if (auto vpOrigin = getOriginView()) {
-            vpOrigin->setTemporaryVisibility(Gui::DatumElement::Axes);
+            studioPlanes = vpOrigin->isTemporaryVisibility();
+            vpOrigin->setTemporaryVisibility(
+                studioPlanes ? Gui::DatumElement::Axes | Gui::DatumElement::Planes
+                             : Gui::DatumElement::Axes
+            );
         }
     }
     catch (const Base::Exception& ex) {
@@ -157,10 +240,12 @@ void TaskRevolutionParameters::setupDialog()
 
     translateSidesList(propSideType->getValue());
     updateStartUI();
+    createOnshapeFields();
 }
 
 void TaskRevolutionParameters::createFields()
 {
+    createProfileField();
     auto baseSolid = [this]() -> App::DocumentObject* {
         auto revolved = getObject<PartDesign::ProfileBased>();
         return revolved ? revolved->getBaseObject(/*silent=*/true) : nullptr;
@@ -189,8 +274,70 @@ void TaskRevolutionParameters::createFields()
                            "StartReference",
                            tr("Start reference"),
                            /*refuseWholeSketch=*/false);
-    m_side1.faceField = faceField(ui->faceFieldPlaceholder, "UpToFace", tr("Face"), true);
-    m_side2.faceField = faceField(ui->faceFieldPlaceholder2, "UpToFace2", tr("Face"), true);
+    // Each side's face, vertex and part share the face's row (ops#640 rank 21): a holder in the
+    // placeholder's place, the fields one under the other, all on UpToFace
+    auto sideFields = [this, baseSolid, &faceField](SideController& side,
+                                                   QWidget* placeholder,
+                                                   const char* property,
+                                                   bool first) {
+        auto holder = new QWidget(proxy);
+        holder->setObjectName(first ? QStringLiteral("upToFaceVertexOrPart")
+                                    : QStringLiteral("upToFaceVertexOrPart2"));
+        auto layout = new QVBoxLayout(holder);
+        layout->setContentsMargins(0, 0, 0, 0);
+        std::array<QWidget*, 3> cells {};
+        for (QWidget*& cell : cells) {
+            cell = new QWidget(holder);
+            layout->addWidget(cell);
+        }
+        if (QWidget* parent = placeholder->parentWidget(); parent && parent->layout()) {
+            delete parent->layout()->replaceWidget(placeholder, holder, Qt::FindChildrenRecursively);
+        }
+        placeholder->hide();
+        placeholder->deleteLater();
+        side.faceField = faceField(cells[0], property, tr("Face"), true);
+
+        auto make = [this, property](const ReferenceField::Options& options,
+                                     QWidget* where,
+                                     const QString& name) {
+            auto self = std::make_shared<QPointer<ReferenceField>>();
+            auto write = [this, self](App::DocumentObject* obj,
+                                      const std::vector<std::string>& subs) {
+                if (*self) {
+                    (*self)->assign(obj, subs);
+                }
+                recomputeFeature();
+                setGizmoPositions();
+            };
+            auto field = new ReferenceField(getObject(), property, options, write, proxy);
+            *self = field;
+            field->setObjectName(name);
+            field->takePlaceOf(where);
+            return field;
+        };
+        // Up to vertex: a vertex of a part or a sketch, or a datum point
+        ReferenceField::Options vertex = faceFieldOptions(tr("Vertex"), baseSolid, false);
+        vertex.flags = AllowSelection::POINT;
+        vertex.kinds = tr("A vertex or a point");
+        side.vertexField = make(vertex,
+                                cells[1],
+                                first ? QStringLiteral("fieldUpToVertex")
+                                      : QStringLiteral("fieldUpToVertex2"));
+        // Up to part: a pick takes its part, whole
+        ReferenceField::Options part;
+        part.kind = ReferenceField::Kind::SingleElement;
+        part.wholeObject = true;
+        part.target = baseSolid;
+        part.required = false;
+        part.noDependents = true;
+        part.label = tr("Part");
+        part.kinds = tr("A part");
+        side.partField = make(part,
+                              cells[2],
+                              first ? QStringLiteral("fieldUpToPart") : QStringLiteral("fieldUpToPart2"));
+    };
+    sideFields(m_side1, ui->faceFieldPlaceholder, "UpToFace", true);
+    sideFields(m_side2, ui->faceFieldPlaceholder2, "UpToFace2", false);
 
     // The axis: the box's choices, and a picked edge or line in the row under it, through the
     // cross-body question as before
@@ -198,7 +345,9 @@ void TaskRevolutionParameters::createFields()
     axis.kind = ReferenceField::Kind::SingleElement;
     axis.flags = AllowSelection::EDGE | AllowSelection::PLANAR | AllowSelection::CIRCLE;
     axis.target = baseSolid;
-    axis.required = false;
+    // Required: a new Revolve has none, and its dialog opens waiting for the pick, Onshape's way
+    // (FreeCAD-CH ops#643): the first empty required field is armed (armFirstEmpty)
+    axis.required = true;
     axis.removable = false;
     axis.once = true;
     axis.label = tr("Picked axis");
@@ -235,12 +384,281 @@ std::vector<ReferenceField*> TaskRevolutionParameters::referenceFields() const
 {
     std::vector<ReferenceField*> fields;
     ReferenceField* axisField = axisCombo ? axisCombo->field() : nullptr;
-    for (ReferenceField* field : {startField, m_side1.faceField, m_side2.faceField, axisField}) {
+    for (ReferenceField* field : {profileField,
+                                  startField,
+                                  m_side1.faceField,
+                                  m_side1.vertexField,
+                                  m_side1.partField,
+                                  m_side2.faceField,
+                                  m_side2.vertexField,
+                                  m_side2.partField,
+                                  axisField}) {
         if (field) {
             fields.push_back(field);
         }
     }
     return fields;
+}
+
+void TaskRevolutionParameters::createProfileField()
+{
+    // The profile on top, as an Extrude's (ops#640 rank 21): a new Revolve opens with it armed
+    // when nothing was preselected (the first empty required field), a preselected sketch fills
+    // it (hands-on B-2)
+    ReferenceField::Options profile;
+    profile.kind = ReferenceField::Kind::Profile;
+    // The solid before shows while it is armed
+    profile.target = [this]() -> App::DocumentObject* {
+        auto revolved = getObject<PartDesign::ProfileBased>();
+        return revolved ? revolved->getBaseObject(/*silent=*/true) : nullptr;
+    };
+    App::DocumentObjectT featureT(getObject());
+    profile.accept = [featureT](App::DocumentObject* obj, const char* sub, std::string& why) {
+        auto revolved = freecad_cast<PartDesign::ProfileBased*>(featureT.getObject());
+        App::DocumentObject* base = revolved ? revolved->getBaseObject(/*silent=*/true) : nullptr;
+        return acceptRevolveProfile(revolved, base, obj, sub, why);
+    };
+    // A sketch attached to the feature itself would make a cycle
+    profile.noDependents = true;
+    profile.label = tr("Profile");
+    profile.kinds = tr("A sketch, its regions or edges, or faces of the solid");
+    auto self = std::make_shared<QPointer<ReferenceField>>();
+    auto write = [this, self](App::DocumentObject* obj, const std::vector<std::string>& subs) {
+        // Regions of a sketch need the multi-face profile (an older feature's whole sketch keeps
+        // its face maker)
+        auto revolved = getObject<PartDesign::ProfileBased>();
+        if (revolved && !subs.empty() && !revolved->AllowMultiFace.getValue()) {
+            revolved->AllowMultiFace.setValue(true);
+        }
+        if (*self) {
+            (*self)->assign(obj, subs);
+        }
+        // The axis box lists the new sketch's axes
+        fillAxisCombo(true);
+        recomputeFeature();
+        setGizmoPositions();
+        // A new Revolve's first tool decides where it opens (FreeCAD-CH ops#640, round 3)
+        TaskResultParameters::profileTaken(getObject());
+    };
+    profileField = new ReferenceField(getObject(), "Profile", profile, write, proxy);
+    *self = profileField;
+    profileField->setObjectName(QStringLiteral("fieldProfile"));
+    ui->verticalLayout->insertWidget(0, profileField);
+}
+
+void TaskRevolutionParameters::createOnshapeFields()
+{
+    QGridLayout* grid = ui->gridLayout;
+    // The Sides box goes (its index is still what apply() writes), and so does the first side's
+    // header: Full revolve takes its row, under the axis
+    grid->removeWidget(ui->sidesLabel);
+    grid->removeWidget(ui->sidesMode);
+    ui->sidesLabel->hide();
+    ui->sidesMode->hide();
+    auto takeLayout = [grid](QLayout* layout,
+                             int& row,
+                             int& column,
+                             int& rowSpan,
+                             int& columnSpan) {
+        for (int index = 0; index < grid->count(); ++index) {
+            if (grid->itemAt(index)->layout() == layout) {
+                grid->getItemPosition(index, &row, &column, &rowSpan, &columnSpan);
+                grid->takeAt(index);
+                if (layout->parent()) {
+                    layout->setParent(nullptr);
+                }
+                return true;
+            }
+        }
+        return false;
+    };
+    int row = 0;
+    int column = 0;
+    int rowSpan = 0;
+    int columnSpan = 0;
+    ui->side1Label->hide();
+    ui->line1->hide();
+    if (takeLayout(ui->side1HeaderLayout, row, column, rowSpan, columnSpan)) {
+        delete ui->side1HeaderLayout;  // its widgets stay, hidden, in the proxy
+        ui->side1HeaderLayout = nullptr;
+    }
+    // The second side moves down four rows: Flip, Symmetric and Second end position come between
+    // the first end and the second, as in Onshape's dialog
+    constexpr int firstSide2Row = 10;
+    constexpr int shift = 4;
+    struct Moved
+    {
+        QLayoutItem* item;
+        int row;
+        int column;
+        int rowSpan;
+        int columnSpan;
+    };
+    std::vector<Moved> moved;
+    for (int index = grid->count() - 1; index >= 0; --index) {
+        grid->getItemPosition(index, &row, &column, &rowSpan, &columnSpan);
+        if (row < firstSide2Row) {
+            continue;
+        }
+        QLayoutItem* item = grid->takeAt(index);
+        if (item) {
+            moved.push_back({item, row, column, rowSpan, columnSpan});
+        }
+    }
+    for (const Moved& entry : moved) {
+        if (QLayout* layout = entry.item->layout()) {
+            if (layout->parent()) {
+                layout->setParent(nullptr);
+            }
+            grid->addLayout(
+                layout,
+                entry.row + shift,
+                entry.column,
+                entry.rowSpan,
+                entry.columnSpan
+            );
+        }
+        else {
+            grid->addItem(
+                entry.item,
+                entry.row + shift,
+                entry.column,
+                entry.rowSpan,
+                entry.columnSpan
+            );
+        }
+    }
+
+    fullRevolve = new QCheckBox(tr("Full revolve"), proxy);
+    fullRevolve->setObjectName(QStringLiteral("checkBoxFullRevolve"));
+    grid->addWidget(fullRevolve, 6, 0, 1, 2);
+    ui->verticalLayout->removeWidget(ui->checkBoxReversed);
+    grid->addWidget(ui->checkBoxReversed, firstSide2Row, 0, 1, 2);
+    symmetric = new QCheckBox(tr("Symmetric"), proxy);
+    symmetric->setObjectName(QStringLiteral("checkBoxSymmetric"));
+    grid->addWidget(symmetric, firstSide2Row + 1, 0, 1, 2);
+    secondEnd = new QCheckBox(tr("Second end position"), proxy);
+    secondEnd->setObjectName(QStringLiteral("checkBoxSecondEnd"));
+    grid->addWidget(secondEnd, firstSide2Row + 2, 0, 1, 2);
+
+    connect(fullRevolve, &QCheckBox::toggled, this, [this](bool on) {
+        onFullRevolveToggled(on);
+    });
+    connect(symmetric, &QCheckBox::toggled, this, [this](bool on) {
+        onSymmetricToggled(on);
+    });
+    connect(secondEnd, &QCheckBox::toggled, this, [this](bool on) {
+        onSecondEndToggled(on);
+    });
+}
+
+bool TaskRevolutionParameters::isFullRevolve() const
+{
+    return std::strcmp(propSideType->getValueAsString(), "One side") == 0
+        && std::strcmp(m_side1.Type->getValueAsString(), "Angle") == 0
+        && isFullTurn(m_side1.Angle->getValue());
+}
+
+void TaskRevolutionParameters::updateOnshapeUI()
+{
+    if (!fullRevolve) {
+        return;
+    }
+    const auto sidesMode = static_cast<SidesMode>(ui->sidesMode->currentIndex());
+    const bool full = isFullRevolve();
+    {
+        QSignalBlocker block(fullRevolve);
+        fullRevolve->setChecked(full);
+    }
+    {
+        QSignalBlocker block(symmetric);
+        symmetric->setChecked(sidesMode == SidesMode::Symmetric);
+    }
+    {
+        QSignalBlocker block(secondEnd);
+        secondEnd->setChecked(sidesMode == SidesMode::TwoSides);
+    }
+    ui->sidesLabel->hide();
+    ui->sidesMode->hide();
+    // Full revolve: no end, no angle, no flip (Onshape's box hides them)
+    ui->textLabelMode->setVisible(!full);
+    ui->changeMode->setVisible(!full);
+    ui->checkBoxReversed->setVisible(!full);
+    if (full) {
+        ui->labelAngle->hide();
+        ui->revolveAngle->hide();
+        ui->revolveAngle->setEnabled(false);
+    }
+    // Symmetric and Second end position exclude each other, as in Onshape's dialog
+    symmetric->setVisible(!full && sidesMode != SidesMode::TwoSides);
+    secondEnd->setVisible(!full && sidesMode != SidesMode::Symmetric);
+}
+
+void TaskRevolutionParameters::setSides(SidesMode mode)
+{
+    static constexpr std::array<const char*, 3> names {"One side", "Two sides", "Symmetric"};
+    {
+        QSignalBlocker block(ui->sidesMode);
+        ui->sidesMode->setCurrentIndex(static_cast<int>(mode));
+    }
+    propSideType->setValue(names.at(static_cast<std::size_t>(mode)));
+}
+
+void TaskRevolutionParameters::setAngle(Side side, double angle)
+{
+    SideController& controller = getSideController(side);
+    controller.Angle->setValue(angle);
+    QSignalBlocker block(controller.angleEdit);
+    controller.angleEdit->setValue(angle);
+}
+
+void TaskRevolutionParameters::onFullRevolveToggled(bool on)
+{
+    if (!getObject()) {
+        return;
+    }
+    if (on) {
+        setSides(SidesMode::OneSide);
+        {
+            QSignalBlocker block(ui->changeMode);
+            ui->changeMode->setCurrentIndex(static_cast<int>(Mode::Angle));
+        }
+        m_side1.Type->setValue("Angle");
+        setAngle(Side::First, fullTurn);
+    }
+    else if (isFullTurn(m_side1.Angle->getValue())) {
+        // Onshape's Blind default (B-5)
+        setAngle(Side::First, blindDefault);
+    }
+    updateUI(Side::First);
+    recomputeFeature();
+    setGizmoPositions();
+}
+
+void TaskRevolutionParameters::onSymmetricToggled(bool on)
+{
+    if (!getObject()) {
+        return;
+    }
+    setSides(on ? SidesMode::Symmetric : SidesMode::OneSide);
+    updateUI(Side::First);
+    recomputeFeature();
+    setGizmoPositions();
+}
+
+void TaskRevolutionParameters::onSecondEndToggled(bool on)
+{
+    if (!getObject()) {
+        return;
+    }
+    if (on && std::fabs(m_side2.Angle->getValue()) < Precision::Angular()
+        && std::strcmp(m_side2.Type->getValueAsString(), "Angle") == 0) {
+        setAngle(Side::Second, secondEndDefault);
+    }
+    setSides(on ? SidesMode::TwoSides : SidesMode::OneSide);
+    updateUI(on ? Side::Second : Side::First);
+    recomputeFeature();
+    setGizmoPositions();
 }
 
 void TaskRevolutionParameters::onReferenceSelectionTaken()
@@ -321,17 +739,24 @@ void TaskRevolutionParameters::onReferencesRepaired()
 
 void TaskRevolutionParameters::translateModeList(QComboBox* box, int index)
 {
+    // Onshape's names and order (hands-on B-5, ops#640 rank 21): Blind, Up to next, Up to face,
+    // Up to part, Up to vertex; each row's data is its Mode, the Type's index (\a index is one)
+    auto add = [box](const QString& text, Mode mode) {
+        box->addItem(text, static_cast<int>(mode));
+    };
     box->clear();
-    box->addItem(tr("Angle"));
-    if (!isGroove) {
-        box->addItem(tr("To last"));
+    add(tr("Blind"), Mode::Angle);
+    add(isGroove ? tr("Through all") : tr("To last"), Mode::ToLast);
+    add(tr("Up to next"), Mode::ToFirst);
+    add(tr("Up to face"), Mode::ToFace);
+    add(tr("Up to part"), Mode::ToShape);
+    add(tr("Up to vertex"), Mode::ToVertex);
+    const int row = box->findData(index);
+    box->setCurrentIndex(row >= 0 ? row : 0);
+    // Onshape's Revolve has neither To last nor Through all: listed only while the feature uses it
+    if (auto view = qobject_cast<QListView*>(box->view())) {
+        view->setRowHidden(1, index != static_cast<int>(Mode::ToLast));
     }
-    else {
-        box->addItem(tr("Through all"));
-    }
-    box->addItem(tr("To first"));
-    box->addItem(tr("Up to face"));
-    box->setCurrentIndex(index);
 }
 
 void TaskRevolutionParameters::translateSidesList(int index)
@@ -399,6 +824,8 @@ void TaskRevolutionParameters::updateSideUI(
 {
     bool isAngleVisible = false;
     bool isFaceVisible = false;
+    bool isVertexVisible = false;
+    bool isPartVisible = false;
 
     if (mode == Mode::Angle) {
         isAngleVisible = true;
@@ -409,6 +836,12 @@ void TaskRevolutionParameters::updateSideUI(
     }
     else if (mode == Mode::ToFace) {
         isFaceVisible = true;
+    }
+    else if (mode == Mode::ToVertex) {
+        isVertexVisible = true;
+    }
+    else if (mode == Mode::ToShape) {
+        isPartVisible = true;
     }
 
     const bool finalAngleVisible = isParentVisible && isAngleVisible;
@@ -422,19 +855,32 @@ void TaskRevolutionParameters::updateSideUI(
     if (!finalFaceVisible) {
         side.faceField->setArmed(false);
     }
+    // Up to vertex's and Up to part's fields (ops#640 rank 21), as the face's
+    for (auto [field, shown] : {std::pair {side.vertexField, isParentVisible && isVertexVisible},
+                                std::pair {side.partField, isParentVisible && isPartVisible}}) {
+        field->setVisible(shown);
+        field->setRequired(shown);
+        if (!shown) {
+            field->setArmed(false);
+        }
+    }
+    if (QWidget* holder = side.faceField->parentWidget()) {
+        holder->setVisible(isParentVisible && (isFaceVisible || isVertexVisible || isPartVisible));
+    }
 }
 
 void TaskRevolutionParameters::updateWholeUI(Side side)
 {
     SidesMode sidesMode = static_cast<SidesMode>(ui->sidesMode->currentIndex());
-    Mode mode1 = static_cast<Mode>(ui->changeMode->currentIndex());
-    Mode mode2 = static_cast<Mode>(ui->changeMode2->currentIndex());
+    Mode mode1 = static_cast<Mode>(getMode());
+    Mode mode2 = static_cast<Mode>(getMode2());
 
     const bool isSide2Visible = sidesMode == SidesMode::TwoSides;
-    ui->side1Label->setVisible(isSide2Visible);
-    ui->line1->setVisible(isSide2Visible);
-    ui->side2Label->setVisible(isSide2Visible);
-    ui->line2->setVisible(isSide2Visible);
+    // No side headers: Onshape's Second end position shows its own end under its box (rank 21)
+    ui->side1Label->setVisible(false);
+    ui->line1->setVisible(false);
+    ui->side2Label->setVisible(false);
+    ui->line2->setVisible(false);
     ui->typeLabel2->setVisible(isSide2Visible);
     ui->changeMode2->setVisible(isSide2Visible);
 
@@ -444,6 +890,7 @@ void TaskRevolutionParameters::updateWholeUI(Side side)
     const bool symmetricAngleLike = sidesMode == SidesMode::Symmetric
         && (mode1 == Mode::Angle || (isGroove && mode1 == Mode::ThroughAll));
     ui->checkBoxReversed->setEnabled(!symmetricAngleLike);
+    updateOnshapeUI();
 }
 
 void TaskRevolutionParameters::connectSignals()
@@ -580,20 +1027,49 @@ void TaskRevolutionParameters::writeAxis(
 
         recomputeFeature();
         setGizmoPositions();
+        // the axis may make its first tool: it decides where it opens (ops#640, round 3)
+        TaskResultParameters::profileTaken(getObject());
     }
     catch (const Base::Exception& e) {
         e.reportException();
     }
 }
 
-void TaskRevolutionParameters::onModeChangedSide1(int index)
+void TaskRevolutionParameters::onModeChangedSide1(int)
 {
-    onModeChanged(index, Side::First);
+    // the row's mode, not the row (ops#640 rank 21)
+    onModeChanged(getMode(), Side::First);
 }
 
-void TaskRevolutionParameters::onModeChangedSide2(int index)
+void TaskRevolutionParameters::onModeChangedSide2(int)
 {
-    onModeChanged(index, Side::Second);
+    onModeChanged(getMode2(), Side::Second);
+}
+
+void TaskRevolutionParameters::dropUpToFaceOfOtherKind(Side side, Mode mode)
+{
+    if (mode != Mode::ToFace && mode != Mode::ToVertex && mode != Mode::ToShape) {
+        return;  // the link stays until OK (apply() drops it), as before
+    }
+    App::PropertyLinkSub* link = getSideController(side).UpToFace;
+    App::DocumentObject* obj = link ? link->getValue() : nullptr;
+    if (!obj) {
+        return;
+    }
+    const std::vector<std::string> subs = link->getSubValues();
+    const std::string sub = subs.empty() ? std::string() : subs.front();
+    App::DocumentObject* named = sub.empty() || !obj->getDocument()
+        ? nullptr
+        : obj->getDocument()->getObject(sub.c_str());
+    // an origin point is linked whole (no LCS sub): a vertex too
+    const bool isVertex = sub.starts_with("Vertex") || obj->isDerivedFrom<PartDesign::Point>()
+        || obj->isDerivedFrom<App::Point>() || (named && named->isDerivedFrom<App::Point>());
+    // a part is linked whole; a face or a plane by its element, or a datum or origin plane whole
+    const bool isPart = !isVertex && sub.empty() && !PartDesign::Feature::isDatum(obj);
+    const Mode kind = isVertex ? Mode::ToVertex : isPart ? Mode::ToShape : Mode::ToFace;
+    if (kind != mode) {
+        link->setValue(nullptr);
+    }
 }
 
 void TaskRevolutionParameters::onModeChanged(int index, Side side)
@@ -615,12 +1091,25 @@ void TaskRevolutionParameters::onModeChanged(int index, Side side)
             break;
         case Mode::TwoAngles:
             break;
+        case Mode::ToVertex:
+            sideCtrl.Type->setValue("UpToVertex");
+            break;
+        case Mode::ToShape:
+            sideCtrl.Type->setValue("UpToShape");
+            break;
     }
+    dropUpToFaceOfOtherKind(side, static_cast<Mode>(index));
 
     updateUI(side);
-    // Up to a face with none yet: its field takes the next pick
+    // Up to a face, a vertex or a part with none yet: its field takes the next pick
     if (static_cast<Mode>(index) == Mode::ToFace) {
         armField(sideCtrl.faceField);
+    }
+    else if (static_cast<Mode>(index) == Mode::ToVertex) {
+        armField(sideCtrl.vertexField);
+    }
+    else if (static_cast<Mode>(index) == Mode::ToShape) {
+        armField(sideCtrl.partField);
     }
     recomputeFeature();
 
@@ -651,6 +1140,9 @@ void TaskRevolutionParameters::onSidesModeChanged(int index)
 void TaskRevolutionParameters::onReversed(bool on)
 {
     if (getObject()) {
+        // the user's direction: an operation switch keeps it now (ops#640 H4, rank 20; a no-op
+        // until the Result box gives a Revolve the operation row)
+        TaskResultParameters::noteReversedTouched(getObject());
         propReversed->setValue(on);
         if (auto revolved = getObject<PartDesign::Revolved>()) {
             const auto suggested = revolved->suggestedReversed();
@@ -667,14 +1159,24 @@ bool TaskRevolutionParameters::getReversed() const
     return ui->checkBoxReversed->isChecked();
 }
 
+namespace
+{
+// The end type box's rows carry their Mode (ops#640 rank 21: Onshape's order, not the Modes')
+int modeOfRow(const QComboBox* box)
+{
+    const QVariant data = box->currentData();
+    return data.isValid() ? data.toInt() : box->currentIndex();
+}
+}  // namespace
+
 int TaskRevolutionParameters::getMode() const
 {
-    return ui->changeMode->currentIndex();
+    return modeOfRow(ui->changeMode);
 }
 
 int TaskRevolutionParameters::getMode2() const
 {
-    return ui->changeMode2->currentIndex();
+    return modeOfRow(ui->changeMode2);
 }
 
 int TaskRevolutionParameters::getSidesMode() const
@@ -684,10 +1186,15 @@ int TaskRevolutionParameters::getSidesMode() const
 
 TaskRevolutionParameters::~TaskRevolutionParameters()
 {
-    // hide the parts coordinate system axis for selection
+    // hide the parts coordinate system axis for selection; a new part studio's planes stay
+    // shown, as SketchWorkflow's showStudioPlanes() shows them (ops#626, rank 52)
     try {
         if (auto vpOrigin = getOriginView()) {
             vpOrigin->resetTemporaryVisibility();
+            if (studioPlanes) {
+                vpOrigin->setTemporaryVisibility(Gui::DatumElement::Planes);
+                vpOrigin->setPlaneLabelVisibility(true);
+            }
         }
     }
     catch (const Base::Exception& ex) {
@@ -710,8 +1217,8 @@ void TaskRevolutionParameters::changeEvent(QEvent* event)
         ui->retranslateUi(proxy);
 
         // Translate mode items
-        translateModeList(ui->changeMode, ui->changeMode->currentIndex());
-        translateModeList(ui->changeMode2, ui->changeMode2->currentIndex());
+        translateModeList(ui->changeMode, getMode());
+        translateModeList(ui->changeMode2, getMode2());
         translateSidesList(ui->sidesMode->currentIndex());
         fillAxisCombo(true);
     }
@@ -736,11 +1243,15 @@ void TaskRevolutionParameters::apply()
     FCMD_OBJ_CMD(tobj, "StartOffset = " << ui->startOffsetEdit->value().getValue());
     FCMD_OBJ_CMD(tobj, "StartType = " << ui->startMode->currentIndex());
 
-    // A side that doesn't go up to a face keeps none
-    if (static_cast<Mode>(getMode()) != Mode::ToFace && revolved->UpToFace.getValue()) {
+    // A side that doesn't go up to a face keeps none (nor a vertex or a part, ops#640 rank 21)
+    auto upToFaceKept = [](int mode) {
+        const auto kind = static_cast<Mode>(mode);
+        return kind == Mode::ToFace || kind == Mode::ToVertex || kind == Mode::ToShape;
+    };
+    if (!upToFaceKept(getMode()) && revolved->UpToFace.getValue()) {
         FCMD_OBJ_CMD(tobj, "UpToFace = None");
     }
-    if (static_cast<Mode>(getMode2()) != Mode::ToFace && revolved->UpToFace2.getValue()) {
+    if (!upToFaceKept(getMode2()) && revolved->UpToFace2.getValue()) {
         FCMD_OBJ_CMD(tobj, "UpToFace2 = None");
     }
 }
@@ -847,7 +1358,10 @@ void TaskRevolutionParameters::setGizmoPositions()
     const Base::Vector3d axisPosition = basePos + axisComp;
     rotationGizmo->Gizmo::setDraggerPlacement(axisPosition, startDirection);
     rotationGizmo->getDraggerContainer()->setArcNormalDirection(Base::convertTo<SbVec3f>(axisDir));
-    rotationGizmo->setVisibility(revolutionType == "Angle" || isLegacyTwoAngles(revolutionType));
+    // none on a full revolve, as in Onshape's (ops#640 rank 21)
+    rotationGizmo->setVisibility(
+        (revolutionType == "Angle" || isLegacyTwoAngles(revolutionType)) && !isFullRevolve()
+    );
 
     rotationGizmo2->Gizmo::setDraggerPlacement(axisPosition, startDirection);
     rotationGizmo2->getDraggerContainer()->setArcNormalDirection(Base::convertTo<SbVec3f>(-axisDir));
@@ -882,6 +1396,30 @@ TaskDlgRevolutionParameters::TaskDlgRevolutionParameters(ViewProviderRevolution*
     );
     addResultBox();
     Content.push_back(preview);
+}
+
+namespace
+{
+QString missingAxis(const App::DocumentObject* feature)
+{
+    auto axis = feature
+        ? dynamic_cast<const App::PropertyLinkSub*>(feature->getPropertyByName("ReferenceAxis"))
+        : nullptr;
+    if (!axis || axis->getValue()) {
+        return {};
+    }
+    return QObject::tr("Pick a line or an edge to revolve about");
+}
+}  // namespace
+
+QString TaskDlgRevolutionParameters::missingRequired() const
+{
+    return missingAxis(getObject());
+}
+
+QString TaskDlgGrooveParameters::missingRequired() const
+{
+    return missingAxis(getObject());
 }
 
 TaskDlgGrooveParameters::TaskDlgGrooveParameters(ViewProviderGroove* GrooveView)

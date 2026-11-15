@@ -864,7 +864,67 @@ MappedName ElementMap::setElementName(const IndexedName& element,
             }
         }
 
-        for (size_t i = 0; i < mappedNames.size(); i++) {
+        // Where the search starts: past the counts known to be taken (takenDuplicateCounts). The
+        // search without that start returns the first count that is free or already this
+        // element's, so one of this element's own names among the skipped counts is the answer.
+        std::string countKey = mappedNameBeforeDuplicateCount;
+        countKey += '\n';
+        countKey += mappedNameAfterDuplicateCount;
+        countKey += '\n';
+        countKey += duplicateIndexString;
+        size_t i = 0;
+        if (auto taken = takenDuplicateCounts.find(countKey);
+            taken != takenDuplicateCounts.end() && taken->second > 0) {
+            const unsigned long firstCount = duplicateIndex;
+            const unsigned long skipped = taken->second;
+            const std::string fieldPrefix = twinPlace ? duplicateIndexString + "~" : std::string();
+            const MappedNameRef* own = nullptr;
+            unsigned long ownCount = 0;
+            for (const MappedNameRef* ref = findMappedRef(element); ref; ref = ref->next.get()) {
+                if (!ref->name) {
+                    continue;
+                }
+                const std::string held = ref->name.toString();
+                const size_t fixedSize = mappedNameBeforeDuplicateCount.size() + fieldPrefix.size()
+                    + mappedNameAfterDuplicateCount.size();
+                if (held.size() <= fixedSize
+                    || held.compare(0, mappedNameBeforeDuplicateCount.size(), mappedNameBeforeDuplicateCount) != 0
+                    || held.compare(mappedNameBeforeDuplicateCount.size(), fieldPrefix.size(), fieldPrefix) != 0
+                    || held.compare(
+                           held.size() - mappedNameAfterDuplicateCount.size(),
+                           mappedNameAfterDuplicateCount.size(),
+                           mappedNameAfterDuplicateCount
+                       ) != 0) {
+                    continue;
+                }
+                const std::string digits = held.substr(
+                    mappedNameBeforeDuplicateCount.size() + fieldPrefix.size(),
+                    held.size() - fixedSize
+                );
+                if (digits.size() > 18
+                    || !std::all_of(digits.begin(), digits.end(), [](char c) {
+                           return std::isdigit(static_cast<unsigned char>(c)) != 0;
+                       })) {
+                    continue;
+                }
+                const unsigned long count = std::stoul(digits);
+                if (std::to_string(count) != digits || count < firstCount
+                    || count - firstCount >= skipped) {
+                    continue;
+                }
+                if (!own || count < ownCount) {
+                    own = ref;
+                    ownCount = count;
+                }
+            }
+            if (own) {
+                return own->name;
+            }
+            i = skipped;
+            duplicateIndex += skipped;
+        }
+
+        for (; i < mappedNames.size(); i++) {
             ZoneScopedN("V2 Duplicate Loop");
 
             const std::string duplicateField = twinPlace
@@ -875,6 +935,8 @@ MappedName ElementMap::setElementName(const IndexedName& element,
 
             if (res) {
                 ZoneNameF("%s, %d", name.toString().c_str(), static_cast<int>(duplicateIndex));
+                // this count is taken now, and so is every one before it
+                takenDuplicateCounts[countKey] = i + 1;
                 return res;
             }
 
@@ -1071,6 +1133,7 @@ void ElementMap::erase(const MappedName& name)
     }
     ref->erase(name);
     this->mappedNames.erase(it);
+    forgetTakenCounts();
 }
 
 void ElementMap::erase(const IndexedName& idx)
@@ -1090,6 +1153,7 @@ void ElementMap::erase(const IndexedName& idx)
         this->mappedNames.erase(nameRef->name);
     }
     ref.clear();
+    forgetTakenCounts();
 }
 
 unsigned long ElementMap::size() const
@@ -2100,6 +2164,7 @@ void ElementMap::retagElementMap(long newTag) {
                 foundNameRef->name = retagged;
 
                 if (it != mappedNames.end()) {
+                    forgetTakenCounts();
                     auto extractedNode = mappedNames.extract(it);
 
                     if (extractedNode.key()) {

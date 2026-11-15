@@ -24,6 +24,12 @@
 
 #pragma once
 
+#include <map>
+#include <optional>
+#include <string>
+#include <utility>
+#include <vector>
+
 #include <gp_Pnt.hxx>
 #include <TopAbs_ShapeEnum.hxx>
 
@@ -122,6 +128,16 @@ public:
         const std::vector<App::DocumentObject*>& objects,
         const std::vector<std::string>& subNames
     );
+    /** FreeCAD-CH (ops#673, selection parity 11): set all references at once, some of them
+     * standing for a point: points[i], when set, is measured instead of reference i's shape, as a
+     * vertex there (global coordinates). An edge picked at its middle measures as that point
+     * (Onshape SP10-Q9). The points are not saved; clear() and the other setters drop them.
+     */
+    void setReferences3D(
+        const std::vector<App::DocumentObject*>& objects,
+        const std::vector<std::string>& subNames,
+        const std::vector<std::optional<Base::Vector3d>>& points
+    );
 
     MeasureType getType();
     MeasureType findType();
@@ -181,6 +197,8 @@ protected:
     ) const;
 
 private:
+    /// FreeCAD-CH (ops#673): the points standing for references, by (object, subname)
+    std::map<std::pair<const App::DocumentObject*, std::string>, Base::Vector3d> pointReferences;
     MeasureType measureType;
     Py::SmartPtr PythonObject;
 };

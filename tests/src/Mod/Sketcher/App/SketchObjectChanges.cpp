@@ -285,11 +285,12 @@ TEST_F(SketchObjectTest, testSplitCircle)
     int result = getObject()->split(geoId, splitPoint);
 
     // Assert
-    EXPECT_EQ(result, 0);
-    // The circle should be split into an arc now
+    // FreeCAD-CH (ops#656): a circle has no ends, so one cut leaves it whole: Split refuses, and the
+    // circle stays a circle (it used to become a full-turn arc whose ends nothing held together).
+    EXPECT_EQ(result, -1);
     EXPECT_EQ(getObject()->getHighestCurveIndex(), geoId);
-    EXPECT_TRUE(getObject()->noRecomputes);
-    EXPECT_TRUE(solverUpdated);
+    EXPECT_TRUE(getObject()->getGeometry(geoId)->is<Part::GeomCircle>());
+    EXPECT_FALSE(solverUpdated);
 }
 
 TEST_F(SketchObjectTest, testSplitEllipse)
@@ -311,12 +312,10 @@ TEST_F(SketchObjectTest, testSplitEllipse)
     int result = getObject()->split(geoId, splitPoint);
 
     // Assert
-    EXPECT_EQ(result, 0);
-    // The ellipse should be split into an arc of ellipse now
-    // FIXME: Internal geometries may be added or removed which may cause some issues
-    // EXPECT_EQ(getObject()->getHighestCurveIndex(), geoId);
-    EXPECT_TRUE(getObject()->noRecomputes);
-    EXPECT_TRUE(solverUpdated);
+    // FreeCAD-CH (ops#656): like a circle, a whole ellipse can't be split at one point.
+    EXPECT_EQ(result, -1);
+    EXPECT_TRUE(getObject()->getGeometry(geoId)->is<Part::GeomEllipse>());
+    EXPECT_FALSE(solverUpdated);
 }
 
 TEST_F(SketchObjectTest, testSplitArcOfCircle)

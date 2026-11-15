@@ -29,6 +29,7 @@
 #include <cmath>
 #include <numbers>
 
+#include <array>
 #include <algorithm>
 #define DEBUG_DERIVS 0
 #if DEBUG_DERIVS
@@ -3227,6 +3228,114 @@ void ConstraintArcLength::evaluate()
     double startA, endA;
     normalizedAngles(startA, endA);
     *distance() = (endA - startA) * *arc.rad;
+}
+
+// --------------------------------------------------------
+// FreeCAD-CH (sketch patterns): LinearSum, q = sum(w_i * p_i) + c
+ConstraintLinearSum::ConstraintLinearSum(
+    const std::vector<double*>& givenpvec,
+    const std::vector<double>& givenweights,
+    double givenconstant
+)
+    : weights(givenweights)
+    , constant(givenconstant)
+{
+    pvec = givenpvec;
+    assert(pvec.size() == weights.size() + 1);
+    origpvec = pvec;
+    rescale();
+}
+
+ConstraintType ConstraintLinearSum::getTypeId()
+{
+    return LinearSum;
+}
+
+void ConstraintLinearSum::errorgrad(double* err, double* grad, double* param)
+{
+    // a parameter may stand in more than one place once the system's equal parameters are merged
+    // (redirectParams): every place adds its part
+    if (err) {
+        double sum = constant;
+        for (size_t i = 0; i < weights.size(); ++i) {
+            sum += weights[i] * *pvec[1 + i];
+        }
+        *err = *pvec[0] - sum;
+    }
+    if (grad) {
+        double deriv = 0.;
+        if (param == pvec[0]) {
+            deriv += 1.;
+        }
+        for (size_t i = 0; i < weights.size(); ++i) {
+            if (param == pvec[1 + i]) {
+                deriv -= weights[i];
+            }
+        }
+        *grad = deriv;
+    }
+}
+
+// --------------------------------------------------------
+// FreeCAD-CH (sketch patterns): PatternRotation, P' = C + R(k theta) (P - C), one coordinate
+ConstraintPatternRotation::ConstraintPatternRotation(
+    Point& copy,
+    Point& seed,
+    Point& pivot,
+    double* theta,
+    double givenk,
+    int givencomponent
+)
+    : k(givenk)
+    , component(givencomponent)
+{
+    pvec.push_back(copy.x);   // 0
+    pvec.push_back(copy.y);   // 1
+    pvec.push_back(seed.x);   // 2
+    pvec.push_back(seed.y);   // 3
+    pvec.push_back(pivot.x);  // 4
+    pvec.push_back(pivot.y);  // 5
+    pvec.push_back(theta);    // 6
+    origpvec = pvec;
+    rescale();
+}
+
+ConstraintType ConstraintPatternRotation::getTypeId()
+{
+    return PatternRotation;
+}
+
+void ConstraintPatternRotation::errorgrad(double* err, double* grad, double* param)
+{
+    const double a = k * *pvec[6];
+    const double c = std::cos(a);
+    const double s = std::sin(a);
+    const double dx = *pvec[2] - *pvec[4];
+    const double dy = *pvec[3] - *pvec[5];
+    // d(error)/d(pvec[i]) for the x coordinate (component 0) or the y coordinate (component 1)
+    std::array<double, 7> d {};
+    if (component == 0) {
+        if (err) {
+            *err = *pvec[0] - *pvec[4] - (c * dx - s * dy);
+        }
+        d = {1., 0., -c, s, -1. + c, -s, k * (s * dx + c * dy)};
+    }
+    else {
+        if (err) {
+            *err = *pvec[1] - *pvec[5] - (s * dx + c * dy);
+        }
+        d = {0., 1., -s, -c, s, -1. + c, -k * (c * dx - s * dy)};
+    }
+    if (grad) {
+        // as LinearSum: a merged parameter adds every place's part
+        double deriv = 0.;
+        for (size_t i = 0; i < d.size(); ++i) {
+            if (param == pvec[i]) {
+                deriv += d[i];
+            }
+        }
+        *grad = deriv;
+    }
 }
 
 }  // namespace GCS

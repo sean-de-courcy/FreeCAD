@@ -1,0 +1,8 @@
+# Batch 11 lane interaction: kernel safety 18-19's fillet fallback now rounds r 4 on a 3-high edge, where hub 11's
+# P8a tests expect a refusal (FILLET_FAILED). Oracle 9k: Onshape builds it too, so the tests are wrong. Remove this file with hub 14's test fix.
+
+issue: ops#693
+
+reason: test expectation wrong (ops#693, Onshape builds it); hub 14 fixes the tests
+cli  PartDesignTests.TestStudioDressUp.TestStudioDressUp.testNoPartRoundedFails
+cli  PartDesignTests.TestStudioDressUp.TestStudioDressUp.testAFailingPartIsLeftUnchanged

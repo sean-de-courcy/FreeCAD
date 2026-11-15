@@ -158,6 +158,43 @@ void finishDatumTransaction(Sketcher::SketchObject* sketch, int transactionID)
     tryAutoRecompute(sketch);
 }
 
+/// The number of constraints the solver reports redundant or conflicting.
+std::size_t overdefinedCount(Sketcher::SketchObject* sketch)
+{
+    sketch->solve();
+    return sketch->getLastRedundant().size() + sketch->getLastConflicting().size();
+}
+
+/// FreeCAD-CH (ops#640): a new dimension that would overdefine the sketch is made driven (a
+/// reference dimension), as Onshape does, instead of leaving the sketch redundant. Each new
+/// dimension is tried as driven, in placement order, and stays so only when that lowers the
+/// solver's count of redundant and conflicting constraints, so a sketch that was already
+/// overdefined keeps its new dimensions as placed.
+void makeOverdefiningDriven(Sketcher::SketchObject* sketch, const std::vector<int>& constrIds)
+{
+    std::size_t count = overdefinedCount(sketch);
+    for (int id : constrIds) {
+        if (count == 0) {
+            return;
+        }
+        const std::vector<Sketcher::Constraint*>& constraints = sketch->Constraints.getValues();
+        if (id < 0 || id >= static_cast<int>(constraints.size())
+            || !constraints[id]->isDimensional() || !constraints[id]->isDriving) {
+            continue;
+        }
+        if (sketch->setDriving(id, false) != 0) {
+            continue;
+        }
+        std::size_t driven = overdefinedCount(sketch);
+        if (driven < count) {
+            count = driven;
+            continue;
+        }
+        sketch->setDriving(id, true);
+        sketch->solve();
+    }
+}
+
 }  // namespace
 
 void SketcherGui::askDatumValues(
@@ -173,6 +210,10 @@ void SketcherGui::askDatumValues(
     bool newConstraints = request == DatumRequest::NewConstraints;
     bool show = !newConstraints || hGrp->GetBool("ShowDialogOnDistanceConstraint", true);
     bool inPlace = hGrp->GetBool("DimensionValueInPlace", true);
+
+    if (newConstraints) {
+        makeOverdefiningDriven(sketch, constrIds);
+    }
 
     std::vector<int> ids;
     const std::vector<Sketcher::Constraint*>& constraints = sketch->Constraints.getValues();

@@ -1405,6 +1405,20 @@ TEST(SolveOwner, equivalentPiecesResolveToTheFirstPiece)
         << outcomes[0].evidence;
 }
 
+TEST(SolveOwner, equivalentPiecesBreakAnAttachment)
+{
+    //   SW19 (a): an attachment's face cut in two breaks though both pieces give one placement
+    SplitFace names;
+    auto input = names.input([](const std::string&, const std::string&) { return true; });
+    input.entries[0].piecesBreak = true;
+
+    auto outcomes = Data::solveOwner(input);
+
+    EXPECT_EQ(outcomes[0].status, SolveStatus::Broken);
+    EXPECT_EQ(outcomes[0].candidates, (std::vector<std::string> {"Face2", "Face3", "Face1"}));
+    EXPECT_EQ(outcomes[0].evidence, "split into 2 pieces");
+}
+
 TEST(SolveOwner, equivalentPiecesWithDifferentResultsBreak)
 {
     SplitFace names;
@@ -11632,4 +11646,283 @@ TEST(IndexMadeOnly, theRecursionFailsClosed)
     name = section({}, {name}, 1300, "CUT", 0, 'E', {"MOD"});
     EXPECT_FALSE(App::indexMadeOnly(name));
     EXPECT_TRUE(App::indexMadeOnly(name, 9));
+}
+
+// The twin walk of a reference's fingerprint reads names as the map holds them (ops#640): a name's
+// own sections in full, the names they embed as references. On the replica's Case Lid the plain
+// forms took 129 s per referenced edge, and one face's name gigabytes.
+#include <App/NameTable.h>
+
+TEST(NameAncestry, twinKeyOfOwnSectionsIsThePlainForms)
+{
+    auto& table = Data::NameTable::instance();
+    const auto ref = [&](const std::string& content) {
+        return Data::NameTable::makeRef(*table.intern(content));
+    };
+    HoledBend h;
+    const std::string two = h.cyl + "|" + section({}, {}, 12, "FUS", 0, 'F', {"MOD"});
+    const std::string deep = section({}, {h.hole1, h.seam1}, 13, "CUT", 0, 'V', {"GEN"}, {h.seamNow});
+    // An ID no content has (indexStandIn() holds a space, which no name does)
+    const std::string absent = Data::NameTable::makeRef(Data::NameTable::indexStandIn(77));
+    std::vector<std::string> names = {
+        "",
+        h.edge1,
+        two,
+        ref(two),                              // a whole name behind a reference
+        ref(ref(two)),                         // behind two
+        ref(two) + "|" + section({}, {}, 14, "FLT", 0, 'F', {"MOD"}),           // a split piece's prefix
+        ref(ref(two) + "|" + section({}, {}, 14, "FLT", 0, 'F', {"MOD"})) + "|"
+            + section({}, {}, 15, "CHF", 0, 'F', {"MOD"}),                      // a prefix in a prefix
+        ref("") + "|" + section({}, {}, 14, "FLT", 0, 'F', {"MOD"}),            // an empty prefix
+        absent,
+        absent + "|" + section({}, {}, 14, "FLT", 0, 'F', {"MOD"}),
+        table.toInterned(deep),                // references in both name lists, two deep
+        table.toInterned(two + "|" + deep),
+        "F1;" + ref(h.cyl) + "," + ref(two) + ";t;MKR;1;E;_;_;" + absent,
+        "F1;x^;y^|z;t;MKR;1;E;_;_;_",
+        "F1;_;_;MKR;1;E;_;_;_;",               // an empty last field
+        // A list of two with its last entry empty: the table holds the empty entry as a reference
+        table.toInterned("F1;_;_;MKR;1;E;_;_;" + Data::MappedName::escapeString(h.edge1) + ","),
+        table.toInterned("F1;" + Data::MappedName::escapeString(h.edge1) + ",;7;MKR;1;E;_;_;_"),
+        table.toInterned("F1;,;7;MKR;1;E;_;_;,"),
+        // A reference where no reference stands for a name: a section's first field
+        ref(two) + ";_;7;MKR;1;E;_;_;_",
+        // A text as long as a reference that ends in the escape character: its `|` is no delimiter
+        "~" + std::string(Data::NameTable::RefLength - 2, 'a') + "^|"
+            + section({}, {}, 14, "FLT", 0, 'F', {"MOD"}),
+        // A section of two fields whose list ends in an empty entry
+        table.toInterned("F1;" + Data::MappedName::escapeString(h.edge1) + ","),
+        table.toInterned(two + "|F1;" + Data::MappedName::escapeString(h.edge1) + ","),
+    };
+    // Not pinned, outside the grammar: a table content that ends in the escape character (`a;~X;c`
+    // with X = `x^`). The encoder ends no field in one (NameTable's splitTopLevel() relies on it),
+    // and the plain form would swallow the delimiter after the reference, which the own sections
+    // keep: the two keys differ there.
+    for (const auto& name : names) {
+        EXPECT_EQ(App::twinKeyForTesting(name, false), App::twinKeyForTesting(name, true)) << name;
+        // The own sections of a name hold the plain form's fields besides its name lists
+        EXPECT_EQ(Data::ownSectionsOf(table.toPlain(name)), table.toPlain(name)) << name;
+        EXPECT_EQ(table.toPlain(Data::ownSectionsOf(name)), table.toPlain(name)) << name;
+    }
+}
+
+TEST(NameAncestry, twinNamesAsTheMapHoldsThem)
+{
+    // isTwinName() of interned names is the plain names' answer
+    auto& table = Data::NameTable::instance();
+    HoledBend h;
+    const auto rank = [&](int index, const std::vector<std::string>& flags) {
+        return section({}, {h.edge1, h.cyl}, 11, "CUT", index, 'V', flags);
+    };
+    const auto told = [&](const std::vector<std::string>& connected) {
+        return section({}, {h.edge1, h.cyl}, 11, "CUT", 0, 'E', {"GEN"}, connected);
+    };
+    // Twins below the top level: a piece made from each of two twins
+    const auto above = [&](const std::string& below) {
+        return section({}, {below, h.cyl}, 12, "FLT", 0, 'F', {"GEN"});
+    };
+    const std::vector<std::string> names = {
+        rank(0, {"GEN"}),
+        rank(1, {"GEN"}),
+        rank(1, {"GEN", "ORD"}),
+        told({}),
+        told({h.x0}),
+        told({h.edge1}),
+        above(rank(0, {"GEN"})),
+        above(rank(1, {"GEN", "ORD"})),
+        above(told({h.x0})),
+        h.cyl,
+        h.cyl + "|" + section({}, {}, 12, "FUS", 0, 'F', {"MOD"}),
+        "F1;_;_;MKR;1;E;_;_;" + Data::MappedName::escapeString(h.edge1) + ",",
+        "F1;_;_;MKR;1;E;_;_;" + Data::MappedName::escapeString(h.edge1) + ","
+            + Data::MappedName::escapeString(h.cyl),
+        // A list's trailing empty entry, with and without ORD: the table holds the entry as a
+        // reference to the empty name, which reads as the plain form's empty entry
+        "F1;_;_;MKR;1;E;_;ORD;" + Data::MappedName::escapeString(h.edge1) + ",",
+        "F1;" + Data::MappedName::escapeString(h.edge1) + ",;7;MKR;1;E;_;_;_",
+        "F1;" + Data::MappedName::escapeString(h.edge1) + ",;7;MKR;1;E;_;ORD;_",
+    };
+    for (const auto& a : names) {
+        for (const auto& b : names) {
+            const bool plain = Data::isTwinName(a, b);
+            // The twin index's digest never rules out a pair of twins (ops#640)
+            if (plain) {
+                const auto digestA = App::twinDigestForTesting(table.toInterned(a));
+                const auto digestB = App::twinDigestForTesting(table.toInterned(b));
+                EXPECT_TRUE(!digestA || !digestB || *digestA == *digestB) << a << " | " << b;
+                EXPECT_TRUE(digestA.has_value()) << a;
+            }
+            const std::string storedA = table.toInterned(a);
+            const std::string storedB = table.toInterned(b);
+            EXPECT_EQ(Data::isTwinName(Data::ownSectionsOf(storedA), Data::ownSectionsOf(storedB)), plain)
+                << a << "\n" << b;
+            EXPECT_EQ(Data::isTwinName(storedA, storedB), plain) << a << "\n" << b;
+            EXPECT_EQ(Data::isTwinName(Data::ownSectionsOf(storedA), b), plain) << a << "\n" << b;
+        }
+    }
+}
+
+TEST(NameAncestry, twinNamesOfADeepHistoryAreToldWithoutTheirPlainForms)
+{
+    // Forty generations, each name made from the name before it twice: a plain form holds 2^40
+    // names. Two such chains that differ by the ORD flag at the bottom are twins, and a third with
+    // another tag at the bottom is not. Told through the references: a pair of references found
+    // the same is kept, so each generation's pair is tested once, not once per pair above it
+    // (2^40 tests)
+    auto& table = Data::NameTable::instance();
+    HoledBend h;
+    const auto stored = [&](const std::string& name) {
+        return Data::NameTable::makeRef(*table.intern(name));
+    };
+    const auto bottom = [&](int tag, bool ordered) {
+        const std::vector<std::string> flags = ordered ? std::vector<std::string> {"GEN", "ORD"}
+                                                       : std::vector<std::string> {"GEN"};
+        return stored(section({}, {stored(h.edge1), stored(h.cyl)}, tag, "CUT", 0, 'E', flags));
+    };
+    const auto grown = [&](std::string name) {
+        for (int generation = 0; generation < 40; ++generation) {
+            name = stored(section({}, {name, name}, 100 + generation, "FLT", 0, 'E', {"GEN"}));
+        }
+        return name;
+    };
+    const std::string first = grown(bottom(11, false));
+    const std::string second = grown(bottom(11, true));
+    const std::string other = grown(bottom(12, false));
+    // As the map holds them, and in their own sections
+    EXPECT_TRUE(Data::isTwinName(first, second));
+    EXPECT_TRUE(Data::isTwinName(Data::ownSectionsOf(second), Data::ownSectionsOf(first)));
+    EXPECT_FALSE(Data::isTwinName(first, other));
+    EXPECT_FALSE(Data::isTwinName(Data::ownSectionsOf(first), Data::ownSectionsOf(other)));
+    EXPECT_FALSE(Data::isTwinName(first, first));
+    EXPECT_EQ(App::twinKeyForTesting(first, false), App::twinKeyForTesting(second, false));
+    // The twin index's digest: the same for the twins, read once per entry (2^40 names plain)
+    ASSERT_TRUE(App::twinDigestForTesting(first).has_value());
+    EXPECT_EQ(App::twinDigestForTesting(first), App::twinDigestForTesting(second));
+    EXPECT_NE(App::twinDigestForTesting(first), App::twinDigestForTesting(other));
+}
+
+TEST(NameAncestry, twinNamesTheTableLearnsLaterAreTwins)
+{
+    // Two names that each embed a reference the table doesn't know are no twins; once the table
+    // holds the two contents, which are twins, they are: a no isn't kept
+    auto& table = Data::NameTable::instance();
+    HoledBend h;
+    const auto stored = [&](const std::string& name) {
+        return Data::NameTable::makeRef(*table.intern(name));
+    };
+    const auto below = [&](bool ordered) {
+        const std::vector<std::string> flags = ordered ? std::vector<std::string> {"GEN", "ORD"}
+                                                       : std::vector<std::string> {"GEN"};
+        return section({}, {stored(h.edge1), stored(h.cyl)}, 987651, "CUT", 0, 'E', flags);
+    };
+    const auto notYet = [&](const std::string& content) {
+        return Data::NameTable::makeRef(table.idOf(content));
+    };
+    ASSERT_FALSE(table.lookup(table.idOf(below(false))).has_value());
+    ASSERT_FALSE(table.lookup(table.idOf(below(true))).has_value());
+    const auto above = [&](const std::string& reference) {
+        return stored(section({}, {reference, stored(h.cyl)}, 987652, "FLT", 0, 'E', {"GEN"}));
+    };
+    const std::string first = above(notYet(below(false)));
+    const std::string second = above(notYet(below(true)));
+    EXPECT_FALSE(Data::isTwinName(first, second));
+    EXPECT_FALSE(Data::isTwinName(first, second));
+    table.intern(below(false));
+    table.intern(below(true));
+    EXPECT_TRUE(Data::isTwinName(first, second));
+    EXPECT_TRUE(Data::isTwinName(second, first));
+}
+
+// R1's next step (ops#640, notes/names-bounded.md): an exact reference's tests at every recompute
+// (App's exactNeedsSolving(): isOrderedName(), isMarkedCapName(), isMarkedPieceName()) and the
+// made-by-its-target test (the last section's tag and flags) read a name's own sections, never
+// its plain form. They answer as for the plain form.
+TEST(NameAncestry, exactReferenceTestsReadOwnSections)
+{
+    auto& table = Data::NameTable::instance();
+    const auto ref = [&](const std::string& content) {
+        return Data::NameTable::makeRef(*table.intern(content));
+    };
+    HoledBend h;
+    const std::string two = h.cyl + "|" + section({}, {}, 12, "FUS", 0, 'F', {"MOD"});
+    // A mark of two sections whose last is an edge: a face before it, so that reading the mark's
+    // first section instead of its last tells
+    const std::string edgeAfterFace = h.cyl + "|" + section({}, {}, 12, "FUS", 0, 'E', {"MOD"});
+    const auto cap = [&](const std::vector<std::string>& marks,
+                         std::vector<std::string> flags = {"PRJ", "MOD"},
+                         char type = 'F') {
+        return section({}, {}, 21, "CUT", 0, type, flags, marks);
+    };
+    std::vector<std::string> names = {
+        h.cyl,
+        two,
+        cap({h.cyl}),                            // a marked cap, its mark a face alone
+        cap({two}),                              // a face of two sections
+        cap({edgeAfterFace}),                    // an edge: no face alone
+        cap({h.edge1}),
+        cap({h.cyl, h.edge1}),                   // two marks
+        cap({h.cyl}, {"PRJ", "MOD", "ORD"}),     // ordered
+        cap({h.cyl}, {"PRJ", "MOD"}, 'E'),       // an edge's piece
+        cap({}, {"PRJ", "MOD"}),                 // no marks
+        cap({ref(h.cyl)}),                       // marks as references
+        cap({ref(two)}),
+        cap({ref(edgeAfterFace)}),
+        cap({ref(ref(two))}),
+        two + "|" + cap({h.cyl}),                // a cap's section after a prefix
+        ref(two) + "|" + cap({ref(edgeAfterFace)}),
+        ref(two + "|" + cap({h.cyl})) + "|" + section({}, {}, 30, "FLT", 0, 'F', {"MOD"}),
+        section({}, {h.edge1, h.cyl}, 11, "CUT", 1, 'V', {"GEN", "ORD"}),
+        ref(two) + "|" + section({}, {ref(h.edge1)}, 13, "CUT", 0, 'E', {"GEN"}),
+    };
+    const auto last = [](const std::string& name) {
+        const auto& decoded = Data::MappedName::getDecodedMappedName(name);
+        if (decoded.empty()) {
+            return std::string("-");
+        }
+        std::string out = decoded.back().iterationTag;
+        for (const char* flag : {"MOD", "PRJ", "GEN", "ORD"}) {
+            out += decoded.back().hasMapperFlag(flag) ? std::string(";") + flag : std::string();
+        }
+        return out;
+    };
+    for (const auto& name : names) {
+        const std::string plain = table.toPlain(name);
+        for (const auto& form : {name, table.toInterned(plain)}) {
+            const std::string own = Data::ownSectionsOf(form);
+            EXPECT_EQ(Data::isOrderedName(own), Data::isOrderedName(plain)) << form;
+            EXPECT_EQ(Data::isMarkedCapName(own), Data::isMarkedCapName(plain)) << form;
+            EXPECT_EQ(Data::isMarkedPieceName(own), Data::isMarkedPieceName(plain)) << form;
+            EXPECT_EQ(last(own), last(plain)) << form;
+        }
+    }
+    // Pinned answers, so that the equalities above aren't both wrong
+    EXPECT_TRUE(Data::isMarkedCapName(Data::ownSectionsOf(cap({ref(two)}))));
+    EXPECT_FALSE(Data::isMarkedCapName(Data::ownSectionsOf(cap({ref(edgeAfterFace)}))));
+    const std::string ordered = cap({ref(h.cyl)}, {"PRJ", "MOD", "ORD"});
+    const std::string edgePiece = cap({ref(h.cyl)}, {"PRJ", "MOD"}, 'E');
+    EXPECT_FALSE(Data::isMarkedCapName(Data::ownSectionsOf(ordered)));
+    EXPECT_TRUE(Data::isMarkedPieceName(Data::ownSectionsOf(edgePiece)));
+}
+
+TEST(NameAncestry, exactReferenceTestsOfADeepHistoryReadNoPlainForm)
+{
+    // Forty generations, each made from the one before it twice: a plain form of 2^40 names. A
+    // marked cap marked by the last generation, after it: the tests read its own sections
+    auto& table = Data::NameTable::instance();
+    HoledBend h;
+    const auto stored = [&](const std::string& name) {
+        return Data::NameTable::makeRef(*table.intern(name));
+    };
+    std::string face = stored(h.cyl);
+    for (int generation = 0; generation < 40; ++generation) {
+        face = stored(section({}, {face, face}, 200 + generation, "FLT", 0, 'F', {"GEN"}));
+    }
+    const std::string top =
+        face + "|" + section({}, {}, 300, "CUT", 0, 'F', {"PRJ", "MOD"}, {face});
+    const std::string own = Data::ownSectionsOf(top);
+    EXPECT_LT(own.size(), 1000U);
+    EXPECT_TRUE(Data::isMarkedCapName(own));
+    EXPECT_TRUE(Data::isMarkedPieceName(own));
+    EXPECT_FALSE(Data::isOrderedName(own));
+    EXPECT_EQ(Data::MappedName::getDecodedMappedName(own).back().iterationTag, "300");
 }

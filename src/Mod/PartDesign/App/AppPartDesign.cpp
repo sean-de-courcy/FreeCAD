@@ -37,6 +37,7 @@
 #include "FeatureBoolean.h"
 #include "FeatureChamfer.h"
 #include "FeatureDefeaturing.h"
+#include "FeatureFacePattern.h"
 #include "FeatureDraft.h"
 #include "FeatureDressUp.h"
 #include "FeatureFillet.h"
@@ -53,6 +54,7 @@
 #include "FeaturePipe.h"
 #include "FeaturePocket.h"
 #include "FeaturePolarPattern.h"
+#include "FeatureCurvePattern.h"
 #include "FeaturePrimitive.h"
 #include "FeatureRevolution.h"
 #include "FeatureScaled.h"
@@ -65,6 +67,15 @@
 #include "Retarget.h"
 #include "ContainerMoves.h"
 #include "Studio.h"
+#include "StudioVariables.h"
+#include "StudioConfig.h"
+#include "StudioList.h"
+#include "FeatureApply.h"
+
+namespace PartDesign
+{
+void registerPartMirrorResync();  // StudioList.cpp (ops#654 slice 9; declared where used)
+}  // namespace PartDesign
 
 
 namespace PartDesign
@@ -93,10 +104,18 @@ PyMOD_INIT_FUNC(_PartDesign)
     PartDesign::registerParkedReferenceProvider();
     // Parked lines follow their objects through import, merge and paste (ops#158)
     PartDesign::registerParkedImport();
+    // Part Studio variables have a place in the history (ops#723). Before registerHistoryImport:
+    // a deleted row's variables move up while the row (a studio owner and its steps) is still
+    // listed, before the list drops it
+    PartDesign::registerStudioVariables();
     // A copied or pasted feature is listed as the newest, not at its source's place (ops#632)
     PartDesign::registerHistoryImport();
     // A container moved by an expression mid-recompute reruns its readers then (ops#342)
     PartDesign::registerContainerMoves();
+    // A part mirror's Add that consumes its source re-projects the list after a recompute
+    // (ops#654 slice 9)
+    PartDesign::registerPartMirrorResync();
+    PartDesign::registerConfigurationHooks();  // ops#671
     Base::Console().log("Loading Part Design module… done\n");
 
 
@@ -120,6 +139,7 @@ PyMOD_INIT_FUNC(_PartDesign)
     PartDesign::Mirrored                    ::init();
     PartDesign::LinearPattern               ::init();
     PartDesign::PolarPattern                ::init();
+    PartDesign::CurvePattern                ::init();
     PartDesign::Scaled                      ::init();
     PartDesign::MultiTransform              ::init();
     PartDesign::Hole                        ::init();
@@ -135,6 +155,11 @@ PyMOD_INIT_FUNC(_PartDesign)
     PartDesign::Draft                       ::init();
     PartDesign::Thickness                   ::init();
     PartDesign::Defeaturing                 ::init();
+    // FreeCAD-CH (ops#655 T8): Onshape's Face pattern
+    PartDesign::FacePattern                 ::init();
+    PartDesign::FaceLinearPattern           ::init();
+    PartDesign::FacePolarPattern            ::init();
+    PartDesign::FaceMirrored                ::init();
     PartDesign::Pipe                        ::init();
     PartDesign::AdditivePipe                ::init();
     PartDesign::SubtractivePipe             ::init();
@@ -180,6 +205,10 @@ PyMOD_INIT_FUNC(_PartDesign)
     PartDesign::AdditiveWedge               ::init();
     PartDesign::SubtractiveWedge            ::init();
     PartDesign::FeatureBase                 ::init();
+    // FreeCAD-CH ops#654: studio features
+    PartDesign::StudioList                  ::init();
+    PartDesign::StudioConfig                ::init();  // ops#671
+    PartDesign::FeatureApply                ::init();
 
     PartDesign::Measure ::initialize();
     // clang-format on

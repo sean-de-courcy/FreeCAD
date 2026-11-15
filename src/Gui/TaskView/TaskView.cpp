@@ -24,15 +24,20 @@
 #include <QAbstractSpinBox>
 #include <QActionEvent>
 #include <QApplication>
+#include <QCheckBox>
 #include <QCursor>
 #include <QCoreApplication>
 #include <QDockWidget>
+#include <QEvent>
 #include <QLabel>
 #include <QLineEdit>
 #include <QPointer>
 #include <QPushButton>
+#include <QRadioButton>
+#include <QSignalBlocker>
 #include <QTimer>
 #include <QVBoxLayout>
+#include <functional>
 
 #include <FCConfig.h>
 
@@ -42,6 +47,7 @@
 #include <Gui/Application.h>
 #include <Gui/Document.h>
 #include <Gui/MainWindow.h>
+#include <Gui/View3DInventor.h>
 #include <Gui/ViewProviderDocumentObject.h>
 #include <Gui/OverlayManager.h>
 
@@ -58,8 +64,170 @@
 using namespace Gui::TaskView;
 namespace sp = std::placeholders;
 
+namespace Gui::TaskView
+{
+/// FreeCAD-CH (ops#640 round 8): what the edit status banner says of the edited object's error
+/// or warning text, in a workbench's words (PartDesign: the plain words of its rows' tooltips,
+/// under the Onshape keymap); the text itself while none is set. Declared where it is used (no
+/// header names it)
+using EditStatusText = std::function<QString(const App::DocumentObject*, const QString&)>;
+GuiExport void setEditStatusText(EditStatusText text);
+}  // namespace Gui::TaskView
+
 namespace
 {
+Gui::TaskView::EditStatusText& editStatusText()
+{
+    static Gui::TaskView::EditStatusText text;
+    return text;
+}
+// FreeCAD-CH (ops#640, rank 38): the Enter TaskView::keyPressEvent handles came from the graphics
+// area (GraphicsEnterFilter), wherever the focus is
+bool enterFromGraphics = false;
+
+// FreeCAD-CH (ops#640, rank 38): whether `widget` is in a 3D view (the graphics area)
+bool isInGraphics(const QWidget* widget)
+{
+    for (const QWidget* w = widget; w; w = w->parentWidget()) {
+        if (qobject_cast<const Gui::View3DInventor*>(w)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// FreeCAD-CH (ops#640, hands-on C-4): whether a sketch is in edit. Its editor takes Enter in the
+// graphics area itself (ViewProviderSketch::keyPressed, as the Fillet tool's previewed corner
+// does), so Enter there never accepts a dialog. By type name: Gui doesn't link the Sketcher
+bool sketchInEdit()
+{
+    Gui::Document* doc = Gui::Application::Instance ? Gui::Application::Instance->editDocument()
+                                                    : nullptr;
+    Gui::ViewProvider* vp = doc ? doc->getInEdit() : nullptr;
+    if (!vp) {
+        return false;
+    }
+    const Base::Type sketchType = Base::Type::fromName("SketcherGui::ViewProviderSketch");
+    return !sketchType.isBad() && vp->isDerivedFrom(sketchType);
+}
+
+// FreeCAD-CH (ops#640, hands-on F10): a field of the open dialog showing an unresolved #name
+// (QuantitySpinBox's `unresolvedVariable`) disables the dialog's OK, as Onshape's check is
+// disabled until the name resolves, and Enter in the graphics area does nothing meanwhile. The
+// OK carries this mark while the rule holds it, so the rule enables only an OK it disabled
+constexpr const char* unresolvedBlocksOk = "unresolvedBlocksOk";
+
+void updateUnresolvedBlock()
+{
+    Gui::TaskView::TaskView* view = Gui::Control().taskPanel();
+    std::optional<Gui::TaskView::TaskInfo> active = view ? view->currentTaskInfo() : std::nullopt;
+    if (!active || !active->ActiveCtrl || !active->taskPanel) {
+        return;
+    }
+    QPushButton* ok = active->ActiveCtrl->standardButtons()->button(QDialogButtonBox::Ok);
+    if (!ok) {
+        return;
+    }
+    const QList<QWidget*> widgets = active->taskPanel->findChildren<QWidget*>();
+    const bool unresolved = std::ranges::any_of(widgets, [](const QWidget* widget) {
+        return widget->property("unresolvedVariable").toBool();
+    });
+    const bool blocked = ok->property(unresolvedBlocksOk).toBool();
+    if (unresolved && !blocked && ok->isEnabled()) {
+        ok->setProperty(unresolvedBlocksOk, true);
+        ok->setEnabled(false);
+    }
+    else if (!unresolved && blocked) {
+        ok->setProperty(unresolvedBlocksOk, false);
+        ok->setEnabled(true);
+    }
+}
+
+/// FreeCAD-CH (ops#640, J21 A0): Esc discards a value typed in the focused field of the task
+/// view and not committed yet. The field (the spin box, not its line edit) loses its focus with
+/// its signals blocked, so its focus-out commits nothing; the popup reason keeps QuantitySpinBox
+/// from binding a typed #name. Other focus (a button, a list, the 3D view) is left alone.
+void discardTypedValue(QWidget* view, QWidget* focus)
+{
+    if (!focus || !view || !view->isAncestorOf(focus)) {
+        return;
+    }
+    QWidget* field = focus;
+    for (QWidget* w = focus; w && w != view; w = w->parentWidget()) {
+        if (qobject_cast<QAbstractSpinBox*>(w)) {
+            field = w;
+            break;
+        }
+    }
+    if (!qobject_cast<QAbstractSpinBox*>(field) && !qobject_cast<QLineEdit*>(field)) {
+        return;
+    }
+    const QSignalBlocker blockField(field);
+    auto spin = qobject_cast<QAbstractSpinBox*>(field);
+    QLineEdit* line = spin ? spin->findChild<QLineEdit*>() : nullptr;
+    const QSignalBlocker blockLine(line);
+    view->setFocus(Qt::PopupFocusReason);
+}
+
+/** FreeCAD-CH (ops#640, rank 38): Enter in the graphics area with a dialog open goes to the task
+ * view, which accepts the dialog as Onshape's Enter does there (hands-on R6). A field shown in the
+ * view keeps its Enter, which commits its value. Installed on the application once.
+ */
+class GraphicsEnterFilter: public QObject
+{
+public:
+    using QObject::QObject;
+
+protected:
+    bool eventFilter(QObject* watched, QEvent* event) override
+    {
+        if (event->type() == QEvent::DynamicPropertyChange) {
+            // A field of the task view resolved or lost its #name (hands-on F10)
+            auto change = static_cast<QDynamicPropertyChangeEvent*>(event);  // NOLINT
+            if (change->propertyName() == "unresolvedVariable") {
+                auto widget = qobject_cast<QWidget*>(watched);
+                Gui::TaskView::TaskView* view = Gui::Control().taskPanel();
+                if (widget && view && view->isAncestorOf(widget)) {
+                    updateUnresolvedBlock();
+                }
+            }
+            return false;
+        }
+        if (event->type() != QEvent::KeyPress) {
+            return false;
+        }
+        auto ke = static_cast<QKeyEvent*>(event);  // NOLINT
+        if ((ke->key() != Qt::Key_Return && ke->key() != Qt::Key_Enter) || ke->isAutoRepeat()) {
+            return false;
+        }
+        auto widget = qobject_cast<QWidget*>(watched);
+        if (!widget || qobject_cast<QAbstractSpinBox*>(widget) || qobject_cast<QLineEdit*>(widget)
+            || !isInGraphics(widget) || sketchInEdit()) {
+            return false;  // a field's own Enter; the sketch editor's (a tool's, C-4)
+        }
+        Gui::TaskView::TaskView* view = Gui::Control().taskPanel();
+        std::optional<Gui::TaskView::TaskInfo> active = view ? view->currentTaskInfo() : std::nullopt;
+        if (!active || !active->ActiveCtrl || !active->ActiveCtrl->okTakesEnter()) {
+            return false;  // no dialog, the sketch editor, a renamed OK: the view's own Enter
+        }
+        // Only when the Enter clicks the OK: a disabled or hidden OK, or another default
+        // button, leaves the view its own Enter (TaskView::keyPressEvent would do nothing)
+        QPushButton* ok = active->ActiveCtrl->standardButtons()->button(QDialogButtonBox::Ok);
+        if (ok && ok->property(unresolvedBlocksOk).toBool()) {
+            return true;  // an unresolved #name in a field: nothing until it resolves (F10)
+        }
+        if (!ok || !ok->isDefault() || !ok->isVisible() || !ok->isEnabled()) {
+            return false;
+        }
+        QKeyEvent copy(QEvent::KeyPress, ke->key(), ke->modifiers(), ke->text());
+        const bool was = enterFromGraphics;
+        enterFromGraphics = true;
+        QCoreApplication::sendEvent(view, &copy);
+        enterFromGraphics = was;
+        return true;
+    }
+};
+
 /** The edited object's error or warning, at the top of its dialog's panel (ops#151)
  *
  * Shows the text the tree's tooltip shows: the recompute error, or the warning of a recompute
@@ -190,11 +358,15 @@ private:
         if (obj) {
             // Translated as the tree translates the status text
             const std::string typeName {obj->getTypeId().getName()};
+            auto words = [obj](const QString& text) {
+                const auto& filter = editStatusText();
+                return filter ? filter(obj, text) : text;
+            };
             if (obj->isError()) {
                 const char* text = obj->getDocument()->getErrorDescription(obj);
                 html = format(
                     QCoreApplication::translate("Gui::TaskView::TaskView", "Error:"),
-                    text && *text ? QCoreApplication::translate(typeName.c_str(), text)
+                    text && *text ? words(QCoreApplication::translate(typeName.c_str(), text))
                                   : QCoreApplication::translate(
                                         "Gui::TaskView::TaskView",
                                         "The feature failed to recompute."
@@ -209,7 +381,7 @@ private:
                 const char* text = obj->getWarningDescription();
                 html = format(
                     QCoreApplication::translate("Gui::TaskView::TaskView", "Warning:"),
-                    text ? QCoreApplication::translate(typeName.c_str(), text) : QString()
+                    text ? words(QCoreApplication::translate(typeName.c_str(), text)) : QString()
                 );
                 style = QStringLiteral(
                     "QLabel#TaskEditStatus { background-color: rgba(230, 160, 0, 45);"
@@ -253,6 +425,11 @@ private:
     std::vector<fastsignals::scoped_connection> connections;
 };
 }  // namespace
+
+void Gui::TaskView::setEditStatusText(EditStatusText text)
+{
+    editStatusText() = std::move(text);
+}
 
 
 //**************************************************************************
@@ -467,6 +644,13 @@ TaskView::TaskView(QWidget* parent)
     );
     // NOLINTEND
 
+    // FreeCAD-CH (ops#640, rank 38): Enter in the graphics area accepts the open dialog
+    static QPointer<GraphicsEnterFilter> graphicsEnter;
+    if (!graphicsEnter && qApp) {
+        graphicsEnter = new GraphicsEnterFilter(qApp);
+        qApp->installEventFilter(graphicsEnter);
+    }
+
     setShowTaskWatcher(hGrp->GetBool("ShowTaskWatcher", true));
     connectShowTaskWatcherSetting = hGrp->Manager()->signalParamChanged.connect(
         [this](ParameterGrp* Param, ParameterGrp::ParamType Type, const char* name, const char* value) {
@@ -564,19 +748,23 @@ void TaskView::keyPressEvent(QKeyEvent* ke)
                 }
                 return;
             }
-            // The box's OK (ops#605 2a) accepts only from a field the user types in, as Onshape's
-            // Enter after a value: a list's Enter opens its item, a check box's does nothing. Not
-            // in the sketch editor, nor a renamed OK (Delete, Run Check): Qt makes the box's first
-            // accept button the default when it shows, so its default flag doesn't tell
-            QWidget* typed = QApplication::focusWidget();
-            const bool fromField = qobject_cast<QAbstractSpinBox*>(typed)
-                || qobject_cast<QLineEdit*>(typed);
+            // The box's OK (ops#605 2a) accepts as Onshape's Enter does (ops#640, rank 38): from a
+            // check box or a radio button (hands-on B-1) and from the graphics area (R6, through
+            // GraphicsEnterFilter). In a value field Enter only commits the value, which the field
+            // did already; a list's Enter opens its item. Not in the sketch editor, nor a renamed
+            // OK (Delete, Run Check): Qt makes the box's first accept button the default when it
+            // shows, so its default flag doesn't tell. The graphics area's Enter is the sketch
+            // editor's while a sketch is in edit (hands-on C-4: a tool's, as the Fillet preview's)
+            QWidget* focus = QApplication::focusWidget();
+            const bool fromGraphics = (enterFromGraphics || isInGraphics(focus)) && !sketchInEdit();
+            const bool accepts = qobject_cast<QCheckBox*>(focus)
+                || qobject_cast<QRadioButton*>(focus) || fromGraphics;
             QPushButton* boxOk = active->ActiveCtrl->standardButtons()->button(QDialogButtonBox::Ok);
             // get all buttons of the complete task dialog
             QList<QPushButton*> list = this->findChildren<QPushButton*>();
             for (auto pb : list) {
                 if (pb->isDefault() && pb->isVisible()) {
-                    if (pb == boxOk && (!fromField || !active->ActiveCtrl->okTakesEnter())) {
+                    if (pb == boxOk && (!accepts || !active->ActiveCtrl->okTakesEnter())) {
                         return;
                     }
                     if (pb->isEnabled()) {
@@ -596,6 +784,13 @@ void TaskView::keyPressEvent(QKeyEvent* ke)
             }
         }
         else if (ke->key() == Qt::Key_Escape && active->ActiveDialog->isEscapeButtonEnabled()) {
+            // FreeCAD-CH (ops#640, journey J21 A0): a value typed in the focused field and not
+            // committed yet is discarded, as Onshape's Esc discards it. Cancel ran with the field
+            // still focused, and the field's focus-out at the dialog's close committed the typed
+            // value after the reject restored the old one (into the previous undo step). The
+            // field gives up its focus first with its signals blocked; the popup reason keeps
+            // QuantitySpinBox from binding a typed #name
+            discardTypedValue(this, QApplication::focusWidget());
             // get only the buttons of the button box
             QDialogButtonBox* box = active->ActiveCtrl->standardButtons();
             QList<QAbstractButton*> list = box->buttons();

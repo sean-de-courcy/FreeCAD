@@ -380,13 +380,13 @@ class TestStudioSequence(unittest.TestCase):
         self.assertAlmostEqual(self.body2.Shape.BoundBox.ZMin, 7, places=6)
 
     def testBarWithoutHint(self):
-        """Without a hint the bar sits before the first held row: a Body2 sketch its Body
-        doesn't hold shows above it."""
+        """Without a hint the bar sits above the sketches waiting with the held rows: a sketch
+        whose users are all held is listed below the bar with them (ops#640 rank 34)."""
         self.interleaved()
         PartDesign.rollStudioTo(self.doc, self.box)
-        self.assertEqual(PartDesign.studioBarAfter(self.doc).Name, "SkB")
+        self.assertEqual(PartDesign.studioBarAfter(self.doc).Name, "Box")
         PartDesign.rollStudioTo(self.doc, None)
-        self.assertEqual(PartDesign.studioBarAfter(self.doc).Name, "SkA")
+        self.assertIsNone(PartDesign.studioBarAfter(self.doc))
         self.assertIsNone(PartDesign.studioBarAfter(self.doc, None))
         PartDesign.rollStudioToEnd(self.doc)
         self.assertEqual(PartDesign.studioBarAfter(self.doc).Name, "PocketB")
@@ -486,7 +486,7 @@ class TestHistoryOrder(unittest.TestCase):
         skN = sketch(self.body1, "SkN", (7, 7, 9, 9), z=5)
         padN = self.pad(self.body1, "PadN", skN, 1)
         self.doc.recompute()
-        expected = ["SkA", "PadA", "SkC", "SkA2", "SkN", "PadN", "PadC", "PadA2"]
+        expected = ["SkA", "PadA", "SkN", "PadN", "SkC", "PadC", "SkA2", "PadA2"]
         self.assertEqual(self.order(), expected)
         self.assertEqual(PartDesign.studioBarAfter(self.doc).Name, "PadN")
         self.assertEqual(self.body1.Tip, padN)
@@ -527,24 +527,79 @@ class TestHistoryOrder(unittest.TestCase):
         self.assertEqual(self.names(self.body2.Group), ["SkC", "PadC"])
         self.checkVolumes(500 + 32, 400)
 
-    def testDropInsideABodyCarriesTheSketch(self):
-        """Body1's boss Pad dragged to the top: Body1's Group puts it first, with its sketch (the
-        reorder carries the inputs only it uses), and the list is the dropped order."""
+    def testDropInsideABodyWithItsSketch(self):
+        """Body1's boss Pad dragged to the top with its sketch: Body1's Group puts them first,
+        and the list is the dropped order. Alone, the Pad would go above its sketch: refused
+        (ops#640 rank 31: a drag moves only the dragged rows), and nothing changes."""
         self.twoParts()
-        self.assertTrue(PartDesign.moveInStudio(self.doc, self.padA2, None))
+        with self.assertRaisesRegex(ValueError, "'PadA2' uses 'SkA2', which would come after it"):
+            PartDesign.moveInStudio(self.doc, self.padA2, None)
+        self.assertEqual(self.names(self.body1.Group), ["SkA", "PadA", "SkA2", "PadA2"])
+        self.assertEqual(self.ranked(), [])
+        self.assertTrue(PartDesign.moveInStudio(self.doc, [self.skA2, self.padA2], None))
         self.assertEqual(self.names(self.body1.Group), ["SkA2", "PadA2", "SkA", "PadA"])
         self.assertEqual(self.order(), ["SkA2", "PadA2", "SkA", "PadA", "SkC", "PadC"])
         self.assertEqual(self.body1.Tip, self.padA)
         self.checkVolumes(500 + 32, 400)
 
     def testDropNextToItsSketch(self):
-        """Body1's boss Pad dragged to after Body1's block, above Body2: its sketch comes along
-        and Body1's Group stays as it is."""
+        """Body1's boss Pad dragged to after Body1's block, above Body2: it would go above its
+        sketch, refused; with its sketch, Body1's Group stays as it is."""
         self.twoParts()
-        self.assertTrue(PartDesign.moveInStudio(self.doc, self.padA2, self.padA))
+        with self.assertRaisesRegex(ValueError, "'PadA2' uses 'SkA2'"):
+            PartDesign.moveInStudio(self.doc, self.padA2, self.padA)
+        self.assertTrue(PartDesign.moveInStudio(self.doc, [self.skA2, self.padA2], self.padA))
         self.assertEqual(self.names(self.body1.Group), ["SkA", "PadA", "SkA2", "PadA2"])
         self.assertEqual(self.order(), ["SkA", "PadA", "SkA2", "PadA2", "SkC", "PadC"])
         self.checkVolumes(500 + 32, 400)
+
+    def holeBlock(self):
+        """ops#640 rank 31 (blind test F31, J5): Body1's 20x10x5 block; on its top face a boss
+        sketch (4x4 at x 2..6) and a hole sketch (2x2 at x 14..16), then the boss Pad (2 high) and
+        a Pocket through all from the hole sketch, which misses the boss."""
+        doc = self.doc
+        self.body1 = doc.addObject("PartDesign::Body", "Body1")
+        self.base = self.pad(self.body1, "BasePad", sketch(self.body1, "Base", (0, 0, 20, 10)), 5)
+        doc.recompute()
+        top = [(self.base, faceAt(self.base, 5))]
+        self.bossSk = sketch(self.body1, "BossSk", (2, 2, 6, 6), support=top)
+        self.holeSk = sketch(self.body1, "HoleSk", (14, 4, 16, 6), support=top)
+        doc.recompute()
+        self.boss = self.pad(self.body1, "BossPad", self.bossSk, 2)
+        self.pocket = self.body1.newObject("PartDesign::Pocket", "Pocket")
+        self.pocket.Profile = self.holeSk
+        self.pocket.Type = "ThroughAll"
+        doc.recompute()
+        self.assertEqual(self.order(), ["Base", "BasePad", "BossSk", "HoleSk", "BossPad", "Pocket"])
+        self.assertAlmostEqual(self.body1.Shape.Volume, 1000 + 32 - 20, places=3)
+
+    def testADraggedFeatureLeavesItsSketch(self):
+        """The Pocket dragged above the boss Pad moves alone: its sketch stays where it is and
+        its face reference isn't rewritten (before: the sketch came along and was re-attached);
+        the part is the same."""
+        self.holeBlock()
+        support = [(o.Name, subs) for o, subs in self.holeSk.AttachmentSupport]
+        self.assertTrue(PartDesign.moveInStudio(self.doc, self.pocket, self.holeSk))
+        self.assertEqual(self.order(), ["Base", "BasePad", "BossSk", "HoleSk", "Pocket", "BossPad"])
+        self.assertEqual(self.names(self.body1.Group), self.order())
+        self.assertEqual([(o.Name, subs) for o, subs in self.holeSk.AttachmentSupport], support)
+        self.assertIs(self.boss.BaseFeature, self.pocket)
+        self.doc.recompute()
+        self.assertEqual([o.Name for o in self.doc.Objects if not o.isValid()], [])
+        self.assertAlmostEqual(self.body1.Shape.Volume, 1000 + 32 - 20, places=3)
+
+    def testAFeatureDraggedAboveItsSketchIsRefused(self):
+        """The Pocket dragged above its sketch, or the sketch below the Pocket: refused, naming
+        both, and nothing changes."""
+        self.holeBlock()
+        before = self.order()
+        with self.assertRaisesRegex(ValueError, "'Pocket' uses 'HoleSk', which would come after it"):
+            PartDesign.moveInStudio(self.doc, self.pocket, self.bossSk)
+        with self.assertRaisesRegex(ValueError, "'Pocket' uses 'HoleSk'"):
+            PartDesign.moveInStudio(self.doc, self.holeSk, self.pocket)
+        self.assertEqual(self.order(), before)
+        self.assertEqual(self.names(self.body1.Group), before)
+        self.assertEqual(self.ranked(), [])
 
     def testDropInPlaceChangesNothing(self):
         self.twoParts()
@@ -557,7 +612,7 @@ class TestHistoryOrder(unittest.TestCase):
         self.twoParts()
         count = self.doc.UndoCount
         self.doc.openTransaction("Reorder")
-        PartDesign.moveInStudio(self.doc, self.padA2, None)
+        PartDesign.moveInStudio(self.doc, [self.skA2, self.padA2], None)
         self.doc.commitTransaction()
         self.doc.recompute()
         self.assertEqual(self.doc.UndoCount, count + 1)
@@ -597,12 +652,12 @@ class TestHistoryOrder(unittest.TestCase):
         self.checkVolumes(500 + 32, 400)
 
     def testTheBarStaysAfterItsRow(self):
-        """Without a bar given, it stays after the row it followed: rows dropped right after that
-        row are below it, and held."""
+        """Without a bar given, it stays after the row it followed (PadA: Body2's sketch waits
+        below it with its Pad, ops#640 rank 34): rows dropped below it are held."""
         self.twoParts()
         PartDesign.rollStudioTo(self.doc, self.padA)
         self.doc.recompute()
-        self.assertEqual(PartDesign.studioBarAfter(self.doc).Name, "SkC")
+        self.assertEqual(PartDesign.studioBarAfter(self.doc).Name, "PadA")
         PartDesign.moveInStudio(self.doc, [self.skA2, self.padA2], self.skC)
         self.assertEqual(self.order(), ["SkA", "PadA", "SkC", "SkA2", "PadA2", "PadC"])
         self.assertEqual(self.names((self.body1.Tip, self.body2.Tip)), ["PadA", None])
@@ -669,4 +724,225 @@ class TestHistoryOrder(unittest.TestCase):
             PartDesign.moveInStudio(self.doc, self.padC, stray)
         with self.assertRaises(TypeError):
             PartDesign.moveInStudio(self.doc, 3, None)
+        self.assertEqual(self.ranked(), [])
+
+    # ------------------------------------------------- a face traced back (report 16, ops#647)
+
+    def filletedBlock(self):
+        """Made in this order: Body1's sketch and Pad (a 20x10x5 block at the origin) and a Fillet
+        (radius 1) of the block's top edge along y = 0, which trims the top face to y >= 1; Body2's
+        sketch on that trimmed top face (a 4x4 square at x, y = 4..8) and a Pad of 2 from it."""
+        doc = self.doc
+        self.body1 = doc.addObject("PartDesign::Body", "Body1")
+        self.body2 = doc.addObject("PartDesign::Body", "Body2")
+        self.skA = sketch(self.body1, "SkA", (0, 0, 20, 10))
+        self.padA = self.pad(self.body1, "PadA", self.skA, 5)
+        doc.recompute()
+        edge = next(
+            f"Edge{i}"
+            for i, e in enumerate(self.padA.Shape.Edges, 1)
+            if all(abs(v.Point.z - 5) < 1e-9 and abs(v.Point.y) < 1e-9 for v in e.Vertexes)
+        )
+        self.fillet = self.body1.newObject("PartDesign::Fillet", "Fillet")
+        self.fillet.Base = (self.padA, [edge])
+        self.fillet.Radius = 1
+        self.body1.Tip = self.fillet
+        doc.recompute()
+        self.top = faceAt(self.fillet, 5)
+        self.assertIsNotNone(self.top)
+        self.skF = sketch(self.body2, "SkF", (4, 4, 8, 8), support=[(self.fillet, self.top)])
+        self.padF = self.pad(self.body2, "PadF", self.skF, 2)
+        doc.recompute()
+        self.assertEqual(self.order(), ["SkA", "PadA", "Fillet", "SkF", "PadF"])
+        self.filletVolume = self.body1.Shape.Volume
+        self.assertLess(self.filletVolume, 1000)
+        self.checkVolumes(self.filletVolume, 32)
+
+    def testSketchOnAFilletedFaceGoesAboveTheFillet(self):
+        """Report 16: Body2's sketch sits on the block's top face, which the Fillet only trimmed.
+        Dragged above the Fillet (with its Pad) it is put on the Pad's top face, the face the
+        Fillet trimmed, as Onshape traces the face to the feature that made it: the drop is
+        accepted, nothing moves or fails, and it is one undo step."""
+        self.filletedBlock()
+        count = self.doc.UndoCount
+        self.doc.openTransaction("Reorder")
+        self.assertTrue(PartDesign.moveInStudio(self.doc, [self.skF, self.padF], self.padA))
+        self.doc.commitTransaction()
+        self.doc.recompute()
+        self.assertEqual(self.order(), ["SkA", "PadA", "SkF", "PadF", "Fillet"])
+        support = self.skF.AttachmentSupport
+        self.assertEqual(len(support), 1)
+        self.assertIs(support[0][0], self.padA)
+        self.assertEqual(support[0][1], (faceAt(self.padA, 5),))
+        self.assertAlmostEqual(self.skF.Placement.Base.z, 5, places=9)
+        self.checkVolumes(self.filletVolume, 32)
+        self.assertAlmostEqual(self.padF.Shape.BoundBox.ZMax, 7, places=6)
+        # One undo step: back on the Fillet's face
+        self.assertEqual(self.doc.UndoCount, count + 1)
+        self.doc.undo()
+        self.doc.recompute()
+        self.assertIs(self.skF.AttachmentSupport[0][0], self.fillet)
+        self.assertEqual(self.order(), ["SkA", "PadA", "Fillet", "SkF", "PadF"])
+        self.checkVolumes(self.filletVolume, 32)
+
+    def testTheFilletIsDroppedBelowTheSketchOnItsFace(self):
+        """The same read, the other way: the Fillet dragged below Body2's Pad. The sketch is put
+        on the Pad's face and stays where it is."""
+        self.filletedBlock()
+        self.assertTrue(PartDesign.moveInStudio(self.doc, self.fillet, self.padF))
+        self.doc.recompute()
+        self.assertEqual(self.order(), ["SkA", "PadA", "SkF", "PadF", "Fillet"])
+        self.assertIs(self.skF.AttachmentSupport[0][0], self.padA)
+        self.checkVolumes(self.filletVolume, 32)
+
+    def listedFilletedBlock(self):
+        """filletedBlock() with the studio's list, which the Features list makes before every
+        drop (PartDesign.studioList(studio, True)), in the drop's step with no recompute between
+        (FeaturesView.cpp): the drag then moves the list's entries"""
+        self.filletedBlock()
+        self.assertIsNotNone(PartDesign.studioList(self.doc, True))
+        self.assertEqual(self.order(), ["SkA", "PadA", "Fillet", "SkF", "PadF"])
+
+    def testInTheListASketchOnAFilletedFaceGoesAboveTheFillet(self):
+        """ops#647, as the Features list drags: Body2's sketch on the top face the Fillet trimmed,
+        dragged alone above the Fillet, is put on the Pad's top face (z = 5): accepted, nothing
+        moves or fails, one undo step. Before, the list's drag refused it ("'SkF' uses 'Fillet'
+        of 'Body1': it can't go above it"), the report's text."""
+        self.listedFilletedBlock()
+        count = self.doc.UndoCount
+        self.doc.openTransaction("Reorder")
+        self.assertTrue(PartDesign.moveInStudio(self.doc, self.skF, self.padA))
+        self.doc.commitTransaction()
+        self.doc.recompute()
+        self.assertEqual(self.order(), ["SkA", "PadA", "SkF", "Fillet", "PadF"])
+        support = self.skF.AttachmentSupport
+        self.assertEqual(len(support), 1)
+        self.assertIs(support[0][0], self.padA)
+        self.assertEqual(support[0][1], (faceAt(self.padA, 5),))
+        self.assertAlmostEqual(self.skF.Placement.Base.z, 5, places=9)
+        self.checkVolumes(self.filletVolume, 32)
+        self.assertAlmostEqual(self.padF.Shape.BoundBox.ZMax, 7, places=6)
+        self.assertEqual(self.doc.UndoCount, count + 1)
+        self.doc.undo()
+        self.doc.recompute()
+        self.assertIs(self.skF.AttachmentSupport[0][0], self.fillet)
+        self.assertEqual(self.order(), ["SkA", "PadA", "Fillet", "SkF", "PadF"])
+        self.checkVolumes(self.filletVolume, 32)
+
+    def testInTheListASketchAndItsPadGoAboveTheFillet(self):
+        """The same, the sketch dragged with its Pad: both above the Fillet, the sketch on the
+        Pad's top face"""
+        self.listedFilletedBlock()
+        self.assertTrue(PartDesign.moveInStudio(self.doc, [self.skF, self.padF], self.padA))
+        self.doc.recompute()
+        self.assertEqual(self.order(), ["SkA", "PadA", "SkF", "PadF", "Fillet"])
+        self.assertIs(self.skF.AttachmentSupport[0][0], self.padA)
+        self.assertAlmostEqual(self.skF.Placement.Base.z, 5, places=9)
+        self.checkVolumes(self.filletVolume, 32)
+
+    def testInTheListTheFilletIsDroppedBelowTheSketchOnItsFace(self):
+        """The other way, in the list: the Fillet dragged below Body2's Pad; the sketch, which
+        doesn't move, is put on the Pad's face"""
+        self.listedFilletedBlock()
+        self.assertTrue(PartDesign.moveInStudio(self.doc, self.fillet, self.padF))
+        self.doc.recompute()
+        self.assertEqual(self.order(), ["SkA", "PadA", "SkF", "PadF", "Fillet"])
+        self.assertIs(self.skF.AttachmentSupport[0][0], self.padA)
+        self.checkVolumes(self.filletVolume, 32)
+
+    def testInTheListAnEdgeTheFilletMadeIsStillRefused(self):
+        """In the list too, a reference with no earlier version refuses the drop, writing
+        nothing: a sketch normal to the Fillet's tangent edge (y = 1), which the Pad hasn't"""
+        self.listedFilletedBlock()
+        tangent = next(
+            f"Edge{i}"
+            for i, e in enumerate(self.fillet.Shape.Edges, 1)
+            if all(abs(v.Point.z - 5) < 1e-9 and abs(v.Point.y - 1) < 1e-9 for v in e.Vertexes)
+        )
+        skE = sketch(self.body2, "SkE", (0, 0, 1, 1), support=[(self.fillet, tangent)])
+        skE.MapMode = "NormalToEdge"
+        self.doc.recompute()
+        self.assertTrue(skE.isValid())
+        before = self.order()
+        with self.assertRaisesRegex(ValueError, "'SkE' uses 'Fillet' of 'Body1'"):
+            PartDesign.moveInStudio(self.doc, skE, self.padA)
+        self.assertEqual(self.order(), before)
+        self.assertIs(skE.AttachmentSupport[0][0], self.fillet)
+        self.assertIs(self.skF.AttachmentSupport[0][0], self.fillet)
+
+    def testAnEdgeTheFilletMadeIsStillRefused(self):
+        """A reference with no earlier version still refuses the drop, writing nothing: a Body2
+        sketch normal to the Fillet's tangent edge on the top face (y = 1), an edge the Fillet
+        generated from the sharp edge (y = 0), which is another line."""
+        self.filletedBlock()
+        tangent = next(
+            f"Edge{i}"
+            for i, e in enumerate(self.fillet.Shape.Edges, 1)
+            if all(abs(v.Point.z - 5) < 1e-9 and abs(v.Point.y - 1) < 1e-9 for v in e.Vertexes)
+        )
+        skE = sketch(self.body2, "SkE", (0, 0, 1, 1), support=[(self.fillet, tangent)])
+        skE.MapMode = "NormalToEdge"
+        self.doc.recompute()
+        self.assertTrue(skE.isValid())
+        before = self.order()
+        with self.assertRaisesRegex(ValueError, "'SkE' uses 'Fillet' of 'Body1'"):
+            PartDesign.moveInStudio(self.doc, skE, self.padA)
+        self.assertEqual(self.order(), before)
+        self.assertIs(skE.AttachmentSupport[0][0], self.fillet)
+        self.assertIs(self.skF.AttachmentSupport[0][0], self.fillet)
+        self.assertEqual(self.ranked(), [])
+
+    def testAPatternCopysFaceIsRefused(self):
+        """Review sff13-r1 (Opus T1): a pattern copy's top face lies in the original's plane but
+        elsewhere; it has no earlier version. Body2's datum point at its centre, dragged above the
+        pattern, is refused (before: it went to the original's face, 20 mm away, silently)."""
+        doc = self.doc
+        self.body1 = doc.addObject("PartDesign::Body", "Body1")
+        self.body2 = doc.addObject("PartDesign::Body", "Body2")
+        plate = self.pad(self.body1, "Plate", sketch(self.body1, "SkPlate", (0, 0, 30, 10)), 2)
+        boss = self.pad(self.body1, "Boss", sketch(self.body1, "SkBoss", (0, 2, 10, 8), z=2), 3)
+        doc.recompute()
+        pattern = self.body1.newObject("PartDesign::LinearPattern", "Pattern")
+        pattern.Originals = [boss]
+        pattern.Direction = (self.body1.Origin.OriginFeatures[0], [""])
+        pattern.Mode = "Spacing"
+        pattern.Offset = 20
+        pattern.Occurrences = 2
+        self.body1.Tip = pattern
+        doc.recompute()
+        self.assertTrue(pattern.isValid())
+        copyTop = next(
+            f"Face{i}"
+            for i, f in enumerate(pattern.Shape.Faces, 1)
+            if abs(f.CenterOfMass.z - 5) < 1e-9 and abs(f.CenterOfMass.x - 25) < 1e-9
+        )
+        point = self.body2.newObject("PartDesign::Point", "PointCopy")
+        point.AttachmentSupport = [(pattern, copyTop)]
+        point.MapMode = "CenterOfMass"
+        doc.recompute()
+        self.assertAlmostEqual(point.Placement.Base.x, 25, places=6)
+        with self.assertRaisesRegex(ValueError, "'PointCopy' uses 'Pattern' of 'Body1'"):
+            PartDesign.moveInStudio(doc, point, boss)
+        self.assertIs(point.AttachmentSupport[0][0], pattern)
+        self.assertEqual(self.ranked(), [])
+        self.assertIsNotNone(plate)
+
+    def testAnEdgeTheFilletTrimmedIsStillRefused(self):
+        """Review sff13-r1 (Sonnet rl1): the top edge at x = 0 runs y = 0..10 on the Pad and
+        y = 1..10 after the Fillet, on the same line. A sketch normal to it starts at its first
+        point, so on the Pad's edge it would move by 1: the drop is refused, writing nothing."""
+        self.filletedBlock()
+        trimmed = next(
+            f"Edge{i}"
+            for i, e in enumerate(self.fillet.Shape.Edges, 1)
+            if all(abs(v.Point.z - 5) < 1e-9 and abs(v.Point.x) < 1e-9 for v in e.Vertexes)
+            and abs(e.Length - 9) < 1e-9
+        )
+        skT = sketch(self.body2, "SkT", (0, 0, 1, 1), support=[(self.fillet, trimmed)])
+        skT.MapMode = "NormalToEdge"
+        self.doc.recompute()
+        self.assertTrue(skT.isValid())
+        with self.assertRaisesRegex(ValueError, "'SkT' uses 'Fillet' of 'Body1'"):
+            PartDesign.moveInStudio(self.doc, skT, self.padA)
+        self.assertIs(skT.AttachmentSupport[0][0], self.fillet)
         self.assertEqual(self.ranked(), [])

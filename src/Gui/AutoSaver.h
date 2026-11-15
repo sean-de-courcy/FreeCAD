@@ -23,6 +23,7 @@
 
 #pragma once
 
+#include <QElapsedTimer>
 #include <QObject>
 
 #include <map>
@@ -72,6 +73,11 @@ public:
     void restoreFailedSaveAttempt();
 
 private:
+    /// FreeCAD-CH (ops#711): the pass a moment after a change, so a crash in a new document's first
+    /// minutes (before the timer's first pass) or after a step does not lose the work
+    int soonTimerId {0};
+    bool soonPending {false};
+    double lastSaveSeconds {-1.0};  // the last snapshot's time, -1 before the first
     void scheduleQueuedRetry();
     void slotDocumentBecameStable(const App::Document&);
     using Connection = fastsignals::connection;
@@ -118,12 +124,22 @@ protected:
     void slotDeleteDocument(const App::Document& Doc);
     void timerEvent(QTimerEvent* event) override;
     void saveDocument(const std::string&, AutoSaveProperty&);
+    void startSoonPass(const std::string& name);
+    int soonDelay(const AutoSaveProperty& saver) const;
+    double expectedSeconds(const AutoSaveProperty& saver) const;
+    /// The user's input (keys, clicks, drags, the wheel): a slow soon pass waits for a pause in it
+    bool eventFilter(QObject* watched, QEvent* event) override;
 
 public Q_SLOTS:
     void flushPendingSave(const QString& documentName);
 
+public:
+    /// AutoSaveProperty: a change to @p name's document; starts its soon pass unless one is pending
+    void documentChanged(const std::string& name);
+
 private:
     int timeout; /*!< Timeout in milliseconds */
+    QElapsedTimer sinceInput;
     bool compressed;
     std::map<std::string, AutoSaveProperty*> saverMap;
 };

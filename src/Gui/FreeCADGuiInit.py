@@ -298,6 +298,20 @@ class NoneWorkbench(Workbench):
         return "Gui::NoneWorkbench"
 
 
+class VariableStudioWorkbench(Workbench):
+    """A Variable Studio tab's tools (FreeCAD-CH, ops#640): the standard menus, File and Edit."""
+
+    MenuText = "Variable Studio"
+    ToolTip = "The tools of a Variable Studio tab"
+
+    def Initialize(self):
+        """Initialize this workbench."""
+
+    def GetClassName(self):
+        """Return the name of the associated C++ class."""
+        return "Gui::VariableStudioWorkbench"
+
+
 @dataclass
 class InputHint:
     """
@@ -547,6 +561,7 @@ FreeCADGui.Workbench = Workbench
 _fc_install_add_workbench_icon_wrapper(Gui)
 
 Gui.addWorkbench(_fc_patch_workbench_icon_object(NoneWorkbench()))
+Gui.addWorkbench(_fc_patch_workbench_icon_object(VariableStudioWorkbench()))
 # init modules
 InitApplications()
 

@@ -411,6 +411,18 @@ protected:
         AutoConstraint::TargetType type
     );
 
+    /// FreeCAD-CH (ops#640, rank 18): the inference onto a model vertex or edge under the cursor
+    /// when nothing of the sketch is (ModelSnap)
+    void seekModelAutoConstraint(
+        std::vector<AutoConstraint>& constraints,
+        const Base::Vector2d& Pos,
+        AutoConstraint::TargetType type
+    );
+
+    /// FreeCAD-CH (ops#640, rank 18): the GeoId an autoconstraint targets: its own, or for a model
+    /// element the external geometry linking it, linked now (GeoUndef when it can't be)
+    int resolveModelAutoConstraint(const AutoConstraint& autoConstraint);
+
     void resetLineExtensionAutoConstraintHint();
     void renderLineExtensionAutoConstraintHint() const;
 

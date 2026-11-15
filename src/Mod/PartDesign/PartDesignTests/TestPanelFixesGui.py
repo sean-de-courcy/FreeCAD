@@ -35,6 +35,7 @@ from PartDesignTests.Scenarios import models
 from PartDesignTests.Scenarios.harness import Z, face
 from PartDesignTests.TestDressUpDeleteKeyGui import reportText
 from PartDesignTests.TestExpressionFieldsGui import pump, taskButton, waitFor
+from PartDesignTests.TestCrossBodyGui import siblingEraPath  # ops#654 list on first use
 
 V = App.Vector
 XZ = App.Placement(V(0, 0, 0), App.Rotation(V(1, 0, 0), 90))  # sketch y -> global z
@@ -673,13 +674,14 @@ class TestPanelFixesGui(unittest.TestCase):
 
     # -- ops#410: Pad on a sketch of another document ---------------------------------------------
 
-    def padOnASketchOfAnotherDocument(self, ownSketch, button=None):
+    def padOnASketchOfAnotherDocument(self, ownSketch):
         """Pad, with an active body, on a sketch selected in another document (decision 104: a
-        command's selection holds only the active document's objects, ops#390). Returns the
-        modals shown, the other document's label and, if a pick dialog was left open, the texts
-        of its list (it is closed here). Nothing is added to either document. With `ownSketch`
-        the active document has a sketch of its own, which Pad must not take in its place without
-        a word: the box asks, and `button` (default: the box's accept) answers it."""
+        command's selection holds only the active document's objects, ops#390). Since ops#640
+        rank 13 the Pad starts with no profile, its Profile field armed, and says the sketch is
+        left out (in the field's status, or the status bar): no message box. Returns the modals
+        shown, the other document's label, the new pads' profiles and the notes; the dialog is
+        cancelled here, and nothing is added to either document. With `ownSketch` the active
+        document has a sketch of its own, which Pad must not take in its place."""
         self.body = models.body(self.doc)
         if ownSketch:
             models.sketch(self.doc, "Own", models.rectangle(0, 0, 5, 5), self.body)
@@ -697,91 +699,73 @@ class TestPanelFixesGui(unittest.TestCase):
             group = self.body.Group
             undo = self.doc.UndoNames
             Gui.Selection.addSelection(other.Name, outer.Name)
-            self.answerModals("radioDependent", button)
+            self.answerModals("radioDependent")
             Gui.runCommand("PartDesign_Pad")
+            self.assertTrue(waitFor(lambda: Gui.Control.activeDialog()), "no Pad panel")
             pump(0.5)
             self.answering = False
-            picked = None
-            if Gui.Control.activeDialog():
-                pump(0.3)
-                Gui.Control.showTaskView()
-                listWidget = self.widget(QtWidgets.QListWidget, "listWidget")
-                picked = [listWidget.item(i).text() for i in range(listWidget.count())]
+            profiles = [o.Profile for o in self.doc.Objects if o.isDerivedFrom("PartDesign::Pad")]
+            notes = self.leftOutNotes("fieldProfile")
+            taskButton(QtWidgets.QDialogButtonBox.Cancel).click()
+            self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "Cancel didn't close")
+            pump(0.2)
             self.assertEqual(sorted(o.Name for o in self.doc.Objects), names)
             self.assertEqual(self.body.Group, group)
             self.assertEqual([o.Name for o in other.Objects], [outer.Name])
-            if picked is None:
-                self.assertIsNone(App.getActiveTransaction())
-                self.assertEqual(self.doc.UndoNames, undo)
-            else:
-                Gui.Control.closeDialog()
-                pump()
-            return list(self.modals), other.Label, picked
+            self.assertIsNone(App.getActiveTransaction())
+            self.assertEqual(self.doc.UndoNames, undo)
+            return list(self.modals), other.Label, profiles, notes
         finally:
             Gui.Selection.clearSelection()
             App.setActiveDocument(self.doc.Name)
             App.closeDocument(other.Name)
 
+    @staticmethod
+    def leftOutNotes(fieldName):
+        """Where a command says what it left out of the selection (ops#640 rank 13): the status
+        of the dialog's field `fieldName` ("fieldProfile"), and the status bar."""
+        texts = TestPanelFixesGui.statusTexts()
+        QtCore.QCoreApplication.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
+        for field in Gui.getMainWindow().findChildren(QtWidgets.QWidget, fieldName):
+            status = field.findChild(QtWidgets.QLabel, "status")
+            if status is not None:
+                texts.append(status.text())
+        return texts
+
+    @siblingEraPath
     def testPadOnASketchOfAnotherDocumentSaysSo(self):
-        """ops#410 (decision 104), then ops#327 retired: since ops#390 (upstream PR 33716) a
-        command's selection holds only the active document's objects, so a sketch selected in
-        another document is no profile. With no sketch in the active document Pad says so,
-        naming the sketch and its document, and advises a sketch of the active document: "No
-        sketch is available in the document" sent the user looking for one in a document that
-        has none. (Before ops#327 a refused dependent copy, a null, went on as the pad's profile,
-        without a word.)"""
-        modals, label, picked = self.padOnASketchOfAnotherDocument(ownSketch=False)
-        self.assertEqual(
-            modals,
-            [
-                f"QMessageBox: 'Outer' is in the document '{label}', not in the active "
-                "document. Select a sketch of the active document."
-            ],
+        """ops#410 (decision 104), then ops#640 rank 13: a sketch selected in another document is
+        no profile. With no sketch in the active document the Pad starts empty and says so,
+        naming the sketch and its document; no message box (it was one)."""
+        modals, label, profiles, notes = self.padOnASketchOfAnotherDocument(ownSketch=False)
+        self.assertEqual(modals, [])
+        self.assertEqual(profiles, [None])
+        expected = (
+            f"Left out of the selection: 'Outer' is in the document '{label}', not in the active "
+            "document."
         )
-        self.assertIsNone(picked)
+        self.assertTrue(any(expected in t for t in notes), notes)
 
+    @siblingEraPath
     def testPadOnASketchOfAnotherDocumentDoesNotTakeAnotherSketch(self):
-        """ops#410, PR 360 round 2: as testPadOnASketchOfAnotherDocumentSaysSo, with a sketch in
-        the active document, and Cancel. The command took that sketch as the pad's profile, and
-        no word was said that the selected one was left out; now it asks, and Cancel makes
-        nothing: no pad, no pick dialog."""
-        modals, label, picked = self.padOnASketchOfAnotherDocument(ownSketch=True, button="Cancel")
-        self.assertEqual(
-            modals,
-            [
-                f"QMessageBox: 'Outer' is in the document '{label}', not in the active "
-                f"document. Continue with a sketch of '{self.doc.Label}'?"
-            ],
-        )
-        self.assertIsNone(picked)
-        self.assertEqual(
-            [o.Name for o in self.doc.Objects if o.isDerivedFrom("PartDesign::Pad")], []
-        )
-
-    def testPadOnASketchOfAnotherDocumentContinuesThroughThePickDialog(self):
-        """ops#410, PR 360 round 2: the same, answered Continue. The command goes on as it did
-        before the selection mattered, but through the pick dialog although the active document
-        has exactly one free sketch, which it takes only when the user picks it."""
-        modals, label, picked = self.padOnASketchOfAnotherDocument(
-            ownSketch=True, button="Continue"
-        )
-        self.assertEqual(len(modals), 1, modals)
-        self.assertIn("Continue with a sketch of", modals[0])
-        self.assertIsNotNone(picked, "no pick dialog")
-        self.assertEqual(len(picked), 1, picked)
-        self.assertIn("Own", picked[0])
-        self.assertEqual(
-            [o.Name for o in self.doc.Objects if o.isDerivedFrom("PartDesign::Pad")], []
-        )
+        """ops#410, PR 360 round 2, then ops#640 rank 13: with a sketch in the active document the
+        Pad still starts empty: the active document's sketch isn't taken in the selected one's
+        place (it took it without a word, then asked in a message box)."""
+        modals, label, profiles, notes = self.padOnASketchOfAnotherDocument(ownSketch=True)
+        self.assertEqual(modals, [])
+        self.assertEqual(profiles, [None])
+        self.assertTrue(any("'Outer' is in the document" in t for t in notes), notes)
 
     # -- ops#395 1: Pad on a sketch of another body ---------------------------------------------
 
-    def testPadOnASketchOfAnotherBodyIsRefused(self):
+    @siblingEraPath
+    def testPadOnASketchOfAnotherBodyIsLeftOut(self):
         """ops#395 1 (PR 343 review L3): the dependent profile copy that Pad's code makes for a
         selected sketch outside the active body (a traced shape binder, not computed before the
         pad's recompute) can't be reached: a selection of anything outside the body (and its
-        studio) stops the command first, with a message. Pinned here: a 4 x 5 sketch in a body of
-        another App::Part, selected, Pad asks no copy question, opens no panel and adds nothing."""
+        studio) is no profile. Since ops#640 rank 13 it is left out with a note, never a message
+        box: a 4 x 5 sketch in a body of another App::Part, selected, Pad asks no copy question,
+        opens its panel on a Pad with no profile, and Cancel adds nothing."""
         other = self.otherBody()
         profile = models.sketch(self.doc, "Profile", models.rectangle(0, 0, 4, 5), other)
         self.body = models.body(self.doc)
@@ -795,18 +779,23 @@ class TestPanelFixesGui(unittest.TestCase):
         Gui.Selection.addSelection(self.doc.Name, profile.Name)
         self.answerModals("radioDependent")
         Gui.runCommand("PartDesign_Pad")
+        self.assertTrue(waitFor(lambda: Gui.Control.activeDialog()), "no Pad panel")
         pump(0.5)
         self.answering = False
-        self.assertFalse(Gui.Control.activeDialog())
+        self.assertEqual(self.modals, [])
+        [pad] = [o for o in self.doc.Objects if o.isDerivedFrom("PartDesign::Pad")]
+        self.assertIsNone(pad.Profile)
+        self.assertTrue(self.body.hasObject(pad))
+        notes = self.leftOutNotes("fieldProfile")
+        self.assertTrue(
+            any("Left out of the selection: 'Profile' is not in the active body." in t for t in notes),
+            notes,
+        )
+        taskButton(QtWidgets.QDialogButtonBox.Cancel).click()
+        self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "Cancel didn't close")
+        pump(0.2)
         self.assertEqual(sorted(o.Name for o in self.doc.Objects), names)
         self.assertIsNone(App.getActiveTransaction())
-        self.assertEqual(
-            self.modals,
-            [
-                "QMessageBox: Cannot use selected object. Selected object must belong to the "
-                "active body"
-            ],
-        )
 
     # -- ops#170 1-3: the Pipe's orientation and scaling panels ----------------------------------
 
@@ -824,6 +813,88 @@ class TestPanelFixesGui(unittest.TestCase):
         self.assertEqual(pipe.Binormal, V(0.5, 0, 1))
         self.close(ok=False)
         self.assertEqual(pipe.Binormal, V(1, 0, 1))
+
+    def testPipeSweepControls(self):
+        """FreeCAD-CH ops#640 slice 3: the Sweep panel's Lock direction field shows only with its
+        control, the Twist, Scale and Body type boxes write their properties, and the Twist box
+        goes under Lock faces (Onshape shows it only for None and Keep orientation)."""
+        pipe = self.rod()
+        self.doc.recompute()
+        self.edit(pipe)
+        control = self.widget(QtWidgets.QComboBox, "comboBoxProfileControl")
+        self.assertEqual(
+            [control.itemText(i) for i in range(control.count())],
+            ["None", "Keep orientation", "Advanced", "Lock faces", "Lock direction"],
+        )
+        direction = self.widget(QtWidgets.QWidget, "fieldLockDirection")
+        faces = self.widget(QtWidgets.QWidget, "fieldLockFaces")
+        twist = self.widget(QtWidgets.QCheckBox, "checkBoxTwist")
+        self.assertTrue(direction.isHidden())
+        self.assertTrue(faces.isHidden())
+        self.assertFalse(twist.isHidden())
+        control.setCurrentIndex(4)  # Lock direction
+        pump()
+        self.assertEqual(pipe.ProfileControl, "Lock direction")
+        self.assertFalse(direction.isHidden())
+        self.assertTrue(faces.isHidden())
+        self.assertTrue(twist.isHidden())
+        control.setCurrentIndex(3)  # Lock faces
+        pump()
+        self.assertEqual(pipe.ProfileControl, "Lock faces")
+        self.assertFalse(faces.isHidden())
+        self.assertTrue(direction.isHidden())
+        self.assertTrue(twist.isHidden(), "the twist stays under Lock faces")
+        control.setCurrentIndex(1)  # Keep orientation
+        pump()
+        self.assertEqual(pipe.ProfileControl, "Keep orientation")
+        self.assertTrue(faces.isHidden())
+        self.assertFalse(twist.isHidden())
+        # Twist: the box writes HasTwist, shows its rows; the type and the value follow
+        self.assertFalse(pipe.HasTwist)
+        twistType = self.widget(QtWidgets.QComboBox, "comboBoxTwistType")
+        self.assertTrue(twistType.isHidden())
+        twist.setChecked(True)
+        pump()
+        self.assertTrue(pipe.HasTwist)
+        self.assertFalse(twistType.isHidden())
+        twistType.setCurrentIndex(0)  # Turns
+        pump()
+        self.assertEqual(pipe.TwistType, "Turns")
+        turns = self.widget(QtWidgets.QDoubleSpinBox, "doubleSpinBoxTurns")
+        self.assertFalse(turns.isHidden())
+        turns.setValue(2.5)
+        pump()
+        self.assertAlmostEqual(pipe.Turns, 2.5)
+        counter = self.widget(QtWidgets.QCheckBox, "checkBoxTwistCCW")
+        counter.setChecked(True)
+        pump()
+        self.assertTrue(pipe.TwistCCW)
+        # Scale
+        scale = self.widget(QtWidgets.QCheckBox, "checkBoxScale")
+        factor = self.widget(QtWidgets.QDoubleSpinBox, "doubleSpinBoxScaleFactor")
+        self.assertTrue(factor.isHidden())
+        scale.setChecked(True)
+        pump()
+        self.assertTrue(pipe.HasScale)
+        self.assertFalse(factor.isHidden())
+        factor.setValue(0.5)
+        pump()
+        self.assertAlmostEqual(pipe.ScaleFactor, 0.5)
+        # Body type: Thin shows its rows, Midplane takes the second thickness away
+        bodyType = self.widget(QtWidgets.QComboBox, "comboBoxBodyType")
+        midplane = self.widget(QtWidgets.QCheckBox, "checkBoxMidplane")
+        second = self.widget(QtWidgets.QWidget, "quantitySpinBoxThickness2")
+        self.assertTrue(midplane.isHidden())
+        bodyType.setCurrentIndex(1)  # Thin
+        pump()
+        self.assertEqual(pipe.BodyType, "Thin")
+        self.assertFalse(midplane.isHidden())
+        self.assertFalse(second.isHidden())
+        midplane.setChecked(True)
+        pump()
+        self.assertTrue(pipe.Midplane)
+        self.assertTrue(second.isHidden())
+        self.close(ok=False)
 
     def testPipeScalingRecomputes(self):
         """2: choosing Multisection recomputes at once (no OK): the section at z = 10 is the
@@ -1175,8 +1246,9 @@ class TestPanelFixesGui(unittest.TestCase):
         self.assertEqual([(r["property"], r["index"]) for r in App.getReferenceReport(pipe)], report)
 
     def testPipeCopyThatFailsIsNamed(self):
-        """ops#234: the spine outside the body has conflicting constraints (its first line 10 and
-        20 long), so its copy doesn't recompute either. OK stops with a message naming the
+        """ops#234: the spine outside the body has a malformed constraint (a Midpoint of its first
+        line on itself; a conflict no longer fails a sketch, ops#640), so its copy doesn't
+        recompute either. OK stops with a message naming the
         original and why: the copy is gone, the spine is the original, the body as before. The
         copy's result was ignored (round 1 of PR 219: it named it only in the Report view, and OK
         went on)."""
@@ -1184,12 +1256,12 @@ class TestPanelFixesGui(unittest.TestCase):
 
         pipe = self.rod(spineInBody=False)
         self.spine.addConstraint(Sketcher.Constraint("DistanceY", 0, 1, 0, 2, 10))
-        self.spine.addConstraint(Sketcher.Constraint("DistanceY", 0, 1, 0, 2, 20))
+        self.spine.addConstraint(Sketcher.Constraint("Midpoint", 0, 1, 0))
         self.doc.recompute()
         self.assertFalse(self.spine.isValid())
         before = self.body.Group
         self.assertOkStops(
-            pipe, "Pipe: a copy of 'Spine' doesn't recompute: Sketch with conflicting"
+            pipe, "Pipe: a copy of 'Spine' doesn't recompute: Sketch with malformed"
         )
         self.assertIs(pipe.Spine[0], self.spine)
         self.assertEqual(self.body.Group, before)
@@ -1198,7 +1270,9 @@ class TestPanelFixesGui(unittest.TestCase):
         """OK answered Make independent copy shows a message box with text and leaves the panel
         open, with the edit's transaction still open and no new object left (round 2 of PR 219:
         the stop aborted the whole edit under the open panel). edit=False: the panel is open
-        already. ok: the OK button, found earlier (the panel is hidden)."""
+        already. ok: the OK button, found earlier (the panel is hidden). Only the copy step
+        still stops (a copy that doesn't recompute, a reference a copy can't keep): a pipe that
+        fails after it is committed in error (assertOkCommitsInError)."""
         if edit:
             self.edit(pipe, transaction)
         objects = self.doc.Objects
@@ -1214,6 +1288,35 @@ class TestPanelFixesGui(unittest.TestCase):
         self.assertIsNotNone(Gui.Control.activeDialog(), "OK closed the panel")
         self.assertNotEqual(self.doc.getBookedTransactionID(), 0, "the edit's transaction ended")
         self.assertEqual([o for o in self.doc.Objects if o not in objects], [])
+
+    def assertOkCommitsInError(self, pipe, text, copy=True):
+        """OK (answering the copy dialog, if it comes, with Make independent copy) commits a pipe
+        that fails, as Onshape's check does and as the other feature dialogs' OK does (F7 of the
+        blind test, ops#640; TestCrossBodyGui.TestOkInErrorGui): no message box, the panel
+        closes, the pipe stays in error saying why (text), and the edit is one undo step, ended.
+        Before ops#640 OK stopped with the panel open (ops#243). copy: the pipe has a spine
+        outside the body, so the copy dialog comes. Returns the copies the commit made (the
+        objects named Copy*). Needs self.undos, the undo count before the edit."""
+        self.answerModals()
+        taskButton(QtWidgets.QDialogButtonBox.Ok).click()
+        self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), self.modals)
+        self.answering = False
+        pump(0.2)
+        self.assertEqual(self.modals, ["DlgReference"] if copy else [])
+        self.assertFalse(pipe.isValid())
+        self.assertIn(text, pipe.getStatusString())
+        self.assertEqual(self.doc.getBookedTransactionID(), 0, "the edit's transaction is open")
+        self.assertEqual(self.doc.UndoCount, self.undos + 1, self.doc.UndoNames)
+        return [o for o in self.doc.Objects if o.Name.startswith("Copy")]
+
+    def assertCopyCommitted(self, pipe, copies):
+        """One copy, in the body, is the pipe's spine (Edge1 and Edge2). Open question for the hub
+        (ops#640): a commit in error keeps the copy its OK made, as a valid commit does; the edit
+        is committed as it is."""
+        self.assertEqual(len(copies), 1, [o.Name for o in copies])
+        self.assertIs(pipe.Spine[0], copies[0])
+        self.assertEqual(pipe.Spine[1], ["Edge1", "Edge2"])
+        self.assertTrue(self.body.hasObject(copies[0]))
 
     def staleOuterSpine(self):
         """The Rod's spine as a sketch "Outer" beside the body, recomputed, then its first line
@@ -1404,21 +1507,27 @@ class TestPanelFixesGui(unittest.TestCase):
             self.assertAlmostEqual(got, want, places=6, msg=box)
         self.assertCopiedEdgeAt(pipe, V(5, 0, 5))
 
-    def testPipeCopyAbortedWithThePipe(self):
-        """ops#234 (PR 211 review), ops#243: the profile is open (three sides of the square), so
-        the pipe fails. OK copies the spine from outside the body, recomputes it, then fails on
-        the pipe (Input Error): the copy is gone, the spine is the original again, the body is as
-        before, and the panel and the edit's transaction are still open."""
+    def testPipeCopyCommittedWithThePipeInError(self):
+        """ops#234 (PR 211 review), ops#243, ops#640: the profile is open (three sides of the
+        square), so the pipe fails. OK copies the spine from outside the body, recomputes it, and
+        commits the pipe in error with the copy as its spine, in the body (until ops#640 OK
+        stopped and dropped the copy). One undo restores the original spine and the body, with no
+        copy left."""
         pipe = self.rod(spineInBody=False)
         self.openProfile()
         self.doc.recompute()
         self.assertFalse(pipe.isValid())
         before = self.body.Group
+        self.undos = self.doc.UndoCount
         self.edit(pipe)
-        self.assertOkStops(pipe, "Wire is not closed.", edit=False)
-        self.assertIsNone(self.doc.getObject("CopySpine"))
+        copies = self.assertOkCommitsInError(pipe, "Wire is not closed.")
+        self.assertCopyCommitted(pipe, copies)
+        self.doc.undo()
+        self.doc.recompute()
+        self.assertFalse([o for o in self.doc.Objects if o.Name.startswith("Copy")])
         self.assertIs(pipe.Spine[0], self.spine)
         self.assertEqual(self.body.Group, before)
+        self.assertEqual(self.doc.UndoCount, self.undos)
 
     def openProfile(self):
         """The Rod's profile as three sides of its square: the pipe fails."""
@@ -1437,13 +1546,12 @@ class TestPanelFixesGui(unittest.TestCase):
         self.doc.recompute()
         return outer
 
-    def failAfterTheCopy(self):
-        """ops#243 (PR 219 verification P1): in the edit of the Rod (spine in the body) the spine
-        is picked again on a sketch beside the body and the profile opened. OK (Make independent
-        copy) copies the spine, and the pipe then fails: only the copy step is undone. The copy is
-        gone, the spine is the picked one again, the panel and the edit's transaction are open
-        (the abort undid the whole edit under the open panel, and OK again committed the old
-        spine, outside undo)."""
+    def commitAfterTheCopy(self):
+        """ops#243 (PR 219 verification P1), ops#640: in the edit of the Rod (spine in the body)
+        the spine is picked again on a sketch beside the body and the profile opened. OK (Make
+        independent copy) copies the spine, and the pipe then fails: it is committed in error with
+        the copy as its spine (until ops#640 OK undid the copy step and stopped with the panel
+        open)."""
         pipe = self.rod()
         self.doc.recompute()
         outer = self.outerSpine()
@@ -1452,31 +1560,35 @@ class TestPanelFixesGui(unittest.TestCase):
         self.edit(pipe)
         pipe.Spine = (outer, ["Edge1", "Edge2"])
         self.openProfile()
-        self.assertOkStops(pipe, "Wire is not closed.", edit=False)
-        self.assertIs(pipe.Spine[0], outer)
-        self.assertEqual(pipe.Spine[1], ["Edge1", "Edge2"])
-        self.assertEqual(self.body.Group, self.before)
-        return pipe, outer
+        copies = self.assertOkCommitsInError(pipe, "Wire is not closed.")
+        self.assertCopyCommitted(pipe, copies)
+        return pipe, copies[0]
 
-    def testPipeRecomputeFailureThenRetry(self):
-        """ops#243: after failAfterTheCopy the profile is closed again and OK pressed again: one
-        copy, the pipe sweeps it (V = 120), and the edit is one transaction: one undo removes the
-        copy and restores the spine and the profile."""
-        pipe, outer = self.failAfterTheCopy()
+    def testPipeCommittedInErrorThenRepaired(self):
+        """ops#243, ops#640: after commitAfterTheCopy the pipe is edited again, the profile closed
+        and OK pressed: no copy dialog (the spine is the copy, in the body), the pipe sweeps the
+        copy (V = 120), and each edit is one undo step: the first undo opens the profile again,
+        the second removes the copy and restores the spine and the profile."""
+        pipe, copy = self.commitAfterTheCopy()
+        self.edit(pipe)
         self.closeProfile()
         self.modals = []
         self.answerModals()
         taskButton(QtWidgets.QDialogButtonBox.Ok).click()
         self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), self.modals)
         self.answering = False
-        self.assertEqual(self.modals, ["DlgReference"])
-        copies = [o for o in self.doc.Objects if o.Name.startswith("Copy")]
-        self.assertEqual(len(copies), 1, [o.Name for o in copies])
-        self.assertIs(pipe.Spine[0], copies[0])
-        self.assertTrue(self.body.hasObject(copies[0]))
+        pump(0.2)
+        self.assertEqual(self.modals, [])
+        self.assertEqual([o for o in self.doc.Objects if o.Name.startswith("Copy")], [copy])
+        self.assertIs(pipe.Spine[0], copy)
         self.assertTrue(pipe.isValid(), pipe.getStatusString())
         self.assertAlmostEqual(pipe.Shape.Volume, 120, places=3)
-        self.assertEqual(self.doc.UndoCount, self.undos + 1)
+        self.assertEqual(self.doc.UndoCount, self.undos + 2, self.doc.UndoNames)
+        self.doc.undo()
+        self.doc.recompute()
+        self.assertEqual(len(self.profile.Shape.Edges), 3)
+        self.assertIs(pipe.Spine[0], copy)
+        self.assertFalse(pipe.isValid())
         self.doc.undo()
         self.doc.recompute()
         self.assertFalse([o for o in self.doc.Objects if o.Name.startswith("Copy")])
@@ -1485,11 +1597,12 @@ class TestPanelFixesGui(unittest.TestCase):
         self.assertEqual(len(self.profile.Shape.Edges), 4)
         self.assertTrue(pipe.isValid(), pipe.getStatusString())
 
-    def testPipeRecomputeFailureThenCancel(self):
-        """ops#243: after failAfterTheCopy, Cancel restores the state from before the edit: the
-        spine in the body, the closed profile, no copy, nothing to undo."""
-        pipe, outer = self.failAfterTheCopy()
-        self.close(ok=False)
+    def testPipeCommittedInErrorThenUndone(self):
+        """ops#243, ops#640: after commitAfterTheCopy one undo restores the state from before the
+        edit (as Cancel did while OK stopped): the spine in the body, the closed profile, no copy,
+        nothing more to undo."""
+        pipe, copy = self.commitAfterTheCopy()
+        self.doc.undo()
         self.doc.recompute()
         self.assertIs(pipe.Spine[0], self.spine)
         self.assertEqual(pipe.Spine[1], ["Edge1", "Edge2"])
@@ -1502,67 +1615,59 @@ class TestPanelFixesGui(unittest.TestCase):
     def visible(self, obj):
         return obj.ViewObject.Visibility
 
-    def testPipeRecomputeFailureWithoutCopyKeepsTheEdit(self):
-        """ops#253 (PR 226 review L1 and test gap): the Rod (all in the body), its spine and
-        profile hidden, as after the pipe's creation; in the edit the profile is opened, so OK
-        fails on the pipe with no copy step: the message says the edit is still open (no word
-        of a copy), the panel and the edit's transaction stay open, and the spine and profile are
-        still shown (they went back to hidden under the open panel). Cancel restores the closed
-        profile and hides them again, with nothing to undo."""
+    def testPipeCommittedInErrorWithoutCopy(self):
+        """ops#253, ops#640: the Rod (all in the body), its spine and profile hidden, as after the
+        pipe's creation; the edit shows them, and in it the profile is opened. OK commits the
+        pipe in error with no copy dialog and no copy, and hides the spine and profile again, as
+        a valid OK does (Onshape accepts a failing feature red with its sketch hidden; until
+        ops#640 OK stopped with the panel open and them shown). One undo restores the closed
+        profile."""
         pipe = self.rod()
         self.doc.recompute()
         self.assertTrue(pipe.isValid(), pipe.getStatusString())
         self.spine.ViewObject.Visibility = False
         self.profile.ViewObject.Visibility = False
-        undos = self.doc.UndoCount
+        self.undos = self.doc.UndoCount
         self.edit(pipe)
         self.assertTrue(self.visible(self.spine))
         self.assertTrue(self.visible(self.profile))
         self.openProfile()
-        self.answerModals()
-        taskButton(QtWidgets.QDialogButtonBox.Ok).click()
-        self.assertTrue(waitFor(lambda: len(self.modals) >= 1, 5.0), self.modals)
-        self.answering = False
-        pump(0.2)
-        self.assertEqual(len(self.modals), 1, self.modals)
-        self.assertIn("Wire is not closed.", self.modals[0])
-        self.assertIn("The edit is still open.", self.modals[0])
-        self.assertNotIn("copy", self.modals[0])
-        self.assertIsNotNone(Gui.Control.activeDialog(), "OK closed the panel")
-        self.assertNotEqual(self.doc.getBookedTransactionID(), 0, "the edit's transaction ended")
-        self.assertTrue(self.visible(self.spine), "the spine went back to hidden")
-        self.assertTrue(self.visible(self.profile), "the profile went back to hidden")
-        self.close(ok=False)
-        self.doc.recompute()
-        self.assertEqual(len(self.profile.Shape.Edges), 4)
+        self.assertEqual(self.assertOkCommitsInError(pipe, "Wire is not closed.", copy=False), [])
+        self.assertIs(pipe.Spine[0], self.spine)
         self.assertFalse(self.visible(self.spine))
         self.assertFalse(self.visible(self.profile))
-        self.assertEqual(self.doc.UndoCount, undos)
+        self.doc.undo()
+        self.doc.recompute()
+        self.assertEqual(len(self.profile.Shape.Edges), 4)
+        self.assertEqual(self.doc.UndoCount, self.undos)
         self.assertTrue(pipe.isValid(), pipe.getStatusString())
 
-    def testPipeCopyStopShowsTheSpine(self):
-        """ops#253 (PR 226 review L1): as failAfterTheCopy with the Rod's spine and profile
-        hidden: after the stop the picked spine and the profile are shown."""
+    def testPipeCopyCommittedInErrorIsHidden(self):
+        """ops#253 (PR 226 review L1), ops#640: as commitAfterTheCopy with the Rod's spine and
+        profile and the outside sketch hidden: the edit shows the picked sketch and the profile,
+        and the commit in error hides them again, as a valid OK does; the copy, the pipe's spine
+        now, is hidden too (until ops#640 OK stopped, and the panel had to show them)."""
         pipe = self.rod()
         self.doc.recompute()
         outer = self.outerSpine()
         self.spine.ViewObject.Visibility = False
         self.profile.ViewObject.Visibility = False
         outer.ViewObject.Visibility = False
+        self.undos = self.doc.UndoCount
         self.edit(pipe)
         pipe.Spine = (outer, ["Edge1", "Edge2"])
         self.openProfile()
-        self.assertOkStops(pipe, "Wire is not closed.", edit=False)
-        self.assertIs(pipe.Spine[0], outer)
-        self.assertTrue(self.visible(outer), "the spine is hidden under the open panel")
-        self.assertTrue(self.visible(self.profile), "the profile is hidden under the open panel")
+        copies = self.assertOkCommitsInError(pipe, "Wire is not closed.")
+        self.assertCopyCommitted(pipe, copies)
+        hidden = [(o.Name, self.visible(o)) for o in (outer, copies[0], self.profile, self.spine)]
+        self.assertEqual(hidden, [(name, False) for name, _ in hidden])
 
-    def testPipeRecomputeFailureRestoresTheSpinesGuess(self):
-        """ops#253 (PR 226 review test gap): the spine outside the body is found again by
+    def testPipeCommittedInErrorUndoRestoresTheSpinesGuess(self):
+        """ops#253 (PR 226 review test gap), ops#640: the spine outside the body is found again by
         geometry (testPipeCopyKeepsTheSpinesGuess), and the profile is opened in the edit. OK
-        copies the spine, then fails on the pipe: the restored spine is the original with its
-        guess. With the profile closed again the pipe recomputes with the same warning and
-        report entries."""
+        copies the spine and commits the pipe in error; the copy keeps the guess's report
+        entries, as a valid OK does. One undo restores the original spine with its guess: with
+        the profile closed again the pipe recomputes with the same warning and report entries."""
         pipe = self.rod(spineInBody=False)
         self.doc.recompute()
         self.spine.deleteAllGeometry()
@@ -1572,9 +1677,16 @@ class TestPanelFixesGui(unittest.TestCase):
         subs = pipe.Spine[1]
         report = [(r["property"], r["index"]) for r in App.getReferenceReport(pipe)]
         self.assertEqual({prop for prop, _ in report}, {"Spine"})
+        self.undos = self.doc.UndoCount
         self.edit(pipe)
         self.openProfile()
-        self.assertOkStops(pipe, "Wire is not closed.", edit=False)
+        copies = self.assertOkCommitsInError(pipe, "Wire is not closed.")
+        self.assertEqual(len(copies), 1, [o.Name for o in copies])
+        self.assertIs(pipe.Spine[0], copies[0])
+        self.assertEqual(pipe.Spine[1], subs)
+        self.assertEqual([(r["property"], r["index"]) for r in App.getReferenceReport(pipe)], report)
+        self.doc.undo()
+        self.doc.recompute()
         self.assertIs(pipe.Spine[0], self.spine)
         self.assertEqual(pipe.Spine[1], subs)
         self.assertFalse([o for o in self.doc.Objects if o.Name.startswith("Copy")])
@@ -1709,7 +1821,7 @@ class TestPanelFixesGui(unittest.TestCase):
         the pipe sweeps along it. Model: a base box 20 x 20 x 10 and a box 10 x 10 x 20, both at
         the origin; the spine is the fused shape's vertical edge at x = 20, y = 0 (z 0..10), which
         the box alone hasn't; the profile is a 2 x 2 square around its foot."""
-        other = models.body(self.doc)
+        other = self.otherBody()
         base = other.newObject("PartDesign::AdditiveBox", "Base")
         base.Length = 20
         base.Width = 20
@@ -1773,7 +1885,7 @@ class TestPanelFixesGui(unittest.TestCase):
         round), so the pipe warns. OK copies it (a ShapeBinder of the pad's shape): the copied
         entry is written by its index name and keeps its guess, so the warning and the report
         entry stay. 2 x 2 at z = 0 to 4 x 4 at z = 10, ruled: a frustum, V = 280 / 3."""
-        other = models.body(self.doc)
+        other = self.otherBody()
         base = models.sketch(self.doc, "Base", models.rectangle(-2, -2, 2, 2), other)
         pad = models.pad(other, base, 10)
         self.body = models.body(self.doc)
@@ -3100,8 +3212,9 @@ class TestPanelFixesGui(unittest.TestCase):
         The independent copy keeps the box's place: OK closes, and the copy's edge is the box's,
         from (5, 5, 10) to (5, 5, 20). With 7801f7c453's makeCopy the Pipe panel stopped on Edge1
         ("would name another element on a copy"); Placement has no group, so it was never
-        skipped with the Attachment group (PR 224 review L1)."""
-        other = models.body(self.doc)
+        skipped with the Attachment group (PR 224 review L1). The other body is in its own App::Part
+        (otherBody): a top-level sibling's edge is linked directly (ops#634)."""
+        other = self.otherBody()
         box = other.newObject("PartDesign::AdditiveBox", "Box")
         box.Placement.Base = V(5, 5, 10)
         self.body = models.body(self.doc)
@@ -3148,8 +3261,9 @@ class TestPanelFixesGui(unittest.TestCase):
         point at (1, 2, 3) in another body (if placed, turned 90 degrees about Z and moved by
         (5, 0, 0): globally (3, 1, 3)). makeCopy's datum branch made an abstract Part::Datum
         (nothing) and dereferenced it. The copy is a datum point in this body, and the datum is
-        where the point is."""
-        other = models.body(self.doc)
+        where the point is. Unplaced, the other body is in its own App::Part (otherBody): at the top
+        level it would be this body's studio sibling, linked directly (ops#634)."""
+        other = models.body(self.doc) if placed else self.otherBody()
         point = other.newObject("PartDesign::Point", "Point")
         point.Placement.Base = V(1, 2, 3)
         self.body = models.body(self.doc)
@@ -3209,7 +3323,7 @@ class TestPanelFixesGui(unittest.TestCase):
         """ops#244 P2: a datum plane attached to the top face (z = 10, not Face1) of a 10 mm box
         in another body, Make independent copy. The datum's sub on the copy was empty: it lost
         the picked face. It is the picked face on the copy."""
-        other = models.body(self.doc)
+        other = self.otherBody()
         box = other.newObject("PartDesign::AdditiveBox", "Box")
         self.body = models.body(self.doc)
         self.doc.recompute()
@@ -3227,7 +3341,7 @@ class TestPanelFixesGui(unittest.TestCase):
     def testDatumOnAFaceOfACopiedPad(self):
         """ops#244 P2: as testDatumOnAFaceOfACopiedBox on the top face of a 20 x 20 x 10 pad,
         whose copy is a shape binder of that face alone: the datum is on its Face1."""
-        other = models.body(self.doc)
+        other = self.otherBody()
         sketch = models.sketch(self.doc, "Base", models.rectangle(0, 0, 20, 20), other)
         pad = other.newObject("PartDesign::Pad", "Pad")
         pad.Profile = sketch
@@ -3287,7 +3401,7 @@ class TestPanelFixesGui(unittest.TestCase):
         edge is another line on the sketch's copy, recomputed in makeCopy. OK stops with a
         message, the panel stays, and no copy is left. (A stale box no longer stops: its copy is
         a shape binder of the shape shown, ops#244 P5.)"""
-        other = models.body(self.doc)
+        other = self.otherBody()
         axis = models.sketch(self.doc, "Axis", [line(10, 0, 10, 10)], other, placement=XZ)
         self.body = models.body(self.doc)
         datum = self.body.newObject("PartDesign::Plane", "Datum")
@@ -3362,52 +3476,45 @@ class TestPanelFixesGui(unittest.TestCase):
         self.assertEqual(App.getReferenceReport(revolution), [])
 
     def padOfAFreeSketch(self, sketch):
-        """Pad with nothing selected, and in its pick dialog `sketch` (outside any body), Make
-        independent copy, into self.body; the pad panel closed with OK. Returns the pad and the
-        copy."""
+        """`sketch` (outside any body) selected, then Pad with self.body active. Since ops#640 (the
+        hub's decision: Onshape reads any sketch of the studio) the command takes it, with no
+        modal, as the pick dialog's Make independent copy did: an independent copy into the body,
+        the pad's profile (the pick dialog is reached by no command since ranks 13 and 21). The
+        pad's panel, 10 long, is closed with OK. Returns the pad and the copy."""
         Gui.activateWorkbench("PartDesignWorkbench")
         App.setActiveDocument(self.doc.Name)
         Gui.setActiveDocument(self.doc.Name)
         pump(0.2)
         Gui.getDocument(self.doc.Name).ActiveView.setActiveObject("pdbody", self.body)
-        Gui.runCommand("PartDesign_Pad")
-        self.assertTrue(waitFor(lambda: Gui.Control.activeDialog()), "no pick dialog")
-        pump(0.3)
-        Gui.Control.showTaskView()
-        self.widget(QtWidgets.QCheckBox, "checkOtherPart").setChecked(True)
-        listWidget = self.widget(QtWidgets.QListWidget, "listWidget")
-        [item] = [
-            listWidget.item(i)
-            for i in range(listWidget.count())
-            if listWidget.item(i).text().startswith("Free ")
-        ]
-        self.assertFalse(item.isHidden())
-        item.setSelected(True)
-        self.assertTrue(self.widget(QtWidgets.QRadioButton, "radioIndependent").isChecked())
+        Gui.Selection.clearSelection()
+        Gui.Selection.addSelection(self.doc.Name, sketch.Name)
+        before = {o.Name for o in self.doc.Objects}
         self.answerModals()
-        ok = QtWidgets.QDialogButtonBox.Ok
-        self.assertTrue(waitFor(lambda: taskButton(ok) is not None, 5.0), "no OK")
-        taskButton(ok).click()
-        self.assertTrue(
-            waitFor(lambda: self.doc.getObject("Pad") is not None, 5.0),
-            f"no pad; modals {self.modals}",
-        )
-        pad = self.doc.getObject("Pad")
+        Gui.runCommand("PartDesign_Pad")
         self.assertTrue(waitFor(lambda: Gui.Control.activeDialog(), 5.0), "no pad panel")
         pump(0.3)
+        made = [o for o in self.doc.Objects if o.Name not in before]
+        pads = [o for o in made if o.isDerivedFrom("PartDesign::Pad")]
+        self.assertEqual(len(pads), 1, [o.Name for o in made])
+        [pad] = pads
+        self.assertAlmostEqual(pad.Length.Value, 10, places=6)
         self.close(ok=True)
         self.answering = False
         self.assertEqual(self.modals, [])
+        self.assertIsNotNone(pad.Profile, "the pad took no profile")
         copy = pad.Profile[0]
+        self.doc.recompute()
         self.assertIsNot(copy, sketch)
         self.assertTrue(self.body.hasObject(copy))
         return pad, copy
 
+    @siblingEraPath
     def testPadOfASketchCopiedIntoARotatedBody(self):
-        """ops#245: Pad with nothing selected, and in its pick dialog a sketch outside any body
-        (a 10 x 10 square at (2, 3, 5), turned 15 degrees about Z), Make independent copy, into a
-        body turned 30 degrees about X. fixSketchSupport threw ("Sketch plane cannot be
-        migrated"), and the dialog's worker called front() on the empty list. The copy is
+        """ops#245: a sketch outside any body (a 10 x 10 square at (2, 3, 5), turned 15 degrees
+        about Z), selected, then Pad (its independent copy, since ops#640 made by the command:
+        padOfAFreeSketch), into a body turned 30 degrees about X. fixSketchSupport threw
+        ("Sketch plane cannot be migrated"), and the dialog's worker called front() on the empty
+        list. The copy is
         attached to the body's XY plane with an offset that keeps it where the sketch is
         (decision 40; fixSketchSupport also dropped the offset and turn in the plane), and the pad
         is 10 x 10 x 10 on it."""
@@ -3428,10 +3535,11 @@ class TestPanelFixesGui(unittest.TestCase):
         self.assertTrue(pad.isValid(), pad.getStatusString())
         self.assertAlmostEqual(pad.Shape.Volume, 1000, places=3)
 
+    @siblingEraPath
     def testPadOfAnXZSketchCopiedIntoABody(self):
         """ops#244 L6: a 10 x 10 square sketch outside any body on XZ, moved by (2, 3, 5) and
-        turned in its plane, Pad through the pick dialog, Make independent copy: the copy is
-        attached to the body's XZ plane (it was XY, with a 90 degree offset), where the sketch
+        turned in its plane, selected, then Pad (its independent copy: padOfAFreeSketch): the copy
+        is attached to the body's XZ plane (it was XY, with a 90 degree offset), where the sketch
         is."""
         sketch = models.sketch(
             self.doc,
@@ -3668,7 +3776,7 @@ class TestPanelFixesGui(unittest.TestCase):
     def testDatumOnALegacyCoordinateSystemStops(self):
         """PR 227 review L1: a datum plane attached to a (legacy) PartDesign coordinate system in
         another body, Make independent copy: OK stops with makeCopy's message; no copy is left."""
-        other = models.body(self.doc)
+        other = self.otherBody()
         cs = other.newObject("PartDesign::CoordinateSystem", "CS")
         self.body = models.body(self.doc)
         datum = self.body.newObject("PartDesign::Plane", "Datum")
@@ -4024,7 +4132,8 @@ class TestPanelFixesGui(unittest.TestCase):
 
     def testMirrorOfABoxAndASketchSaysTheSketchIsLeftOut(self):
         """The box and a sketch selected, then Mirror: the box is the original, and the status
-        bar names the sketch as left out (it said nothing; a sketch alone made a "Whole shape"
+        bar (or, ops#640 rank 13, the Features field's status) names the sketch as left out
+        (it said nothing; a sketch alone made a "Whole shape"
         mirror, the same way. Not tested alone: the new mirror's first recompute then fails, and
         the notification area off screen fails the command, notes/build.md)."""
         box, (sketch, _) = self.activeBodyWithBoxAndSketches()
@@ -4034,11 +4143,10 @@ class TestPanelFixesGui(unittest.TestCase):
         self.assertTrue(waitFor(lambda: Gui.Control.activeDialog()), "no task dialog")
         [mirror] = [o for o in self.doc.Objects if o.TypeId == "PartDesign::Mirrored"]
         self.assertEqual(mirror.Originals, [box])
-        self.assertTrue(
-            any("left out of the selection: 'First sketch'." in t for t in self.statusTexts()),
-            self.statusTexts(),
-        )
+        notes = self.leftOutNotes("fieldOriginals")
+        self.assertTrue(any("left out of the selection: 'First sketch'." in t for t in notes), notes)
 
+    @siblingEraPath
     def testPadOfTwoSketchesSaysWhichIsLeftOut(self):
         """Two sketches selected, then Pad: the first is the profile, and the status bar names
         both, the second as left out (it was dropped without a word)."""
@@ -4173,6 +4281,7 @@ class TestPanelFixesGui(unittest.TestCase):
             (reportText() or "")[before:],
         )
 
+    @siblingEraPath
     def testBooleanWithoutToolsFailsOnlyOutsideItsPanel(self):
         """ops#314: a Boolean with no tools computes nothing while it is set up (created by its
         command with nothing selected, or its panel open) and fails once the panel is closed.

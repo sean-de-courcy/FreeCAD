@@ -9,6 +9,7 @@ endif(BUILD_GUI)
 
 set(TechDraw_Scripts
     Init.py
+    TechDrawCreateDrawing.py
     TestTechDrawApp.py
     TestTechDrawGui.py
 )
@@ -188,6 +189,7 @@ SET(TDTest_SRCS
     TDTest/DrawViewBalloonTest.py
     TDTest/DrawViewDetailTest.py
     TDTest/DrawViewScaleTypeTest.py
+    TDTest/TestOnshapeDrawings.py
     TDTest/TechDrawTestUtilities.py
 )
 

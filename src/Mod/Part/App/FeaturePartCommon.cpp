@@ -57,7 +57,8 @@ const char* Common::opCode() const
 BRepAlgoAPI_BooleanOperation* Common::makeOperation(const TopoDS_Shape& base, const TopoDS_Shape& tool) const
 {
     // Let's call algorithm computing a section operation:
-    return new FCBRepAlgoAPI_Common(base, tool);
+    // Built by Boolean::execute(), under the time limit
+    return new FCBRepAlgoAPI_Common(base, tool, false);
 }
 
 // ----------------------------------------------------

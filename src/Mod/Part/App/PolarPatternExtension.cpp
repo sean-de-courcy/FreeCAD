@@ -45,8 +45,10 @@ using namespace Part;
 
 EXTENSION_PROPERTY_SOURCE(Part::PolarPatternExtension, App::DocumentObjectExtension)
 
+// FreeCAD-CH (ops#783): at most 2500 instances. Unbounded, a count of about 2^31 (a UIntSpinBox's
+// raw value written by a macro, or a mistyped count) grew Spacings to that size and froze the GUI
 const App::PropertyIntegerConstraint::Constraints PolarPatternExtension::intOccurrences
-    = {1, std::numeric_limits<int>::max(), 1};
+    = {1, PolarPatternExtension::maxInstances, 1};
 
 const char* PolarPatternExtension::ModeEnums[] = {"Extent", "Spacing", nullptr};
 
@@ -132,6 +134,12 @@ const std::list<gp_Trsf> PolarPatternExtension::calculateTransformations() const
     int occurrences = Occurrences.getValue();
     if (occurrences < 1) {
         throw Base::ValueError("At least one occurrence required");
+    }
+    if (occurrences > maxInstances) {
+        throw Base::ValueError(
+            "A pattern has at most " + std::to_string(maxInstances) + " instances; this one asks for "
+            + std::to_string(occurrences)
+        );
     }
 
     if (occurrences == 1) {
@@ -334,7 +342,12 @@ void PolarPatternExtension::setReadWriteStatusForMode(PolarPatternMode mode)
 void PolarPatternExtension::updateSpacings()
 {
     std::vector<double> spacings = Spacings.getValues();
-    size_t targetCount = Occurrences.getValue() - 1;
+    // a count out of range is refused at the recompute, never grown here (ops#783)
+    const long occurrences = Occurrences.getValue();
+    if (occurrences < 1 || occurrences > maxInstances) {
+        return;
+    }
+    size_t targetCount = static_cast<size_t>(occurrences - 1);
 
     for (auto& spacing : spacings) {
         if (spacing == Offset.getValue()) {

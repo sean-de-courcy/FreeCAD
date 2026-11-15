@@ -125,6 +125,7 @@
 #include "DocumentObjectGroup.h"
 #include "DocumentObjectGroupPy.h"
 #include "DocumentObserver.h"
+#include "DocumentTabs.h"
 #include "DocumentPy.h"
 #include "DocumentSettingsPy.h"
 #include "ExpressionParser.h"
@@ -614,6 +615,11 @@ void Application::setupPythonTypes()
     Py_INCREF(pUnitsModule);
     PyModule_AddObject(pAppModule, "Units", pUnitsModule);
 
+    // FreeCAD-CH (ops#640, rank 59): the typed tabs' registry, FreeCAD.DocumentTabs
+    PyObject* pTabsModule = App::DocumentTabs::initModule();
+    Py_INCREF(pTabsModule);
+    PyModule_AddObject(pAppModule, "DocumentTabs", pTabsModule);
+
     Base::ProgressIndicatorPy::init_type();
     Base::InterpreterSingleton::addType(Base::ProgressIndicatorPy::type_object(),
         pBaseModule,"ProgressIndicator");
@@ -884,7 +890,11 @@ bool Application::isAsyncRecomputeEnabled()
     static const ParameterGrp::handle hGrp = GetParameterGroupByPath(
         "User parameter:BaseApp/Preferences/Document"
     );
-    bool enableAsyncRecompute = hGrp->GetBool("EnableAsyncRecompute", true);
+    // FreeCAD-CH (ops#640, F5): one regeneration at a time, on the GUI thread: the worker is off
+    // unless AsyncRecomputeWorker is set (the async tests set it themselves). A new key: the old
+    // EnableAsyncRecompute was written true by every OK of the preferences (its checkbox's
+    // default), so a stored value says nothing of a choice and is ignored
+    bool enableAsyncRecompute = hGrp->GetBool("AsyncRecomputeWorker", false);
     return enableAsyncRecompute;
 }
 
@@ -1557,6 +1567,11 @@ Application::TransactionSignaller::TransactionSignaller(bool abort, bool signal)
         _TransSignalled = true;
         GetApplication().signalBeforeCloseTransaction(abort);
     }
+}
+
+bool Application::TransactionSignaller::isActive()
+{
+    return _TransSignalCount > 0;
 }
 
 Application::TransactionSignaller::~TransactionSignaller() {

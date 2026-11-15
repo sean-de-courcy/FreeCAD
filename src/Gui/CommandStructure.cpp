@@ -29,6 +29,7 @@
 #include "ActiveObjectList.h"
 #include "Application.h"
 #include "Document.h"
+#include "DocumentTabBar.h"
 #include "MDIView.h"
 #include "ViewProviderDocumentObject.h"
 #include "Selection.h"
@@ -60,6 +61,14 @@ StdCmdPart::StdCmdPart()
 void StdCmdPart::activated(int iMsg)
 {
     Q_UNUSED(iMsg);
+
+    // FreeCAD-CH (ops#640, R6T-2): under the typed tabs one tab is one studio, as in Onshape (no
+    // part containers): Std_Part makes a Part Studio tab, never an App::Part nested in a studio
+    // (its Bodies drawn in the tab but outside its lists, another studio to Derived and the picks)
+    if (DocumentTabs::isOn()) {
+        doCommand(Gui, "Gui.DocumentTabs.create(App.activeDocument(), 'PartStudio')");
+        return;
+    }
 
     openCommand(QT_TRANSLATE_NOOP("Command", "Add a part"));
 

@@ -41,7 +41,9 @@
 #include <QListWidget>
 #include <QMenu>
 #include <QMouseEvent>
+#include <QPainter>
 #include <QSignalBlocker>
+#include <QStyledItemDelegate>
 #include <QTimer>
 #include <QVBoxLayout>
 
@@ -83,6 +85,7 @@
 #include <Gui/Application.h>
 #include <Gui/BitmapFactory.h>
 #include <Gui/Command.h>
+#include <Gui/ForkKeymap.h>
 #include <Gui/Document.h>
 #include <Gui/Tools.h>
 #include <Gui/View3DInventor.h>
@@ -94,14 +97,22 @@
 #include <Mod/PartDesign/App/Body.h>
 #include <Mod/PartDesign/App/FeatureAddSub.h>
 #include <Mod/PartDesign/App/FeatureExtrude.h>
+#include <Mod/PartDesign/App/FeatureHole.h>
 #include <Mod/PartDesign/App/FeatureRevolved.h>
 #include <Mod/PartDesign/App/FeatureSketchBased.h>
 #include <Mod/PartDesign/App/ShapeBinder.h>
 
 #include "ReferenceField.h"
+#include <Mod/PartDesign/App/StudioList.h>
 #include "ReferenceSelection.h"
 
 using namespace PartDesignGui;
+
+// FreeCAD-CH (ops#640 round 8): the plain status words (FeaturesView.cpp; no header names it)
+namespace PartDesignGui
+{
+QString plainStatusText(const App::DocumentObject* obj, const QString& message);
+}
 
 namespace
 {
@@ -126,6 +137,28 @@ std::string bareElement(const std::string& sub)
     return name;
 }
 
+bool isVertex(const char* sub)
+{
+    const char* element = Base::Tools::isNullOrEmpty(sub) ? nullptr : Data::findElementName(sub);
+    return element && std::string_view(element).starts_with("Vertex");
+}
+
+// Onshape's words for an element of an object: "Face of Pad" for Pad's `Face6`; another kind of
+// element keeps FreeCAD's form, `Pad:Wire1` (ops#640 round 6, J10)
+QString elementInWords(const std::string& element, const QString& name)
+{
+    if (element.starts_with("Face")) {
+        return ReferenceField::tr("Face of %1").arg(name);
+    }
+    if (element.starts_with("Edge")) {
+        return ReferenceField::tr("Edge of %1").arg(name);
+    }
+    if (element.starts_with("Vertex")) {
+        return ReferenceField::tr("Vertex of %1").arg(name);
+    }
+    return QStringLiteral("%1:%2").arg(name, QString::fromStdString(element));
+}
+
 QString distanceText(double distance)
 {
     if (std::isnan(distance)) {
@@ -140,6 +173,63 @@ bool matchesRedo(QKeyEvent* ke)
     return ke->matches(QKeySequence::Redo)
         || Gui::QtTools::matches(ke, QKeySequence(QStringLiteral("Ctrl+Y")));
 }
+
+// The x of an entry, as Onshape's beside each pick (FreeCAD-CH ops#640, rank 26): the square at
+// the right end of the entry's row; a click there removes the entry.
+QRect closeRect(const QRect& row)
+{
+    const int side = row.height();
+    return {row.right() - side + 1, row.top(), side, side};
+}
+
+// Draws each removable entry with its x after the text, which elides before it.
+class EntryDelegate: public QStyledItemDelegate
+{
+public:
+    EntryDelegate(std::function<bool(const QModelIndex&)> removable, QObject* parent)
+        : QStyledItemDelegate(parent)
+        , removable(std::move(removable))
+    {}
+
+    void paint(QPainter* painter,
+               const QStyleOptionViewItem& option,
+               const QModelIndex& index) const override
+    {
+        if (!(option.state & QStyle::State_Enabled) || !removable || !removable(index)) {
+            QStyledItemDelegate::paint(painter, option, index);
+            return;
+        }
+        const QRect box = closeRect(option.rect);
+        QStyleOptionViewItem rest(option);
+        rest.rect.setRight(box.left() - 1);
+        QStyledItemDelegate::paint(painter, rest, index);
+
+        painter->save();
+        painter->setRenderHint(QPainter::Antialiasing);
+        QPen pen(option.palette.color(
+                     (option.state & QStyle::State_Selected) ? QPalette::HighlightedText
+                                                              : QPalette::Text
+                 ),
+                 1.5);
+        pen.setCapStyle(Qt::RoundCap);
+        painter->setPen(pen);
+        const qreal half = box.height() * 0.18;
+        const QPointF centre = QRectF(box).center();
+        painter->drawLine(centre + QPointF(-half, -half), centre + QPointF(half, half));
+        painter->drawLine(centre + QPointF(-half, half), centre + QPointF(half, -half));
+        painter->restore();
+    }
+
+    QSize sizeHint(const QStyleOptionViewItem& option, const QModelIndex& index) const override
+    {
+        QSize size = QStyledItemDelegate::sizeHint(option, index);
+        size.rwidth() += size.height();
+        return size;
+    }
+
+private:
+    std::function<bool(const QModelIndex&)> removable;
+};
 
 /// The field's gate: elements of the field's target and kind, in the owner's document. Tells the
 /// field when it goes, whoever removed it (TaskReferences' PickGate pattern).
@@ -159,6 +249,7 @@ public:
         , kind(options.kind)
         , wholeObject(options.wholeObject)
         , acceptOnly(options.acceptOnly)
+        , vertexToEdge(options.vertexToEdge)
     {}
     ~ReferenceFieldGate() override
     {
@@ -198,11 +289,18 @@ public:
                 return false;
             }
         }
+        else if (vertexToEdge && kind == ReferenceField::Kind::Elements && isVertex(sub)) {
+            // The pick takes the adjacent edge nearest the click (ReferenceField::onSelectionChanged)
+        }
         else if (kind != ReferenceField::Kind::Profile && kind != ReferenceField::Kind::Objects
                  && kind != ReferenceField::Kind::Sections && !acceptOnly) {
             // A profile's gate is its accept test alone (an object of the body, or its elements),
             // and so are a list of objects' and a list of sections'
-            if (ReferenceSelection selection(support, flags); !selection.allow(doc, obj, sub)) {
+            // FreeCAD-CH (ops#654 S4): a studio feature has no solid before it; its studio
+            // (its parts' datums, the studio's origin) is the gate's
+            App::DocumentObject* gateSupport =
+                support ? support : (PartDesign::isStudioOwner(own) ? own : nullptr);
+            if (ReferenceSelection selection(gateSupport, flags); !selection.allow(doc, obj, sub)) {
                 notAllowedReason = QT_TR_NOOP("The field doesn't take this kind of element.");
                 return false;
             }
@@ -238,6 +336,7 @@ private:
     ReferenceField::Kind kind;
     bool wholeObject;
     bool acceptOnly;
+    bool vertexToEdge;
 };
 
 // The link properties a field writes: PropertyLinkSub, and PropertyLinkSubList (an up-to-shape)
@@ -606,6 +705,60 @@ std::optional<Presence> presenceIn(const TopoDS_Shape& element, const TopoDS_Sha
 
 }  // namespace
 
+// Selection parity P6b (oracle 8 SQ13): Onshape's Fillet filters vertices and takes the nearest
+// allowed entity, the adjacent edge
+std::string PartDesignGui::nearestEdgeAt(App::DocumentObject* obj, const std::string& vertex, const Base::Vector3d& click)
+{
+    try {
+        const Part::ShapeOptions shapeOptions
+            = Part::ShapeOption::ResolveLink | Part::ShapeOption::Transform;
+        const Part::TopoShape shape = Part::Feature::getTopoShape(obj, shapeOptions);
+        const TopoDS_Shape point = shape.getSubShape(vertex.c_str(), /* silent = */ true);
+        if (point.IsNull() || point.ShapeType() != TopAbs_VERTEX) {
+            return {};
+        }
+        // The click into the shape's coordinates: the containers above its Body place it
+        Base::Vector3d local = click;
+        if (auto body = PartDesign::Body::findBodyOf(obj)) {
+            body->globalPlacement().inverse().multVec(click, local);
+        }
+        const TopoDS_Shape at = BRepBuilderAPI_MakeVertex(gp_Pnt(local.x, local.y, local.z)).Shape();
+        const std::string kind = Part::TopoShape::shapeName(TopAbs_EDGE);
+        const int count = static_cast<int>(shape.countSubElements(kind.c_str()));
+        std::string best;
+        double nearest = 0;
+        for (int index = 1; index <= count; ++index) {
+            const std::string name = kind + std::to_string(index);
+            const TopoDS_Edge edge = TopoDS::Edge(shape.getSubShape(name.c_str()));
+            if (BRep_Tool::Degenerated(edge)) {
+                continue;
+            }
+            bool touches = false;
+            for (TopExp_Explorer it(edge, TopAbs_VERTEX); it.More() && !touches; it.Next()) {
+                touches = it.Current().IsSame(point);
+            }
+            if (!touches) {
+                continue;
+            }
+            BRepExtrema_DistShapeShape distance(edge, at);
+            if (!distance.IsDone()) {
+                continue;
+            }
+            if (best.empty() || distance.Value() < nearest) {
+                best = name;
+                nearest = distance.Value();
+            }
+        }
+        return best;
+    }
+    catch (const Standard_Failure&) {
+        return {};
+    }
+    catch (const Base::Exception&) {
+        return {};
+    }
+}
+
 /*********************************************************************
  *                          Reference field                          *
  *********************************************************************/
@@ -691,6 +844,14 @@ ReferenceField::ReferenceField(App::DocumentObject* owner,
                 this,
                 &ReferenceField::sectionsDragged);
     }
+    // An x beside each removable pick; the pointer over an entry preselects it in the 3D view
+    // (ops#640 rank 26): the viewport's moves come without a button pressed
+    entryList->setItemDelegate(new EntryDelegate(
+        [this](const QModelIndex& index) { return isRemovable(index.data(IndexRole).toInt()); },
+        entryList
+    ));
+    entryList->setMouseTracking(true);
+    entryList->viewport()->setMouseTracking(true);
     entryList->installEventFilter(this);
     entryList->viewport()->installEventFilter(this);
     connect(entryList, &QListWidget::customContextMenuRequested, this, &ReferenceField::showMenu);
@@ -748,6 +909,7 @@ ReferenceField::~ReferenceField()
         armedFieldPtr = nullptr;
     }
     try {
+        hoverEntry(nullptr);
         if (own && Gui::Selection().getSelectionGate(nullptr) == own) {
             Gui::Selection().rmvSelectionGate();
         }
@@ -1140,7 +1302,10 @@ void ReferenceField::reload()
         if ((isSingle() || isProfile()) && slot.obj) {
             // The object varies: `Pad:Face6`, or `DatumPlane` alone; a profile's `Sketch (whole)`
             const QString name = QString::fromUtf8(slot.obj->Label.getValue());
-            if (!element.empty()) {
+            if (!element.empty() && options.elementWords) {
+                text = elementInWords(element, name);
+            }
+            else if (!element.empty()) {
                 text = QStringLiteral("%1:%2").arg(name, text);
             }
             else {
@@ -1256,6 +1421,17 @@ void ReferenceField::onSelectionChanged(const Gui::SelectionChanges& msg)
         return;
     }
     if (obj != target() || Base::Tools::isNullOrEmpty(msg.pSubName)) {
+        return;
+    }
+    if (options.vertexToEdge && isVertex(msg.pSubName)) {
+        const std::string edge =
+            nearestEdgeAt(obj, Data::findElementName(msg.pSubName), Base::Vector3d(msg.x, msg.y, msg.z));
+        if (edge.empty()) {
+            Base::StateLocker lock(busy, true);
+            Gui::Selection().clearSelection();
+            return;
+        }
+        pick(obj, edge);
         return;
     }
     pick(obj, msg.pSubName);
@@ -1390,8 +1566,12 @@ App::DocumentObject* ReferenceField::featureOfElement(App::DocumentObject* shape
         if (!role.starts_with("UpTo")) {
             return true;  // a loft's or pipe's Sections, a pipe's Spine
         }
-        // Read by a pad, pocket, revolution or groove only (a hole or pipe has the properties
-        // too); the second side's in two sides only, and a revolution or groove reads no shape
+        // A hole reads its up-to face in Up to entity only (ops#640 rank 23)
+        if (obj->isDerivedFrom<PartDesign::Hole>()) {
+            return role == "UpToFace" && is("DepthType", "UpToFace");
+        }
+        // Read by a pad, pocket, revolution or groove only (a pipe has the properties too); the
+        // second side's in two sides only, and a revolution or groove reads no shape
         const bool revolved = obj->isDerivedFrom<PartDesign::Revolved>();
         if (!revolved && !obj->isDerivedFrom<PartDesign::FeatureExtrude>()) {
             return false;
@@ -1406,7 +1586,12 @@ App::DocumentObject* ReferenceField::featureOfElement(App::DocumentObject* shape
             return false;
         }
         const char* type = role.starts_with("UpToFace") ? "UpToFace" : "UpToShape";
-        return is(second ? "Type2" : "Type", type);
+        const char* sideType = second ? "Type2" : "Type";
+        // Up to vertex holds its vertex in UpToFace (ops#640 rank 22), a revolution's or a
+        // groove's Up to part its part (rank 21)
+        return is(sideType, type)
+            || (role.starts_with("UpToFace")
+                && (is(sideType, "UpToVertex") || (revolved && is(sideType, "UpToShape"))));
     };
     // What the feature links in those roles
     auto roleLinks = [&inUse](App::DocumentObject* obj) {
@@ -1878,14 +2063,20 @@ std::vector<App::PropertyLinkSubList::SubSet> ReferenceField::storedSections() c
     return sections;
 }
 
+bool ReferenceField::keepsSketchElement(const std::string& sub)
+{
+    const std::string element = bareElement(sub);
+    return boost::starts_with(element, "Vertex")
+        || boost::starts_with(element, "InternalFace");
+}
+
 void ReferenceField::pickSection(const Gui::SelectionChanges& msg)
 {
     App::DocumentObject* obj = owner()->getDocument()->getObject(msg.pObjectName);
     std::string sub = msg.pSubName ? msg.pSubName : "";
-    // A sketch is a section whole, unless one of its points is picked: the feature takes the
-    // whole sketch for any other element of it (Loft::getSectionShape)
-    if (obj->isDerivedFrom<Part::Part2DObject>()
-        && !boost::starts_with(bareElement(sub), "Vertex")) {
+    // A sketch is a section whole, unless one of its points or regions is picked: the feature
+    // takes the whole sketch for any other element of it (Loft::getSectionShape)
+    if (obj->isDerivedFrom<Part::Part2DObject>() && !keepsSketchElement(sub)) {
         sub.clear();
     }
     auto list = freecad_cast<App::PropertyLinkSubList*>(property());
@@ -2047,7 +2238,7 @@ void ReferenceField::moveCurrent(int step)
     }
 }
 
-bool ReferenceField::refusesLastElement(const std::vector<std::string>& stored)
+bool ReferenceField::keepsLastElement(const std::vector<std::string>& stored) const
 {
     App::DocumentObject* linked = isProfile() ? linkedObject() : nullptr;
     if (!linked || !stored.empty() || linked->isDerivedFrom<Part::Part2DObject>()) {
@@ -2066,6 +2257,14 @@ bool ReferenceField::refusesLastElement(const std::vector<std::string>& stored)
         }
         catch (const Base::Exception&) {
         }
+    }
+    return true;
+}
+
+bool ReferenceField::refusesLastElement(const std::vector<std::string>& stored)
+{
+    if (!keepsLastElement(stored)) {
+        return false;
     }
     switch (options.use) {
         case ProfileUse::Path:
@@ -2382,6 +2581,37 @@ void ReferenceField::removeSelected()
     if (indexes.empty() && entryList->currentItem()) {
         indexes.push_back(entryList->currentItem()->data(role).toInt());
     }
+    removeEntries(std::move(indexes));
+}
+
+void ReferenceField::setNote(const QString& text)
+{
+    message = text;
+    updateLook();
+}
+
+bool ReferenceField::isRemovable(int index) const
+{
+    // What removeEntries() takes out: not a required profile's whole object, nor a single
+    // reference that can't be empty (an axis)
+    if (!isEnabled()) {
+        return false;
+    }
+    if (isProfile()) {
+        if (index < 0) {
+            return !options.required;
+        }
+        // The last element of a solid's faces stays (refusesLastElement()): no x on it
+        return storedSubs().size() > 1 || !keepsLastElement({});
+    }
+    if (isSingle()) {
+        return options.removable;
+    }
+    return true;
+}
+
+void ReferenceField::removeEntries(std::vector<int> indexes)
+{
     // A profile's whole object isn't removed while the profile is required; an optional one
     // (an auxiliary path) is cleared
     if (isProfile() && !options.required && std::ranges::any_of(indexes, [](int index) {
@@ -2436,6 +2666,88 @@ void ReferenceField::removeSelected()
     write(stored);
 }
 
+bool ReferenceField::entryElement(const QListWidgetItem* item,
+                                  App::DocumentObject*& obj,
+                                  std::string& sub) const
+{
+    obj = nullptr;
+    sub.clear();
+    if (!item) {
+        return false;
+    }
+    const std::string stored = item->data(SubRole).toString().toStdString();
+    const int index = item->data(IndexRole).toInt();
+    if (isObjects()) {
+        // A feature whole (SubRole is its name)
+        const std::vector<App::DocumentObject*> objs = linkedObjects();
+        if (index >= 0 && index < static_cast<int>(objs.size())) {
+            obj = objs[index];
+        }
+        return obj != nullptr;
+    }
+    if (Data::hasMissingElement(stored.c_str())) {
+        return false;
+    }
+    if (isSections()) {
+        // A section's object, whole or at its first element
+        if (auto list = freecad_cast<App::PropertyLinkSubList*>(property())) {
+            const std::vector<App::DocumentObject*>& objs = list->getValues();
+            if (index >= 0 && index < static_cast<int>(objs.size())) {
+                obj = objs[index];
+            }
+        }
+    }
+    else {
+        obj = (isSingle() || isProfile()) ? linkedObject() : listObject();
+    }
+    if (!obj) {
+        return false;
+    }
+    sub = bareElement(stored);
+    return true;
+}
+
+void ReferenceField::hoverEntry(const QListWidgetItem* item)
+{
+    App::DocumentObject* obj = nullptr;
+    std::string sub;
+    if (!entryElement(item, obj, sub) || !obj->isAttachedToDocument()) {
+        obj = nullptr;
+    }
+    if (obj && hovering && hoverObject.getObject() == obj && hoverSub == sub) {
+        return;
+    }
+    if (hovering) {
+        // Only this field's preselection goes: the 3D view's may have taken its place
+        hovering = false;
+        const Gui::SelectionChanges& now = Gui::Selection().getPreselection();
+        auto text = [](const char* str) {
+            return std::string(str ? str : "");
+        };
+        if (text(now.pDocName) == hoverObject.getDocumentName()
+            && text(now.pObjectName) == hoverObject.getObjectName()
+            && text(now.pSubName) == hoverSub) {
+            Gui::Selection().rmvPreselect();
+        }
+    }
+    if (!obj) {
+        return;
+    }
+    hoverObject = obj;
+    hoverSub = sub;
+    // Internal: past the gates (the armed field's, or another field's while this one isn't),
+    // which would refuse with a message in the status bar; the 3D view highlights it as the
+    // tree's hover does
+    hovering = Gui::Selection().setPreselect(obj->getDocument()->getName(),
+                                             obj->getNameInDocument(),
+                                             sub.c_str(),
+                                             0,
+                                             0,
+                                             0,
+                                             Gui::SelectionChanges::MsgSource::Internal)
+        != 0;
+}
+
 bool ReferenceField::undo()
 {
     if (undoStack.empty()) {
@@ -2466,7 +2778,11 @@ void ReferenceField::updateLook()
     font.setBold(armed);
     label->setFont(font);
     const QString st = state();
-    if (st == QLatin1String("broken")) {
+    // A required field still empty (a new Revolve's axis): red, as Onshape outlines its empty
+    // required field, while OK still commits the feature in error (FreeCAD-CH ops#640 H1)
+    const bool missing = options.required && entryList->count() == 0;
+    setProperty("missing", missing);
+    if (st == QLatin1String("broken") || missing) {
         label->setStyleSheet(QStringLiteral("color: red;"));
     }
     else if (st == QLatin1String("guessed")) {
@@ -2476,8 +2792,9 @@ void ReferenceField::updateLook()
         label->setStyleSheet(QString());
     }
     entryList->setStyleSheet(
-        armed ? QStringLiteral("QListWidget#entries { border: 2px solid palette(highlight); }")
-              : QString()
+        armed     ? QStringLiteral("QListWidget#entries { border: 2px solid palette(highlight); }")
+        : missing ? QStringLiteral("QListWidget#entries { border: 2px solid red; }")
+                  : QString()
     );
 
     if (armed) {
@@ -2517,6 +2834,10 @@ void ReferenceField::updateLook()
     if (text.isEmpty() && st != QLatin1String("exact")) {
         if (auto own = owner()) {
             text = QString::fromUtf8(own->getStatusString());
+            // Under the Onshape keymap in the rows' tooltips' words (round 8)
+            if (Gui::ForkKeymap::isOnshape()) {
+                text = plainStatusText(own, text);
+            }
         }
     }
     status->setText(text);
@@ -2996,9 +3317,43 @@ void ReferenceField::startRepick(int index)
 bool ReferenceField::eventFilter(QObject* watched, QEvent* event)
 {
     if (watched == entryList->viewport()) {
-        if (event->type() == QEvent::MouseButtonPress
-            && static_cast<QMouseEvent*>(event)->button() == Qt::LeftButton) {  // NOLINT
-            setArmed(true);
+        switch (event->type()) {
+            case QEvent::MouseButtonPress:
+            case QEvent::MouseButtonDblClick: {
+                auto me = static_cast<QMouseEvent*>(event);  // NOLINT
+                if (me->button() != Qt::LeftButton) {
+                    break;
+                }
+                const bool press = event->type() == QEvent::MouseButtonPress;
+                if (press) {
+                    setArmed(true);
+                }
+                // A click on an entry's x removes that entry alone (ops#640 rank 26); its double
+                // click opens nothing
+                const QPoint pos = me->position().toPoint();
+                QListWidgetItem* item = entryList->itemAt(pos);
+                if (item && closeRect(entryList->visualItemRect(item)).contains(pos)
+                    && isRemovable(item->data(IndexRole).toInt())) {
+                    if (press) {
+                        const int role = isSections() ? SectionRole : IndexRole;
+                        const int index = item->data(role).toInt();
+                        hoverEntry(nullptr);
+                        removeEntries({index});
+                    }
+                    return true;
+                }
+                break;
+            }
+            case QEvent::MouseMove: {
+                auto me = static_cast<QMouseEvent*>(event);  // NOLINT
+                hoverEntry(entryList->itemAt(me->position().toPoint()));
+                break;
+            }
+            case QEvent::Leave:
+                hoverEntry(nullptr);
+                break;
+            default:
+                break;
         }
         return false;
     }
@@ -3015,11 +3370,12 @@ bool ReferenceField::eventFilter(QObject* watched, QEvent* event)
             break;
         }
         case QEvent::ShortcutOverride: {
-            // The field's keys before the window's shortcuts (Std_Delete, Std_Undo, ...)
+            // The field's keys before the window's shortcuts (Std_Delete, Std_Undo, ...). Not
+            // Esc: armed or not, it goes to the task view and cancels the dialog at once, as
+            // Onshape's (ops#640 rank 25, R1; reverses decision 23 Q1 (a))
             auto ke = static_cast<QKeyEvent*>(event);  // NOLINT
-            bool own = Gui::QtTools::matches(ke, QKeySequence(Gui::QtTools::deleteKeySequence()))
-                || ke->matches(QKeySequence::Undo) || matchesRedo(ke)
-                || (armed && ke->key() == Qt::Key_Escape) || isSectionMove(ke);
+            bool own = Gui::ForkKeymap::isDeleteKey(ke)
+                || ke->matches(QKeySequence::Undo) || matchesRedo(ke) || isSectionMove(ke);
             for (const auto& action : menuActions) {
                 own = own || (action && Gui::QtTools::matches(ke, action->shortcut()));
             }
@@ -3031,7 +3387,8 @@ bool ReferenceField::eventFilter(QObject* watched, QEvent* event)
         }
         case QEvent::KeyPress: {
             auto ke = static_cast<QKeyEvent*>(event);  // NOLINT
-            if (Gui::QtTools::matches(ke, QKeySequence(Gui::QtTools::deleteKeySequence()))) {
+            // Delete, and Backspace too on the Mac (both keys there; ops#640 polish)
+            if (Gui::ForkKeymap::isDeleteKey(ke)) {
                 removeSelected();
                 return true;
             }
@@ -3041,10 +3398,6 @@ bool ReferenceField::eventFilter(QObject* watched, QEvent* event)
             }
             if (matchesRedo(ke)) {
                 redo();
-                return true;
-            }
-            if (armed && ke->key() == Qt::Key_Escape) {
-                setArmed(false);
                 return true;
             }
             if (isSectionMove(ke)) {
@@ -3218,10 +3571,24 @@ std::set<std::string> ReferenceFieldGroup::properties() const
     return result;
 }
 
-void ReferenceFieldGroup::armFirstEmpty()
+void ReferenceFieldGroup::armFirstEmpty(const std::string& preferred)
 {
     // Once the dialog shows, after the panels' own queued focus calls
-    QTimer::singleShot(0, this, [this]() {
+    QTimer::singleShot(0, this, [this, preferred]() {
+        // FreeCAD-CH (selection parity P1): the field armed before a restart of the edit, filled
+        // or not: a multi-pick field stays armed for the next pick, as Onshape's
+        if (!preferred.empty()) {
+            for (ReferenceField* field : fields()) {
+                if (field->propertyName() == preferred && field->isEnabled()
+                    && !field->isHidden()) {
+                    field->setArmed(true);
+                    if (field->isArmed()) {
+                        field->list()->setFocus(Qt::OtherFocusReason);
+                        return;
+                    }
+                }
+            }
+        }
         for (ReferenceField* field : fields()) {
             if (field->isRequired() && field->isEnabled() && field->entries().empty()) {
                 field->setArmed(true);
@@ -3281,7 +3648,7 @@ ReferenceCombo::ReferenceCombo(QComboBox* combo,
     , writer(std::move(write))
 {
     connect(combo, qOverload<int>(&QComboBox::activated), this, &ReferenceCombo::onActivated);
-    // Disarmed (a pick made, Esc, another input): the box shows the property again
+    // Disarmed (a pick made, another input): the box shows the property again
     connect(field, &ReferenceField::armedChanged, this, [this](bool on) {
         if (!on) {
             refresh();

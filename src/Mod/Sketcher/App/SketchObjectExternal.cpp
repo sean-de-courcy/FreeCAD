@@ -40,6 +40,7 @@
 #include <GC_MakeArcOfCircle.hxx>
 #include <GeomAPI_ProjectPointOnCurve.hxx>
 #include <GeomAPI_ProjectPointOnSurf.hxx>
+#include <GeomAPI_IntCS.hxx>
 #include <GeomConvert.hxx>
 #include <GeomConvert_BSplineCurveKnotSplitting.hxx>
 #include <GeomLProp_CLProps.hxx>
@@ -278,6 +279,68 @@ namespace
 bool isIdentityFrame(const Base::Placement& frame)
 {
     return frame.isIdentity(Precision::Confusion());
+}
+
+// FreeCAD-CH (Onshape's Pierce, oracle 10d): where the edge's underlying curve crosses the plane.
+// Onshape pierces the curve, not the bounded edge (a line that stops short pierces at its
+// extension's crossing, an arc whose span misses the plane through its circle), and when it
+// crosses more than once, every point goes to the same crossing: the first along the edge from its
+// start, by the curve's parameter. A periodic curve is followed round from the start; a crossing
+// before the start of an open curve counts only when none lies after it, the nearest then. None
+// when the curve misses the plane (parallel, or bounded short of it: a B-spline)
+std::optional<gp_Pnt> pierceCrossing(const TopoDS_Edge& edge, const gp_Pln& plane)
+{
+    double first = 0.0;
+    double last = 0.0;
+    Handle(Geom_Curve) curve = BRep_Tool::Curve(edge, first, last);  // the edge's location applied
+    if (curve.IsNull()) {
+        return std::nullopt;
+    }
+    if (auto trimmed = Handle(Geom_TrimmedCurve)::DownCast(curve); !trimmed.IsNull()) {
+        curve = trimmed->BasisCurve();
+    }
+    Handle(Geom_Plane) surface = new Geom_Plane(plane);
+    GeomAPI_IntCS intersector(curve, surface);
+    if (!intersector.IsDone() || intersector.NbPoints() == 0) {
+        return std::nullopt;
+    }
+    const bool reversed = edge.Orientation() == TopAbs_REVERSED;
+    const double start = reversed ? last : first;
+    const double sign = reversed ? -1.0 : 1.0;
+    const bool periodic = curve->IsPeriodic();
+    const double period = periodic ? curve->Period() : 0.0;
+    constexpr double tolerance = 1e-9;  // in the curve's parameter
+    std::optional<std::pair<double, gp_Pnt>> ahead;   // the least t at or after the start
+    std::optional<std::pair<double, gp_Pnt>> behind;  // the greatest t before it
+    for (int k = 1; k <= intersector.NbPoints(); ++k) {
+        double u = 0.0;
+        double v = 0.0;
+        double w = 0.0;  // on the curve
+        intersector.Parameters(k, u, v, w);
+        double t = sign * (w - start);
+        if (periodic && period > 0.0) {
+            t = std::fmod(t, period);
+            if (t < 0.0) {
+                t += period;
+            }
+            if (period - t < tolerance) {
+                t = 0.0;
+            }
+        }
+        const gp_Pnt point = intersector.Point(k);
+        if (t >= -tolerance) {
+            if (!ahead || t < ahead->first) {
+                ahead = std::make_pair(t, point);
+            }
+        }
+        else if (!behind || t > behind->first) {
+            behind = std::make_pair(t, point);
+        }
+    }
+    if (ahead) {
+        return ahead->second;
+    }
+    return behind->second;
 }
 }  // namespace
 
@@ -1054,6 +1117,12 @@ int SketchObject::carbonCopy(App::DocumentObject* pObj, bool construction)
             return;
         }
 
+        // FreeCAD-CH (sketch patterns): a mirrored circular pattern turns the other way (a linear
+        // pattern's value is unused)
+        if (xinv != yinv && newConstr->Type == Sketcher::Pattern) {
+            newConstr->setValue(-newConstr->getValue());
+        }
+
         // DistanceX, DistanceY
         if ((xinv && newConstr->Type == Sketcher::DistanceX)
             || (yinv && newConstr->Type == Sketcher::DistanceY)) {
@@ -1298,8 +1367,14 @@ struct AddingSubShapes
 };
 }  // namespace
 
-int SketchObject::addExternal(App::DocumentObject* Obj, const char* SubName, bool defining, bool intersection)
+int SketchObject::addExternal(App::DocumentObject* Obj,
+                              const char* SubName,
+                              bool defining,
+                              bool intersection,
+                              bool implicit,
+                              bool pierce)
 {
+    pierce = pierce && intersection;
     // no need to check input data validity as this is an sketchobject managed operation.
     Base::StateLocker lock(managedoperation, true);
 
@@ -1371,7 +1446,8 @@ int SketchObject::addExternal(App::DocumentObject* Obj, const char* SubName, boo
             element += std::to_string(idx);
             {
                 AddingSubShapes adding;
-                added = addExternal(Obj, element.c_str(), defining, intersection) >= 0 || added;
+                added = addExternal(Obj, element.c_str(), defining, intersection, implicit) >= 0
+                    || added;
             }
             element.resize(elementNameSize);
         }
@@ -1428,9 +1504,14 @@ int SketchObject::addExternal(App::DocumentObject* Obj, const char* SubName, boo
         if (!(Objects[i] == Obj && std::string(SubName) == SubElements[i])) {
             continue;
         }
-        if (Types[i] == static_cast<int>(ExtType::Both)
-            || (Types[i] == static_cast<int>(ExtType::Projection) && !intersection)
-            || (Types[i] == static_cast<int>(ExtType::Intersection) && intersection)) {
+        const long kind = externalKind(Types[i]);
+        if (kind == static_cast<int>(ExtType::Both)
+            || (kind == static_cast<int>(ExtType::Projection) && !intersection)
+            || (kind == static_cast<int>(ExtType::Intersection) && intersection)) {
+            // FreeCAD-CH (ops#634): the user's add of a constraint's helper keeps it
+            if (isImplicitType(Types[i]) && !implicit) {
+                return keepImplicitExternal(static_cast<int>(i), defining, intersection);
+            }
             Base::Console().error("Link to %s already exists in this sketch.\n", SubName);
             return -1;
         }
@@ -1455,8 +1536,11 @@ int SketchObject::addExternal(App::DocumentObject* Obj, const char* SubName, boo
         }
         // Case where projections are already there when adding intersections, or the reverse:
         // the rebuild keeps the existing geometry's Ids on it (ops#260)
+        // a helper keeps its mark only when another helper's add gives it the kind (ops#634)
         add = false;
-        Types[i] = static_cast<int>(ExtType::Both);
+        Types[i] = static_cast<long>(ExtType::Both)
+            | (implicit && isImplicitType(Types[i]) ? implicitExternalMark : 0)
+            | (pierce ? pierceExternalMark : 0);  // FreeCAD-CH (Onshape's Pierce)
         // the user's choice: a link waiting for its type no longer does, and its geometry is no
         // longer flagged as guessed (PR 277 review L5); a failed add below puts the key back
         if (i < externalGeoRef.size() && undecidedTypeKeys.erase(externalGeoRef[i]) != 0) {
@@ -1467,7 +1551,9 @@ int SketchObject::addExternal(App::DocumentObject* Obj, const char* SubName, boo
         // add the new ones
         Objects.push_back(Obj);
         SubElements.emplace_back(SubName);
-        Types.push_back(static_cast<int>(intersection ? ExtType::Intersection : ExtType::Projection));
+        Types.push_back(static_cast<long>(intersection ? ExtType::Intersection : ExtType::Projection)
+                        | (implicit ? implicitExternalMark : 0)
+                        | (pierce ? pierceExternalMark : 0));  // FreeCAD-CH (Onshape's Pierce)
 
         // set the Link list.
         setExternalLinksAndTypes(Objects, SubElements, Types);
@@ -4680,6 +4766,18 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
     for (const auto& [index, type] : relinkedTypes) {
         Types[index] = type;
     }
+    // FreeCAD-CH (ops#634): the types alone below; the links' implicit marks (and a Pierce
+    // link's mark, Onshape's Pierce) go back where the types are written
+    std::vector<long> linkMarks(Types.size(), 0);
+    for (std::size_t index = 0; index < Types.size(); ++index) {
+        linkMarks[index] = Types[index] < 0
+            ? 0
+            : Types[index] & (implicitExternalMark | pierceExternalMark);
+        Types[index] = externalKind(Types[index]);
+    }
+    auto withMark = [&linkMarks](std::size_t index, long type) {
+        return index < linkMarks.size() && type >= 0 ? type | linkMarks[index] : type;
+    };
 
     std::set<std::string> refSet;
     // We use a vector here to keep the order (roughly) the same as ExternalGeometry
@@ -4706,6 +4804,9 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
 
         bool projection = Types[i] == (int)ExtType::Projection || Types[i] == (int)ExtType::Both;
         bool intersection = Types[i] == (int)ExtType::Intersection || Types[i] == (int)ExtType::Both;
+        // FreeCAD-CH (Onshape's Pierce): the intersection is the underlying curve's first crossing
+        const bool pierceLink = static_cast<std::size_t>(i) < linkMarks.size()
+            && (linkMarks[i] & pierceExternalMark) != 0;
 
         // Skip frozen geometries
         bool frozen = false;
@@ -4881,7 +4982,16 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
             }
             projSize = geos.size();
 
-            if (intersection && !refSubShape.IsNull()) {
+            if (intersection && pierceLink && !refSubShape.IsNull()
+                && refSubShape.ShapeType() == TopAbs_EDGE) {
+                // FreeCAD-CH (Onshape's Pierce): one point, where the edge's underlying curve
+                // crosses the plane, the first along the edge from its start (none: the link
+                // gives nothing, and its geometry is kept, flagged missing)
+                if (auto crossing = pierceCrossing(TopoDS::Edge(refSubShape), sketchPlane)) {
+                    importVertex(BRepBuilderAPI_MakeVertex(*crossing).Vertex());
+                }
+            }
+            else if (intersection && !refSubShape.IsNull()) {
                 FCBRepAlgoAPI_Section maker(refSubShape, sketchPlane);
                 maker.Approximation(Standard_True);
                 if (!maker.IsDone())
@@ -5271,11 +5381,15 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
                 }
             }
             Types.resize(linkCount);
+            std::vector<long> savedTypes;
+            for (std::size_t index = 0; index < linkCount; ++index) {
+                savedTypes.push_back(withMark(index, Types[index]));
+            }
             externalTypeRepairPending = undecided;
             if (undecided) {
-                Types.push_back(pendingTypeRepairMark);
+                savedTypes.push_back(pendingTypeRepairMark);
             }
-            ExternalTypes.setValues(Types);
+            ExternalTypes.setValues(savedTypes);
         }
         if (!savedKinds.empty() || !savedUndecided.empty() || !savedAbsent.empty()
             || !savedDecided.empty()) {
@@ -5735,7 +5849,7 @@ void SketchObject::rebuildExternalGeometry(std::optional<ExternalToAdd> extToAdd
             linksChanged = linksChanged || !isLink;
             newObjects.push_back(Objects[index]);
             newSubElements.push_back(SubElements[index]);
-            newTypes.push_back(Types[index]);
+            newTypes.push_back(withMark(index, Types[index]));
         }
         if (typesRepaired) {
             // the mark goes with the last undecided link
@@ -6001,6 +6115,330 @@ int SketchObject::externalType(int entry) const
         return static_cast<int>(ExtType::Projection);
     }
     return static_cast<int>(types[entry]);
+}
+
+bool SketchObject::isImplicitExternal(int entry) const
+{
+    return entry >= 0 && entry < ExternalGeometry.getSize() && isImplicitType(externalType(entry));
+}
+
+// FreeCAD-CH (ops#634): Onshape projects nothing for a constraint on model geometry, so nothing
+// stays when the constraint goes. Here the constraint needs the helper link: it goes once nothing
+// uses it, no constraint on any of its geometries and none of them defining (made part of the
+// profile since). A constraint list flagged invalid (checked against other geometry, e.g. during a
+// restore) can't tell: nothing goes
+std::vector<int> SketchObject::unusedImplicitExternals() const
+{
+    std::vector<int> unused;
+    if (Constraints.hasInvalidGeometry()) {
+        return unused;
+    }
+    std::set<int> used;
+    for (const auto* constraint : Constraints.getValues()) {
+        // every element, not only First/Second/Third: a group constraint has more
+        for (std::size_t n = 0; n < constraint->getElementsSize(); ++n) {
+            used.insert(constraint->getElement(n).GeoId);
+        }
+    }
+    for (int entry = 0; entry < ExternalGeometry.getSize(); ++entry) {
+        if (!isImplicitExternal(entry)) {
+            continue;
+        }
+        const auto ids = externalGeometryIds(entry);
+        // a link without geometry stays: nothing shows it, and it has no geometry to go by
+        const bool inUse = ids.empty() || std::ranges::any_of(ids, [&](long id) {
+            auto it = externalGeoMap.find(id);
+            if (it == externalGeoMap.end()) {
+                return false;
+            }
+            // ExternalGeo[k] has GeoId -1 - k
+            return used.count(-it->second - 1) != 0
+                || ExternalGeometryFacade::getFacade(ExternalGeo[it->second])
+                       ->testFlag(ExternalGeometryExtension::Defining);
+        });
+        if (!inUse) {
+            unused.push_back(entry);
+        }
+    }
+    return unused;
+}
+
+// FreeCAD-CH (Onshape's Pierce): see the header. With pos none the local entity is a line (its
+// extension passes through the crossing: it slides, keeping its direction and length), a circle or
+// an arc (the crossing on its circle) instead of a point. The crossing is the rebuild's own (the
+// Pierce link's point, pierceCrossing()), so it follows the edge on every recompute; if the edge's
+// curve stops reaching the plane, the point's geometry is kept where it was, flagged missing, and
+// the sketch fails naming the reference, as for any external geometry that loses its source
+// (ops#264 e2). Onshape keeps the constraint with a warning and leaves the points where they are
+int SketchObject::addPierce(int pointGeoId, PointPos pos, App::DocumentObject* obj, const char* edgeSub)
+{
+    if (!obj || !obj->isAttachedToDocument() || !edgeSub || !*edgeSub) {
+        throw Base::ValueError("Pierce: no model edge given");
+    }
+    if (pointGeoId < 0 || pointGeoId > getHighestCurveIndex()) {
+        throw Base::ValueError("Pierce: the point must be a point of the sketch's own geometry");
+    }
+    // Onshape's local entity: a point (a point, or a curve's vertex), or a line, whose extension
+    // then passes through the crossing; a circle or an arc likewise has the crossing on its circle
+    const Part::Geometry* local = getGeometry(pointGeoId);
+    if (pos == PointPos::none && local && local->is<Part::GeomPoint>()) {
+        pos = PointPos::start;
+    }
+    const bool onCurve = pos == PointPos::none;
+    if (onCurve
+        && !(local
+             && (local->is<Part::GeomLineSegment>() || local->is<Part::GeomCircle>()
+                 || local->is<Part::GeomArcOfCircle>()))) {
+        throw Base::ValueError(
+            "Pierce: the sketch entity must be a point, a line, a circle or an arc");
+    }
+    if (!onCurve && getVertexIndexGeoPos(pointGeoId, pos) < 0) {
+        throw Base::ValueError("Pierce: the point must be a point of the sketch's own geometry");
+    }
+    if (!isExternalAllowed(obj->getDocument(), obj)) {
+        throw Base::ValueError(std::string("Pierce: ") + obj->getNameInDocument()
+                               + " is not allowed as external geometry of this sketch");
+    }
+
+    // the edge as the link reads it (addExternal's shape, plane and frame)
+    const auto wholeShape = Part::Feature::getTopoShape(
+        obj,
+        Part::ShapeOption::ResolveLink | Part::ShapeOption::Transform
+    );
+    const auto edgeShape = wholeShape.getSubTopoShape(edgeSub, /*silent*/ true);
+    if (edgeShape.isNull() || edgeShape.shapeType(/*silent*/ true) != TopAbs_EDGE) {
+        throw Base::ValueError(std::string("Pierce: ") + edgeSub + " is not an edge");
+    }
+    gp_Pln sketchPlane;
+    const Base::Placement frame = externalFrame(obj, edgeSub);
+    {
+        const Base::Placement Plm = Placement.getValue();
+        const Base::Vector3d Pos = Plm.getPosition();
+        const Base::Rotation Rot = Plm.getRotation();
+        Base::Vector3d dN(0, 0, 1);
+        Rot.multVec(dN, dN);
+        Base::Vector3d dX(1, 0, 0);
+        Rot.multVec(dX, dX);
+        sketchPlane.SetPosition(gp_Ax3(gp_Pnt(Pos.x, Pos.y, Pos.z),
+                                       gp_Dir(dN.x, dN.y, dN.z),
+                                       gp_Dir(dX.x, dX.y, dX.z)));
+        if (!isIdentityFrame(frame)) {
+            sketchPlane.Transform(Part::TopoShape::convert(frame.inverse().toMatrix()));
+        }
+    }
+    // an edge in the sketch plane has no crossing point: its section is the edge itself
+    {
+        BRepAdaptor_Curve curve(TopoDS::Edge(edgeShape.getShape()));
+        const double first = curve.FirstParameter();
+        const double last = curve.LastParameter();
+        constexpr int samples = 8;
+        bool inPlane = true;
+        for (int k = 0; k <= samples && inPlane; ++k) {
+            const gp_Pnt p = curve.Value(first + (last - first) * k / samples);
+            inPlane = sketchPlane.Distance(p) <= Precision::Confusion();
+        }
+        if (inPlane) {
+            throw Base::ValueError(std::string("Pierce: ") + edgeSub
+                                   + " lies in the sketch plane; constrain the point onto it "
+                                     "instead (Coincident or Point on object)");
+        }
+    }
+    // the crossing as Onshape takes it (the edge's underlying curve, the first along the edge from
+    // its start), in the sketch's coordinates; a curve that misses the plane is refused
+    const auto crossingPoint = pierceCrossing(TopoDS::Edge(edgeShape.getShape()), sketchPlane);
+    if (!crossingPoint) {
+        throw Base::ValueError(std::string("Pierce: ") + edgeSub
+                               + " does not cross the sketch plane");
+    }
+    Base::Vector3d expected(crossingPoint->X(), crossingPoint->Y(), crossingPoint->Z());
+    frame.multVec(expected, expected);                    // into the sketch's container
+    Placement.getValue().inverse().multVec(expected, expected);  // into the sketch
+    expected.z = 0.0;
+
+    auto findEntry = [&]() {
+        const auto& objects = ExternalGeometry.getValues();
+        const auto& subs = ExternalGeometry.getSubValues();
+        for (std::size_t i = 0; i < objects.size() && i < subs.size(); ++i) {
+            if (objects[i] == obj && subs[i] == edgeSub) {
+                return static_cast<int>(i);
+            }
+        }
+        return -1;
+    };
+    auto givesIntersections = [this](int entry) {
+        const long kind = externalKind(externalType(entry));
+        return kind == static_cast<long>(ExtType::Intersection)
+            || kind == static_cast<long>(ExtType::Both);
+    };
+    // a link of the edge that gives its intersections already is reused (a Pierce's, or the
+    // user's own, if it gives this crossing); otherwise the Pierce's intersection is added as a
+    // helper, to a projection link too
+    int entry = findEntry();
+    bool added = false;
+    if (entry < 0 || !givesIntersections(entry)) {
+        added = entry < 0;
+        if (addExternal(obj,
+                        edgeSub,
+                        /*defining*/ false,
+                        /*intersection*/ true,
+                        /*implicit*/ true,
+                        /*pierce*/ true)
+            < 0) {
+            throw Base::ValueError(std::string("Pierce: ") + edgeSub
+                                   + " does not cross the sketch plane");
+        }
+        entry = findEntry();
+        if (entry < 0) {
+            throw Base::RuntimeError("Pierce: the edge's intersection link is missing");
+        }
+    }
+
+    // the crossings: the link's intersection points (a projection of the link is kind 1)
+    std::vector<int> crossings;
+    std::set<long> linkIds;
+    for (long id : externalGeometryIds(entry)) {
+        linkIds.insert(id);
+        if (externalGeometryKind(id) == 1) {
+            continue;
+        }
+        auto it = externalGeoMap.find(id);
+        if (it == externalGeoMap.end()) {
+            continue;
+        }
+        if (ExternalGeo[it->second]->is<Part::GeomPoint>()) {
+            // ExternalGeo[k] has GeoId -1 - k
+            crossings.push_back(-it->second - 1);
+        }
+    }
+    if (crossings.empty()) {
+        if (added) {
+            delExternalPrivate(linkIds, true);
+        }
+        throw Base::ValueError(std::string("Pierce: ") + edgeSub
+                               + " does not cross the sketch plane");
+    }
+
+    // The move that takes the local entity to the crossing x: a point to x; a line along its
+    // normal, so that its extension passes through x (direction and length kept, as Onshape moves
+    // it); a circle or an arc along the line from its centre, so that its circle does (radius kept)
+    auto moveToMeet = [&](const Base::Vector3d& x) -> Base::Vector3d {
+        if (!onCurve) {
+            return x - getPoint(pointGeoId, pos);
+        }
+        // fetched again: the link's add above can have solved the sketch, renewing its geometry
+        const Part::Geometry* curve = getGeometry(pointGeoId);
+        if (const auto* line = freecad_cast<const Part::GeomLineSegment*>(curve)) {
+            const Base::Vector3d p1 = line->getStartPoint();
+            Base::Vector3d dir = line->getEndPoint() - p1;
+            const Base::Vector3d v = x - p1;
+            if (dir.Length() < Precision::Confusion()) {
+                return v;
+            }
+            dir.Normalize();
+            return v - dir * v.Dot(dir);
+        }
+        Base::Vector3d center;
+        double radius = 0.0;
+        if (const auto* circle = freecad_cast<const Part::GeomCircle*>(curve)) {
+            center = circle->getCenter();
+            radius = circle->getRadius();
+        }
+        else if (const auto* arc = freecad_cast<const Part::GeomArcOfCircle*>(curve)) {
+            center = arc->getCenter();
+            radius = arc->getRadius();
+        }
+        Base::Vector3d w = x - center;
+        if (w.Length() < Precision::Confusion()) {
+            return Base::Vector3d(radius, 0, 0);
+        }
+        return w - Base::Vector3d(w).Normalize() * radius;
+    };
+    // the link's point at the crossing (a Pierce link gives that one only; the user's own
+    // intersection link gives the bounded edge's crossings, which may not include it)
+    int crossing = crossings.front();
+    double offset = std::numeric_limits<double>::infinity();
+    for (int geoId : crossings) {
+        const double distance = (getPoint(geoId, PointPos::start) - expected).Length();
+        if (distance < offset) {
+            offset = distance;
+            crossing = geoId;
+        }
+    }
+    if (offset > 1e-6) {
+        if (added) {
+            delExternalPrivate(linkIds, true);
+        }
+        throw Base::ValueError(std::string("Pierce: the sketch's own intersection link of ")
+                               + edgeSub
+                               + " gives the edge's crossings only, not its curve's first one "
+                                 "(along its extension); delete that link to pierce");
+    }
+    // a curve is slid onto the crossing first, by the solver with the sketch's other constraints
+    // kept (as the Midpoint command places its point): the point-on-object alone would let the
+    // solver turn a line or resize a circle. A refused move leaves it to the solver
+    if (onCurve && moveToMeet(getPoint(crossing, PointPos::start)).Length() > Precision::Confusion()) {
+        try {
+            moveGeometry(pointGeoId,
+                         PointPos::none,
+                         moveToMeet(getPoint(crossing, PointPos::start)),
+                         /*relative*/ true,
+                         /*updateGeoBeforeMoving*/ true);
+        }
+        catch (const Base::Exception& e) {
+            Base::Console().log("Pierce: the curve is left to the solver (%s)\n", e.what());
+        }
+    }
+
+    auto constraint = std::make_unique<Constraint>();
+    constraint->Type = Pierce;
+    constraint->First = pointGeoId;
+    constraint->FirstPos = pos;
+    constraint->Second = crossing;
+    constraint->SecondPos = PointPos::start;
+    return addConstraint(std::move(constraint));
+}
+
+int SketchObject::delUnusedImplicitExternals()
+{
+    const auto entries = unusedImplicitExternals();
+    std::set<long> ids;
+    for (int entry : entries) {
+        const auto entryIds = externalGeometryIds(entry);
+        ids.insert(entryIds.begin(), entryIds.end());
+    }
+    if (ids.empty()) {
+        return 0;
+    }
+    delExternalPrivate(ids, true);
+    return static_cast<int>(entries.size());
+}
+
+int SketchObject::keepImplicitExternal(int entry, bool defining, bool intersection)
+{
+    // the link, its geometry, their Ids and constraints stay; the mark goes, and the geometry of
+    // the kind added takes the defining flag asked for, as a new link's would
+    auto types = ExternalTypes.getValues();
+    types[entry] = externalKind(types[entry]);
+    ExternalTypes.setValues(types);
+    const int kind = intersection ? 0 : 1;  // externalGeometryKind's
+    for (long id : externalGeometryIds(entry)) {
+        auto it = externalGeoMap.find(id);
+        const int geometryKind = externalGeometryKind(id);
+        if (it == externalGeoMap.end() || (geometryKind != kind && geometryKind != -1)) {
+            continue;
+        }
+        if (ExternalGeometryFacade::getFacade(ExternalGeo[it->second])
+                ->testFlag(ExternalGeometryExtension::Defining)
+            == defining) {
+            continue;
+        }
+        std::unique_ptr<Part::Geometry> geo(ExternalGeo[it->second]->clone());
+        ExternalGeometryFacade::getFacade(geo.get())
+            ->setFlag(ExternalGeometryExtension::Defining, defining);
+        ExternalGeo.set1Value(it->second, std::move(geo));
+    }
+    solverNeedsUpdate = true;
+    return entry;
 }
 
 bool SketchObject::externalTypeUndecided(int entry) const
@@ -6277,7 +6715,7 @@ int SketchObject::unparkExternalGeometry(App::DocumentObject* obj,
     // FreeCAD-CH (ops#278): kept geometry without a kind (also parked before ops#264, when parking
     // kept none) splits a Both entry's Ids between its projection and its intersections by
     // position: a split that moved while the entry was parked moves constraints
-    if (type == static_cast<int>(ExtType::Both)) {
+    if (externalKind(type) == static_cast<int>(ExtType::Both)) {
         bool kindless = false;
         for (std::size_t n = 0; n < refs.size() && !kindless; ++n) {
             if (!kept[n]) {

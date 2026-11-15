@@ -8,9 +8,9 @@
 "PadOnCopyFaceConvertGrow|pad_copy_face|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "quiet", "found_by": "review pr590s-r1", "issue": "ops#590", "tier": "F"},
 "PadOnCopyFaceEmptied|pad_copy_face|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "BROKEN", "expected": "broken", "found_by": "review pr590s-r1", "issue": "ops#590", "tier": "F"},
 "PatternOfNothingDeletedCap|front|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr590s-r1", "issue": "ops#590", "tier": "F"},
-"PatternOfNothingDeletedLast|front|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "wrong", "found_by": "review pr590s-r1", "issue": "ops#590", "tier": "F"},
+"PatternOfNothingDeletedLast|front|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr590s-r1", "issue": "ops#590", "tier": "F"},
 "PatternOfNothingEmptiedCap|front|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr590s-r1", "issue": "ops#590", "tier": "F"},
-"PatternOfNothingEmptiedLast|front|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "wrong", "found_by": "review pr590s-r1", "issue": "ops#590", "tier": "F"},
+"PatternOfNothingEmptiedLast|front|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr590s-r1", "issue": "ops#590", "tier": "F"},
 "SketchOnCopyConvertGrow|sketch_copy|V2s": {"axes": ["M1", "E4", "X4:600"], "classes": ["D"], "expect": "CORRECT", "expected": "wrong", "found_by": "review pr590s-r1", "issue": "ops#590", "tier": "F"}
 }
 }

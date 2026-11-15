@@ -32,6 +32,10 @@ EditTextRole = QtCore.Qt.UserRole + 6
 NAME, TYPE, EXPRESSION, VALUE, DESCRIPTION, SOURCE = range(6)
 
 
+# Clicks that may open a modal dialog are made directly (button.click()), never through
+# QTimer.singleShot(0, button.click) and then pump() or waitFor(): on macOS (Qt 6.11, Cocoa
+# event dispatcher) no timer fires inside a modal exec() entered from an event that a manual
+# processEvents() delivered, so the timer that answers the dialog never runs and the test hangs.
 def pump(seconds=0.3):
     app = QtWidgets.QApplication.instance()
     end = time.time() + seconds
@@ -185,10 +189,25 @@ class TestVariablesPanelGui(unittest.TestCase):
     # G18 first: the dock as a fresh FREECAD_USER_HOME has it
 
     def test_a_dock_hidden_by_default(self):
-        """G18. The "Variables" dock exists and is hidden; its toggle action is in View > Panels,
-        and triggering it shows the dock."""
+        """G18. The "Variables" dock exists; under the Onshape keymap (the fork's default) it is
+        shown on the right from the start, as Onshape's variable table is (ops#640, rank 15, F13),
+        else hidden. Its toggle action is in View > Panels, and triggering it shows the dock."""
         dock = dockOf(self.panel)
         self.assertIsNotNone(dock)
+        keymap = App.ParamGet("User parameter:BaseApp/Preferences/General").GetString(
+            "Keymap", "Onshape"
+        )
+        if keymap != "FreeCAD":
+            # Shown once at the start (the one-time marker); whether it still shows depends on
+            # the classes run before this one (TestVariablesImportGui comes first and its panel
+            # is closed after), so the oracle is the marker and the side
+            marker = App.ParamGet("User parameter:BaseApp/Preferences/DockWindows/VariablesView")
+            self.assertTrue(marker.GetBool("ShownByKeymap", False))
+            self.assertEqual(
+                Gui.getMainWindow().dockWidgetArea(dock), QtCore.Qt.RightDockWidgetArea
+            )
+            dock.hide()
+            pump(0.1)
         self.assertFalse(dock.isVisible())
         # The Panels menu has no parent widget: reach it through the menu bar's actions.
         panels = []
@@ -297,7 +316,8 @@ class TestVariablesPanelGui(unittest.TestCase):
 
     def test_rename(self):
         """G4. Renaming Width to BoxWidth in place: the Box and a sheet cell follow, the value
-        stays, one undo step; Undo brings the name and the texts back. Bad names change nothing."""
+        stays, one undo step; Undo brings the name and the texts back. Bad names change nothing
+        (a unit name such as mm is a good one since rank 54, as Onshape takes t)."""
         doc = self.standardDocument()
         self.sheet.set("B1", "=VarSet.Width")
         doc.recompute()
@@ -312,7 +332,7 @@ class TestVariablesPanelGui(unittest.TestCase):
         self.assertAlmostEqual(self.box.Length.Value, 40)
         self.assertIn(("VarSet", "BoxWidth"), self.rows())
 
-        for bad in ("mm", "Height", "A1"):
+        for bad in ("2w", "Height", "A1"):
             self.commit("VarSet", "BoxWidth", NAME, bad)
             self.assertEqual(doc.UndoCount, undoCount + 1, bad)
             self.assertTrue(self.message.isVisible(), bad)
@@ -370,7 +390,7 @@ class TestVariablesPanelGui(unittest.TestCase):
         panelDialog = self.openPanelAddDialog()
         other = panelDialog.findChild(QtWidgets.QPushButton, "other")
         self.assertIsNotNone(other, "no Other... button")
-        QtCore.QTimer.singleShot(0, other.click)
+        other.click()
         dialog = waitFor(
             lambda: [
                 w
@@ -589,7 +609,7 @@ class TestVariablesPanelGui(unittest.TestCase):
         dialog = self.openPanelAddDialog()
         error = dialog.findChild(QtWidgets.QLabel, "error")
         cases = [
-            ("t", "Length", "2 mm", "is a unit"),
+            ("2t", "Length", "2 mm", "isn't a name"),
             ("pow", "Number", "2", "is a function"),
             ("Label", "Number", "2", "property of every"),
             ("Ratio", "Number", "2 mm", "no unit"),
@@ -697,7 +717,7 @@ class TestVariablesPanelGui(unittest.TestCase):
             other.click()
             doc.removeObject("VarSet")
 
-        QtCore.QTimer.singleShot(0, clickThenDelete)
+        clickThenDelete()
         pump(0.5)
         self.assertEqual(doc.findObjects("App::VarSet"), [])
         self.assertFalse(
@@ -1025,6 +1045,18 @@ class TestVariablesPanelGui(unittest.TestCase):
         pump(0.3)
         self.assertCancelledThenRight(doc)
 
+    def test_toolbar_does_not_widen_the_panel(self):
+        """ops#640 round 5: the toolbar's text actions (Copy from FreeCAD file..., Refresh...)
+        don't set the panel's width: a dock 441 px wide took 185 px from the 3D view (and moved
+        the 3D view's centre under the Tasks overlay). What doesn't fit goes to the toolbar's
+        overflow button, and the list's context menu has every action."""
+        toolBar = self.panel.findChild(QtWidgets.QToolBar)
+        self.assertIsNotNone(toolBar)
+        self.assertLess(self.panel.sizeHint().width(), toolBar.sizeHint().width())
+        names = {action.objectName() for action in self.tree.actions()}
+        for name in ("copyFromFreeCAD", "refreshCopy", "locateSource"):
+            self.assertIn(name, names)
+
     def test_edit_during_other_document_sketch_edit(self):
         """Review pr599-r1b R1b-3: a sketch in another document, its radius the variable across
         documents, in edit there: the panel edit doesn't recompute, and that document's Cancel
@@ -1345,7 +1377,7 @@ class TestVariablesImportGui(unittest.TestCase):
         button = self.find(QtWidgets.QPushButton, "import")
         self.assertTrue(button.isEnabled(), self.find(QtWidgets.QPlainTextEdit, "report")
                         .toPlainText())
-        QtCore.QTimer.singleShot(0, button.click)
+        button.click()
         self.assertTrue(waitFor(lambda: self.dialog.result is not None))
         pump(0.1)
         return self.dialog.result
@@ -1417,21 +1449,25 @@ class TestVariablesImportGui(unittest.TestCase):
         self.assertAlmostEqual(copyA.Width.Value, 8)
 
     def test_names(self):
-        """Names FreeCAD can't use are listed with their proposals, editable: t -> tt by hand,
-        H -> H_ as proposed; a name FreeCAD refuses (pi) disables Import."""
+        """Names FreeCAD can't use are listed with their proposals, editable: Label -> Lbl by
+        hand; a name FreeCAD refuses (cos) disables Import. Unit names (t, H) aren't listed:
+        they are usable as they are (ops#640, rank 54)."""
         path = writeExport(self.folder, "Units", [("LENGTH", "t", "2 mm"),
-                                                   ("LENGTH", "H", "#t * 3")])
+                                                   ("LENGTH", "H", "#t * 3"),
+                                                   ("LENGTH", "Label", "3 mm"),
+                                                   ("LENGTH", "Wall", "#Label * 4")])
         self.open([path])
         names = self.find(QtWidgets.QTableWidget, "names")
         table = {names.item(r, 0).text(): names.item(r, 1) for r in range(names.rowCount())}
-        self.assertEqual({k: v.text() for k, v in table.items()}, {"H": "H_", "t": "t_"})
-        table["t"].setText("pi")
+        self.assertEqual({k: v.text() for k, v in table.items()}, {"Label": "Label_"})
+        table["Label"].setText("cos")
         pump(0.05)
         self.assertFalse(self.find(QtWidgets.QPushButton, "import").isEnabled())
-        table["t"].setText("tt")
+        table["Label"].setText("Lbl")
         copy = self.importNow().copies[0]
-        self.assertEqual(copy.NameMap, {"t": "tt", "H": "H_"})
-        self.assertAlmostEqual(copy.H_.Value, 6)
+        self.assertEqual(copy.NameMap, {"Label": "Lbl"})
+        self.assertAlmostEqual(copy.H.Value, 6)
+        self.assertAlmostEqual(copy.Wall.Value, 12)
 
     def test_file_import_type(self):
         """File > Import knows "Onshape variables (*.json)"; its module opens the dialog."""
@@ -1473,7 +1509,7 @@ class TestVariablesImportGui(unittest.TestCase):
     # PR 317 round 1
 
     def clickImport(self):
-        QtCore.QTimer.singleShot(0, self.find(QtWidgets.QPushButton, "import").click)
+        self.find(QtWidgets.QPushButton, "import").click()
 
     def test_failure_shown(self):
         """A failed check (the test hook moves Width's value), then any other error during the
@@ -1555,23 +1591,24 @@ class TestVariablesImportGui(unittest.TestCase):
         self.assertNotIn("z", copyB.PropertiesList)
 
     def test_value_for_unit_name(self):
-        """A value for #t, a name FreeCAD can't use: the names table proposes t_, editable, as
-        for a copy's variable (review 317, 6)."""
-        path = writeExport(self.folder, "Thin", [("LENGTH", "Width", "#t * 2")])
+        """A value for #Label, a name FreeCAD can't use (every set has a Label): the names table
+        proposes Label_, editable, as for a copy's variable (review 317, 6). (#t, a unit name,
+        is usable since ops#640 rank 54.)"""
+        path = writeExport(self.folder, "Thin", [("LENGTH", "Width", "#Label * 2")])
         self.open([path])
-        self.choose(self.find(QtWidgets.QComboBox, "choice_t"), "value")
-        self.choose(self.find(QtWidgets.QComboBox, "type_t"), "LENGTH")
-        self.find(QtWidgets.QLineEdit, "value_t").setText("3 mm")
+        self.choose(self.find(QtWidgets.QComboBox, "choice_Label"), "value")
+        self.choose(self.find(QtWidgets.QComboBox, "type_Label"), "LENGTH")
+        self.find(QtWidgets.QLineEdit, "value_Label").setText("3 mm")
         pump(0.05)
         names = self.find(QtWidgets.QTableWidget, "names")
         self.assertTrue(names.isVisibleTo(self.dialog))
         table = {names.item(r, 0).text(): names.item(r, 1) for r in range(names.rowCount())}
-        self.assertEqual({k: v.text() for k, v in table.items()}, {"t": "t_"})
-        table["t"].setText("Thick")
+        self.assertEqual({k: v.text() for k, v in table.items()}, {"Label": "Label_"})
+        table["Label"].setText("Thick")
         pump(0.05)
         copy = self.importNow().copies[0]
         self.assertAlmostEqual(self.doc.getObject("Variables").Thick.Value, 3)
-        self.assertEqual(copy.Bindings, {"t": "Variables.Thick"})
+        self.assertEqual(copy.Bindings, {"Label": "Variables.Thick"})
         self.assertAlmostEqual(copy.Width.Value, 6)
 
     def test_dialog_freed(self):
@@ -1660,3 +1697,493 @@ class TestVariablesImportGui(unittest.TestCase):
         self.assertIn("copy", error.text())
         dialog.reject()
         dockOf(view).hide()
+
+
+# The panel's roles on a copy's header (src/Gui/VariablesView.cpp, ops#640 round 5)
+CopyStateRole = QtCore.Qt.UserRole + 20
+CopyMessageRole = QtCore.Qt.UserRole + 21
+
+
+class TestVariablesRefreshGui(unittest.TestCase):
+    """A copy's state in the panel, the Refresh preview, Locate and "Copy from FreeCAD file..."
+    (ops#317 PRs G2 and F, ops#640 round 5; notes/variables-studio.md 3.2-3.4, section 6 G-4).
+    Every source is made up here."""
+
+    def setUp(self):
+        self.folder = tempfile.mkdtemp(prefix="TestVariablesRefreshGui")
+        self.doc = App.newDocument("TestVariablesRefreshGui")
+        self.doc.UndoMode = 1
+        self.other = App.newDocument("TestVariablesRefreshGuiOther")
+        self.path = writeExport(self.folder, "Studio B", [("LENGTH", "Gap", "3 mm")])
+        from freecad.variables import copies
+
+        self.copy = copies.import_studios(self.doc, [self.path]).copies[0]
+        self.view = panel()
+        self.dock = dockOf(self.view)
+        self.dock.show()
+        Gui.setActiveDocument(self.doc.Name)
+        self.tree = self.view.findChild(QtWidgets.QTreeView, "variablesTree")
+        self.model = self.tree.model()
+        self.assertTrue(waitFor(lambda: self.model.rowCount() == 1))
+
+    def tearDown(self):
+        from freecad.variables import copies, importgui
+
+        copies._check_hook = None
+        for dialog in list(importgui._open):
+            if shiboken6.isValid(dialog):
+                dialog.reject()
+        for widget in QtWidgets.QApplication.topLevelWidgets():
+            if isinstance(widget, QtWidgets.QDialog) and widget.isVisible():
+                widget.reject()
+        pump(0.1)
+        for name in (self.doc.Name, self.other.Name):
+            if name in App.listDocuments():
+                App.closeDocument(name)
+        self.dock.hide()
+        pump(0.1)
+        shutil.rmtree(self.folder, ignore_errors=True)
+
+    def rewrite(self, variables):
+        writeExport(self.folder, "Studio B", variables)
+        later = os.stat(self.path).st_mtime + 10
+        os.utime(self.path, (later, later))
+
+    def recheck(self):
+        """Another document active and back: the panel rebuilds and checks the states again."""
+        Gui.setActiveDocument(self.other.Name)
+        pump(0.2)
+        Gui.setActiveDocument(self.doc.Name)
+        pump(0.3)
+
+    def header(self):
+        return self.model.index(0, 0)
+
+    def action(self, name):
+        found = self.view.findChildren(QtGui.QAction, name)
+        self.assertTrue(found, name)
+        return found[0]
+
+    def planDialog(self):
+        from freecad.variables import importgui
+
+        self.assertTrue(waitFor(lambda: importgui._open and importgui._open[-1].isVisible()),
+                        "no dialog")
+        return importgui._open[-1]
+
+    def apply(self, dialog):
+        button = dialog.findChild(QtWidgets.QPushButton, "apply")
+        self.assertTrue(button.isEnabled(),
+                        dialog.findChild(QtWidgets.QPlainTextEdit, "report").toPlainText())
+        button.click()
+        self.assertTrue(waitFor(lambda: dialog.result is not None))
+        pump(0.3)
+        return dialog.result
+
+    def test_states(self):
+        """G-4. The header of an attached copy shows its state: up to date (the label alone),
+        out of date after the JSON changed on disk, not found once it is gone; the message is
+        its tooltip and a role."""
+        self.assertEqual(self.model.data(self.header()), "Studio B")
+        self.assertEqual(self.model.data(self.header(), CopyStateRole), "up to date")
+        self.assertIn("Up to date with Studio B.json",
+                      self.model.data(self.header(), QtCore.Qt.ToolTipRole))
+        self.rewrite([("LENGTH", "Gap", "4 mm")])
+        self.recheck()
+        self.assertEqual(self.model.data(self.header()), "Studio B (out of date)")
+        self.assertEqual(self.model.data(self.header(), CopyStateRole), "out of date")
+        self.assertIn("changed since the last Refresh",
+                      self.model.data(self.header(), CopyMessageRole))
+        os.remove(self.path)
+        self.recheck()
+        self.assertEqual(self.model.data(self.header()), "Studio B (source not found)")
+        self.assertIn("Locate", self.model.data(self.header(), CopyMessageRole))
+
+    def test_actions_enabled(self):
+        """Refresh and Locate need an attached copy's row; Copy from FreeCAD file a document."""
+        self.tree.setCurrentIndex(self.model.index(0, NAME, self.header()))
+        pump(0.1)
+        self.assertTrue(self.action("refreshCopy").isEnabled())
+        self.assertTrue(self.action("locateSource").isEnabled())
+        self.assertTrue(self.action("copyFromFreeCAD").isEnabled())
+        variables = self.doc.addObject("App::VarSet", "Variables")
+        variables.addProperty("App::PropertyLength", "Plain")
+        self.doc.recompute()
+        pump(0.3)
+        for row in range(self.model.rowCount()):
+            if self.model.data(self.model.index(row, 0)) == "Variables":
+                self.tree.setCurrentIndex(self.model.index(row, 0))
+        pump(0.1)
+        self.assertFalse(self.action("refreshCopy").isEnabled())
+
+    def test_refresh_preview(self):
+        """The panel's Refresh shows the preview (the summary, each change); its Refresh button
+        applies it as one undo step and the header is up to date again."""
+        self.rewrite([("LENGTH", "Gap", "4 mm"), ("LENGTH", "Rail", "#Gap * 2")])
+        self.recheck()
+        self.tree.setCurrentIndex(self.header())
+        pump(0.1)
+        undo = self.doc.UndoCount
+        self.action("refreshCopy").trigger()
+        dialog = self.planDialog()
+        self.assertEqual(dialog.findChild(QtWidgets.QLabel, "summary").text(),
+                         "Added 1, changed 1")
+        report = dialog.findChild(QtWidgets.QPlainTextEdit, "report").toPlainText()
+        self.assertIn("Added: Rail", report)
+        self.assertIn("Changed: Gap", report)
+        self.apply(dialog)
+        self.assertAlmostEqual(self.copy.Gap.Value, 4)
+        self.assertAlmostEqual(self.copy.Rail.Value, 8)
+        self.assertEqual(self.doc.UndoCount, undo + 1)
+        self.assertTrue(waitFor(
+            lambda: self.model.data(self.model.index(0, 0), CopyStateRole) == "up to date"))
+
+    def test_refresh_choice(self):
+        """A variable added at the source using a name nothing defines: Refresh waits for a
+        choice; Skip lets it go on."""
+        self.rewrite([("LENGTH", "Gap", "3 mm"), ("LENGTH", "Far", "#Missing * 2")])
+        from freecad.variables import importgui
+
+        dialog = importgui.refresh(self.copy)
+        pump(0.1)
+        button = dialog.findChild(QtWidgets.QPushButton, "apply")
+        self.assertFalse(button.isEnabled())
+        choice = dialog.findChild(QtWidgets.QComboBox, "choice_Missing")
+        self.assertIsNotNone(choice)
+        choice.setCurrentIndex(choice.findData("skip"))
+        pump(0.05)
+        self.apply(dialog)
+        self.assertNotIn("Far", self.copy.PropertiesList)
+        self.assertEqual(self.copy.Skipped, ["Missing"])
+
+    def test_orphan_flag(self):
+        """A variable removed at the source that User still uses stays as an orphan, flagged in
+        its row's Source column (design 3.4, D2)."""
+        user = self.doc.addObject("App::VarSet", "User")
+        user.addProperty("App::PropertyDistance", "Len")
+        user.setExpression("Len", "Studio_B.Gap * 2")
+        self.doc.recompute()
+        self.rewrite([("LENGTH", "Other", "1 mm")])
+        from freecad.variables import copies
+
+        copies.refresh(self.copy)
+        pump(0.3)
+        self.recheck()
+        found = None
+        for row in range(self.model.rowCount(self.header())):
+            if self.model.data(self.model.index(row, NAME, self.header())) == "Gap":
+                found = self.model.data(self.model.index(row, SOURCE, self.header()))
+        self.assertEqual(found, "Studio B: removed at the source; used by User")
+
+    def test_locate(self):
+        """Locate to a renamed copy of the file: the preview, then the copy follows that file."""
+        moved = os.path.join(self.folder, "Studio B moved.json")
+        shutil.copy(self.path, moved)
+        os.remove(self.path)
+        from freecad.variables import importgui
+
+        dialog = importgui.locate(self.copy, moved)
+        self.apply(dialog)
+        self.assertEqual(self.copy.SourcePath, os.path.abspath(moved).replace(os.sep, "/"))
+        self.recheck()
+        self.assertEqual(self.model.data(self.model.index(0, 0), CopyStateRole), "up to date")
+
+    def test_copy_from_freecad_file(self):
+        """Copy from FreeCAD file: a saved document's VarSet, read without opening it; the dialog
+        offers its saved value for a reference outside the set, and Copy makes the copy."""
+        source = App.newDocument("TestVariablesRefreshGuiSource")
+        dims = source.addObject("App::VarSet", "Dims")
+        dims.addProperty("App::PropertyLength", "L")
+        dims.L = 40
+        master = source.addObject("App::VarSet", "Master")
+        master.addProperty("App::PropertyDistance", "Depth")
+        master.setExpression("Depth", "Dims.L / 2")
+        source.recompute()
+        path = os.path.join(self.folder, "Master.FCStd")
+        source.saveAs(path)
+        App.closeDocument(source.Name)
+        from freecad.variables import importgui
+
+        dialog = importgui.copy_from_file(self.doc, path, "Master")
+        pump(0.1)
+        self.assertFalse(dialog.findChild(QtWidgets.QPushButton, "apply").isEnabled())
+        choice = dialog.findChild(QtWidgets.QComboBox, "choice_Dims.L")
+        self.assertIsNotNone(choice)
+        choice.setCurrentIndex(choice.findData("freeze"))
+        pump(0.05)
+        copy = self.apply(dialog)
+        self.assertEqual(copy.SourceKind, "FreeCAD document")
+        self.assertAlmostEqual(copy.Depth.Value, 20)
+        self.assertNotIn(path.replace(os.sep, "/"),
+                         [d.FileName for d in App.listDocuments().values()])
+
+
+class TestVariablesClashGui(unittest.TestCase):
+    """A local variable and an imported one of the same name (ops#640, decision 317): the
+    panel's Add asks which one `#name` means before it makes the variable ("Use <source>", "Use
+    local", "Pick...", Cancel); the import and Refresh dialogs list the clashing names with
+    "Use <source>", "Use local" and "Pick" (per name), and wait for a choice. Made-up exports."""
+
+    def setUp(self):
+        self.folder = tempfile.mkdtemp(prefix="TestVariablesClashGui")
+        self.doc = App.newDocument("TestVariablesClashGui")
+        self.doc.UndoMode = 1
+        self.path = writeExport(self.folder, "Studio B", [("LENGTH", "Gap", "3 mm")])
+        self.view = panel()
+        self.dock = dockOf(self.view)
+        self.dock.show()
+        Gui.setActiveDocument(self.doc.Name)
+        self.tree = self.view.findChild(QtWidgets.QTreeView, "variablesTree")
+        self.model = self.tree.model()
+        pump(0.2)
+
+    def tearDown(self):
+        from freecad.variables import importgui
+
+        for dialog in list(importgui._open):
+            if shiboken6.isValid(dialog):
+                dialog.reject()
+        for widget in QtWidgets.QApplication.topLevelWidgets():
+            if isinstance(widget, QtWidgets.QDialog) and widget.isVisible():
+                widget.reject()
+        pump(0.1)
+        if self.doc.Name in App.listDocuments():
+            App.closeDocument(self.doc.Name)
+        self.dock.hide()
+        pump(0.1)
+        shutil.rmtree(self.folder, ignore_errors=True)
+
+    def imported(self):
+        """Studio B (Gap = 3 mm) as a copy, and User.Len = Studio_B.Gap * 2 made before any
+        clash."""
+        from freecad.variables import copies
+
+        copy = copies.import_studios(self.doc, [self.path]).copies[0]
+        self.user = self.doc.addObject("App::VarSet", "User")
+        self.user.addProperty("App::PropertyDistance", "Len")
+        self.user.setExpression("Len", "#Gap * 2")
+        self.doc.recompute()
+        self.assertEqual(expressionText(self.user, "Len"), "Studio_B.Gap * 2")
+        pump(0.3)
+        return copy
+
+    def shown(self, holder, name):
+        """The panel's Expression cell of @a holder's (label) variable @a name."""
+        pump(0.4)
+        for row in range(self.model.rowCount()):
+            header = self.model.index(row, 0)
+            if self.model.data(header) != holder:
+                continue
+            for child in range(self.model.rowCount(header)):
+                if self.model.data(self.model.index(child, NAME, header)) == name:
+                    return self.model.data(self.model.index(child, EXPRESSION, header))
+        return None
+
+    def add(self, name, value, answer, pick=None):
+        """The panel's Add with a Length @a name = @a value; the clash question answered with
+        the button named @a answer ("Pick..." then picks the item containing @a pick). Returns
+        the Add dialog and the question's text (None: not asked)."""
+        self.action("addVariable").trigger()
+        found = waitFor(lambda: [w for w in QtWidgets.QApplication.topLevelWidgets()
+                                 if w.objectName() == "addVariableDialog" and w.isVisible()])
+        self.assertTrue(found, "no Add variable dialog")
+        dialog = found[0]
+        dialog.findChild(QtWidgets.QLineEdit, "name").setText(name)
+        typeBox = dialog.findChild(QtWidgets.QComboBox, "type")
+        typeBox.setCurrentIndex(typeBox.findText("Length"))
+        dialog.findChild(QtWidgets.QLineEdit, "value").setText(value)
+        texts = []
+
+        def answerPick():
+            for widget in QtWidgets.QApplication.topLevelWidgets():
+                if isinstance(widget, QtWidgets.QInputDialog) and widget.isVisible():
+                    items = [i for i in widget.comboBoxItems() if pick in i]
+                    widget.setTextValue(items[0])
+                    widget.accept()
+                    return
+            QtCore.QTimer.singleShot(50, answerPick)
+
+        def answerBox(tries=[0]):
+            for widget in QtWidgets.QApplication.topLevelWidgets():
+                if isinstance(widget, QtWidgets.QMessageBox) and widget.objectName() == "nameClash":
+                    texts.append(widget.text())
+                    texts.append([b.text() for b in widget.buttons()])
+                    if pick is not None:
+                        QtCore.QTimer.singleShot(50, answerPick)
+                    if answer == "cancel":
+                        widget.button(QtWidgets.QMessageBox.Cancel).click()
+                    else:
+                        widget.findChild(QtWidgets.QPushButton, answer).click()
+                    return
+            tries[0] += 1
+            if tries[0] < 40:
+                QtCore.QTimer.singleShot(50, answerBox)
+
+        if answer is not None:
+            QtCore.QTimer.singleShot(50, answerBox)
+        ok = dialog.findChild(QtWidgets.QDialogButtonBox).button(QtWidgets.QDialogButtonBox.Ok)
+        ok.click()  # direct: the name-clash box's exec() runs here, where answerBox's timer fires (see pump)
+        if answer is not None:
+            self.assertTrue(waitFor(lambda: texts), "no question about the name")
+        pump(0.4)
+        return dialog, (texts or [None, None])
+
+    def action(self, name):
+        found = self.view.findChildren(QtGui.QAction, name)
+        self.assertTrue(found, name)
+        return found[0]
+
+    def probe(self, text="#Gap"):
+        """The path a new expression's @a text gets."""
+        probe = self.doc.getObject("Probe") or self.doc.addObject("App::VarSet", "Probe")
+        if "Len" not in probe.PropertiesList:
+            probe.addProperty("App::PropertyDistance", "Len")
+        probe.setExpression("Len", text)
+        return expressionText(probe, "Len")
+
+    def test_add_use_local(self):
+        """Adding Gap where Studio B defines it: asked first, naming the copy and its file;
+        "Use local" makes it with the choice in one undo step. `#Gap` then means the local one
+        and is shown so; User keeps Studio B's Gap, shown by its full path."""
+        copy = self.imported()
+        undo = self.doc.UndoCount
+        _dialog, (text, buttons) = self.add("Gap", "7 mm", "useLocal")
+        self.assertIn("#Gap is already imported: Studio B (Studio B.json)", text)
+        self.assertIn("Existing expressions keep the variable they use", text)
+        self.assertLessEqual({"Use Studio B.json", "Use local", "Pick..."}, set(buttons))
+        local = self.doc.getObject("Variables")
+        self.assertIsNotNone(local)
+        self.assertAlmostEqual(local.Gap.Value, 7)
+        self.assertEqual(copy.Bindings, {"#Gap": "Variables.Gap"})
+        self.assertEqual(self.doc.UndoCount, undo + 1)
+        self.assertEqual(self.probe(), "Variables.Gap")
+        self.assertEqual(self.shown("Probe", "Len"), "#Gap")
+        self.assertEqual(self.shown("User", "Len"), "Studio_B.Gap * 2")
+        self.doc.removeObject("Probe")
+        self.doc.undo()
+        self.assertIsNone(self.doc.getObject("Variables"))
+        self.assertEqual(copy.Bindings, {})
+        self.assertEqual(self.shown("User", "Len"), "#Gap * 2")
+
+    def test_add_use_import(self):
+        """"Use Studio B.json": the local Gap is made, `#Gap` keeps meaning the copy's."""
+        copy = self.imported()
+        self.add("Gap", "7 mm", "useImport")
+        self.assertAlmostEqual(self.doc.getObject("Variables").Gap.Value, 7)
+        self.assertEqual(copy.Bindings, {"#Gap": "Studio_B.Gap"})
+        self.assertEqual(self.probe(), "Studio_B.Gap")
+        self.assertEqual(self.shown("User", "Len"), "#Gap * 2")
+        self.assertEqual(self.shown("Probe", "Len"), "#Gap")
+
+    def test_add_pick(self):
+        """"Pick...": a list of the new local variable and the copy's; the copy picked."""
+        copy = self.imported()
+        self.add("Gap", "7 mm", "pick", pick="Studio B.json")
+        self.assertIsNotNone(self.doc.getObject("Variables"))
+        self.assertEqual(copy.Bindings, {"#Gap": "Studio_B.Gap"})
+
+    def test_add_cancel(self):
+        """Cancel: nothing is made, and the Add dialog stays open with what was typed."""
+        copy = self.imported()
+        undo = self.doc.UndoCount
+        dialog, _text = self.add("Gap", "7 mm", "cancel")
+        self.assertIsNone(self.doc.getObject("Variables"))
+        self.assertEqual(copy.Bindings, {})
+        self.assertEqual(self.doc.UndoCount, undo)
+        self.assertTrue(dialog.isVisible())
+        self.assertEqual(dialog.findChild(QtWidgets.QLineEdit, "name").text(), "Gap")
+        dialog.reject()
+
+    def test_add_no_clash(self):
+        """A name no copy defines: no question."""
+        self.imported()
+        self.add("Rail", "2 mm", None)
+        self.assertAlmostEqual(self.doc.getObject("Variables").Rail.Value, 2)
+        self.assertFalse([w for w in QtWidgets.QApplication.topLevelWidgets()
+                          if w.objectName() == "nameClash" and w.isVisible()])
+
+    def localGap(self):
+        local = self.doc.addObject("App::VarSet", "Variables")
+        local.addProperty("App::PropertyDistance", "Gap")
+        local.Gap = "7 mm"
+        self.doc.recompute()
+        return local
+
+    def importDialog(self):
+        from freecad.variables import importgui
+
+        dialog = importgui.run(self.doc, [self.path])
+        pump(0.2)
+        return dialog
+
+    def clickImport(self, dialog):
+        button = dialog.findChild(QtWidgets.QPushButton, "import")
+        self.assertTrue(button.isEnabled(),
+                        dialog.findChild(QtWidgets.QPlainTextEdit, "report").toPlainText())
+        button.click()
+        self.assertTrue(waitFor(lambda: dialog.result is not None))
+        pump(0.2)
+        return dialog.result.copies[0]
+
+    def test_import_use_local(self):
+        """Importing Studio B where Variables defines Gap: the clash box lists it, Import waits
+        for a choice; "Use local" imports with the choice recorded."""
+        self.localGap()
+        dialog = self.importDialog()
+        box = dialog.findChild(QtWidgets.QGroupBox, "clashes")
+        self.assertTrue(box.isVisible())
+        self.assertIn("#Gap: Variables.Gap", dialog.findChild(QtWidgets.QLabel, "clashNote").text())
+        self.assertEqual(dialog.findChild(QtWidgets.QRadioButton, "useImport").text(),
+                         "Use Studio B.json")
+        self.assertFalse(dialog.findChild(QtWidgets.QPushButton, "import").isEnabled())
+        dialog.findChild(QtWidgets.QRadioButton, "useLocal").setChecked(True)
+        pump(0.1)
+        copy = self.clickImport(dialog)
+        self.assertEqual(copy.Bindings, {"#Gap": "Variables.Gap"})
+        self.assertEqual(self.probe(), "Variables.Gap")
+
+    def test_import_pick(self):
+        """"Pick": a row per name, Import waits until each has its choice."""
+        self.localGap()
+        dialog = self.importDialog()
+        dialog.findChild(QtWidgets.QRadioButton, "pick").setChecked(True)
+        pump(0.1)
+        combo = dialog.findChild(QtWidgets.QComboBox, "clash_Gap")
+        self.assertTrue(combo.isVisible())
+        self.assertEqual([combo.itemData(i) for i in range(combo.count())],
+                         [None, "Variables.Gap", "Studio_B.Gap"])
+        self.assertFalse(dialog.findChild(QtWidgets.QPushButton, "import").isEnabled())
+        combo.setCurrentIndex(combo.findData("Studio_B.Gap"))
+        pump(0.1)
+        copy = self.clickImport(dialog)
+        self.assertEqual(copy.Bindings, {"#Gap": "Studio_B.Gap"})
+        self.assertEqual(self.probe(), "Studio_B.Gap")
+
+    def test_refresh_new_clash(self):
+        """A Refresh that brings Rail, which Variables defines: the preview's clash box, and
+        Refresh waits for a choice; "Use Studio B.json" records it."""
+        copy = self.imported()
+        local = self.doc.addObject("App::VarSet", "Variables")
+        local.addProperty("App::PropertyDistance", "Rail")
+        self.doc.recompute()
+        writeExport(self.folder, "Studio B", [("LENGTH", "Gap", "3 mm"),
+                                              ("LENGTH", "Rail", "#Gap * 3")])
+        later = os.stat(self.path).st_mtime + 10
+        os.utime(self.path, (later, later))
+        from freecad.variables import importgui
+
+        dialog = importgui.refresh(copy)
+        pump(0.2)
+        self.assertTrue(dialog.findChild(QtWidgets.QGroupBox, "clashes").isVisible())
+        apply = dialog.findChild(QtWidgets.QPushButton, "apply")
+        self.assertFalse(apply.isEnabled())
+        dialog.findChild(QtWidgets.QRadioButton, "useImport").setChecked(True)
+        pump(0.1)
+        self.assertTrue(apply.isEnabled(),
+                        dialog.findChild(QtWidgets.QPlainTextEdit, "report").toPlainText())
+        apply.click()
+        self.assertTrue(waitFor(lambda: dialog.result is not None))
+        pump(0.2)
+        self.assertEqual(copy.Bindings, {"#Rail": "Studio_B.Rail"})
+        self.assertAlmostEqual(copy.Rail.Value, 9)
+        self.assertEqual(self.probe("#Rail"), "Studio_B.Rail")

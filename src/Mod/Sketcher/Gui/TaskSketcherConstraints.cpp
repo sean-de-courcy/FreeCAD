@@ -40,6 +40,7 @@
 #include <limits>
 
 #include <App/Application.h>
+#include <App/ConfigurationHooks.h>
 #include <App/Document.h>
 #include <App/Expression.h>
 #include <Gui/Application.h>
@@ -133,6 +134,15 @@ public:
                 break;
             case Sketcher::PointOnObject:
                 type = QCoreApplication::translate("SketcherGui::ConstraintView", "PointOnObject");
+                break;
+            case Sketcher::Midpoint:  // FreeCAD-CH (ops#656)
+                type = QCoreApplication::translate("SketcherGui::ConstraintView", "Midpoint");
+                break;
+            case Sketcher::Pierce:  // FreeCAD-CH (Onshape's Pierce)
+                type = QCoreApplication::translate("SketcherGui::ConstraintView", "Pierce");
+                break;
+            case Sketcher::Pattern:  // FreeCAD-CH (sketch patterns)
+                type = QCoreApplication::translate("SketcherGui::ConstraintView", "Pattern");
                 break;
             case Sketcher::Parallel:
                 type = QCoreApplication::translate("SketcherGui::ConstraintView", "Parallel");
@@ -230,6 +240,8 @@ public:
                 case Sketcher::Vertical:
                 case Sketcher::Coincident:
                 case Sketcher::PointOnObject:
+                case Sketcher::Midpoint:  // FreeCAD-CH (ops#656)
+                case Sketcher::Pierce:    // FreeCAD-CH (Onshape's Pierce)
                 case Sketcher::Parallel:
                 case Sketcher::Perpendicular:
                 case Sketcher::Tangent:
@@ -322,7 +334,9 @@ public:
             // Gui::BitmapFactory().iconFromTheme("Constraint_Ellipse_Axis_Angle") );
             static QIcon equal(Gui::BitmapFactory().iconFromTheme("Constraint_EqualLength"));
             static QIcon pntoo(Gui::BitmapFactory().iconFromTheme("Constraint_PointOnObject"));
+            static QIcon midpt(Gui::BitmapFactory().iconFromTheme("Constraint_PointOnMidPoint"));
             static QIcon group(Gui::BitmapFactory().iconFromTheme("Constraint_Group"));
+            static QIcon pattern(Gui::BitmapFactory().iconFromTheme("Sketcher_RectangularArray"));
             static QIcon text(Gui::BitmapFactory().iconFromTheme("Constraint_Text"));
             static QIcon symm(Gui::BitmapFactory().iconFromTheme("Constraint_Symmetric"));
             static QIcon snell(Gui::BitmapFactory().iconFromTheme("Constraint_SnellsLaw"));
@@ -384,8 +398,14 @@ public:
                     return selicon(constraint, block, block);
                 case Sketcher::PointOnObject:
                     return selicon(constraint, pntoo, pntoo);
+                case Sketcher::Midpoint:  // FreeCAD-CH (ops#656)
+                    return selicon(constraint, midpt, midpt);
+                case Sketcher::Pierce:  // FreeCAD-CH (Onshape's Pierce): a coincidence
+                    return selicon(constraint, coinc, coinc);
                 case Sketcher::Group:
                     return selicon(constraint, group, group);
+                case Sketcher::Pattern:  // FreeCAD-CH (sketch patterns)
+                    return selicon(constraint, pattern, pattern);
                 case Sketcher::Text:
                     return selicon(constraint, text, text);
                 case Sketcher::Parallel:
@@ -469,6 +489,8 @@ public:
                 case Sketcher::Coincident:
                 case Sketcher::Block:
                 case Sketcher::PointOnObject:
+                case Sketcher::Midpoint:  // FreeCAD-CH (ops#656)
+                case Sketcher::Pierce:    // FreeCAD-CH (Onshape's Pierce)
                 case Sketcher::Parallel:
                 case Sketcher::Perpendicular:
                 case Sketcher::Tangent:
@@ -476,6 +498,7 @@ public:
                 case Sketcher::Symmetric:
                 case Sketcher::Group:
                 case Sketcher::Text:
+                case Sketcher::Pattern:  // FreeCAD-CH (sketch patterns)
                     return true;
                 case Sketcher::Distance:
                 case Sketcher::DistanceX:
@@ -670,6 +693,38 @@ void ConstraintView::contextMenuEvent(QContextMenuEvent* event)
     QAction* change = menu.addAction(tr("Edit Value"), this, &ConstraintView::modifyCurrentItem);
     change->setEnabled(isQuantity);
     menu.setDefaultAction(change);
+
+    // FreeCAD-CH (ops#671 C2): Onshape's configuration items on a dimension ("Configure with
+    // <input>", "Set to #<variable>", "Unconfigure from <input>"), from the App hook
+    if (it && isQuantity && items.size() <= 1) {
+        auto sketch = it->sketchView->getSketchObject();
+        App::ObjectIdentifier path = sketch->ExpressionEngine.canonicalPath(
+            sketch->Constraints.createPath(it->ConstraintNbr));
+        const std::string docName = sketch->getDocument()->getName();
+        const std::string objName = sketch->getNameInDocument();
+        const std::string pathText = path.toString();
+        // Onshape (CP2-9): a "Configure dimension" submenu, one item per input ("Size",
+        // "Set to #w"); a configured dimension's "Unconfigure from <input>" sits in it too
+        const auto configItems = App::callConfigMenuQuery(sketch, path);
+        QMenu* configMenu = configItems.empty() ? nullptr : menu.addMenu(tr("Configure dimension"));
+        if (configMenu) {
+            configMenu->setObjectName(QStringLiteral("constraintConfigMenu"));
+        }
+        for (const auto& configItem : configItems) {
+            const QString label = configItem.action == "configure"
+                ? QString::fromStdString(configItem.inputName)
+                : QString::fromStdString(configItem.label);
+            QAction* action = configMenu->addAction(
+                label, [docName, objName, pathText, configItem]() {
+                    auto doc = App::GetApplication().getDocument(docName.c_str());
+                    if (auto target = doc ? doc->getObject(objName.c_str()) : nullptr) {
+                        App::runConfigMenuItem(target, pathText, configItem);
+                    }
+                });
+            action->setObjectName(QStringLiteral("constraintConfig_")
+                                  + QString::fromStdString(configItem.action));
+        }
+    }
 
     QAction* driven =
         menu.addAction(tr("Toggle Driving/Reference"), this, &ConstraintView::updateDrivingStatus);
@@ -1248,12 +1303,25 @@ void TaskSketcherConstraints::onListWidgetConstraintsEmitShowSelection3DVisibili
     changeFilteredVisibility(true, ActionTarget::Selected);
 }
 
+namespace
+{
+// FreeCAD-CH (ops#634): a constraint's helper (a model pick's link) goes with its last
+// constraint, in the deletion's transaction, as in Onshape, where nothing is left
+void deleteUnusedHelpers(const Sketcher::SketchObject* sketch)
+{
+    if (!sketch->unusedImplicitExternals().empty()) {
+        Gui::cmdAppObjectArgs(sketch, "delUnusedImplicitExternals()");
+    }
+}
+}  // namespace
+
 void TaskSketcherConstraints::onDeleteAllConstraints()
 {
     const Sketcher::SketchObject* sketch = sketchView->getSketchObject();
     sketchView->getDocument()->openCommand(QT_TRANSLATE_NOOP("Command", "Delete all constraints"));
     try {
         Gui::cmdAppObjectArgs(sketch, "deleteAllConstraints()");
+        deleteUnusedHelpers(sketch);
         sketchView->getDocument()->commitCommand();
     }
     catch (const Base::Exception&) {
@@ -1272,6 +1340,7 @@ void TaskSketcherConstraints::onDeleteConstraints(const QList<int>& ids)
     sketchView->getDocument()->openCommand(QT_TRANSLATE_NOOP("Command", "Delete constraints"));
     try {
         Gui::cmdAppObjectArgs(sketch, "delConstraints(%s)", idList.c_str());
+        deleteUnusedHelpers(sketch);
         sketchView->getDocument()->commitCommand();
     }
     catch (const Base::Exception&) {
@@ -1363,6 +1432,9 @@ void TaskSketcherConstraints::onListWidgetConstraintsItemActivated(QListWidgetIt
         auto* editDialog = new EditTextDialog(this->sketchView, it->ConstraintNbr);
         editDialog->exec();
         delete editDialog;
+    }
+    else if (it->constraintType() == Sketcher::Pattern) {  // FreeCAD-CH (sketch patterns)
+        editPattern(this->sketchView->getSketchObject(), it->ConstraintNbr);
     }
     // For all other constraints (geometric: e.g., Parallel, Perpendicular, Coincident),
     // double-click triggers the rename functionality.
@@ -1818,6 +1890,8 @@ bool TaskSketcherConstraints::isConstraintFiltered(QListWidgetItem* item)
                 visible = checkFilterBitset(multiFilterStatus, FilterValue::Coincident);
                 break;
             case Sketcher::PointOnObject:
+            case Sketcher::Midpoint:  // FreeCAD-CH (ops#656): a point kept on an object
+            case Sketcher::Pierce:    // FreeCAD-CH (Onshape's Pierce): likewise
                 visible = checkFilterBitset(multiFilterStatus, FilterValue::PointOnObject);
                 break;
             case Sketcher::Group:

@@ -219,6 +219,50 @@ class ForkReleaseTest(unittest.TestCase):
         same = self._open(path)
         self.assertEqual(App.getNewerFormat(same), "")
 
+    def _names(self, doc):
+        """The Cut's element map, and whether the open dropped it (the Cut is touched)."""
+        cut = doc.getObject("Cut")
+        return dict(cut.Shape.ElementMap), "Touched" in cut.State
+
+    def testSaveWritesTheOldestReaderOfItsNames(self):
+        """A save with interned names writes the naming format and the oldest reader format its
+        table needs (the reader policy, ops#640 B1): both this build's."""
+        _, xml = self._saved()
+        self.assertIn('NamingFormat="2"', xml)
+        self.assertIn('NamingFormatOldestRead="2"', xml)
+
+    def testNewerFileAnOlderReaderReadsKeepsItsNames(self):
+        """A file written in a newer naming format whose table this build's format reads
+        (`NamingFormatOldestRead` 2) opens with its interned names as written: the Cut's map is
+        the one the unedited file opens with, not dropped; the file is still newer."""
+        path, _ = self._saved()
+        expected, droppedBefore = self._names(self._open(path))
+        self.assertFalse(droppedBefore, "the control: an unedited file keeps its map")
+        self.assertTrue(any("~" in name for name in expected), "the premise: interned names")
+        newer = self._edited(
+            path, "ReadableNewer", _setDocumentAttribute("NamingFormat", 3)
+        )
+        self.assertIn('NamingFormatOldestRead="2"', _documentXml(newer))
+        doc = self._checkNewer(newer, "NamingFormat 3")
+        names, dropped = self._names(doc)
+        self.assertFalse(dropped, "the names are read, not dropped")
+        self.assertEqual(names, expected)
+
+    def testFileNeedingANewerReaderIsRefusedClearly(self):
+        """A file whose table needs a newer reader (`NamingFormatOldestRead` 3) still opens
+        (decision D2), but its name table is refused: the Cut's map is dropped, and the newer
+        message names the oldest reader the file needs."""
+        path, _ = self._saved()
+
+        def rewrite(text):
+            text = _setDocumentAttribute("NamingFormat", 3)(text)
+            return _setDocumentAttribute("NamingFormatOldestRead", 3)(text)
+
+        refused = self._edited(path, "Unreadable", rewrite)
+        doc = self._checkNewer(refused, "NamingFormatOldestRead 3")
+        _, dropped = self._names(doc)
+        self.assertTrue(dropped, "the names are dropped and the Cut recomputed")
+
     def testNewerMapTokenTakesNoMigration(self):
         """A shape's `.F` or `.N` above this build's makes the file newer, and the shape takes no
         naming migration: its version is current after the open. An older `.F` still takes it

@@ -54,6 +54,7 @@
 #include "Inventor/SoMouseWheelEvent.h"
 #include "Navigation/NavigationStyle.h"
 #include "PythonWrapper.h"
+#include "SectionView.h"
 #include "SoFCDB.h"
 #include "SoFCOffscreenRenderer.h"
 #include "SoFCSelectionAction.h"
@@ -322,6 +323,24 @@ void View3DInventorPy::init_type()
         "beforeEditing: whether to insert the clipping node before or after editing root node\n"
         "noManip: whether to create a manipulator\n"
         "pla: clipping plane placement"
+    );
+    add_keyword_method(
+        "setSectionView",
+        &View3DInventorPy::setSectionView,
+        "setSectionView(origin=(0,0,0), normal=(0,-1,0)), both arguments required\n"
+        "Cuts the view at a plane and caps the cut (view only, nothing is saved).\n\n"
+        "origin: a point on the plane\n"
+        "normal: points to the side that is cut away and hidden"
+    );
+    add_noargs_method(
+        "clearSectionView",
+        &View3DInventorPy::clearSectionView,
+        "clearSectionView(): removes the section view"
+    );
+    add_noargs_method(
+        "sectionView",
+        &View3DInventorPy::sectionView,
+        "sectionView() -> None or (origin, normal): the section view of this view"
     );
     add_noargs_method(
         "hasClippingPlane",
@@ -2648,6 +2667,82 @@ Py::Object View3DInventorPy::toggleClippingPlane(const Py::Tuple& args, const Py
         pla
     );
     return Py::None();
+}
+
+namespace
+{
+SbVec3f sbVec3fFromPython(PyObject* obj)
+{
+    if (PyObject_TypeCheck(obj, &Base::VectorPy::Type)) {
+        const Base::Vector3d* vec = static_cast<Base::VectorPy*>(obj)->getVectorPtr();
+        return SbVec3f(float(vec->x), float(vec->y), float(vec->z));
+    }
+    Py::Sequence seq(obj);
+    if (seq.size() != 3) {
+        throw Py::ValueError("Three coordinates are expected");
+    }
+    float values[3];
+    for (int i = 0; i < 3; ++i) {
+        Py::Object item = seq[i];
+        values[i] = float(PyFloat_AsDouble(item.ptr()));
+        if (PyErr_Occurred()) {
+            throw Py::Exception();
+        }
+    }
+    return SbVec3f(values[0], values[1], values[2]);
+}
+
+Py::Tuple sbVec3fToPython(const SbVec3f& vec)
+{
+    Py::Tuple tuple(3);
+    for (int i = 0; i < 3; ++i) {
+        tuple.setItem(i, Py::Float(double(vec[i])));
+    }
+    return tuple;
+}
+}  // namespace
+
+Py::Object View3DInventorPy::setSectionView(const Py::Tuple& args, const Py::Dict& kwds)
+{
+    static const std::array<const char*, 3> keywords {"origin", "normal", nullptr};
+    PyObject* pyOrigin = nullptr;
+    PyObject* pyNormal = nullptr;
+    if (!Base::Wrapped_ParseTupleAndKeywords(
+            args.ptr(),
+            kwds.ptr(),
+            "OO",
+            keywords,
+            &pyOrigin,
+            &pyNormal
+        )) {
+        throw Py::Exception();
+    }
+
+    const SbVec3f origin = sbVec3fFromPython(pyOrigin);
+    const SbVec3f normal = sbVec3fFromPython(pyNormal);
+    if (!SectionView::set(getView3DInventorPtr()->getViewer(), origin, normal)) {
+        throw Py::ValueError("The normal of a section view needs a length");
+    }
+    return Py::None();
+}
+
+Py::Object View3DInventorPy::clearSectionView()
+{
+    SectionView::clear(getView3DInventorPtr()->getViewer());
+    return Py::None();
+}
+
+Py::Object View3DInventorPy::sectionView()
+{
+    SbVec3f origin;
+    SbVec3f normal;
+    if (!SectionView::get(getView3DInventorPtr()->getViewer(), origin, normal)) {
+        return Py::None();
+    }
+    Py::Tuple result(2);
+    result.setItem(0, sbVec3fToPython(origin));
+    result.setItem(1, sbVec3fToPython(normal));
+    return result;
 }
 
 Py::Object View3DInventorPy::hasClippingPlane()

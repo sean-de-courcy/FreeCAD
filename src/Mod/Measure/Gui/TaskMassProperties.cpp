@@ -127,6 +127,35 @@ MassPropertiesMode currentMode = MassPropertiesMode::CenterOfGravity;
 App::DocumentObject* currentDatum = nullptr;
 std::vector<std::tuple<std::string, std::string, std::string>> savedSelection;
 
+namespace
+{
+// FreeCAD-CH (ops#640, rank 16; hands-on D-3): Onshape's banner where a measured part has no
+// material; the figures that need a mass are left blank then
+QString noMaterialNote()
+{
+    return QCoreApplication::translate(
+        "MassPropertiesGui::TaskMassProperties",
+        "One or more parts do not have a material defined"
+    );
+}
+
+/// The note above the physical properties (made on first use), shown or hidden.
+void showNoMaterialNote(QWidget* page, QFormLayout* layout, bool show)
+{
+    auto* note = page->findChild<QLabel*>(QStringLiteral("materialNote"));
+    if (!note) {
+        if (!show) {
+            return;
+        }
+        note = new QLabel(noMaterialNote(), page);
+        note->setObjectName(QStringLiteral("materialNote"));
+        note->setWordWrap(true);
+        layout->insertRow(0, note);
+    }
+    note->setVisible(show);
+}
+}  // namespace
+
 enum UnitsComboIndex
 {
     UnitsInternal = 0,
@@ -530,6 +559,8 @@ void TaskMassProperties::clearUiFields()
     panel->ui.inertiaJzText->clear();
 
     panel->ui.axisInertiaText->clear();
+
+    showNoMaterialNote(panel->ui.physicalPropertiesPage, panel->ui.physicalPropertiesLayout, false);
 }
 
 void TaskMassProperties::onSelectionChanged(const Gui::SelectionChanges& msg)
@@ -1222,13 +1253,29 @@ void TaskMassProperties::tryUpdate()
 
     const QString densitySuffix = objectsToMeasure.size() > 1 ? tr(" (Average)") : QString();
 
+    // FreeCAD-CH (ops#640, rank 16; hands-on D-3): with a part that has no material the
+    // figures that need a mass stay blank under the note; the volume ones are shown
+    const bool noMaterial = info.partsWithoutMaterial > 0;
+    if (noMaterial) {
+        clearUiFields();
+    }
+    showNoMaterialNote(panel->ui.physicalPropertiesPage, panel->ui.physicalPropertiesLayout, noMaterial);
+
     if (info.mass.getValue() + info.volume.getValue() != 0.0) {
         setText(panel->ui.volumeEdit, info.volume);
-        setText(panel->ui.massEdit, info.mass);
-        setText(panel->ui.densityEdit, info.density, densitySuffix);
+        if (!noMaterial) {
+            setText(panel->ui.massEdit, info.mass);
+            setText(panel->ui.densityEdit, info.density, densitySuffix);
+        }
     }
 
     setText(panel->ui.surfaceAreaEdit, info.surfaceArea);
+
+    if (noMaterial && info.volume.getValue() != 0.0) {
+        setText(panel->ui.covXText, Base::Quantity(info.cov.x, Base::Unit::Length));
+        setText(panel->ui.covYText, Base::Quantity(info.cov.y, Base::Unit::Length));
+        setText(panel->ui.covZText, Base::Quantity(info.cov.z, Base::Unit::Length));
+    }
 
 
     if (info.mass.getValue() != 0.0) {
@@ -1553,26 +1600,36 @@ void TaskMassProperties::saveResult()
         currentMode == MassPropertiesMode::Custom ? "Custom" : "Center of gravity"
     );
 
+    // FreeCAD-CH (ops#640, rank 16; hands-on D-3): where a part has no material nothing that
+    // needs a mass is saved (no mass, density, centre of gravity or inertia), but a note
+    const bool noMaterial = currentInfo.partsWithoutMaterial > 0;
     setQuantity("Volume", "Physical Properties", currentInfo.volume);
-    setQuantity("Mass", "Physical Properties", currentInfo.mass);
-    setQuantity("Density", "Physical Properties", currentInfo.density);
+    if (noMaterial) {
+        setString("Note", "Physical Properties", noMaterialNote().toStdString());
+    }
+    else {
+        setQuantity("Mass", "Physical Properties", currentInfo.mass);
+        setQuantity("Density", "Physical Properties", currentInfo.density);
+    }
     setQuantity("SurfaceArea", "Physical Properties", currentInfo.surfaceArea);
 
-    setQuantity(
-        "CenterOfGravityX",
-        "Center of Gravity",
-        Base::Quantity(currentInfo.cog.x, Base::Unit::Length)
-    );
-    setQuantity(
-        "CenterOfGravityY",
-        "Center of Gravity",
-        Base::Quantity(currentInfo.cog.y, Base::Unit::Length)
-    );
-    setQuantity(
-        "CenterOfGravityZ",
-        "Center of Gravity",
-        Base::Quantity(currentInfo.cog.z, Base::Unit::Length)
-    );
+    if (!noMaterial) {
+        setQuantity(
+            "CenterOfGravityX",
+            "Center of Gravity",
+            Base::Quantity(currentInfo.cog.x, Base::Unit::Length)
+        );
+        setQuantity(
+            "CenterOfGravityY",
+            "Center of Gravity",
+            Base::Quantity(currentInfo.cog.y, Base::Unit::Length)
+        );
+        setQuantity(
+            "CenterOfGravityZ",
+            "Center of Gravity",
+            Base::Quantity(currentInfo.cog.z, Base::Unit::Length)
+        );
+    }
     setQuantity(
         "CenterOfVolumeX",
         "Center of Volume",
@@ -1593,51 +1650,65 @@ void TaskMassProperties::saveResult()
         && (currentAxisReference.has_value()
             || (currentDatum && currentDatum->isDerivedFrom<App::Line>()));
 
-    if (hasAxisSelection) {
-        setQuantity(
-            "AxisInertia",
-            "Inertia",
-            Base::Quantity(currentInfo.axisInertia, Base::Unit::Inertia)
-        );
-    }
-    else {
-        setQuantity(
-            "InertiaJox",
-            "Inertia",
-            Base::Quantity(currentInfo.inertiaJo.x, Base::Unit::Inertia)
-        );
-        setQuantity(
-            "InertiaJoy",
-            "Inertia",
-            Base::Quantity(currentInfo.inertiaJo.y, Base::Unit::Inertia)
-        );
-        setQuantity(
-            "InertiaJoz",
-            "Inertia",
-            Base::Quantity(currentInfo.inertiaJo.z, Base::Unit::Inertia)
-        );
-        setQuantity(
-            "InertiaJxy",
-            "Inertia",
-            Base::Quantity(currentInfo.inertiaJCross.x, Base::Unit::Inertia)
-        );
-        setQuantity(
-            "InertiaJzx",
-            "Inertia",
-            Base::Quantity(currentInfo.inertiaJCross.y, Base::Unit::Inertia)
-        );
-        setQuantity(
-            "InertiaJzy",
-            "Inertia",
-            Base::Quantity(currentInfo.inertiaJCross.z, Base::Unit::Inertia)
-        );
-        setQuantity("InertiaJx", "Inertia", Base::Quantity(currentInfo.inertiaJ.x, Base::Unit::Inertia));
-        setQuantity("InertiaJy", "Inertia", Base::Quantity(currentInfo.inertiaJ.y, Base::Unit::Inertia));
-        setQuantity("InertiaJz", "Inertia", Base::Quantity(currentInfo.inertiaJ.z, Base::Unit::Inertia));
+    if (!noMaterial) {
+        if (hasAxisSelection) {
+            setQuantity(
+                "AxisInertia",
+                "Inertia",
+                Base::Quantity(currentInfo.axisInertia, Base::Unit::Inertia)
+            );
+        }
+        else {
+            setQuantity(
+                "InertiaJox",
+                "Inertia",
+                Base::Quantity(currentInfo.inertiaJo.x, Base::Unit::Inertia)
+            );
+            setQuantity(
+                "InertiaJoy",
+                "Inertia",
+                Base::Quantity(currentInfo.inertiaJo.y, Base::Unit::Inertia)
+            );
+            setQuantity(
+                "InertiaJoz",
+                "Inertia",
+                Base::Quantity(currentInfo.inertiaJo.z, Base::Unit::Inertia)
+            );
+            setQuantity(
+                "InertiaJxy",
+                "Inertia",
+                Base::Quantity(currentInfo.inertiaJCross.x, Base::Unit::Inertia)
+            );
+            setQuantity(
+                "InertiaJzx",
+                "Inertia",
+                Base::Quantity(currentInfo.inertiaJCross.y, Base::Unit::Inertia)
+            );
+            setQuantity(
+                "InertiaJzy",
+                "Inertia",
+                Base::Quantity(currentInfo.inertiaJCross.z, Base::Unit::Inertia)
+            );
+            setQuantity(
+                "InertiaJx",
+                "Inertia",
+                Base::Quantity(currentInfo.inertiaJ.x, Base::Unit::Inertia)
+            );
+            setQuantity(
+                "InertiaJy",
+                "Inertia",
+                Base::Quantity(currentInfo.inertiaJ.y, Base::Unit::Inertia)
+            );
+            setQuantity(
+                "InertiaJz",
+                "Inertia",
+                Base::Quantity(currentInfo.inertiaJ.z, Base::Unit::Inertia)
+            );
 
-        setVector("PrincipalAxis1", "Inertia", currentInfo.principalAxis1);
-        setVector("PrincipalAxis2", "Inertia", currentInfo.principalAxis2);
-        setVector("PrincipalAxis3", "Inertia", currentInfo.principalAxis3);
+            setVector("PrincipalAxis1", "Inertia", currentInfo.principalAxis1);
+            setVector("PrincipalAxis2", "Inertia", currentInfo.principalAxis2);
+            setVector("PrincipalAxis3", "Inertia", currentInfo.principalAxis3);
+        }
     }
 
     if (group) {
@@ -1648,13 +1719,15 @@ void TaskMassProperties::saveResult()
     if (auto* guiDoc = Gui::Application::Instance->activeDocument()) {
         if (auto* view = dynamic_cast<Gui::ViewProviderDocumentObject*>(guiDoc->getViewProvider(obj))) {
             if (auto* resultView = dynamic_cast<ViewProviderMassPropertiesResult*>(view)) {
-                resultView->setCenters(currentInfo.cog, currentInfo.cov);
+                // no centre of gravity or principal axes without a material: the centre of
+                // volume's marker only (the gravity one on it)
+                resultView->setCenters(noMaterial ? currentInfo.cov : currentInfo.cog, currentInfo.cov);
                 resultView->setPrincipalAxes(
                     currentInfo.cog,
                     currentInfo.principalAxis1,
                     currentInfo.principalAxis2,
                     currentInfo.principalAxis3,
-                    !hasAxisSelection
+                    !hasAxisSelection && !noMaterial
                 );
             }
             view->setShowable(true);

@@ -21,6 +21,15 @@
     <widget class="QWidget" name="spineFieldPlaceholder" native="true"/>
    </item>
    <item>
+    <widget class="QWidget" name="spineMoreFieldPlaceholder" native="true"/>
+   </item>
+   <item>
+    <widget class="QWidget" name="lockFacesFieldPlaceholder" native="true"/>
+   </item>
+   <item>
+    <widget class="QWidget" name="lockDirectionFieldPlaceholder" native="true"/>
+   </item>
+   <item>
     <layout class="QFormLayout" name="formLayout">
      <property name="fieldGrowthPolicy">
       <enum>QFormLayout::ExpandingFieldsGrow</enum>
@@ -57,12 +66,315 @@
        </item>
       </widget>
      </item>
+     <item row="1" column="0">
+      <widget class="QLabel" name="labelProfileControl">
+       <property name="text">
+        <string>Profile control</string>
+       </property>
+      </widget>
+     </item>
+     <item row="1" column="1">
+      <widget class="QComboBox" name="comboBoxProfileControl">
+       <property name="toolTip">
+        <string>None: the profile turns with the path. Keep orientation: it keeps its orientation. Lock faces: it keeps its angle to the picked faces. Lock direction: it keeps the picked direction (a plane's normal or an edge). Advanced: the Orientation panel's mode decides.</string>
+       </property>
+       <item>
+        <property name="text">
+         <string>None</string>
+        </property>
+       </item>
+       <item>
+        <property name="text">
+         <string>Keep orientation</string>
+        </property>
+       </item>
+       <item>
+        <property name="text">
+         <string>Advanced</string>
+        </property>
+       </item>
+       <item>
+        <property name="text">
+         <string>Lock faces</string>
+        </property>
+       </item>
+       <item>
+        <property name="text">
+         <string>Lock direction</string>
+        </property>
+       </item>
+      </widget>
+     </item>
+     <item row="2" column="0" colspan="2">
+      <widget class="QCheckBox" name="checkBoxExtendToFullPath">
+       <property name="text">
+        <string>Extend to full path</string>
+       </property>
+       <property name="toolTip">
+        <string>A profile in the middle of the path sweeps both ways along all of it</string>
+       </property>
+      </widget>
+     </item>
+     <item row="3" column="0" colspan="2">
+      <widget class="QCheckBox" name="checkBoxOppositeDirection">
+       <property name="text">
+        <string>Opposite direction</string>
+       </property>
+       <property name="toolTip">
+        <string>A profile in the middle of the path sweeps the other way from it</string>
+       </property>
+      </widget>
+     </item>
+     <item row="4" column="0" colspan="2">
+      <widget class="QCheckBox" name="checkBoxTwist">
+       <property name="text">
+        <string>Twist</string>
+       </property>
+       <property name="toolTip"><string>The profile turns about the path, linearly in its length</string></property>
+      </widget>
+     </item>
+     <item row="5" column="0">
+      <widget class="QLabel" name="labelTwistType">
+       <property name="text">
+        <string>Twist type</string>
+       </property>
+      </widget>
+     </item>
+     <item row="5" column="1">
+      <widget class="QComboBox" name="comboBoxTwistType">
+       <item>
+        <property name="text">
+         <string>Turns</string>
+        </property>
+       </item>
+       <item>
+        <property name="text">
+         <string>Angle</string>
+        </property>
+       </item>
+       <item>
+        <property name="text">
+         <string>Pitch</string>
+        </property>
+       </item>
+      </widget>
+     </item>
+     <item row="6" column="0">
+      <widget class="QLabel" name="labelTwistValue">
+       <property name="text">
+        <string>Angle</string>
+       </property>
+      </widget>
+     </item>
+     <item row="6" column="1">
+      <widget class="QWidget" name="widgetTwistValue" native="true">
+       <layout class="QVBoxLayout" name="verticalLayoutTwistValue">
+        <property name="leftMargin"><number>0</number></property>
+        <property name="topMargin"><number>0</number></property>
+        <property name="rightMargin"><number>0</number></property>
+        <property name="bottomMargin"><number>0</number></property>
+        <item>
+         <widget class="QDoubleSpinBox" name="doubleSpinBoxTurns">
+       <property name="keyboardTracking">
+        <bool>false</bool>
+       </property>
+       <property name="decimals">
+        <number>4</number>
+       </property>
+       <property name="minimum">
+        <double>-1000</double>
+       </property>
+       <property name="maximum">
+        <double>1000</double>
+       </property>
+       <property name="singleStep">
+        <double>0.25</double>
+       </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="Gui::QuantitySpinBox" name="quantitySpinBoxTwistAngle">
+       <property name="keyboardTracking">
+        <bool>false</bool>
+       </property>
+       <property name="unit" stdset="0">
+        <string notr="true">deg</string>
+       </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="Gui::QuantitySpinBox" name="quantitySpinBoxTwistPitch">
+       <property name="keyboardTracking">
+        <bool>false</bool>
+       </property>
+       <property name="unit" stdset="0">
+        <string notr="true">mm</string>
+       </property>
+       <property name="minimum">
+        <double>0.000000000000000</double>
+       </property>
+         </widget>
+        </item>
+       </layout>
+      </widget>
+     </item>
+     <item row="7" column="0" colspan="2">
+      <widget class="QCheckBox" name="checkBoxTwistCCW">
+       <property name="text">
+        <string>Counterclockwise</string>
+       </property>
+       <property name="toolTip"><string>Counterclockwise about the path&apos;s direction (off: clockwise)</string></property>
+      </widget>
+     </item>
+     <item row="8" column="0" colspan="2">
+      <widget class="QCheckBox" name="checkBoxScale">
+       <property name="text">
+        <string>Scale</string>
+       </property>
+       <property name="toolTip"><string>The profile scales linearly in the path&apos;s length</string></property>
+      </widget>
+     </item>
+     <item row="9" column="0">
+      <widget class="QLabel" name="labelScaleFactor">
+       <property name="text">
+        <string>Scale factor</string>
+       </property>
+      </widget>
+     </item>
+     <item row="9" column="1">
+      <widget class="QDoubleSpinBox" name="doubleSpinBoxScaleFactor">
+       <property name="keyboardTracking">
+        <bool>false</bool>
+       </property>
+       <property name="decimals">
+        <number>4</number>
+       </property>
+       <property name="minimum">
+        <double>0.0001</double>
+       </property>
+       <property name="maximum">
+        <double>1000</double>
+       </property>
+       <property name="singleStep">
+        <double>0.1</double>
+       </property>
+      </widget>
+     </item>
+     <item row="10" column="0">
+      <widget class="QLabel" name="labelBodyType">
+       <property name="text">
+        <string>Body type</string>
+       </property>
+      </widget>
+     </item>
+     <item row="10" column="1">
+      <widget class="QComboBox" name="comboBoxBodyType">
+       <item>
+        <property name="text">
+         <string>Solid</string>
+        </property>
+       </item>
+       <item>
+        <property name="text">
+         <string>Thin</string>
+        </property>
+       </item>
+      </widget>
+     </item>
+     <item row="11" column="0">
+      <widget class="QLabel" name="labelThickness">
+       <property name="text">
+        <string>Thickness</string>
+       </property>
+      </widget>
+     </item>
+     <item row="11" column="1">
+      <widget class="Gui::QuantitySpinBox" name="quantitySpinBoxThickness">
+       <property name="keyboardTracking">
+        <bool>false</bool>
+       </property>
+       <property name="unit" stdset="0">
+        <string notr="true">mm</string>
+       </property>
+       <property name="minimum">
+        <double>0.000000000000000</double>
+       </property>
+      </widget>
+     </item>
+     <item row="12" column="0" colspan="2">
+      <widget class="QCheckBox" name="checkBoxMidplane">
+       <property name="text">
+        <string>Midplane</string>
+       </property>
+       <property name="toolTip"><string>The wall centred on the profile&apos;s curves</string></property>
+      </widget>
+     </item>
+     <item row="13" column="0" colspan="2">
+      <widget class="QCheckBox" name="checkBoxFlipWall">
+       <property name="text">
+        <string>Flip wall</string>
+       </property>
+       <property name="toolTip"><string>The wall on the other side of the profile&apos;s curves</string></property>
+      </widget>
+     </item>
+     <item row="14" column="0">
+      <widget class="QLabel" name="labelThickness2">
+       <property name="text">
+        <string>Second thickness</string>
+       </property>
+      </widget>
+     </item>
+     <item row="14" column="1">
+      <widget class="Gui::QuantitySpinBox" name="quantitySpinBoxThickness2">
+       <property name="keyboardTracking">
+        <bool>false</bool>
+       </property>
+       <property name="unit" stdset="0">
+        <string notr="true">mm</string>
+       </property>
+       <property name="minimum">
+        <double>0.000000000000000</double>
+       </property>
+      </widget>
+     </item>
+     <item row="15" column="0" colspan="2">
+      <widget class="QCheckBox" name="checkBoxTrimEnds">
+       <property name="text">
+        <string>Trim ends</string>
+       </property>
+       <property name="toolTip"><string>No effect, as in Onshape</string></property>
+      </widget>
+     </item>
     </layout>
    </item>
   </layout>
  </widget>
+ <customwidgets>
+  <customwidget>
+   <class>Gui::QuantitySpinBox</class>
+   <extends>QWidget</extends>
+   <header>Gui/QuantitySpinBox.h</header>
+  </customwidget>
+ </customwidgets>
  <tabstops>
   <tabstop>comboBoxTransition</tabstop>
+  <tabstop>comboBoxProfileControl</tabstop>
+  <tabstop>checkBoxExtendToFullPath</tabstop>
+  <tabstop>checkBoxOppositeDirection</tabstop>
+  <tabstop>checkBoxTwist</tabstop>
+  <tabstop>comboBoxTwistType</tabstop>
+  <tabstop>doubleSpinBoxTurns</tabstop>
+  <tabstop>quantitySpinBoxTwistAngle</tabstop>
+  <tabstop>quantitySpinBoxTwistPitch</tabstop>
+  <tabstop>checkBoxTwistCCW</tabstop>
+  <tabstop>checkBoxScale</tabstop>
+  <tabstop>doubleSpinBoxScaleFactor</tabstop>
+  <tabstop>comboBoxBodyType</tabstop>
+  <tabstop>quantitySpinBoxThickness</tabstop>
+  <tabstop>checkBoxMidplane</tabstop>
+  <tabstop>checkBoxFlipWall</tabstop>
+  <tabstop>quantitySpinBoxThickness2</tabstop>
+  <tabstop>checkBoxTrimEnds</tabstop>
  </tabstops>
  <resources/>
  <connections/>

@@ -64,6 +64,7 @@ SET(SketcherGui_SRCS
     DrawSketchHandlerDragAutoConstraint.h
     DrawSketchHandlerDragAutoConstraint.cpp
     DrawSketchHandlerFillet.h
+    SketchEnterTarget.h
     DrawSketchHandlerTranslate.h
     DrawSketchHandlerTrimming.h
     DrawSketchHandlerExtend.h
@@ -72,6 +73,7 @@ SET(SketcherGui_SRCS
     DrawSketchHandlerCarbonCopy.h
     DrawSketchHandlerSlot.h
     DrawSketchHandlerOffset.h
+    DrawSketchHandlerPattern.h
     DrawSketchHandlerRotate.h
     DrawSketchHandlerScale.h
     DrawSketchHandlerSymmetry.h
@@ -159,6 +161,10 @@ SET(SketcherGui_SRCS
     SketchRectangularArrayDialog.cpp
     SketcherRegularPolygonDialog.h
     SketcherRegularPolygonDialog.cpp
+    ConflictRefusal.cpp
+    ConflictRefusal.h
+    ModelSnap.cpp
+    ModelSnap.h
     SnapManager.cpp
     SnapManager.h
     StyleParameters.h

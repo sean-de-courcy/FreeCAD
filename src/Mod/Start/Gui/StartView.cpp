@@ -52,6 +52,7 @@
 #include <Gui/Application.h>
 #include <Gui/Command.h>
 #include <Gui/Document.h>
+#include <Gui/ForkKeymap.h>
 #include <Gui/MainWindow.h>
 #include <Gui/ModuleIO.h>
 #include <Gui/View3DInventor.h>
@@ -78,12 +79,15 @@ StartView::StartView(QWidget* parent)
         "User parameter:BaseApp/Preferences/Mod/Start"
     );
     auto cardSpacing = hGrp->GetInt("FileCardSpacing", 15);  // NOLINT
-    auto showExamples = hGrp->GetBool("ShowExamples", true);
+    // FreeCAD-CH, ops#640 P11: under the Onshape keymap this is Onshape's Documents page: New,
+    // Open and the recent documents; no examples, custom folder, first start or footer
+    _onshape = Gui::ForkKeymap::isOnshape();
+    auto showExamples = !_onshape && hGrp->GetBool("ShowExamples", true);
 
     // Verify that the folder specified in preferences is available before showing it
     std::string customFolder(hGrp->GetASCII("CustomFolder", ""));
     bool showCustomFolder = false;
-    if (!customFolder.empty()) {
+    if (!customFolder.empty() && !_onshape) {
         showCustomFolder = true;
     }
 
@@ -178,11 +182,15 @@ StartView::StartView(QWidget* parent)
     footerLayout->addWidget(_openFirstStart);
     footerLayout->addStretch();
     footerLayout->addWidget(_showOnStartupCheckBox);
+    if (_onshape) {
+        _openFirstStart->setVisible(false);
+        _showOnStartupCheckBox->setVisible(false);
+    }
 
     setCentralWidget(_contents);
 
     // Set startup widget according to the first start parameter
-    auto firstStart = hGrp->GetBool("FirstStart2024", true);
+    auto firstStart = !_onshape && hGrp->GetBool("FirstStart2024", true);
     _contents->setCurrentWidget(firstStart ? firstStartScrollArea : documentsWidget);
     if (customFolderListWidget) {
         configureCustomFolderListWidget(customFolderListWidget);
@@ -213,18 +221,26 @@ StartView::StartView(QWidget* parent)
         }
     );
     // NOLINTEND
+    if (_onshape) {
+        // ops#640 P11: a document made or opened any way (Ctrl+N, Ctrl+O) takes the page's place
+        _newdoc = Gui::Application::Instance->signalNewDocument.connect(
+            [this](const Gui::Document&, bool) {
+                QTimer::singleShot(0, this, [this]() { closeIfOnshape(); });
+            }
+        );
+    }
 }
 
 void StartView::configureNewFileButtons(QLayout* layout) const
 {
     auto newEmptyFile = gsl::owner<NewFileButton*>(new NewFileButton(
-        {tr("Empty File"),
-         tr("Creates a new empty FreeCAD file"),
+        {_onshape ? tr("New document") : tr("Empty File"),
+         _onshape ? tr("A document with a part studio") : tr("Creates a new empty FreeCAD file"),
          QLatin1String(":/icons/document-new.svg")}
     ));
     auto openFile = gsl::owner<NewFileButton*>(new NewFileButton(
-        {tr("Open File"),
-         tr("Opens an existing CAD file or 3D model"),
+        {_onshape ? tr("Open document") : tr("Open File"),
+         _onshape ? tr("A FreeCAD document from a folder") : tr("Opens an existing CAD file or 3D model"),
          QLatin1String(":/icons/document-open.svg")}
     ));
     auto partDesign = gsl::owner<NewFileButton*>(new NewFileButton(
@@ -245,6 +261,20 @@ void StartView::configureNewFileButtons(QLayout* layout) const
          tr("Creates an architectural project"),
          QLatin1String(":/icons/BIMWorkbench.svg")}
     ));
+
+    // FreeCAD-CH, ops#640 P11: Onshape's two, a new document (a part studio) and Open
+    if (_onshape) {
+        newEmptyFile->setObjectName(QStringLiteral("DocumentsPageNew"));
+        openFile->setObjectName(QStringLiteral("DocumentsPageOpen"));
+        layout->addWidget(newEmptyFile);
+        layout->addWidget(openFile);
+        connect(newEmptyFile, &QPushButton::clicked, this, &StartView::newEmptyFile);
+        connect(openFile, &QPushButton::clicked, this, &StartView::openExistingFile);
+        for (auto* unused : {partDesign, assembly, draft, arch}) {
+            delete unused;
+        }
+        return;
+    }
 
     // TODO: Ensure all of the required WBs are actually available
     layout->addWidget(partDesign);
@@ -345,6 +375,20 @@ void StartView::openExistingFile()
     }
 }
 
+void StartView::closeIfOnshape()
+{
+    // ops#640 P11: the Documents page goes once a document is open (Onshape opens it in its place)
+    if (!_onshape || App::GetApplication().getDocuments().empty()) {
+        return;
+    }
+    for (QWidget* w = this; w != nullptr; w = w->parentWidget()) {
+        if (auto mdiSub = qobject_cast<QMdiSubWindow*>(w)) {
+            mdiSub->close();
+            return;
+        }
+    }
+}
+
 void StartView::newAssemblyFile()
 {
     newDocument();
@@ -406,7 +450,10 @@ void StartView::postStart(PostStartBehavior behavior)
             Gui::Application::Instance->activateWorkbench(wb.c_str());
         }
     }
-    if (hGrp->GetBool("closeStart", false)) {
+    if (_onshape) {
+        closeIfOnshape();
+    }
+    else if (hGrp->GetBool("closeStart", false)) {
         for (QWidget* w = this; w != nullptr; w = w->parentWidget()) {
             if (auto mdiSub = qobject_cast<QMdiSubWindow*>(w)) {
                 mdiSub->close();
@@ -422,6 +469,7 @@ void StartView::fileCardSelected(const QModelIndex& index)
     try {
         auto filename = index.data(static_cast<int>(Start::DisplayedFilesModelRoles::path)).toString();
         Gui::ModuleIO::verifyAndOpenFile(filename);
+        closeIfOnshape();
     }
     catch (Base::PyException& e) {
         Base::Console().error(e.getMessage().c_str());
@@ -528,17 +576,17 @@ void StartView::recentFileAdded(const QString& filename)
 
 void StartView::retranslateUi()
 {
-    QString title = QCoreApplication::translate("Workbench", "Start");
+    QString title = _onshape ? tr("Documents") : QCoreApplication::translate("Workbench", "Start");
     setWindowTitle(title);
 
     const QLatin1String h1Start("<h1>");
     const QLatin1String h1End("</h1>");
 
-    _newFileLabel->setText(h1Start + tr("New File") + h1End);
+    _newFileLabel->setText(h1Start + (_onshape ? tr("Documents") : tr("New File")) + h1End);
     if (_examplesLabel) {
         _examplesLabel->setText(h1Start + tr("Examples") + h1End);
     }
-    _recentFilesLabel->setText(h1Start + tr("Recent Files") + h1End);
+    _recentFilesLabel->setText(h1Start + (_onshape ? tr("Recent") : tr("Recent Files")) + h1End);
 
     auto hGrp = App::GetApplication().GetParameterGroupByPath(
         "User parameter:BaseApp/Preferences/Mod/Start"

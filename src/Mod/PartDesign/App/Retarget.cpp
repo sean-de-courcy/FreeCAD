@@ -712,6 +712,16 @@ public:
                 solids.push_back(obj);
             }
         }
+        // The first solid after each other member's place
+        App::DocumentObject* after = nullptr;
+        for (auto it = group.rbegin(); it != group.rend(); ++it) {
+            if (Body::isSolidFeature(*it)) {
+                after = *it;
+            }
+            else if (after) {
+                nextSolid[*it] = after;
+            }
+        }
         computeEarliest();
     }
 
@@ -854,6 +864,21 @@ public:
         return it == earliest.end() ? nullptr : it->second;
     }
 
+    /// The solid whose place obj's references must come before: its earliest user (N1 3.1), or,
+    /// for a sketch, datum or binder, the first solid after its own place when that comes first.
+    /// Onshape regenerates its list in order, so a sketch dropped above the feature whose face it
+    /// is on fails at its new place, also before the feature that uses it (round 8, J5); or null
+    App::DocumentObject* bound(const App::DocumentObject* obj) const
+    {
+        auto x = earliestUser(obj);
+        auto it = nextSolid.find(obj);
+        if (it == nextSolid.end() || x == obj) {
+            return x;
+        }
+        auto y = it->second;
+        return !x || chainPos.at(y) < chainPos.at(x) ? y : x;
+    }
+
 private:
     struct RestoredExpression
     {
@@ -923,7 +948,7 @@ private:
 
     void planLinks(App::DocumentObject* owner)
     {
-        auto x = earliestUser(owner);
+        auto x = bound(owner);
         auto doc = owner->getDocument();
         std::vector<ParkedItem> items;
         std::vector<std::string> lines = parkedLines(owner);
@@ -1313,7 +1338,7 @@ private:
 
     void planExpressions(App::DocumentObject* owner)
     {
-        auto x = earliestUser(owner);
+        auto x = bound(owner);
         auto doc = owner->getDocument();
         auto& plan = owners[owner];
         if (x) {
@@ -1627,9 +1652,13 @@ private:
     Objects solids;
     std::map<const App::DocumentObject*, std::size_t> chainPos;
     std::map<const App::DocumentObject*, App::DocumentObject*> earliest;
+    std::map<const App::DocumentObject*, App::DocumentObject*> nextSolid;
     std::map<std::pair<const App::DocumentObject*, const App::Property*>, PropertyState> states;
     std::map<const App::DocumentObject*, OwnerPlan> owners;
 };
+
+/// The OnlyGivenObjects alive on this thread
+thread_local int onlyGiven = 0;
 
 /// The planned state of a reorder: the new Group and each solid's new base
 struct Plan
@@ -1657,6 +1686,12 @@ struct Plan
         for (auto prop : props) {
             auto link = freecad_cast<App::PropertyLinkBase*>(prop);
             if (!link || link->getScope() == App::LinkScope::Hidden) {
+                continue;
+            }
+            // FreeCAD-CH ops#654 slice 9: a studio list's reconcile places each member
+            // (OnlyGivenObjects) and then writes the owners' StudioBases from the list's order:
+            // their old values aren't the planned graph (a stale one made a false cycle)
+            if (onlyGiven > 0 && std::strcmp(prop->getName(), "StudioBases") == 0) {
                 continue;
             }
             if (planned != newBase.end() && followsBase(obj, prop)) {
@@ -1725,7 +1760,18 @@ struct Plan
 /// The reorders writing their plan on this thread (reorderWriting())
 thread_local int reorderWrites = 0;
 
+
 }  // namespace
+
+OnlyGivenObjects::OnlyGivenObjects()
+{
+    ++onlyGiven;
+}
+
+OnlyGivenObjects::~OnlyGivenObjects()
+{
+    --onlyGiven;
+}
 
 bool reorderWriting()
 {
@@ -1774,10 +1820,10 @@ void reorderBody(Body& body,
     }
 
     // 2. Carried inputs: the non-solid members before a moved solid, up to the previous solid,
-    // that only it (or another carried member) uses
+    // that only it (or another carried member) uses; none under OnlyGivenObjects
     std::set<App::DocumentObject*> movedSet(requested);
     for (auto obj : objs) {
-        if (!Body::isSolidFeature(obj)) {
+        if (onlyGiven > 0 || !Body::isSolidFeature(obj)) {
             continue;
         }
         std::size_t pos = position(obj);
@@ -1945,13 +1991,15 @@ bool parkedReason(const App::DocumentObject* obj, std::string& why)
     }
     auto target = parkedTarget(doc, *item);
     std::string targetLabel = target ? target->Label.getValue() : item->target;
-    // The feature it now comes after: the earliest solid whose inputs include obj
+    // The feature it now comes after: the earliest solid whose inputs include obj, unless the
+    // object's own place is what it comes after (Rule::bound(): "which a reorder put after it")
     std::string userLabel;
     if (auto body = Body::findBodyOf(obj)) {
         Objects group = body->Group.getValues();
         std::map<App::DocumentObject*, App::DocumentObject*> none;
         Rule rule(*body, group, none);
-        if (auto user = rule.earliestUser(obj)) {
+        auto user = rule.earliestUser(obj);
+        if (user && rule.bound(obj) == user) {
             userLabel = user->Label.getValue();
         }
     }

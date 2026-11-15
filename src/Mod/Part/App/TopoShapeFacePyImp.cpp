@@ -91,6 +91,7 @@
 #include "OCCError.h"
 #include "PartPyCXX.h"
 #include "Tools.h"
+#include "MassProperties.h"
 
 
 using namespace Part;
@@ -1050,7 +1051,7 @@ Py::Object TopoShapeFacePy::getOuterWire() const
 Py::Object TopoShapeFacePy::getMass() const
 {
     GProp_GProps props;
-    BRepGProp::SurfaceProperties(getTopoShapePtr()->getShape(), props);
+    MassProperties::readoutSurfaceProperties(getTopoShapePtr()->getShape(), props);
     double c = props.Mass();
     return Py::Float(c);
 }
@@ -1058,7 +1059,7 @@ Py::Object TopoShapeFacePy::getMass() const
 Py::Object TopoShapeFacePy::getCenterOfMass() const
 {
     GProp_GProps props;
-    BRepGProp::SurfaceProperties(getTopoShapePtr()->getShape(), props);
+    MassProperties::readoutSurfaceProperties(getTopoShapePtr()->getShape(), props);
     gp_Pnt c = props.CentreOfMass();
     return Py::Vector(Base::Vector3d(c.X(), c.Y(), c.Z()));
 }
@@ -1066,7 +1067,7 @@ Py::Object TopoShapeFacePy::getCenterOfMass() const
 Py::Object TopoShapeFacePy::getMatrixOfInertia() const
 {
     GProp_GProps props;
-    BRepGProp::SurfaceProperties(getTopoShapePtr()->getShape(), props);
+    MassProperties::readoutSurfaceProperties(getTopoShapePtr()->getShape(), props);
     gp_Mat m = props.MatrixOfInertia();
     Base::Matrix4D mat;
     for (int i = 0; i < 3; i++) {
@@ -1080,7 +1081,7 @@ Py::Object TopoShapeFacePy::getMatrixOfInertia() const
 Py::Object TopoShapeFacePy::getStaticMoments() const
 {
     GProp_GProps props;
-    BRepGProp::SurfaceProperties(getTopoShapePtr()->getShape(), props);
+    MassProperties::readoutSurfaceProperties(getTopoShapePtr()->getShape(), props);
     Standard_Real lx, ly, lz;
     props.StaticMoments(lx, ly, lz);
     Py::Tuple tuple(3);
@@ -1093,7 +1094,7 @@ Py::Object TopoShapeFacePy::getStaticMoments() const
 Py::Dict TopoShapeFacePy::getPrincipalProperties() const
 {
     GProp_GProps props;
-    BRepGProp::SurfaceProperties(getTopoShapePtr()->getShape(), props);
+    MassProperties::readoutSurfaceProperties(getTopoShapePtr()->getShape(), props);
     GProp_PrincipalProps pprops = props.PrincipalProperties();
 
     Py::Dict dict;

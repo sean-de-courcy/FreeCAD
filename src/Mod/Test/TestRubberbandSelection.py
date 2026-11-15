@@ -58,6 +58,7 @@ class TestRubberbandSelection(unittest.TestCase):
         ("SolidWorks", "Gui::SolidWorksNavigationStyle"),
         ("TinkerCAD", "Gui::TinkerCADNavigationStyle"),
         ("Touchpad", "Gui::TouchpadNavigationStyle"),
+        ("Onshape", "Gui::OnshapeNavigationStyle"),
     )
     ADDITIVE_DRAG_STYLES = (
         ("CAD", "Gui::CADNavigationStyle"),
@@ -66,6 +67,7 @@ class TestRubberbandSelection(unittest.TestCase):
         ("SolidWorks", "Gui::SolidWorksNavigationStyle"),
         ("TinkerCAD", "Gui::TinkerCADNavigationStyle"),
         ("Touchpad", "Gui::TouchpadNavigationStyle"),
+        ("Onshape", "Gui::OnshapeNavigationStyle"),
     )
     MODIFIED_DRAG_STYLES = (
         ("Gesture", "Gui::GestureNavigationStyle"),
@@ -79,6 +81,7 @@ class TestRubberbandSelection(unittest.TestCase):
         ("SolidWorks", "Gui::SolidWorksNavigationStyle"),
         ("TinkerCAD", "Gui::TinkerCADNavigationStyle"),
         ("Touchpad", "Gui::TouchpadNavigationStyle"),
+        ("Onshape", "Gui::OnshapeNavigationStyle"),
     )
 
     def setUp(self):

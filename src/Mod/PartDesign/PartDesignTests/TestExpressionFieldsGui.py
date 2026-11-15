@@ -31,6 +31,8 @@ value, which the field must show."""
 import time
 import unittest
 
+import shiboken6
+
 import FreeCAD as App
 import FreeCADGui as Gui
 import Part
@@ -47,17 +49,37 @@ def pump(seconds=0.3):
         time.sleep(0.01)
 
 
+def liveButtonBoxes():
+    """The main window's button boxes, each through a live wrapper.
+
+    A box's wrapper can outlive the box in shiboken's map (a box handed to a Python task panel's
+    modifyStandardButtons, through Gui::WrapperManager, which marked it invalid but left it mapped
+    before ops#640), and a later box at that address then comes back through the dead wrapper:
+    "Internal C++ object (QDialogButtonBox) already deleted". Such wrappers are dropped from the
+    map and the boxes found again; a box still unreachable is left out."""
+    boxes = Gui.getMainWindow().findChildren(QtWidgets.QDialogButtonBox)
+    dead = [box for box in boxes if not shiboken6.isValid(box)]
+    if dead:
+        for box in dead:
+            shiboken6.invalidate(box)
+        boxes = Gui.getMainWindow().findChildren(QtWidgets.QDialogButtonBox)
+    return [box for box in boxes if shiboken6.isValid(box)]
+
+
 def taskButton(which):
     """The task panel's OK or Cancel button."""
-    for box in Gui.getMainWindow().findChildren(QtWidgets.QDialogButtonBox):
-        button = box.button(which)
-        if button is None or not button.isVisible():
+    for box in liveButtonBoxes():
+        try:
+            button = box.button(which)
+            if button is None or not button.isVisible():
+                continue
+            parent = box.parentWidget()
+            while parent is not None:
+                if parent.metaObject().className() == "Gui::TaskView::TaskView":
+                    return button
+                parent = parent.parentWidget()
+        except RuntimeError:  # a box (or a parent) deleted under its wrapper: not the panel's
             continue
-        parent = box.parentWidget()
-        while parent is not None:
-            if parent.metaObject().className() == "Gui::TaskView::TaskView":
-                return button
-            parent = parent.parentWidget()
     return None
 
 
@@ -351,6 +373,11 @@ class TestExpressionFieldsGui(unittest.TestCase):
         self.openPanel(self.pad)
         pump(0.3)
         Gui.Control.showTaskView()  # the last dialog's late switch to the Model tab hides it
+        # the taper shows with Onshape's Draft ticked (ops#640, rank 22)
+        draft = Gui.getMainWindow().findChild(QtWidgets.QCheckBox, "checkBoxDraft")
+        if draft is not None and not draft.isChecked():
+            draft.setChecked(True)
+            pump(0.2)
         taper = self.field("taperEdit")
         self.assertTrue(taper.isVisible() and taper.isEnabled(), "the Taper field")
         self.focus(taper)

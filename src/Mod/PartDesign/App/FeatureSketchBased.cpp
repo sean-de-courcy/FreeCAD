@@ -50,7 +50,9 @@
 #include <BRepProj_Projection.hxx>
 #include <Extrema_ExtCC.hxx>
 #include <Extrema_POnCurv.hxx>
+#include <Geom_Surface.hxx>
 #include <gp_Circ.hxx>
+#include <gp_Lin.hxx>
 #include <gp_Pln.hxx>
 #include <gp_Trsf.hxx>
 #include <GProp_GProps.hxx>
@@ -61,6 +63,7 @@
 #include <TopExp_Explorer.hxx>
 #include <TopoDS_Face.hxx>
 #include <TopoDS.hxx>
+#include <TopoDS_Compound.hxx>
 #include <TopoDS_Vertex.hxx>
 #include <TopoDS_Wire.hxx>
 #include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
@@ -83,10 +86,14 @@
 #include <Mod/Part/App/TopoShapeOpCode.h>
 
 #include "Body.h"
+#include "FeatureExtrude.h"
 #include "FeatureSketchBased.h"
+#include "ProfileRegions.h"
 #include "DatumLine.h"
 #include "DatumPlane.h"
 #include "PartDesignParameter.h"
+#include "StraightEdge.h"
+#include "StudioOwner.h"
 #include "Mod/Part/App/Geometry.h"
 
 
@@ -217,13 +224,25 @@ void ProfileBased::transformPlacement(const Base::Placement& transform)
     positionByPrevious();
 }
 
+namespace
+{
+// What a profile feature with no profile says. An Extrude says it in Onshape's words (hands-on
+// check R3, ops#640: "Select face or sketch region to extrude"); the other profile features keep
+// their own until Onshape's words for them are seen
+const char* noProfileMessage(const ProfileBased* feature, const char* otherwise)
+{
+    return feature->isDerivedFrom<FeatureExtrude>() ? "Select face or sketch region to extrude"
+                                                    : otherwise;
+}
+}  // namespace
+
 Part::Part2DObject* ProfileBased::getVerifiedSketch(bool silent) const
 {
     App::DocumentObject* result = Profile.getValue();
     const char* err = nullptr;
 
     if (!result) {
-        err = "No profile linked at all";
+        err = noProfileMessage(this, "No profile linked at all");
     }
     else {
         if (!result->isDerivedFrom<Part::Part2DObject>()) {
@@ -246,7 +265,7 @@ Part::Feature* ProfileBased::getVerifiedObject(bool silent) const
     const char* err = nullptr;
 
     if (!result) {
-        err = "No object linked";
+        err = noProfileMessage(this, "No object linked");
     }
     else {
         if (!result->isDerivedFrom<Part::Feature>()) {
@@ -272,7 +291,9 @@ TopoShape ProfileBased::getTopoShapeVerifiedFace(
         if (silent) {
             return makeTopoShape();
         }
-        throw Base::ValueError("No profile linked");
+        throw Base::ValueError(
+            profile ? "No profile linked" : noProfileMessage(this, "No profile linked")
+        );
     }
     const auto& subs = profile ? _subs : Profile.getSubValues();
     try {
@@ -288,7 +309,10 @@ TopoShape ProfileBased::getTopoShapeVerifiedFace(
                 std::vector<TopoShape> shapes;
                 // In a reference solver document the elements that are gone are skipped: the
                 // feature computes on the rest, with a warning from the recompute check (ops#127).
-                const bool partial = Profile.isPartialAllowed() && Profile.inSolverDocument();
+                // Only for the feature's own Profile: another link's lost picks (a pipe's
+                // sections) must not be skipped by this property's rule (review r1, T4)
+                const bool partial
+                    = !profile && Profile.isPartialAllowed() && Profile.inSolverDocument();
                 for (auto& sub : subs) {
                     if (partial && Data::hasMissingElement(sub.c_str())) {
                         continue;
@@ -313,6 +337,8 @@ TopoShape ProfileBased::getTopoShapeVerifiedFace(
                     shapes.push_back(subshape);
                 }
                 shape.makeElementCompound(shapes);
+                // Picked regions that share a side make one face, as in Onshape
+                shape = mergeAdjacentRegions(obj, subs, shape);
             }
         }
         else {
@@ -343,7 +369,42 @@ TopoShape ProfileBased::getTopoShapeVerifiedFace(
                 }
                 if (shape.hasSubShape(TopAbs_WIRE)) {
                     shape.Hasher = getDocument()->getStringHasher();
-                    if (!allowOpen) {
+                    // A whole sketch is Onshape's regions: every region of its curves but those
+                    // whose outer boundary is another's inner boundary, adjacent ones merged
+                    // (feat/profile-regions). Where its loops give the same faces, they are made
+                    // as before, with the names files saved before have.
+                    bool regions = false;
+                    if (!allowOpen && subs.empty() && AllowMultiFace.getValue()
+                        && obj->getLinkedObject(true)->isDerivedFrom<Part::Part2DObject>()) {
+                        WholeSketchRegions rule(obj, shape);
+                        TopoShape faces = makeTopoShape();
+                        if (rule.sameAsLoops()) {
+                            try {
+                                faces = withoutOpenCurves(shape);
+                                if (!faces.isNull()) {
+                                    faces = faces.makeElementFace();  // FaceMakerBullseye
+                                }
+                            }
+                            catch (const Base::Exception&) {
+                                faces = makeTopoShape();
+                            }
+                            catch (const Standard_Failure&) {
+                                faces = makeTopoShape();
+                            }
+                            if (!rule.matches(faces)) {
+                                faces = makeTopoShape();
+                            }
+                        }
+                        if (faces.isNull()) {
+                            faces = rule.faces();
+                        }
+                        if (faces.isNull()) {
+                            throw Base::CADKernelError("The sketch has no closed region");
+                        }
+                        shape = faces;
+                        regions = true;
+                    }
+                    if (!regions && !allowOpen) {
                         // The faces come from the closed loops; open curves are ignored, as
                         // in Onshape (ops#631)
                         shape = withoutOpenCurves(shape);
@@ -355,7 +416,7 @@ TopoShape ProfileBased::getTopoShapeVerifiedFace(
                             );
                         }
                     }
-                    else {
+                    else if (!regions) {
                         std::vector<TopoShape> openwires;
                         std::vector<TopoShape> wires;
                         for (auto& wire : shape.getSubTopoShapes(TopAbs_WIRE)) {
@@ -384,7 +445,7 @@ TopoShape ProfileBased::getTopoShapeVerifiedFace(
                             }
                         }
                     }
-                    if (!shape.isNull()) {
+                    if (!regions && !shape.isNull()) {
                         if (AllowMultiFace.getValue()) {
                             shape = shape.makeElementFace();  // default to use FaceMakerBullseye
                         }
@@ -454,7 +515,7 @@ TopoDS_Shape ProfileBased::getVerifiedFace(bool silent) const
     std::string _err;
 
     if (!result) {
-        err = "No profile linked";
+        err = noProfileMessage(this, "No profile linked");
     }
     else if (AllowMultiFace.getValue()) {
         try {
@@ -471,8 +532,16 @@ TopoDS_Shape ProfileBased::getVerifiedFace(bool silent) const
                     if (shape.hasSubShape(TopAbs_WIRE)) {
                         // Open curves are ignored, as in getTopoShapeVerifiedFace (ops#631:
                         // the Helix's centre and pitch come from here)
-                        shape = withoutOpenCurves(shape);
-                        if (shape.isNull()) {
+                        auto regions = Profile.getSubValues().empty()
+                                && result->getLinkedObject(true)->isDerivedFrom<Part::Part2DObject>()
+                            ? getTopoShapeVerifiedFace(true)
+                            : TopoShape();
+                        if (!regions.isNull() && regions.hasSubShape(TopAbs_FACE)) {
+                            // A whole sketch: Onshape's regions, as the feature's own profile
+                            // (feat/profile-regions)
+                            shape = regions;
+                        }
+                        else if (shape = withoutOpenCurves(shape); shape.isNull()) {
                             err = "The sketch has no closed region";
                         }
                         else {
@@ -1057,6 +1126,11 @@ Part::Feature* ProfileBased::getBaseObject(bool silent) const
     if (rv) {
         return rv;
     }
+    // FreeCAD-CH ops#654 S2: a studio owner has no base feature, never its profile's support:
+    // its base is its scope's parts at its place (Feature::getBaseTopoShape())
+    if (runsAsStudioOwner(this)) {
+        return Feature::getBaseObject(silent);
+    }
 
     // A feature of another Body is never an implicit base: it would import that Body's whole
     // solid as this feature's start (FreeCAD-CH ops#308 T1: a first Pad on a sketch attached
@@ -1560,6 +1634,45 @@ void ProfileBased::getFaceFromLinkSub(TopoDS_Face& upToFace, const App::Property
 }
 
 
+namespace PartDesign
+{
+// Whether an extrusion from `profile` along `dir` up to `upToFace` goes the other way: the line
+// through the profile's centre meets the face only behind, or, missing the face both ways, its
+// surface without limits only behind (FreeCAD-CH P3). Declared where it is used, in
+// FeatureExtrude.cpp too, to keep FeatureSketchBased.h as it is.
+bool upToFaceBehind(const TopoShape& upToFace, const TopoShape& profile, const gp_Dir& dir)
+{
+    // The line through the profile's centre meets the face ahead, or behind
+    if (!Part::findAllFacesCutBy(upToFace, profile, dir).empty()) {
+        return false;
+    }
+    if (!Part::findAllFacesCutBy(upToFace, profile, dir.Reversed()).empty()) {
+        return true;
+    }
+    // It misses the face both ways: a face beside the profile, or smaller than it. The prism goes
+    // up to the face without its limits (makeElementPrismUntil()), and so does Onshape's, so the
+    // side of the face's surface decides (FreeCAD-CH P3, rehearsal round 2). Before, such a side
+    // was reversed: its prism still reached the face, but the offset moved the face back.
+    BRep_Builder builder;
+    TopoDS_Compound unlimited;
+    builder.MakeCompound(unlimited);
+    bool any = false;
+    for (TopExp_Explorer it(upToFace.getShape(), TopAbs_FACE); it.More(); it.Next()) {
+        Handle(Geom_Surface) surface = BRep_Tool::Surface(TopoDS::Face(it.Current()));
+        if (surface.IsNull()) {
+            continue;
+        }
+        BRepBuilderAPI_MakeFace mkFace(surface, Precision::Confusion());
+        if (mkFace.IsDone()) {
+            builder.Add(unlimited, mkFace.Face());
+            any = true;
+        }
+    }
+    // A surface the line misses both ways (one parallel to the direction) is reversed, as before
+    return !any || Part::findAllFacesCutBy(TopoShape(unlimited), profile, dir).empty();
+}
+}  // namespace PartDesign
+
 void ProfileBased::getUpToFace(
     TopoShape& upToFace,
     const TopoShape& support,
@@ -1588,7 +1701,7 @@ void ProfileBased::getUpToFace(
         }
         upToFace = (method == "UpToLast" ? it_far->face : it_near->face);
     }
-    else if (Part::findAllFacesCutBy(upToFace, sketchshape, dir).empty()) {
+    else if (upToFaceBehind(upToFace, sketchshape, dir)) {
         dir = -dir;
     }
 
@@ -1663,7 +1776,8 @@ void ProfileBased::getUpToFace(
 
 void ProfileBased::addOffsetToFace(TopoShape& upToFace, const gp_Dir& dir, double offset)
 {
-    // Move the face in the extrusion direction
+    // Move the face in the extrusion direction. Onshape's offset does the same, a slanted face's
+    // too (FreeCAD-CH P3: `notes\onshape-facts.md` U2)
     // TODO: For non-planar faces, we could consider offsetting the surface
     if (fabs(offset) > Precision::Confusion()) {
         gp_Trsf mov;
@@ -1997,7 +2111,7 @@ void ProfileBased::getAxis(
             b = adapt.Circle().Location();
             d = adapt.Circle().Axis().Direction();
         }
-        else {
+        else if (!straightEdge(refEdge, b, d)) {  // a B-spline straight by its shape (SW7)
             throw Base::TypeError("Edge must be a straight line, circle or arc of circle");
         }
 

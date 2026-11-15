@@ -27,6 +27,7 @@
 #include <Base/Tools.h>
 #include <Mod/Sketcher/App/SketchObject.h>
 
+#include "ModelSnap.h"  // FreeCAD-CH (ops#640, rank 18)
 #include "SnapManager.h"
 #include "ViewProviderSketch.h"
 
@@ -198,7 +199,10 @@ Base::Vector2d SnapManager::snap(Base::Vector2d inputPos, SnapType mask)
     bool snappedToObject = false;
     if ((static_cast<int>(mask)
          & (static_cast<int>(SnapType::Point) | static_cast<int>(SnapType::Edge)))
-        && snapToObjectsRequested) {
+        && snapToObjectsRequested
+        // FreeCAD-CH (ops#640): Shift held suppresses the inferences, the snap onto a point or
+        // curve with them, as in Onshape (DrawSketchHandler::seekAutoConstraint)
+        && !(QApplication::keyboardModifiers() & Qt::ShiftModifier)) {
         snappedToObject = snapToObject(inputPos, snapPos, mask);
         if (snappedToObject) {
             return snapPos;  // Full snap (point or curve) - done
@@ -307,6 +311,21 @@ bool SnapManager::snapToObject(Base::Vector2d inputPos, Base::Vector2d& snapPos,
 
                 return true;
             }
+        }
+    }
+
+    // FreeCAD-CH (ops#640, rank 18): with a drawing tool and nothing of the sketch under the
+    // cursor, a model vertex or edge in the sketch plane wakes, as in Onshape: the cursor snaps to
+    // it, and the tool's inference (DrawSketchHandler::seekModelAutoConstraint) links it
+    const bool sketchHit = VtId >= 0 || CrsId >= 0 || CrvId >= 0 || CrvId <= GeoEnum::RefExt;
+    if (!sketchHit && viewProvider.getSketchMode() == ViewProviderSketch::STATUS_SKETCH_UseHandler) {
+        auto hit = findModelSnap(Obj, inputPos, modelSnapTolerance(viewProvider));
+        // an edge's middle (SQ2) is a point, as a vertex is
+        const SnapType wanted =
+            hit && (hit->isVertex || hit->isMidpoint) ? SnapType::Point : SnapType::Edge;
+        if (hit && (static_cast<int>(mask) & static_cast<int>(wanted))) {
+            snapPos = hit->position;
+            return true;
         }
     }
     return false;

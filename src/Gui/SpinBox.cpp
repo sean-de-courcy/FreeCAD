@@ -20,10 +20,16 @@
  *                                                                         *
  ***************************************************************************/
 
+#include <functional>
 #include <limits>
+#include <memory>
 #include <unordered_map>
+#include <utility>
+#include <QContextMenuEvent>
 #include <QKeyEvent>
 #include <QLineEdit>
+#include <QLocale>
+#include <QMenu>
 #include <QSignalBlocker>
 #include <QStyle>
 #include <QStyleOptionSpinBox>
@@ -31,6 +37,8 @@
 
 #include <boost/math/special_functions/round.hpp>
 
+#include <App/Application.h>
+#include <App/ConfigurationHooks.h>
 #include <App/Document.h>
 #include <App/DocumentObject.h>
 #include <App/ExpressionParser.h>
@@ -71,8 +79,9 @@ public:
 
     bool eventFilter(QObject*, QEvent* event) override
     {
+        // A configured field keeps its expression (it is the active row's cell; ops#671 C2)
         if (event->type() == QEvent::MouseButtonDblClick && m_binding.hasExpression()
-            && !m_binding.isTentativeDiscard()) {
+            && !m_binding.isTentativeDiscard() && !parent()->property("configured").isValid()) {
             m_binding.stashExpression();
             return true;
         }
@@ -81,6 +90,75 @@ public:
 
 private:
     ExpressionSpinBox& m_binding;
+};
+
+// FreeCAD-CH (ops#671 C2): Onshape's configuration items in a bound field's context menu
+// ("Configure with <input>", "Set to #<variable>", "Unconfigure from <input>"), from the App hook
+// A field that is no longer configured loses the outline and gets its own tooltip back
+void clearConfiguredMarker(QAbstractSpinBox* spinbox)
+{
+    if (spinbox->property("configured").isValid()) {
+        spinbox->setProperty("configured", QVariant());
+        spinbox->setStyleSheet(QString());
+    }
+    if (spinbox->property("plainToolTip").isValid()) {
+        spinbox->setToolTip(spinbox->property("plainToolTip").toString());
+        spinbox->setProperty("plainToolTip", QVariant());
+    }
+}
+
+class ConfigurationMenuFilter: public QObject
+{
+public:
+    using Target = std::function<std::pair<App::DocumentObject*, App::ObjectIdentifier>()>;
+    ConfigurationMenuFilter(QLineEdit* lineedit, Target target)
+        : QObject(lineedit)
+        , m_lineedit(lineedit)
+        , m_target(std::move(target))
+    {}
+
+    bool eventFilter(QObject*, QEvent* event) override
+    {
+        if (event->type() != QEvent::ContextMenu) {
+            return false;
+        }
+        auto [obj, path] = m_target();
+        if (!obj || !obj->isAttachedToDocument()) {
+            return false;
+        }
+        // Onshape (CP2-9): a sketch dimension's value box has no configure items; they are in the
+        // dimension's own menu ("Configure dimension")
+        static const Base::Type sketchType = Base::Type::fromName("Sketcher::SketchObject");
+        if (!sketchType.isBad() && obj->getTypeId().isDerivedFrom(sketchType)
+            && path.getPropertyName() == "Constraints") {
+            return false;
+        }
+        const auto items = App::callConfigMenuQuery(obj, path);
+        if (items.empty()) {
+            return false;
+        }
+        std::unique_ptr<QMenu> menu(m_lineedit->createStandardContextMenu());
+        menu->addSeparator();
+        const std::string docName = obj->getDocument()->getName();
+        const std::string objName = obj->getNameInDocument();
+        // A named sketch constraint as Constraints.<name>, as the configuration stores it
+        const std::string pathText = obj->ExpressionEngine.canonicalPath(path).toString();
+        for (const auto& item : items) {
+            auto action = menu->addAction(QString::fromStdString(item.label), [docName, objName, pathText, item]() {
+                auto doc = App::GetApplication().getDocument(docName.c_str());
+                if (auto target = doc ? doc->getObject(objName.c_str()) : nullptr) {
+                    App::runConfigMenuItem(target, pathText, item);
+                }
+            });
+            action->setObjectName(QStringLiteral("fieldConfig_") + QString::fromStdString(item.action));
+        }
+        menu->exec(static_cast<QContextMenuEvent*>(event)->globalPos());
+        return true;
+    }
+
+private:
+    QLineEdit* m_lineedit;
+    Target m_target;
 };
 
 class ExpressionFocusOutFilter: public QObject
@@ -122,6 +200,43 @@ ExpressionSpinBox::ExpressionSpinBox(QAbstractSpinBox* sb)
     // FocusOut filter goes on the spinbox, not lineedit
     // QAbstractSpinBox handles focus at the spinbox level.
     spinbox->installEventFilter(new SpinBoxPrivate::ExpressionFocusOutFilter(*this, spinbox));
+    // FreeCAD-CH (ops#671 C2): the configuration items of the context menu, and Onshape's typing
+    // into a configured field, which writes the active row's cell (CP2-2)
+    // (on the spin box too: QAbstractSpinBox may leave its line edit's menu event to itself)
+    auto menuFilter = new SpinBoxPrivate::ConfigurationMenuFilter(lineedit, [this]() {
+        return isBound() ? std::make_pair(getPath().getDocumentObject(), getPath())
+                         : std::make_pair(static_cast<App::DocumentObject*>(nullptr), App::ObjectIdentifier());
+    });
+    lineedit->installEventFilter(menuFilter);
+    spinbox->installEventFilter(menuFilter);
+    QObject::connect(lineedit, &QLineEdit::textEdited, spinbox, [this]() {
+        if (spinbox->property("configured").isValid()) {
+            spinbox->setProperty("configuredEdited", true);
+        }
+    });
+    QObject::connect(spinbox, &QAbstractSpinBox::editingFinished, spinbox, [this]() {
+        if (!spinbox->property("configuredEdited").toBool()) {
+            return;
+        }
+        spinbox->setProperty("configuredEdited", QVariant());
+        auto obj = isBound() ? getPath().getDocumentObject() : nullptr;
+        if (!obj || !spinbox->property("configured").isValid()) {
+            return;
+        }
+        try {
+            // The configuration's write hook turns this into the active row's cell. The text is
+            // the user's locale's; the expression parser reads a point
+            QString text = lineedit->text();
+            const QLocale locale;
+            text.remove(locale.groupSeparator());
+            text.replace(locale.decimalPoint(), QStringLiteral("."));
+            std::shared_ptr<Expression> expr(Expression::parse(obj, text.toStdString()));
+            ExpressionBinding::setExpression(expr);
+        }
+        catch (const Base::Exception& e) {
+            showInvalidExpression(QString::fromUtf8(e.what()));
+        }
+    });
 }
 
 ExpressionSpinBox::~ExpressionSpinBox()
@@ -282,6 +397,39 @@ void ExpressionSpinBox::showExpression(Number number)
     }
     // FreeCAD-CH (ops#152): variables as #Name, with where each lives
     iconLabel->setExpressionText(expressionToolTipText(getExpression().get()));
+
+    // FreeCAD-CH (ops#671 C2): a configured field (its expression is the active row's cell) has
+    // Onshape's dotted orange outline, and a plain value in it is typed over (CP2-2)
+    auto obj = isBound() ? getPath().getDocumentObject() : nullptr;
+    const std::string input = obj ? App::callConfiguredQuery(obj, getPath()) : std::string();
+    if (!input.empty()) {
+        spinbox->setProperty("configured", QString::fromStdString(input));
+        spinbox->setStyleSheet(QStringLiteral("QAbstractSpinBox { border: 1px dotted #e8822a; }"));
+        // A plain value ("10 mm" parses as a number times a unit) is typed over
+        std::unique_ptr<App::Expression> simple(getExpression()->simplify());
+        if (value && freecad_cast<NumberExpression*>(simple.get())) {
+            spinbox->setReadOnly(false);
+            QPalette p(lineedit->palette());
+            p.setColor(QPalette::Active, QPalette::Text, defaultPalette.color(QPalette::Text));
+            p.setColor(QPalette::Inactive, QPalette::Text, defaultPalette.color(QPalette::Text));
+            lineedit->setPalette(p);
+        }
+        iconLabel->setExpressionText(
+            QObject::tr("Configured by %1").arg(QString::fromStdString(input)) + QStringLiteral("\n")
+            + expressionToolTipText(getExpression().get())
+        );
+        // Onshape's tooltip: "Depth: #len * 0.25 (Configured by Size)"
+        if (!spinbox->property("plainToolTip").isValid()) {
+            spinbox->setProperty("plainToolTip", spinbox->toolTip());
+        }
+        spinbox->setToolTip(QObject::tr("%1: %2 (Configured by %3)")
+                                .arg(QString::fromStdString(getPath().getPropertyName()),
+                                     QString::fromStdString(getExpression()->toString()),
+                                     QString::fromStdString(input)));
+    }
+    else {
+        SpinBoxPrivate::clearConfiguredMarker(spinbox);
+    }
 }
 
 void ExpressionSpinBox::clearExpression()
@@ -294,6 +442,7 @@ void ExpressionSpinBox::clearExpression()
     p.setColor(QPalette::Active, QPalette::Text, defaultPalette.color(QPalette::Text));
     lineedit->setPalette(p);
     iconLabel->setExpressionText(QString());
+    SpinBoxPrivate::clearConfiguredMarker(spinbox);
 }
 
 void ExpressionSpinBox::updateExpression()

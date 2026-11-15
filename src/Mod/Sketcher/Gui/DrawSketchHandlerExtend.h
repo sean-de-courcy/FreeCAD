@@ -115,6 +115,7 @@ public:
         using std::numbers::pi;
 
         if (Mode == STATUS_SEEK_Second) {
+            BoundaryGeoId = Sketcher::GeoEnum::GeoUndef;
             const Part::Geometry* geom = sketchgui->getSketchObject()->getGeometry(BaseGeoId);
             if (geom->is<Part::GeomLineSegment>()) {
                 const Part::GeomLineSegment* lineSeg = static_cast<const Part::GeomLineSegment*>(geom);
@@ -159,6 +160,28 @@ public:
                         < onSketchPos.Distance(endPoint);
                     Increment = ExtendFromStart ? projection.Length()
                                                 : projection.Length() - recenteredLine.Length();
+                }
+                // FreeCAD-CH (Onshape's Extend, ops#640): the end stops at the first curve or
+                // point in its way (the commit's extendToBoundary finds the same one); the preview
+                // shows the line as it will be
+                BoundaryGeoId = Sketcher::GeoEnum::GeoUndef;
+                Sketcher::PointPos boundaryPos = Sketcher::PointPos::none;
+                double shown = sketchgui->getSketchObject()->seekExtendBoundary(
+                    BaseGeoId,
+                    ExtendFromStart ? Sketcher::PointPos::start : Sketcher::PointPos::end,
+                    Increment,
+                    BoundaryGeoId,
+                    boundaryPos
+                );
+                Base::Vector2d along = recenteredLine;
+                along.Normalize();
+                if (ExtendFromStart) {
+                    EditCurve[0] = startPoint - along * shown;
+                    EditCurve[1] = endPoint;
+                }
+                else {
+                    EditCurve[0] = startPoint;
+                    EditCurve[1] = endPoint + along * shown;
                 }
                 drawEdit(EditCurve);
             }
@@ -238,8 +261,22 @@ public:
                 drawEdit(EditCurve);
             }
             int curveId = getPreselectCurve();
-            if (BaseGeoId != curveId) {
+            if (BoundaryGeoId != Sketcher::GeoEnum::GeoUndef) {
+                // the boundary's constraint is the commit's: no cursor suggestion beside it
+                SugConstr.clear();
+                renderSuggestConstraintsCursor(SugConstr);
+            }
+            else if (BaseGeoId != curveId) {
                 seekAndRenderAutoConstraint(SugConstr, onSketchPos, Base::Vector2d(0.f, 0.f));
+                // FreeCAD-CH (Onshape GA3-25): the extended curve can't hold its own end (on
+                // its preview, a PointOnObject on itself); in open space Onshape stores nothing
+                const auto own = std::ranges::remove_if(SugConstr, [this](const AutoConstraint& c) {
+                    return c.GeoId == BaseGeoId;
+                });
+                if (!own.empty()) {
+                    SugConstr.erase(own.begin(), own.end());
+                    renderSuggestConstraintsCursor(SugConstr);
+                }
             }
         }
     }
@@ -288,13 +325,18 @@ public:
         else if (Mode == STATUS_SEEK_Second) {
             try {
                 openCommand(QT_TRANSLATE_NOOP("Command", "Extend edge"));
+                // FreeCAD-CH (Onshape's Extend, ops#640): a line's end stops at the first boundary
+                const bool isLine = sketchgui->getSketchObject()
+                                        ->getGeometry(BaseGeoId)
+                                        ->is<Part::GeomLineSegment>();
                 Gui::cmdAppObjectArgs(
                     sketchgui->getObject(),
-                    "extend(%d, %f, %d)\n",  // GeoId, increment, PointPos
+                    "extend(%d, %.12g, %d%s)\n",  // GeoId, increment, PointPos, toBoundary
                     BaseGeoId,
                     Increment,
                     ExtendFromStart ? static_cast<int>(Sketcher::PointPos::start)
-                                    : static_cast<int>(Sketcher::PointPos::end)
+                                    : static_cast<int>(Sketcher::PointPos::end),
+                    isLine ? ", True" : ""
                 );
                 commitCommand();
 
@@ -371,6 +413,7 @@ protected:
     SelectMode Mode;
     std::vector<Base::Vector2d> EditCurve;
     int BaseGeoId;
+    int BoundaryGeoId = Sketcher::GeoEnum::GeoUndef;  // FreeCAD-CH: the preview's boundary
     ExtendSelection* filterGate = nullptr;
     bool ExtendFromStart;  // if true, extend from start, else extend from end (circle only)
     bool SavedExtendFromStart;

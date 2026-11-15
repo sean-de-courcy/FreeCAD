@@ -26,7 +26,6 @@
 
 #include <QMenu>
 #include <QAction>
-#include <QMessageBox>
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <TopExp.hxx>
 
@@ -79,30 +78,10 @@ std::string ViewProviderDressUp::featureIcon() const
 
 bool ViewProviderDressUp::setEdit(int ModNum)
 {
-    if (ModNum == ViewProvider::Default) {
-        // Here we should prevent edit of a Feature with missing base
-        // Otherwise it could call unhandled exception.
-        PartDesign::DressUp* dressUp = getObject<PartDesign::DressUp>();
-        assert(dressUp);
-        if (dressUp->getBaseObject(/*silent =*/true)) {
-            return ViewProvider::setEdit(ModNum);
-        }
-        else {
-            QMessageBox::warning(
-                nullptr,
-                QObject::tr("Feature error"),
-                QObject::tr(
-                    "%1 misses a base feature.\n"
-                    "This feature is broken and cannot be edited."
-                )
-                    .arg(QString::fromLatin1(dressUp->getNameInDocument()))
-            );
-            return false;
-        }
-    }
-    else {
-        return ViewProvider::setEdit(ModNum);
-    }
+    // A dress-up whose base is gone opens too, red, with its error and its field (FreeCAD-CH
+    // ops#640 rank 12, blind test F19: Onshape opens a broken fillet's dialog, where the missing
+    // picks are cleared and new ones made; a modal refused it). The panel copes with no base
+    return ViewProvider::setEdit(ModNum);
 }
 
 void ViewProviderDressUp::highlightReferences(const bool on)

@@ -40,12 +40,25 @@ from parttests.ElementReferenceTest import ElementReferenceTest, ElementReferenc
 from parttests.FilletFallbackTest import (
     BaseToleranceTest,
     BridgedRecessTest,
+    CornerWithACircleTest,
+    BlendEndTrimTest,
+    CurvedEndTrimTest,
+    CurvedWallEndTest,
+    CuspTest,
+    CuspRefusalTest,
     DroppedBasePartsTest,
     DressUpCheckLimitsTest,
     FilledRecessTest,
     FilletFallbackTest,
     InvalidDressUpTest,
     LostStepTest,
+    OverflowTest,
+    RoundBetweenCylindersTest,
+    RoundOverASliverTest,
+    RoundAlongASplineEdgeTest,
+    WallOnAChamferedRimTest,
+    TightWallArcTest,
+    VolumeSignTest,
 )
 from parttests.ReferenceFingerprintTest import ReferenceFingerprintTest, ReferenceSolverDefaultTest
 from parttests.InternNamesTest import InternNamesTest, InternNamesDefaultTest
@@ -54,10 +67,16 @@ from parttests.AttachAcrossContainersTest import AttachAcrossContainersTest
 from parttests.TestPartMirror import TestPartMirroringRegression
 from parttests.CompoundFilterTest import CompoundFilterTest
 from parttests.RefineElementMapTest import RefineElementMapTest
+from parttests.GTransformKeepsPlanesTest import GTransformKeepsPlanesTest
+from parttests.RefineFuseEdgesTest import RefineFuseEdgesTest
+from parttests.RefineInternalVertexTest import RefineInternalVertexTest
 from parttests.SplitEdgeNamesTest import SplitEdgeNamesTest
 from parttests.SweepFrenetTest import SweepFrenetTest, SweepApproximationTest
 from parttests.BooleanLocationsTest import BooleanLocationsTest
 from parttests.BooleanLostToolTest import BooleanLostToolTest
+from parttests.KernelBudgetTest import KernelBudgetTest  # FreeCAD-CH kernel safety S1
+from parttests.KernelBudgetTest import KernelCheckTest  # FreeCAD-CH kernel-9
+from parttests.KernelBudgetTest import NarrowCheckTest  # FreeCAD-CH perf profile 3
 from parttests.TestFaceMakerUnifiedPlanar import *
 from parttests.TestFaceMakerUnifiedNonPlanar import *
 

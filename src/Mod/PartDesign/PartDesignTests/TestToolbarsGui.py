@@ -23,8 +23,9 @@
 """The PartDesign toolbar in Onshape's order, and Onshape's words (FreeCAD-CH, ops#605 brief C).
 
 PartDesign has one "Features" toolbar in Onshape's order (notes/onshape-gui-plan.md 2.0, as
-corrected by section 7: Pocket, Groove and the subtractive Pipe and Loft stay beside their additive
-twins, because a Pad has no "Remove from"). The four stock toolbars are still there, hidden until
+corrected by section 7: Groove and the subtractive Pipe and Loft stay beside their additive twins).
+Pocket is off it (ops#640, rank 22: Onshape's one Extrude removes too), and Onshape's Variable tool
+(Std_AddVariable, rank 15) is on it. The four stock toolbars are still there, hidden until
 the user shows them from the toolbar menu. Pad, Pocket, Thickness, Mirrored, LinearPattern and
 PolarPattern read "Extrude", "Extrude (remove)", "Shell", "Mirror", "Linear pattern" and "Circular
 pattern" in menus and tooltips; the command names, the object types and the saved files keep
@@ -49,7 +50,6 @@ SEP = "|"
 FEATURES = [
     "PartDesign_NewSketch",
     "PartDesign_Pad",
-    "PartDesign_Pocket",
     "PartDesign_Revolution",
     "PartDesign_Groove",
     "PartDesign_AdditivePipe",
@@ -60,23 +60,29 @@ FEATURES = [
     "PartDesign_Fillet",
     "PartDesign_Chamfer",
     "PartDesign_Draft",
+    "PartDesign_Thicken",  # lane solid-ops: Thicken, Scale, Offset surface before Shell
+    "PartDesign_ScalePart",
+    "PartDesign_OffsetSurface",
     "PartDesign_Thickness",
     "PartDesign_Hole",
     SEP,
     "PartDesign_Mirrored",
     "PartDesign_LinearPattern",
     "PartDesign_PolarPattern",
+    "PartDesign_CurvePattern",
     "PartDesign_MultiTransform",
     SEP,
     "PartDesign_Boolean",
     "PartDesign_Split",
     "PartDesign_MergeParts",
+    "PartDesign_Derived",  # Onshape's Derived (ops#640 round 6)
     SEP,
     "PartDesign_CompDatums",
     "PartDesign_AdditiveHelix",
     "PartDesign_SubShapeBinder",
     "PartDesign_Body",
     "PartDesign_CompPrimitiveAdditive",
+    "Std_AddVariable",  # Onshape's Variable tool (ops#640, rank 15)
     "Sketcher_ValidateSketch",
     "PartDesign_ToggleModelTree",  # brings the model tree back (ops#602, decision 279)
 ]
@@ -121,6 +127,7 @@ STOCK = {
         "PartDesign_Mirrored",
         "PartDesign_LinearPattern",
         "PartDesign_PolarPattern",
+        "PartDesign_CurvePattern",
         "PartDesign_MultiTransform",
     ],
 }
@@ -133,6 +140,7 @@ TEXTS = {
     "PartDesign_Mirrored": "Mirror",
     "PartDesign_LinearPattern": "Linear pattern",
     "PartDesign_PolarPattern": "Circular pattern",
+    "PartDesign_CurvePattern": "Curve pattern",
 }
 
 

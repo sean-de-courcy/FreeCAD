@@ -240,13 +240,19 @@ class BodyVolume(Attached):
 
     def check(self, scenario, consumer, target, expectation):
         body = scenario.doc.Body
+        # A transform of nothing is red, as Onshape's is (ops#640): the scenario names it
+        red = set(scenario.redTransforms())
         bad = [
             o.Name
             for o in body.Group + [body]
-            if "Touched" in o.State or (o.isDerivedFrom("PartDesign::Feature") and not o.isValid())
+            if o.Name not in red
+            and ("Touched" in o.State or (o.isDerivedFrom("PartDesign::Feature") and not o.isValid()))
         ]
         if bad:
             return "broken", f"in error or touched after the recompute: {bad}"
+        notRed = sorted(n for n in red if scenario.doc.getObject(n).isValid())
+        if notRed:
+            return "wrong", f"valid, expected red (a transform of nothing, ops#640): {notRed}"
         return super().check(scenario, consumer, target, expectation)
 
     def compare(self, scenario, consumer, target, expectation):
@@ -262,8 +268,9 @@ class BodyVolume(Attached):
 
 class PatternOfNothing(P590):
     """The pattern's only original taken out (Originals emptied) or deleted: a pattern of nothing
-    passes the solid before it through. Judged by a sketch outside the Body on the block's front
-    face and the Body's volume. `capped`: a 100 x 80 x 20 cap after the pattern."""
+    is red ('Select features to mirror.', Onshape's rule, ops#640) and passes the solid before it
+    through. Judged by a sketch outside the Body on the block's front face and the Body's volume.
+    `capped`: a 100 x 80 x 20 cap after the pattern."""
 
     abstract = True
     REFS = ("front",)
@@ -272,6 +279,9 @@ class PatternOfNothing(P590):
 
     def front(self):
         return face("plane", normal=-Y, through=self.s(0, -150, 150))
+
+    def redTransforms(self):
+        return ("Mirrored",) if self.stepName == "edit" else ()
 
     def bodyVolume(self):
         L, W, H, b, h, cw, ch = self.s(600, 300, 300, 100, self.bossHeight, 80, 20)

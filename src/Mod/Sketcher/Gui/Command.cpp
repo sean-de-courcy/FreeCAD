@@ -44,6 +44,7 @@
 
 #include <App/DocumentObjectGroup.h>
 #include <App/Datums.h>
+#include <App/ReferenceRepair.h>
 #include <Base/Tools.h>
 #include <Gui/Action.h>
 #include <Gui/Application.h>
@@ -51,6 +52,7 @@
 #include <Gui/CommandT.h>
 #include <Gui/Control.h>
 #include <Gui/Document.h>
+#include <Gui/ForkKeymap.h>
 #include <Gui/MainWindow.h>
 #include <Gui/Notifications.h>
 #include <Gui/PrefWidgets.h>
@@ -60,6 +62,7 @@
 #include <Mod/Part/App/Attacher.h>
 #include <Mod/Part/App/BodyBase.h>
 #include <Mod/Part/App/Part2DObject.h>
+#include <Mod/Part/App/PartFeature.h>
 #include <Mod/Part/Gui/AttacherTexts.h>
 #include <Mod/Sketcher/App/Constraint.h>
 #include <Mod/Sketcher/App/ExternalGeometryFacade.h>
@@ -67,6 +70,7 @@
 
 #include "SketchMirrorDialog.h"
 #include "SketchOrientationDialog.h"
+#include "TaskDlgEditSketch.h"
 #include "TaskSketcherValidation.h"
 #include "Utils.h"
 #include "ViewProviderSketch.h"
@@ -442,9 +446,16 @@ void CmdSketcherCancelSketch::activated(int iMsg)
         vp->purgeHandler();
     }
 
+    // FreeCAD-CH (ops#640, hands-on R1): a cancelled new sketch goes, as with the dialog's Cancel
+    TaskDlgEditSketch* dlg = TaskDlgEditSketch::ofSketchView(vp);
+    const bool removeSketch = dlg && dlg->isNewSketch();
+    const App::DocumentObjectT sketchT(vp->getObject());
     vp->editingCancelled = true;
     doCommand(Gui, "Gui.activeDocument().resetEdit()");
     vp->editingCancelled = false;
+    if (removeSketch) {
+        TaskDlgEditSketch::removeNewSketch(sketchT);
+    }
 }
 
 bool CmdSketcherCancelSketch::isActive()
@@ -695,6 +706,155 @@ int chooseItem(const QString& title, const QString& label, const QStringList& it
     auto combo = dialog.findChild<QComboBox*>();
     return combo ? combo->currentIndex() : -1;
 }
+
+/// FreeCAD-CH (ops#640, rank 2): arms the Sketch plane field of the sketch dialog open now
+/// (PartDesign's box, which Sketcher can't name: found by its object name, armed through its
+/// property), as a click on it would. False if there is none.
+bool armSketchPlaneField()
+{
+    auto dlg = qobject_cast<TaskDlgEditSketch*>(Gui::Control().activeDialog());
+    if (!dlg) {
+        return false;
+    }
+    for (QWidget* panel : dlg->getDialogContent()) {
+        if (auto field = panel->findChild<QWidget*>(QStringLiteral("fieldAttachmentSupport"))) {
+            return field->setProperty("armed", true);
+        }
+    }
+    return false;
+}
+
+/// A plane a sketch can lie on: a planar face, or an origin or datum plane.
+bool isSketchPlane(App::DocumentObject* obj, const std::string& sub)
+{
+    if (!obj) {
+        return false;
+    }
+    if (obj->isDerivedFrom<App::Plane>()) {
+        return true;
+    }
+    const Part::TopoShape shape = Part::Feature::getTopoShape(
+        obj,
+        Part::ShapeOption::NeedSubElement | Part::ShapeOption::ResolveLink,
+        sub.c_str()
+    );
+    return !shape.isNull() && shape.isPlanarFace();
+}
+
+/** FreeCAD-CH (ops#640, rank 2): Attach Sketch with Onshape's keymap, without the two lists. In
+ * the sketch editor it arms the Sketch plane field. One sketch and one plane (a planar face, an
+ * origin or datum plane) selected: the sketch goes on the plane (Flat face, from the Body's
+ * origin) at once. The sketch alone: it opens with its Sketch plane field armed. False for
+ * anything else, which goes on to the lists.
+ */
+bool attachSketchOnshape()
+{
+    Gui::Document* guiDocument = Gui::Application::Instance->activeDocument();
+    if (guiDocument && dynamic_cast<ViewProviderSketch*>(guiDocument->getInEdit())) {
+        return armSketchPlaneField();
+    }
+
+    Part2DObject* sketch = nullptr;
+    App::DocumentObject* plane = nullptr;
+    std::string planeSub;
+    int references = 0;
+    std::vector<Gui::SelectionObject> selected = Gui::Selection().getSelectionEx();
+    for (auto& selection : selected) {
+        App::DocumentObject* obj = selection.getObject();
+        const std::vector<std::string>& subs = selection.getSubNames();
+        if (obj && obj->isDerivedFrom<Part2DObject>() && subs.empty()) {
+            if (sketch) {
+                return false;  // which one is the lists' question
+            }
+            sketch = static_cast<Part2DObject*>(obj);
+            continue;
+        }
+        if (subs.empty()) {
+            ++references;
+            plane = obj;
+            planeSub.clear();
+        }
+        for (const auto& sub : subs) {
+            ++references;
+            plane = obj;
+            planeSub = sub;
+        }
+    }
+    if (!sketch || !sketch->getDocument()) {
+        return false;
+    }
+
+    if (references == 0) {
+        // The field is PartDesignGui's: without it the lists ask for the plane
+        if (!TaskDlgEditSketch::hasContentFactories()) {
+            return false;
+        }
+        Gui::Selection().clearSelection();
+        Gui::Command::doCommand(
+            Gui::Command::Gui,
+            "Gui.getDocument('%s').setEdit('%s')",
+            sketch->getDocument()->getName(),
+            sketch->getNameInDocument()
+        );
+        armSketchPlaneField();
+        return true;
+    }
+    if (references != 1 || plane == sketch || !isSketchPlane(plane, planeSub)) {
+        return false;
+    }
+    if (plane->isDerivedFrom<App::Plane>()) {
+        planeSub.clear();  // the plane whole, whatever part of it the pick named
+    }
+    // Only what the sketch may link as it is: its own Body's, from before it, or a studio
+    // sibling's (the Sketch plane field's rule). Anything else would fail as a link out of the
+    // allowed scope, or make the sketch depend on what comes after it
+    if (Part::BodyBase* body = Part::BodyBase::findBodyOf(sketch)) {
+        const bool own = body->hasObject(plane);
+        if ((!own && !Part::BodyBase::isInOneStudio(sketch, plane))
+            || (own && body->isAfter(plane, sketch))) {
+            Gui::TranslatedUserWarning(
+                sketch->getDocument()->Label.getStrValue(),
+                qApp->translate("Sketcher_MapSketch", "Map sketch"),
+                qApp->translate(
+                    "Sketcher_MapSketch",
+                    "Select a face or a plane of the sketch's part studio, from before the sketch."
+                )
+            );
+            return true;
+        }
+    }
+    if (const std::vector<App::DocumentObject*> input = plane->getOutListRecursive();
+        std::ranges::find(input, sketch) != input.end()) {
+        Gui::TranslatedUserWarning(
+            sketch->getDocument()->Label.getStrValue(),
+            qApp->translate("Sketcher_MapSketch", "Map sketch"),
+            qApp->translate(
+                "Sketcher_MapSketch",
+                "The plane depends on the sketch. Circular dependencies are not allowed."
+            )
+        );
+        return true;
+    }
+
+    App::PropertyLinkSubList support;
+    support.setValue(plane, planeSub.empty() ? std::vector<std::string>() : std::vector<std::string> {planeSub});
+    const std::string flatFace = AttachEngine::getModeName(mmFlatFace);
+    const int tid =
+        Gui::Command::openActiveDocumentCommand(QT_TRANSLATE_NOOP("Command", "Attach sketch"));
+    // Another mode goes off first, so neither support is positioned in the other's mode
+    if (flatFace != sketch->MapMode.getValueAsString()) {
+        Gui::cmdAppObjectArgs(
+            sketch, "MapMode = \"%s\"", AttachEngine::getModeName(mmDeactivated).c_str());
+    }
+    // A support picked here takes the Body's origin, as in TaskAttacher (ops#311)
+    Gui::cmdAppObjectArgs(sketch, "MapOrigin = 'Body'");
+    Gui::cmdAppObjectArgs(sketch, "AttachmentSupport = %s", support.getPyReprString().c_str());
+    Gui::cmdAppObjectArgs(sketch, "MapMode = \"%s\"", flatFace.c_str());
+    // The recompute is part of the step, so its undo puts the model back too
+    Gui::Command::doCommand(Gui::Command::Gui, "App.activeDocument().recompute()");
+    Gui::Command::commitCommand(tid);
+    return true;
+}
 }  // namespace
 
 DEF_STD_CMD_A(CmdSketcherMapSketch)
@@ -716,6 +876,10 @@ void CmdSketcherMapSketch::activated(int iMsg)
 {
     Q_UNUSED(iMsg);
     QString msg_str;
+    // FreeCAD-CH (ops#640, rank 2): Onshape's keymap takes a plane in the Sketch plane field
+    if (Gui::ForkKeymap::isOnshape() && attachSketchOnshape()) {
+        return;
+    }
     try {
         Attacher::eMapMode suggMapMode;
         std::vector<Attacher::eMapMode> validModes;
@@ -908,6 +1072,10 @@ void CmdSketcherMapSketch::activated(int iMsg)
 
 bool CmdSketcherMapSketch::isActive()
 {
+    // FreeCAD-CH (ops#640, rank 2): in the sketch editor it arms the Sketch plane field
+    if (Gui::ForkKeymap::isOnshape() && isSketchInEdit(getActiveGuiDocument())) {
+        return true;
+    }
     App::Document* doc = App::GetApplication().getActiveDocument();
     std::vector<Gui::SelectionObject> selobjs = Gui::Selection().getSelectionEx();
     return doc && doc->countObjectsOfType<Part::Part2DObject>() > 0 && !selobjs.empty();
@@ -941,6 +1109,67 @@ void CmdSketcherViewSketch::activated(int iMsg)
 }
 
 bool CmdSketcherViewSketch::isActive()
+{
+    return isSketchInEdit(getActiveGuiDocument());
+}
+
+// FreeCAD-CH (ops#644): Onshape's repair of a missing sketch reference from inside the sketch: each
+// reference with a closest match takes it (a missing one its first candidate, a guessed one is
+// accepted), in one undo step. The References dialog (Repair References in the tree's menu) still
+// lists every candidate.
+DEF_STD_CMD_A(CmdSketcherUseClosestReferenceMatches)
+
+CmdSketcherUseClosestReferenceMatches::CmdSketcherUseClosestReferenceMatches()
+    : Command("Sketcher_UseClosestReferenceMatches")
+{
+    sAppModule = "Sketcher";
+    sGroup = "Sketcher";
+    sMenuText = QT_TR_NOOP("Use Closest Reference Matches");
+    sToolTipText = QT_TR_NOOP("Each missing reference of the sketch takes its closest match, and "
+                              "a guessed one is accepted as it stands");
+    sWhatsThis = "Sketcher_UseClosestReferenceMatches";
+    sStatusTip = sToolTipText;
+    eType = ForEdit;
+}
+
+void CmdSketcherUseClosestReferenceMatches::activated(int iMsg)
+{
+    Q_UNUSED(iMsg);
+    auto* vp = dynamic_cast<ViewProviderSketch*>(getActiveGuiDocument()->getInEdit());
+    if (!vp) {
+        return;
+    }
+    Sketcher::SketchObject* sketch = vp->getSketchObject();
+    std::vector<App::ReferenceRow> rows = referencesToMatch(sketch);
+    if (rows.empty()) {
+        return;
+    }
+
+    openCommand(QT_TRANSLATE_NOOP("Command", "Use closest reference matches"));
+    try {
+        for (const App::ReferenceRow& row : rows) {
+            // the rows name the sketch's own properties
+            auto* prop = const_cast<App::PropertyLinkBase*>(row.prop);
+            if (row.status == "guessed") {
+                App::acceptReference(prop, row.localIndex);
+            }
+            else {
+                App::repairReference(prop, row.localIndex, row.candidates.front().index);
+            }
+        }
+    }
+    catch (const Base::Exception& e) {
+        abortCommand();
+        Gui::TranslatedUserError(sketch,
+                                 QObject::tr("Reference not repaired"),
+                                 QString::fromStdString(e.what()));
+        return;
+    }
+    commitCommand();
+    doCommand(Gui, "App.activeDocument().recompute()");
+}
+
+bool CmdSketcherUseClosestReferenceMatches::isActive()
 {
     return isSketchInEdit(getActiveGuiDocument());
 }
@@ -1214,7 +1443,9 @@ namespace {
                     continue;
                 }
 
-                int type = srcSketch->externalType(static_cast<int>(i));
+                // the kind alone: a merged link is the user's (ops#634)
+                const long type = Sketcher::SketchObject::externalKind(
+                    srcSketch->externalType(static_cast<int>(i)));
                 bool projection = type != static_cast<int>(Sketcher::ExtType::Intersection);
                 bool intersection = type != static_cast<int>(Sketcher::ExtType::Projection);
                 auto it = std::ranges::find_if(links, [&](const Link& link) {
@@ -1289,7 +1520,8 @@ namespace {
                     continue;
                 }
                 const auto& link = links[entryLinks[s][i]];
-                int type = srcSketch->externalType(static_cast<int>(i));
+                const long type = Sketcher::SketchObject::externalKind(
+                    srcSketch->externalType(static_cast<int>(i)));
                 Candidates candidates {&link,
                                        type != static_cast<int>(Sketcher::ExtType::Intersection),
                                        type != static_cast<int>(Sketcher::ExtType::Projection)};
@@ -2525,6 +2757,7 @@ void CreateSketcherCommands()
     rcCmdMgr.addCommand(new CmdSketcherReorientSketch());
     rcCmdMgr.addCommand(new CmdSketcherMapSketch());
     rcCmdMgr.addCommand(new CmdSketcherViewSketch());
+    rcCmdMgr.addCommand(new CmdSketcherUseClosestReferenceMatches());  // FreeCAD-CH (ops#644)
     rcCmdMgr.addCommand(new CmdSketcherValidateSketch());
     rcCmdMgr.addCommand(new CmdSketcherMirrorSketch());
     rcCmdMgr.addCommand(new CmdSketcherMergeSketches());

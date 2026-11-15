@@ -145,7 +145,16 @@ private:
     {
         ProfilePlane = 0,
         Offset = 1,
-        Reference = 2
+        Reference = 2,
+        FromPart = 3  // Start from part (ops#640, rank 23)
+    };
+    /// The termination (DepthType): Blind, Through all, Up to next, Up to entity (rank 23)
+    enum DepthTypeIndex : int
+    {
+        Blind = 0,
+        ThroughAll = 1,
+        UpToNext = 2,
+        UpToEntity = 3
     };
 
 protected:
@@ -157,6 +166,8 @@ private:
     void updateHoleCutLimits(PartDesign::Hole* hole);
     void updateHoleTypeCombo();
     void updateStartUI();
+    /// The up-to-entity field shows for Up to entity only (rank 23)
+    void updateDepthUI();
     /// The positions and the start reference as fields (ops#150 W9)
     void createFields();
     /// The base profile type the positions need: the saved type plus a point's, a circle's or
@@ -177,6 +188,7 @@ private:
     Gui::LinearGizmo* startOffsetGizmo = nullptr;
     ReferenceField* positionsField = nullptr;
     ReferenceField* startField = nullptr;
+    ReferenceField* upToFaceField = nullptr;
     /// BaseProfileType when the panel opened, or the combo's last choice (PR 169 M2)
     long savedBaseProfileType = 0;
     void setupGizmos(ViewProviderHole* vp);

@@ -23,11 +23,13 @@
  ***************************************************************************/
 
 #include <memory>
+#include <numbers>
 #include <sstream>
 
 #include <Geom_TrimmedCurve.hxx>
 
 #include <App/Document.h>
+#include <App/DocumentObjectPy.h>
 #include <Base/AxisPy.h>
 #include <Base/QuantityPy.h>
 #include <Base/Tools.h>
@@ -61,7 +63,13 @@ PyObject* SketchObjectPy::solve(PyObject* args)
     if (!PyArg_ParseTuple(args, "")) {
         return nullptr;
     }
-    int ret = this->getSketchObjectPtr()->solve();
+    SketchObject* sketch = this->getSketchObjectPtr();
+    int ret = sketch->solve();
+    // FreeCAD-CH (ops#640): a conflict solved around still reports its code (the geometry of the
+    // rest is solved and written)
+    if (ret == 0 && sketch->getLastSolvedAroundConflict()) {
+        ret = sketch->getLastHasConflicts() ? (sketch->getLastDoF() < 0 ? -4 : -3) : -2;
+    }
     return Py_BuildValue("i", ret);
 }
 
@@ -628,21 +636,25 @@ PyObject* SketchObjectPy::addExternal(PyObject* args)
     char* SubName = nullptr;
     PyObject* defining = Py_False;
     PyObject* intersection = Py_False;
+    PyObject* implicit = Py_False;
     if (!PyArg_ParseTuple(
             args,
-            "ss|O!O!",
+            "ss|O!O!O!",
             &ObjectName,
             &SubName,
             &PyBool_Type,
             &defining,
             &PyBool_Type,
-            &intersection
+            &intersection,
+            &PyBool_Type,
+            &implicit
         )) {
         return nullptr;
     }
 
     bool isDefining = Base::asBoolean(defining);
     bool isIntersection = Base::asBoolean(intersection);
+    bool isImplicit = Base::asBoolean(implicit);
 
     // get the target object for the external link
     Sketcher::SketchObject* skObj = this->getSketchObjectPtr();
@@ -662,7 +674,7 @@ PyObject* SketchObjectPy::addExternal(PyObject* args)
     }
 
     // add the external
-    if (skObj->addExternal(Obj, SubName, isDefining, isIntersection) < 0) {
+    if (skObj->addExternal(Obj, SubName, isDefining, isIntersection, isImplicit) < 0) {
         std::stringstream str;
         str << "Not able to add external shape element " << SubName;
         PyErr_SetString(PyExc_ValueError, str.str().c_str());
@@ -670,6 +682,252 @@ PyObject* SketchObjectPy::addExternal(PyObject* args)
     }
 
     Py_Return;
+}
+
+// FreeCAD-CH (Onshape's Pierce)
+PyObject* SketchObjectPy::addPierce(PyObject* args)
+{
+    int geoId = 0;
+    int pointPos = 0;
+    PyObject* object = nullptr;
+    char* subName = nullptr;
+    if (!PyArg_ParseTuple(args, "iiOs", &geoId, &pointPos, &object, &subName)) {
+        return nullptr;
+    }
+    Sketcher::SketchObject* sketch = this->getSketchObjectPtr();
+    App::DocumentObject* obj = nullptr;
+    if (PyObject_TypeCheck(object, &(App::DocumentObjectPy::Type))) {
+        obj = static_cast<App::DocumentObjectPy*>(object)->getDocumentObjectPtr();
+    }
+    else if (PyUnicode_Check(object)) {
+        obj = sketch->getDocument()->getObject(PyUnicode_AsUTF8(object));
+    }
+    if (!obj) {
+        PyErr_SetString(PyExc_ValueError, "addPierce: the edge's object is not in the document");
+        return nullptr;
+    }
+
+    int index = -1;
+    try {
+        index = sketch->addPierce(geoId, static_cast<Sketcher::PointPos>(pointPos), obj, subName);
+    }
+    catch (const Base::Exception& e) {
+        PyErr_SetString(PyExc_ValueError, e.what());
+        return nullptr;
+    }
+    // as addConstraint: the point meets the crossing inside the caller's command
+    sketch->solve();
+    if (sketch->noRecomputes) {
+        sketch->setUpSketch();
+        sketch->Constraints.touch();
+    }
+    return Py::new_reference_to(Py::Long(index));
+}
+
+// FreeCAD-CH (Onshape's sketch patterns)
+namespace
+{
+bool seedList(PyObject* seq, std::vector<int>& seeds)
+{
+    if (!PySequence_Check(seq)) {
+        PyErr_SetString(PyExc_TypeError, "Pattern: the seeds must be a list of geometry indices");
+        return false;
+    }
+    const Py_ssize_t size = PySequence_Size(seq);
+    for (Py_ssize_t i = 0; i < size; ++i) {
+        PyObject* item = PySequence_GetItem(seq, i);
+        const bool isLong = item && PyLong_Check(item);
+        const long value = isLong ? PyLong_AsLong(item) : 0;
+        Py_XDECREF(item);
+        if (!isLong) {
+            PyErr_SetString(PyExc_TypeError, "Pattern: the seeds must be a list of geometry indices");
+            return false;
+        }
+        seeds.push_back(int(value));
+    }
+    return true;
+}
+
+// the caller's command sees the copies placed and solved (as addSymmetric's)
+void solvePattern(Sketcher::SketchObject* sketch)
+{
+    sketch->solve();
+    if (sketch->noRecomputes) {
+        sketch->setUpSketch();
+        sketch->Constraints.touch();
+    }
+}
+}  // namespace
+
+PyObject* SketchObjectPy::addCircularPattern(PyObject* args)
+{
+    PyObject* seq = nullptr;
+    int count = 0;
+    PyObject* pivot = nullptr;
+    double angle = 2.0 * std::numbers::pi;
+    if (!PyArg_ParseTuple(args, "OiO!|d", &seq, &count, &(Base::VectorPy::Type), &pivot, &angle)) {
+        return nullptr;
+    }
+    std::vector<int> seeds;
+    if (!seedList(seq, seeds)) {
+        return nullptr;
+    }
+    Sketcher::SketchObject* sketch = getSketchObjectPtr();
+    int index = -1;
+    try {
+        index = sketch->addCircularPattern(
+            seeds,
+            count,
+            *static_cast<Base::VectorPy*>(pivot)->getVectorPtr(),
+            angle
+        );
+    }
+    catch (const Base::Exception& e) {
+        PyErr_SetString(PyExc_ValueError, e.what());
+        return nullptr;
+    }
+    solvePattern(sketch);
+    return Py::new_reference_to(Py::Long(index));
+}
+
+PyObject* SketchObjectPy::addLinearPattern(PyObject* args)
+{
+    PyObject* seq = nullptr;
+    int count1 = 0;
+    PyObject* direction1 = nullptr;
+    int count2 = 1;
+    PyObject* direction2 = Py_None;
+    if (!PyArg_ParseTuple(args, "OiO!|iO", &seq, &count1, &(Base::VectorPy::Type), &direction1, &count2, &direction2)) {
+        return nullptr;
+    }
+    Base::Vector3d step2;
+    if (direction2 != Py_None) {
+        if (!PyObject_TypeCheck(direction2, &(Base::VectorPy::Type))) {
+            PyErr_SetString(PyExc_TypeError, "Pattern: direction2 must be a Vector or None");
+            return nullptr;
+        }
+        step2 = *static_cast<Base::VectorPy*>(direction2)->getVectorPtr();
+    }
+    std::vector<int> seeds;
+    if (!seedList(seq, seeds)) {
+        return nullptr;
+    }
+    Sketcher::SketchObject* sketch = getSketchObjectPtr();
+    int index = -1;
+    try {
+        index = sketch->addLinearPattern(
+            seeds,
+            count1,
+            *static_cast<Base::VectorPy*>(direction1)->getVectorPtr(),
+            count2,
+            step2
+        );
+    }
+    catch (const Base::Exception& e) {
+        PyErr_SetString(PyExc_ValueError, e.what());
+        return nullptr;
+    }
+    solvePattern(sketch);
+    return Py::new_reference_to(Py::Long(index));
+}
+
+PyObject* SketchObjectPy::setPatternCount(PyObject* args)
+{
+    int index = 0;
+    int count1 = 0;
+    int count2 = 0;
+    if (!PyArg_ParseTuple(args, "ii|i", &index, &count1, &count2)) {
+        return nullptr;
+    }
+    Sketcher::SketchObject* sketch = getSketchObjectPtr();
+    try {
+        sketch->setPatternCount(index, count1, count2);
+    }
+    catch (const Base::Exception& e) {
+        PyErr_SetString(PyExc_ValueError, e.what());
+        return nullptr;
+    }
+    solvePattern(sketch);
+    Py_Return;
+}
+
+PyObject* SketchObjectPy::setPatternAngle(PyObject* args)
+{
+    int index = 0;
+    double angle = 0;
+    if (!PyArg_ParseTuple(args, "id", &index, &angle)) {
+        return nullptr;
+    }
+    Sketcher::SketchObject* sketch = getSketchObjectPtr();
+    try {
+        sketch->setPatternAngle(index, angle);
+    }
+    catch (const Base::Exception& e) {
+        PyErr_SetString(PyExc_ValueError, e.what());
+        return nullptr;
+    }
+    solvePattern(sketch);
+    Py_Return;
+}
+
+PyObject* SketchObjectPy::getPattern(PyObject* args) const
+{
+    int index = 0;
+    if (!PyArg_ParseTuple(args, "i", &index)) {
+        return nullptr;
+    }
+    auto record = getSketchObjectPtr()->getPattern(index);
+    if (!record) {
+        PyErr_SetString(PyExc_ValueError, "Pattern: the constraint is not a pattern");
+        return nullptr;
+    }
+    auto geoOrNone = [](int geoId) -> Py::Object {
+        if (geoId == Sketcher::GeoEnum::GeoUndef) {
+            return Py::None();
+        }
+        return Py::Long(geoId);
+    };
+    const bool circular = record->kind == Sketcher::PatternRecord::Kind::Circular;
+    Py::Dict result;
+    result.setItem("Kind", Py::String(circular ? "Circular" : "Linear"));
+    Py::List seeds;
+    for (int seed : record->seeds) {
+        seeds.append(Py::Long(seed));
+    }
+    result.setItem("Seeds", seeds);
+    Py::Tuple counts(2);
+    counts.setItem(0, Py::Long(record->count1));
+    counts.setItem(1, Py::Long(record->count2));
+    result.setItem("Counts", counts);
+    if (circular) {
+        result.setItem("Pivot", geoOrNone(record->pivot));
+        result.setItem("Angle", Py::Float(record->angle));
+    }
+    else {
+        Py::Tuple directions(2);
+        directions.setItem(0, geoOrNone(record->direction1));
+        directions.setItem(1, geoOrNone(record->direction2));
+        result.setItem("Directions", directions);
+    }
+    Py::Dict instances;
+    for (const auto& [slot, copy] : record->instances) {
+        Py::Tuple key(3);
+        for (int i = 0; i < 3; ++i) {
+            key.setItem(i, Py::Long(slot[i]));
+        }
+        instances.setItem(key, geoOrNone(copy));
+    }
+    result.setItem("Instances", instances);
+    return Py::new_reference_to(result);
+}
+
+PyObject* SketchObjectPy::delUnusedImplicitExternals(PyObject* args)
+{
+    if (!PyArg_ParseTuple(args, "")) {
+        return nullptr;
+    }
+    return Py::new_reference_to(
+        Py::Long(this->getSketchObjectPtr()->delUnusedImplicitExternals()));
 }
 
 PyObject* SketchObjectPy::delExternal(PyObject* args)
@@ -1608,10 +1866,13 @@ PyObject* SketchObjectPy::extend(PyObject* args)
     double increment;
     int endPoint;
     int GeoId;
+    PyObject* toBoundary = Py_False;  // FreeCAD-CH (Onshape's Extend, ops#640)
 
-    if (PyArg_ParseTuple(args, "idi", &GeoId, &increment, &endPoint)) {
-        if (this->getSketchObjectPtr()
-                ->extend(GeoId, increment, static_cast<Sketcher::PointPos>(endPoint))) {
+    if (PyArg_ParseTuple(args, "idi|O!", &GeoId, &increment, &endPoint, &PyBool_Type, &toBoundary)) {
+        auto* sketch = this->getSketchObjectPtr();
+        const auto pos = static_cast<Sketcher::PointPos>(endPoint);
+        if (Base::asBoolean(toBoundary) ? sketch->extendToBoundary(GeoId, increment, pos)
+                                        : sketch->extend(GeoId, increment, pos)) {
             std::stringstream str;
             str << "Not able to extend geometry with id : (" << GeoId << ") for increment ("
                 << increment << ") and point position (" << endPoint << ")";
@@ -1624,7 +1885,7 @@ PyObject* SketchObjectPy::extend(PyObject* args)
     PyErr_SetString(
         PyExc_TypeError,
         "extend() method accepts:\n"
-        "-- int,float,int\n"
+        "-- int,float,int[,bool]\n"
     );
     return nullptr;
 }
@@ -1632,15 +1893,22 @@ PyObject* SketchObjectPy::extend(PyObject* args)
 PyObject* SketchObjectPy::split(PyObject* args)
 {
     PyObject* pcObj;
+    PyObject* pcObj2 = nullptr;
     int GeoId;
 
-    if (!PyArg_ParseTuple(args, "iO!", &GeoId, &(Base::VectorPy::Type), &pcObj)) {
+    // FreeCAD-CH (ops#656 F3): a second point splits a whole circle into two arcs
+    if (!PyArg_ParseTuple(
+            args, "iO!|O!", &GeoId, &(Base::VectorPy::Type), &pcObj, &(Base::VectorPy::Type), &pcObj2
+        )) {
         return nullptr;
     }
 
     Base::Vector3d v1 = static_cast<Base::VectorPy*>(pcObj)->value();
     try {
-        if (this->getSketchObjectPtr()->split(GeoId, v1)) {
+        const int err = pcObj2
+            ? this->getSketchObjectPtr()->split(GeoId, v1, static_cast<Base::VectorPy*>(pcObj2)->value())
+            : this->getSketchObjectPtr()->split(GeoId, v1);
+        if (err) {
             std::stringstream str;
             str << "Not able to split curve with the given index: " << GeoId;
             PyErr_SetString(PyExc_ValueError, str.str().c_str());
@@ -1682,8 +1950,11 @@ PyObject* SketchObjectPy::addSymmetric(PyObject* args)
     PyObject* pcObj;
     int refGeoId;
     int refPosId = static_cast<int>(Sketcher::PointPos::none);
+    // FreeCAD-CH (ops#640): True links each copy to its source with Symmetric constraints, as the
+    // GUI's Mirror does
+    PyObject* linked = Py_False;
 
-    if (!PyArg_ParseTuple(args, "Oi|i", &pcObj, &refGeoId, &refPosId)) {
+    if (!PyArg_ParseTuple(args, "Oi|iO!", &pcObj, &refGeoId, &refPosId, &PyBool_Type, &linked)) {
         return nullptr;
     }
 
@@ -1697,7 +1968,12 @@ PyObject* SketchObjectPy::addSymmetric(PyObject* args)
         }
 
         int ret = this->getSketchObjectPtr()
-                      ->addSymmetric(geoIdList, refGeoId, static_cast<Sketcher::PointPos>(refPosId))
+                      ->addSymmetric(
+                          geoIdList,
+                          refGeoId,
+                          static_cast<Sketcher::PointPos>(refPosId),
+                          PyObject_IsTrue(linked) != 0
+                      )
             + 1;
 
         if (ret == -1) {

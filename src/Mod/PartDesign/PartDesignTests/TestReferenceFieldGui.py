@@ -24,7 +24,9 @@
 
 One field per reference list, armed while it has the focus (no Select button): a pick toggles an
 element, Delete removes the selected entries, Ctrl+Z / Ctrl+Y step through the field's own picks,
-Esc disarms before it cancels. Entries show their state (broken red, guessed yellow) and carry the
+one Esc cancels the dialog, armed or not (ops#640 rank 25, Onshape's R1; decision 23 Q1 (a) had
+the first Esc disarm). Each removable entry has an x that removes it, and the pointer over an
+entry preselects it in the 3D view (ops#640 rank 26). Entries show their state (broken red, guessed yellow) and carry the
 References panel's actions in their context menu; the panel at the top only lists what no field
 shows.
 
@@ -170,9 +172,21 @@ def selected(doc):
     return [(s.ObjectName, list(s.SubElementNames)) for s in Gui.Selection.getSelectionEx(doc.Name)]
 
 
+_viewParents = []
+
+
 def views3D():
+    """The 3D views. Their MDI area's and subwindows' wrappers are kept until the next call: a
+    temporary one took its children's wrappers with it when it went, and the view's wrapper
+    then answered "Internal C++ object (QMainWindow) already deleted"."""
     mdi = Gui.getMainWindow().findChild(QtWidgets.QMdiArea)
-    return [w.widget() for w in mdi.subWindowList() if w.widget().metaObject().className() == "Gui::View3DInventor"]
+    subWindows = mdi.subWindowList()
+    _viewParents[:] = [mdi] + list(subWindows)
+    return [
+        w.widget()
+        for w in subWindows
+        if w.widget().metaObject().className() == "Gui::View3DInventor"
+    ]
 
 
 def sendRepeats(kinds):
@@ -467,17 +481,71 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.assertVolume(fillet, 1000 - FILLET_CUT)
         self.assertTrue(armed(field))
 
-    def testCompleteFilletOpensUnarmed(self):
-        """Q2: an edit of a complete fillet arms nothing; a pick then only selects."""
+    def testEditDialogTakesAPickAtOnce(self):
+        """Round 8 (J11; reverses Q2's edit case): an edit of a complete fillet opens with its
+        edges field armed, as Onshape's dialog opens with its first selection field active. The
+        first pick in the 3D view adds its edge (1000 - 2 x 2.146), with no click on the list
+        first; a pick of a listed edge takes it out again, as Onshape toggles it."""
         box = self.box()
         [first] = TOP_FRONT.one(box.Shape)
         fillet = self.addFillet(box, [first])
         [field] = self.edit(fillet)
-        pump(0.3)
-        self.assertFalse(armed(field))
+        self.assertTrue(waitFor(lambda: armed(field)), "the edit's edges field isn't armed")
         [second] = BOTTOM_BACK.one(box.Shape)
         self.pick(box, second)
+        self.assertTrue(waitFor(lambda: fillet.Base[1] == [first, second]), fillet.Base)
+        self.assertEqual(texts(field), [first, second])
+        self.assertVolume(fillet, 1000 - 2 * FILLET_CUT)
+        self.pick(box, second)
+        self.assertTrue(waitFor(lambda: fillet.Base[1] == [first]), fillet.Base)
+        self.assertVolume(fillet, 1000 - FILLET_CUT)
+
+    def testEditedDressUpsOpenArmed(self):
+        """Round 8 (J11): a chamfer's and a thickness's edit arm their field as the fillet's does;
+        a fillet on all its edges, whose field is off, arms nothing and its radius has the focus."""
+        box = self.box()
+        [edgeName] = TOP_FRONT.one(box.Shape)
+        [top] = face("plane", normal=Z, through=(5, 5, 10)).one(box.Shape)
+        for typeId, subs in (("PartDesign::Chamfer", [edgeName]), ("PartDesign::Thickness", [top])):
+            feature = self.body.newObject(typeId, typeId.split("::")[1])
+            feature.Base = (box, subs)
+            self.doc.recompute()
+            self.assertTrue(feature.isValid(), feature.getStatusString())
+            [field] = self.edit(feature)
+            self.assertTrue(waitFor(lambda: armed(field)), f"{typeId}: the field isn't armed")
+            taskButton(QtWidgets.QDialogButtonBox.Cancel).click()
+            self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "the dialog stays")
+            waitFor(lambda: not fields(), 3.0)
+            self.body.removeObject(feature)
+            self.doc.removeObject(feature.Name)
+            self.doc.recompute()
+        fillet = self.addFillet(box, [edgeName])
+        fillet.UseAllEdges = True
+        self.doc.recompute()
+        [field] = self.edit(fillet)
+        pump(0.3)
+        self.assertFalse(armed(field))
+        radius = Gui.getMainWindow().findChild(QtWidgets.QWidget, "filletRadius")
+        self.assertTrue(waitFor(radius.hasFocus), "the radius doesn't have the focus")
+
+    def testClearMissingReferencesArmsTheField(self):
+        """Round 8 (J11): after the row menu's "Clear missing references" the field is armed, as
+        after Re-pick: the next pick adds its edge."""
+        box = self.box()
+        [first] = TOP_FRONT.one(box.Shape)
+        fillet = self.addFillet(box, [first])
+        [field] = self.edit(fillet)
+        radius = Gui.getMainWindow().findChild(QtWidgets.QWidget, "filletRadius")
+        self.assertTrue(focus(radius), "the radius doesn't take the focus")
+        self.assertTrue(waitFor(lambda: not armed(field)), "still armed with the radius focused")
+        action = Gui.getMainWindow().findChild(QtGui.QAction, "clearMissingReferences")
+        self.assertIsNotNone(action)
+        action.trigger()
+        self.assertTrue(waitFor(lambda: armed(field)), "Clear missing references left it unarmed")
         self.assertEqual(fillet.Base[1], [first])
+        [second] = BOTTOM_BACK.one(box.Shape)
+        self.pick(box, second)
+        self.assertTrue(waitFor(lambda: fillet.Base[1] == [first, second]), fillet.Base)
 
     # -- T3, T4: what disarms and what doesn't --------------------------------------------------
 
@@ -526,9 +594,9 @@ class TestReferenceFieldGui(unittest.TestCase):
 
     # -- T5: Esc --------------------------------------------------------------------------------
 
-    def testEscDisarmsThenCancels(self):
-        """T5: Esc with the field armed disarms it and the dialog stays; the next Esc cancels the
-        dialog, and Base is what it was before the edit."""
+    def testOneEscCancels(self):
+        """T5 (ops#640 rank 25): Esc with the field armed and the focus in it cancels the dialog at
+        once, and Base is what it was before the edit."""
         box = self.box()
         [first] = TOP_FRONT.one(box.Shape)
         [second] = BOTTOM_BACK.one(box.Shape)
@@ -538,44 +606,48 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.pick(box, second)
         self.assertEqual(fillet.Base[1], [first, second])
         self.assertTrue(focus(entries(field)))
-
-        key(QtCore.Qt.Key_Escape)
-        self.assertTrue(waitFor(lambda: not armed(field)), "Esc didn't disarm the field")
-        pump(0.3)
-        self.assertTrue(Gui.Control.activeDialog(), "the first Esc closed the dialog")
+        self.assertTrue(armed(field))
 
         key(QtCore.Qt.Key_Escape)
         self.assertTrue(
-            waitFor(lambda: not Gui.Control.activeDialog()), "the second Esc left the dialog open"
+            waitFor(lambda: not Gui.Control.activeDialog()), "one Esc left the dialog open"
         )
         self.doc.recompute()
         self.assertEqual(fillet.Base[1], [first])
 
-    def testEscInThe3DViewDisarms(self):
-        """T5 from the 3D view: Esc there is the dialog's too; with a field armed it disarms the
-        field and the edit stays."""
+    def testEscInThe3DViewCancels(self):
+        """T5 from the 3D view (ops#640 rank 25): Esc there is the dialog's too; with the field
+        armed it cancels the new fillet at once."""
         box, fillet = self.newFillet()
         [field] = fields()
         self.arm(field, byFocus=True)
-        mdi = Gui.getMainWindow().findChild(QtWidgets.QMdiArea)
-        self.views = [
-            w for w in mdi.subWindowList() if w.widget().metaObject().className() == "Gui::View3DInventor"
-        ]
-        self.assertTrue(focus(self.views[0].widget()))
+        [view] = views3D()
+        self.assertTrue(focus(view))
+        self.assertTrue(armed(field), "the 3D view's focus disarmed the field")
         key(QtCore.Qt.Key_Escape)
-        self.assertTrue(waitFor(lambda: not armed(field)), "Esc in the 3D view didn't disarm")
-        pump(0.5)
-        self.assertTrue(Gui.Control.activeDialog(), "Esc in the 3D view closed the dialog")
-        self.assertIsNotNone(Gui.getDocument(self.doc.Name).getInEdit(), "the edit was reset")
+        self.assertTrue(
+            waitFor(lambda: not Gui.Control.activeDialog()), "Esc in the 3D view left the dialog"
+        )
+        pump(0.3)
+        flushDeletes()
+        self.assertIsNone(Gui.getDocument(self.doc.Name).getInEdit(), "the edit stays")
+        self.assertIsNone(self.doc.getObject("Fillet"), "Esc left the new fillet")
 
     def escInTheViewFirst(self, field, view):
-        """Arms the field and presses and releases Esc in the view, which disarms it; then arms it
-        again. The view's record of an Esc press it saw starts empty, whatever an earlier test
-        left (a press in the view whose release went elsewhere)."""
-        self.arm(field, byFocus=True)
-        self.assertTrue(focus(view))
-        key(QtCore.Qt.Key_Escape)
-        self.assertTrue(waitFor(lambda: not armed(field)), "Esc in the 3D view didn't disarm")
+        """The view's record of an Esc press it saw starts empty, whatever an earlier test left (a
+        press in the view whose release went elsewhere): an Esc pressed in a popup clears it
+        (ops#220's watcher), and its release stays in the popup. Then the field is armed and the
+        view has the focus. (An Esc pressed and released in the view itself cancels the dialog
+        now, ops#640 rank 25.)"""
+        menu = QtWidgets.QMenu(Gui.getMainWindow())
+        menu.addAction("Entry")
+        menu.popup(view.mapToGlobal(view.rect().center()))
+        self.assertTrue(waitFor(lambda: QtWidgets.QApplication.activePopupWidget() is menu))
+        QtTest.QTest.keyClick(menu, QtCore.Qt.Key_Escape)
+        self.assertTrue(waitFor(lambda: not menu.isVisible()), "Esc didn't close the popup")
+        menu.deleteLater()
+        pump(0.2)
+        self.assertTrue(Gui.Control.activeDialog(), "the popup's Esc closed the dialog")
         self.arm(field, byFocus=False)
         self.assertTrue(focus(view))
 
@@ -675,8 +747,8 @@ class TestReferenceFieldGui(unittest.TestCase):
 
     def testEscHeldInTheViewActsOnce(self):
         """ops#220: Esc pressed and held in the 3D view with a field armed: the repeats (X11's
-        repeated releases included) don't count, so the final release only disarms the field;
-        the dialog and the edit stay."""
+        repeated releases included) don't count, so the dialog stays until the final release,
+        which cancels it (ops#640 rank 25): the new fillet goes, the box stays."""
         box, fillet = self.newFillet()
         [field] = fields()
         [view] = views3D()
@@ -685,11 +757,18 @@ class TestReferenceFieldGui(unittest.TestCase):
         window = Gui.getMainWindow().windowHandle()
         QtTest.QTest.keyPress(window, QtCore.Qt.Key_Escape)
         sendRepeats(["release", "press"] * 3)
+        pump(0.3)
+        self.assertTrue(Gui.Control.activeDialog(), "a repeat of the held Esc closed the dialog")
         QtTest.QTest.keyRelease(window, QtCore.Qt.Key_Escape)
-        pump(0.5)
-        self.assertTrue(Gui.Control.activeDialog(), "a held Esc in the 3D view closed the dialog")
-        self.assertFalse(armed(field), "Esc in the 3D view didn't disarm")
-        self.assertIsNotNone(Gui.getDocument(self.doc.Name).getInEdit(), "the edit was reset")
+        self.assertTrue(
+            waitFor(lambda: not Gui.Control.activeDialog()), "the release left the dialog open"
+        )
+        pump(0.3)
+        flushDeletes()
+        self.assertIsNone(Gui.getDocument(self.doc.Name).getInEdit(), "the edit stays")
+        self.assertIsNone(self.doc.getObject("Fillet"), "the release left the new fillet")
+        self.assertIsNotNone(self.doc.getObject(box.Name))
+        self.assertAlmostEqual(box.Shape.Volume, 1000, places=6)
 
     def testEscPressedInTheViewReleasedElsewhereLeavesNoRecord(self):
         """ops#220: Esc pressed in the 3D view whose release goes elsewhere (the focus moved to a
@@ -747,7 +826,212 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.assertTrue(armed(field), "the release of the other view's Esc disarmed the field")
         self.assertIsNotNone(Gui.getDocument(self.doc.Name).getInEdit(), "the edit was reset")
 
+    # -- ops#640 rank 26: an x beside each pick; the pointer over an entry preselects it --------
+
+    def entryPoint(self, field, row, onX):
+        """A point of the entry `row` in its list's viewport: on its x (the square at the right
+        end of the row) or on its text."""
+        refs = entries(field)
+        rect = refs.visualItemRect(refs.item(row))
+        if onX:
+            return QtCore.QPoint(rect.right() - rect.height() // 2, rect.center().y())
+        return QtCore.QPoint(rect.left() + 4, rect.center().y())
+
+    def clickAt(self, field, point):
+        QtTest.QTest.mouseClick(
+            entries(field).viewport(), QtCore.Qt.LeftButton, QtCore.Qt.NoModifier, point
+        )
+        pump(0.2)
+
+    def hoverAt(self, field, point):
+        """The pointer moved, no button pressed, to `point` of the list's viewport (sent to it: an
+        off-screen platform may track no cursor); None: the pointer leaves the list."""
+        viewport = entries(field).viewport()
+        if point is None:
+            QtWidgets.QApplication.sendEvent(viewport, QtCore.QEvent(QtCore.QEvent.Leave))
+        else:
+            event = QtGui.QMouseEvent(
+                QtCore.QEvent.MouseMove,
+                QtCore.QPointF(point),
+                QtCore.QPointF(viewport.mapToGlobal(point)),
+                QtCore.Qt.NoButton,
+                QtCore.Qt.NoButton,
+                QtCore.Qt.NoModifier,
+            )
+            QtWidgets.QApplication.sendEvent(viewport, event)
+        pump(0.1)
+
+    def preselected(self):
+        """(object name, element) of the preselection, the element "" for an object whole; None
+        for none."""
+        presel = Gui.Selection.getPreselection()
+        if not presel.ObjectName:
+            return None
+        subs = [sub for sub in presel.SubElementNames if sub]
+        return (presel.ObjectName, subs[0].split(".")[-1] if subs else "")
+
+    def twoEdgeFillet(self):
+        """The box filleted, r = 1, on its top front and bottom back edges, which don't touch:
+        1000 - 2 x 2.146 mm^3; one of them alone, 1000 - 2.146."""
+        box = self.box()
+        [first] = TOP_FRONT.one(box.Shape)
+        [second] = BOTTOM_BACK.one(box.Shape)
+        fillet = self.addFillet(box, [first, second])
+        self.assertAlmostEqual(fillet.Shape.Volume, 1000 - 2 * FILLET_CUT, places=3)
+        return box, fillet, first, second
+
+    def testEntryXRemovesThatEntry(self):
+        """Rank 26: a click on the first entry's x removes that entry alone, the dialog stays,
+        and the fillet is the second edge's; the field's Ctrl+Z brings the first back."""
+        box, fillet, first, second = self.twoEdgeFillet()
+        [field] = self.edit(fillet)
+        self.assertEqual(texts(field), [first, second])
+        self.clickAt(field, self.entryPoint(field, 0, onX=True))
+        self.assertTrue(waitFor(lambda: fillet.Base[1] == [second]), fillet.Base)
+        self.assertTrue(Gui.Control.activeDialog(), "the x closed the dialog")
+        self.assertEqual(texts(field), [second])
+        self.assertVolume(fillet, 1000 - FILLET_CUT)
+
+        self.assertTrue(focus(entries(field)))
+        key(QtCore.Qt.Key_Z, QtCore.Qt.ControlModifier)
+        self.assertTrue(waitFor(lambda: fillet.Base[1] == [first, second]), fillet.Base)
+        self.assertVolume(fillet, 1000 - 2 * FILLET_CUT)
+
+    def testEntryTextClickKeepsTheEntry(self):
+        """Rank 26: a click on an entry's text, left of its x, removes nothing; it makes the entry
+        current and arms the field, as before."""
+        box, fillet, first, second = self.twoEdgeFillet()
+        [field] = self.edit(fillet)
+        self.clickAt(field, self.entryPoint(field, 1, onX=False))
+        self.assertTrue(waitFor(lambda: armed(field)), "the click didn't arm the field")
+        self.assertEqual(entries(field).currentRow(), 1)
+        self.assertEqual(fillet.Base[1], [first, second])
+        self.assertEqual(texts(field), [first, second])
+
+    def testRequiredWholeProfileHasNoX(self):
+        """Rank 26: a pad's profile whole (required) can't be removed, as Delete can't remove it:
+        a click where its x would be leaves the whole sketch."""
+        pad, sketch, regions = self.regionsPad()
+        [field] = self.edit(pad)
+        self.assertEqual(texts(field), ["Regions (whole)"])
+        self.clickAt(field, self.entryPoint(field, 0, onX=True))
+        pump(0.2)
+        self.assertEqual(pad.Profile, (sketch, []))
+        self.assertEqual(texts(field), ["Regions (whole)"])
+        self.assertVolume(pad, WHOLE_SKETCH)
+
+    def testSolidsLastFaceHasNoX(self):
+        """Rank 26 (fix round): the last face of a pad of the solid's top face stays (the solid
+        whole is no profile), so it shows no x: a click where the x would be removes nothing and
+        says nothing; the pad keeps the face, 1200 mm^3."""
+        pad, top = self.solidFaceProfile("PartDesign::Pad", 1200)
+        [field] = self.edit(pad)
+        self.assertEqual(entries(field).count(), 1)
+        self.clickAt(field, self.entryPoint(field, 0, onX=True))
+        pump(0.2)
+        self.assertLink(pad.Profile, self.boxFeature, [top])
+        self.assertEqual(self.statusText(field), "", "the click hit an x that refused")
+        self.assertVolume(pad, 1200)
+
+    def testSetNoteShowsInTheStatusUntilThePick(self):
+        """Rank 13's note (fix round): setNote() shows its text in red in the field's status;
+        the next pick clears it."""
+        box, fillet, first, second = self.twoEdgeFillet()
+        [field] = self.edit(fillet)
+        # Q_INVOKABLE: the wrapper is a QWidget's, so through the meta-object
+        QtCore.QMetaObject.invokeMethod(
+            field,
+            "setNote",
+            QtCore.Qt.DirectConnection,
+            QtCore.Q_ARG(str, "Left out of the selection: test"),
+        )
+        pump(0.1)
+        status = field.findChild(QtWidgets.QLabel, "status")
+        self.assertEqual(status.text(), "Left out of the selection: test")
+        self.assertIn("red", status.styleSheet())
+        self.arm(field, byFocus=False)
+        self.pick(box, second)
+        self.assertTrue(waitFor(lambda: fillet.Base[1] == [first]), fillet.Base)
+        self.assertNotEqual(status.text(), "Left out of the selection: test")
+
+    def testPatternOriginalXRemovesTheFeature(self):
+        """Rank 26 on a list of objects: the first bump's x leaves the second alone in the
+        Originals; the pattern adds one copy, 1003 mm^3."""
+        first, second = self.bumps()
+        pattern = self.pattern("PartDesign::LinearPattern", [first, second])
+        self.assertVolume(pattern, 1004)
+        [field] = self.edit(pattern)
+        self.clickAt(field, self.entryPoint(field, 0, onX=True))
+        self.assertTrue(
+            waitFor(lambda: self.originalNames(pattern) == [second.Name]),
+            self.originalNames(pattern),
+        )
+        self.assertTrue(Gui.Control.activeDialog(), "the x closed the dialog")
+        self.assertVolume(pattern, 1003)
+
+    def testHoverPreselectsTheEntry(self):
+        """Rank 26: the pointer over an entry preselects its edge of the box, as the 3D view's
+        hover does; over the other entry, that one; out of the list, nothing. Nothing is
+        selected or picked."""
+        box, fillet, first, second = self.twoEdgeFillet()
+        [field] = self.edit(fillet)
+        Gui.Selection.clearPreselection()
+        self.hoverAt(field, self.entryPoint(field, 1, onX=False))
+        self.assertEqual(self.preselected(), (box.Name, second))
+        self.hoverAt(field, self.entryPoint(field, 0, onX=False))
+        self.assertEqual(self.preselected(), (box.Name, first))
+        self.hoverAt(field, None)
+        self.assertIsNone(self.preselected())
+        self.assertEqual(selected(self.doc), [])
+        self.assertEqual(fillet.Base[1], [first, second])
+
+    def testHoverWhileArmedPicksNothing(self):
+        """Rank 26 with the field armed: the hover's preselection passes no gate and makes no
+        pick; the entries stay."""
+        box, fillet, first, second = self.twoEdgeFillet()
+        [field] = self.edit(fillet)
+        self.arm(field, byFocus=False)
+        self.hoverAt(field, self.entryPoint(field, 0, onX=False))
+        self.assertEqual(self.preselected(), (box.Name, first))
+        pump(0.2)
+        self.assertEqual(fillet.Base[1], [first, second])
+        self.assertTrue(armed(field))
+        self.hoverAt(field, None)
+        self.assertIsNone(self.preselected())
+
+    def testHoverOverAnOriginalPreselectsTheFeature(self):
+        """Rank 26 on a list of objects: the pointer over an entry preselects that feature
+        whole."""
+        first, second = self.bumps()
+        pattern = self.pattern("PartDesign::LinearPattern", [first, second])
+        [field] = self.edit(pattern)
+        self.hoverAt(field, self.entryPoint(field, 1, onX=False))
+        self.assertEqual(self.preselected(), (second.Name, ""))
+        self.hoverAt(field, None)
+        self.assertIsNone(self.preselected())
+
     # -- T6: Delete -----------------------------------------------------------------------------
+
+    def testBackspaceRemovesOnTheMac(self):
+        """T6 on the Mac (ops#640 polish, simulated through the hidden General/KeymapMacKeys):
+        Backspace, the Mac keyboard's Delete key, removes the selected entry; without the Mac's
+        keys Backspace leaves the entries alone, as before on Windows."""
+        box = self.box()
+        names = TOP_FRONT.one(box.Shape) + BOTTOM_BACK.one(box.Shape) + VERTICAL.one(box.Shape)
+        fillet = self.addFillet(box, names)
+        general = App.ParamGet("User parameter:BaseApp/Preferences/General")
+        self.addCleanup(general.RemBool, "KeymapMacKeys")
+        [field] = self.edit(fillet)
+        self.assertTrue(focus(entries(field)))
+        clickRow(field, 0)
+        key(QtCore.Qt.Key_Backspace)
+        pump(0.2)
+        self.assertEqual(texts(field), names)
+        general.SetBool("KeymapMacKeys", True)
+        clickRow(field, 0)
+        key(QtCore.Qt.Key_Backspace)
+        self.assertTrue(waitFor(lambda: texts(field) == names[1:]), texts(field))
+        self.assertEqual(fillet.Base[1], names[1:])
 
     def testDeleteRemovesSelectedEntries(self):
         """T6: two of three entries selected, Delete: both go; OK makes one undo step, and undo
@@ -992,9 +1276,11 @@ class TestReferenceFieldGui(unittest.TestCase):
 
     # -- T20: document undo during the edit ------------------------------------------------------
 
-    def testDocumentUndoRefreshesTheField(self):
-        """T20: a pick, then the document's undo with the dialog open: the field shows Base as
-        the undo left it."""
+    def testDocumentUndoInTheDialogTakesThePickBack(self):
+        """T20, since ops#640 (hands-on R1, R1b: an open dialog has its own undo history, never
+        past its start): a pick, then Std_Undo with the dialog open: the dialog's history takes
+        the pick back, Base and the field (the panels read again) follow, and the dialog stays;
+        a second Std_Undo is inactive (the dialog's start); Std_Redo brings the pick back."""
         box = self.box()
         [first] = TOP_FRONT.one(box.Shape)
         [second] = BOTTOM_BACK.one(box.Shape)
@@ -1004,9 +1290,19 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.pick(box, second)
         self.assertEqual(texts(field), [first, second])
 
+        self.assertTrue(Gui.Command.get("Std_Undo").isActive(), "Std_Undo inactive in the dialog")
         Gui.runCommand("Std_Undo")
-        self.assertTrue(waitFor(lambda: fillet.Base[1] == [first]), fillet.Base)
-        self.assertTrue(waitFor(lambda: texts(field) == [first]), texts(field))
+        pump(0.3)
+        self.assertTrue(Gui.Control.activeDialog(), "the dialog closed")
+        self.assertEqual(fillet.Base[1], [first])
+        [field] = fields()
+        self.assertEqual(texts(field), [first])
+        self.assertFalse(Gui.Command.get("Std_Undo").isActive(), "Std_Undo past the dialog's start")
+        Gui.runCommand("Std_Redo")
+        pump(0.3)
+        self.assertEqual(fillet.Base[1], [first, second])
+        [field] = fields()
+        self.assertEqual(texts(field), [first, second])
 
     # -- PR 140 review round ------------------------------------------------------------------------
 
@@ -1046,6 +1342,18 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.assertNotIn(PURPLE, colours)
         self.assertNotIn(MAGENTA, colours)
         self.assertEqual(colours.count(CURRENT), 1)
+
+    def testEditedFieldStaysArmedOverTheReferencesPanel(self):
+        """Selection parity 8: an edited dress-up's Base field is armed on open (rank 14) and
+        stays armed once the panel shows, though the dialog has a References panel (a guessed
+        entry). The panel's refresh on the field's show had nothing to highlight (the field
+        covers Base) but still took the selection, which disarmed the field: whether the field
+        ended armed hung on whether the panel showed before or after the arm."""
+        pad, fillet, corner = self.redrawnFillet()
+        [field] = self.edit(fillet)
+        self.assertEqual(states(field), ["guessed"])
+        pump(0.5)
+        self.assertTrue(armed(field), "the field disarmed after the dialog opened")
 
     def testGuessStaysGuessedAfterAnotherPick(self):
         """Review 2: the redrawn fillet's guessed entry stays guessed (its record kept) when
@@ -1089,9 +1397,12 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.assertEqual(len(fillet.Base[1]), 2)
         self.assertEqual(fillet.Base[1][1], topBack)
 
-    def testDocumentUndoEndsTheFieldUndo(self):
-        """Review 3: two picks, then the document's undo: Base is back to the one edge, and the
-        field's Ctrl+Z has nothing left to write back."""
+    def testDocumentUndoStepsBackOnePickAtATime(self):
+        """Review 3, since ops#640 (hands-on R1b: the dialog's history steps its edits one by
+        one): two picks, then Std_Undo with the dialog open takes the last one back only, a
+        second the first one, and the field follows each time; the field's own Ctrl+Z (focus in
+        the field) still steps back a pick made after them. (Before the step lock the document's
+        undo took both back at once.)"""
         box = self.box()
         [first] = TOP_FRONT.one(box.Shape)
         [second] = BOTTOM_BACK.one(box.Shape)
@@ -1102,11 +1413,23 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.pick(box, second)
         self.pick(box, third)
         Gui.runCommand("Std_Undo")
-        self.assertTrue(waitFor(lambda: texts(field) == [first]), texts(field))
-        self.assertTrue(focus(entries(field)))
-        key(QtCore.Qt.Key_Z, QtCore.Qt.ControlModifier)
+        pump(0.3)
+        self.assertEqual(fillet.Base[1], [first, second])
+        [field] = fields()
+        self.assertEqual(texts(field), [first, second])
+        Gui.runCommand("Std_Undo")
         pump(0.3)
         self.assertEqual(fillet.Base[1], [first])
+        [field] = fields()
+        self.assertEqual(texts(field), [first])
+        self.assertTrue(Gui.Control.activeDialog(), "the dialog closed")
+
+        self.arm(field, byFocus=False)
+        self.pick(box, third)
+        self.assertEqual(fillet.Base[1], [first, third])
+        self.assertTrue(focus(entries(field)))
+        key(QtCore.Qt.Key_Z, QtCore.Qt.ControlModifier)
+        self.assertTrue(waitFor(lambda: fillet.Base[1] == [first]), fillet.Base)
         self.assertEqual(texts(field), [first])
 
     def testAddAllEdgesShowsThemAndUndoes(self):
@@ -1146,10 +1469,13 @@ class TestReferenceFieldGui(unittest.TestCase):
         useAll.setChecked(False)
         self.assertTrue(waitFor(lambda: self.listedRows() is None), self.listedRows())
 
-    def testHiddenPanelComesBackOnRefresh(self):
+    def testHiddenPanelComesBackAfterTheUndo(self):
         """Review 6: the second pad with its direction's guess accepted: only the up-to-face is
-        left, in its field, so no References panel. The document's undo takes the acceptance
-        back: the panel comes back with the direction."""
+        left, in its field, so no References panel. Std_Undo with the dialog open, which has no
+        edit, does nothing (ops#640: never past the dialog's start), and the panel stays away; after
+        Cancel the undo takes
+        the acceptance back, and the dialog opened again lists the direction. (Before, the undo
+        ran under the dialog and the panel came back on its refresh.)"""
         pad, second = self.redrawnSecondPad()
         self.doc.openTransaction("Accept")
         App.acceptReference(second, "ReferenceAxis", 0)
@@ -1160,7 +1486,14 @@ class TestReferenceFieldGui(unittest.TestCase):
         [profile, field] = self.edit(second, count=2)
         self.assertIsNone(self.listedRows())
         Gui.runCommand("Std_Undo")
+        pump(0.3)
+        self.assertIsNone(self.listedRows())
+        taskButton(QtWidgets.QDialogButtonBox.Cancel).click()
+        self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "Cancel didn't close")
+        self.assertTrue(waitFor(lambda: not fields(), 3.0), "the closed dialog's fields stay")
+        self.assertTrue(self.doc.undo(), "nothing to undo")
         self.doc.recompute()
+        self.edit(second, count=2)
         self.assertTrue(waitFor(lambda: self.listedRows() == ["ReferenceAxis[0]"]), self.listedRows())
 
     # -- ops#162 B1, B3; the other dress-up panels -------------------------------------------------
@@ -1181,15 +1514,16 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.pick(box, side)
         self.assertEqual(draft.Base[1], [side])
 
-    def testDraftWithFacesOpensUnarmed(self):
-        """B1 (ops#162): a draft with faces and no pull direction opens with no field armed (the
-        old panel armed on the pull direction's subs, not Base's)."""
+    def testDraftWithFacesOpensWithItsFacesArmed(self):
+        """B1 (ops#162): a draft with faces and no pull direction doesn't arm the pull direction
+        (the old panel armed on the pull direction's subs, not Base's); its faces field is armed,
+        as an edit's first field (round 8, J11)."""
         box, draft = self.draft()
         self.assertEqual(draft.PullDirection, None)
         [faces, plane, line] = self.edit(draft, count=3)
-        pump(0.2)
-        self.assertFalse(armed(faces), "a draft with faces opens armed")
+        self.assertTrue(waitFor(lambda: armed(faces)), "the edit's faces field isn't armed")
         self.assertFalse(armed(line))
+        self.assertFalse(armed(plane))
 
     def testDraftWithoutFacesOpensArmed(self):
         """B1 (ops#162): a draft with a pull direction and no faces opens with its faces field
@@ -1351,8 +1685,8 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.pick(box, self.top)
         self.assertEqual(draft.NeutralPlane[1], [self.top])
 
-    def testDraftEscDisarmsThePlaneThenCancels(self):
-        """T5: Esc disarms the plane field and the dialog stays; the next Esc cancels, and the
+    def testDraftOneEscCancels(self):
+        """T5 (ops#640 rank 25): Esc with the plane field armed cancels the dialog at once, and the
         neutral plane is the bottom again."""
         box, draft = self.draft()
         [faces, plane, line] = self.edit(draft, count=3)
@@ -1360,21 +1694,19 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.pick(box, self.top)
         self.assertEqual(draft.NeutralPlane[1], [self.top])
         self.assertTrue(focus(entries(plane)))
-        key(QtCore.Qt.Key_Escape)
-        self.assertTrue(waitFor(lambda: not armed(plane)), "Esc didn't disarm the field")
-        pump(0.3)
-        self.assertTrue(Gui.Control.activeDialog(), "the first Esc closed the dialog")
+        self.assertTrue(armed(plane))
         key(QtCore.Qt.Key_Escape)
         self.assertTrue(
-            waitFor(lambda: not Gui.Control.activeDialog()), "the second Esc left the dialog open"
+            waitFor(lambda: not Gui.Control.activeDialog()), "one Esc left the dialog open"
         )
         self.doc.recompute()
         self.assertEqual(draft.NeutralPlane[1], [self.bottom])
 
     def testDraftDisarmedPlaneLeavesNoGate(self):
-        """B4: the neutral plane disarmed (Esc), nothing of its pick stays: a vertex, which its
-        gate refuses, can be selected again, what the field showed is as before, and a face pick
-        leaves NeutralPlane alone."""
+        """B4: the neutral plane disarmed (its `armed` property: Esc cancels the dialog now,
+        ops#640 rank 25), nothing of its pick stays: a vertex, which its gate refuses, can be
+        selected again, what the field showed is as before, and a face pick leaves NeutralPlane
+        alone."""
         box, draft = self.draft()
         [faces, plane, line] = self.edit(draft, count=3)
         shown = (box.ViewObject.Visibility, draft.ViewObject.Visibility)
@@ -1382,9 +1714,8 @@ class TestReferenceFieldGui(unittest.TestCase):
         Gui.Selection.addSelection(self.doc.Name, box.Name, "Vertex1")
         pump(0.1)
         self.assertEqual(selected(self.doc), [], "the armed plane's gate let a vertex through")
-        self.assertTrue(focus(entries(plane)))
-        key(QtCore.Qt.Key_Escape)
-        self.assertTrue(waitFor(lambda: not armed(plane)), "Esc didn't disarm the field")
+        plane.setProperty("armed", False)
+        self.assertTrue(waitFor(lambda: not armed(plane)), "the field stays armed")
 
         Gui.Selection.addSelection(self.doc.Name, box.Name, "Vertex1")
         pump(0.1)
@@ -1488,8 +1819,9 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.assertLink(pad.UpToFace, self.high, [])
         self.assertVolume(pad, 1028)
 
-    def testPadEscDisarmsThenCancels(self):
-        """T5: Esc disarms the face field, the next Esc cancels: UpToFace is the lower plane."""
+    def testPadOneEscCancels(self):
+        """T5 (ops#640 rank 25): Esc with the face field armed cancels at once: UpToFace is the
+        lower plane."""
         box, pad = self.padOnBox()
         # The edit opened as a double click opens it, in a command Cancel aborts (the Pad's panel
         # opens none of its own)
@@ -1499,13 +1831,10 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.pick(self.high, "")
         self.assertLink(pad.UpToFace, self.high, [])
         self.assertTrue(focus(entries(field)))
-        key(QtCore.Qt.Key_Escape)
-        self.assertTrue(waitFor(lambda: not armed(field)), "Esc didn't disarm the field")
-        pump(0.3)
-        self.assertTrue(Gui.Control.activeDialog(), "the first Esc closed the dialog")
+        self.assertTrue(armed(field))
         key(QtCore.Qt.Key_Escape)
         self.assertTrue(
-            waitFor(lambda: not Gui.Control.activeDialog()), "the second Esc left the dialog open"
+            waitFor(lambda: not Gui.Control.activeDialog()), "one Esc left the dialog open"
         )
         self.doc.recompute()
         self.assertLink(pad.UpToFace, self.low, [])
@@ -2051,8 +2380,9 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.pickRegion(sketch, regions["B"])
         self.assertVolume(pad, 500)
 
-    def testProfileEscDisarmsThenCancels(self):
-        """Esc disarms the profile field (10.1), the next Esc cancels: the whole sketch again."""
+    def testProfileOneEscCancels(self):
+        """Esc with the profile field armed cancels at once (ops#640 rank 25; 10.1 had it disarm
+        first): the whole sketch again."""
         pad, sketch, regions = self.regionsPad()
         self.doc.openTransaction("Edit Pad")
         [field] = self.edit(pad)
@@ -2060,13 +2390,10 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.pickRegion(sketch, regions["B"])
         self.assertEqual(pad.Profile[1], [regions["B"]])
         self.assertTrue(focus(entries(field)))
-        key(QtCore.Qt.Key_Escape)
-        self.assertTrue(waitFor(lambda: not armed(field)), "Esc didn't disarm the field")
-        pump(0.3)
-        self.assertTrue(Gui.Control.activeDialog(), "the first Esc closed the dialog")
+        self.assertTrue(armed(field))
         key(QtCore.Qt.Key_Escape)
         self.assertTrue(
-            waitFor(lambda: not Gui.Control.activeDialog()), "the second Esc left the dialog open"
+            waitFor(lambda: not Gui.Control.activeDialog()), "one Esc left the dialog open"
         )
         self.assertEqual(pad.Profile, (sketch, []))
         self.assertVolume(pad, WHOLE_SKETCH)
@@ -2390,8 +2717,10 @@ class TestReferenceFieldGui(unittest.TestCase):
     def pattern(self, typeName, originals, transformBody=False):
         """A pattern of the bumps, as the Pattern model places its copies. It joins the body with
         its Originals set. An empty one joins as a pattern of the whole body and is switched back:
-        a pattern of nothing then leaves the Body's chain and its base is cleared (ops#590), as
-        Onshape builds the next feature on the one before a pattern with nothing to pattern."""
+        a pattern in the chain left with nothing to pattern stays in it, red, and passes its base
+        through (ops#640, regen F3 and the hub's decision), as Onshape builds the next feature on
+        the one before a pattern with nothing to pattern. (A new pattern made with nothing picked
+        stays out of the chain, with no base: ops#590.)"""
         pattern = self.doc.addObject(typeName, typeName.split("::")[1])
         if typeName == "PartDesign::LinearPattern":
             pattern.Direction = (models.originFeature(self.body, "X_Axis"), [""])
@@ -2413,10 +2742,10 @@ class TestReferenceFieldGui(unittest.TestCase):
         if not transformBody and not originals:
             pattern.TransformMode = "Features"
         self.doc.recompute()
-        if originals or transformBody:
-            self.assertIsNotNone(pattern.BaseFeature)
-        else:
-            self.assertIsNone(pattern.BaseFeature)
+        self.assertIsNotNone(pattern.BaseFeature)
+        if not originals and not transformBody:
+            self.assertFalse(pattern.isValid())
+            self.assertIn("Select features to pattern.", pattern.getStatusString())
         return pattern
 
     def names(self, field):
@@ -2441,7 +2770,9 @@ class TestReferenceFieldGui(unittest.TestCase):
         Remove buttons); a pick of a bump in the tree adds it, and the pattern computes during
         the edit (ops#182: the edit's roll-back point took it for a MultiTransform's step and
         held it until the edit ended). A bump made after the pattern stays held during the edit,
-        and the pattern doesn't (ops#212)."""
+        and the pattern doesn't (ops#212). Since ops#640 (regen F3, the hub's decision) the empty
+        pattern stays in the chain, red, and passes its base through: the box after it builds on
+        it, with the bump before's shape."""
         first, second = self.bumps()
         pattern = self.pattern("PartDesign::LinearPattern", [])
         after = self.doc.addObject("PartDesign::AdditiveBox", "After")
@@ -2451,8 +2782,12 @@ class TestReferenceFieldGui(unittest.TestCase):
         after.Placement = App.Placement(App.Vector(-3, 3, 10), App.Rotation())
         self.doc.recompute()
         self.assertEqual(self.body.Group.index(after), self.body.Group.index(pattern) + 1)
-        # Out of the chain while it patterns nothing (ops#590): the box builds on the bump before
-        self.assertEqual(after.BaseFeature, second)
+        # In the chain while it patterns nothing, red, its base passed through (ops#640, F3): the
+        # box builds on the pattern, which hands on the bump before's shape
+        self.assertEqual(pattern.BaseFeature, second)
+        self.assertFalse(pattern.isValid())
+        self.assertEqual(after.BaseFeature, pattern)
+        self.assertTrue(after.isValid(), after.getStatusString())
         self.assertAlmostEqual(after.Shape.Volume, 1003, places=6)
         [field] = self.edit(pattern)
         self.assertTrue(self.body.holds(after), "the feature after the pattern isn't held")
@@ -2467,7 +2802,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.assertEqual(self.names(field), [first.Name])
         self.assertEqual(texts(field), ["Bump"])
         self.assertTrue(armed(field))
-        # With an original it joins the chain, and the box after it follows it (ops#590)
+        # With an original it computes in its place, and the box after it follows it (ops#590)
         self.assertEqual(pattern.BaseFeature, second)
         self.assertEqual(after.BaseFeature, pattern)
         self.assertVolume(pattern, 1003)
@@ -4172,9 +4507,9 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.assertEqual(self.originalNames(pattern), [first.Name, second.Name])
         self.assertVolume(pattern, 1004)
 
-    def testPatternOriginalsEscDisarmsThenCancels(self):
-        """T5: Esc disarms the field and the dialog stays; the next Esc cancels, and the Originals
-        are what they were before the edit."""
+    def testPatternOriginalsOneEscCancels(self):
+        """T5 (ops#640 rank 25): Esc with the field armed cancels the dialog at once, and the
+        Originals are what they were before the edit."""
         first, second = self.bumps()
         pattern = self.pattern("PartDesign::LinearPattern", [first])
         [field] = self.edit(pattern)
@@ -4182,15 +4517,11 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.pick(second, "")
         self.assertEqual(self.originalNames(pattern), [first.Name, second.Name])
         self.assertTrue(focus(entries(field)))
-
-        key(QtCore.Qt.Key_Escape)
-        self.assertTrue(waitFor(lambda: not armed(field)), "Esc didn't disarm the field")
-        pump(0.3)
-        self.assertTrue(Gui.Control.activeDialog(), "the first Esc closed the dialog")
+        self.assertTrue(armed(field))
 
         key(QtCore.Qt.Key_Escape)
         self.assertTrue(
-            waitFor(lambda: not Gui.Control.activeDialog()), "the second Esc left the dialog open"
+            waitFor(lambda: not Gui.Control.activeDialog()), "one Esc left the dialog open"
         )
         self.doc.recompute()
         self.assertEqual(self.originalNames(pattern), [first.Name])
@@ -4355,6 +4686,29 @@ class TestReferenceFieldGui(unittest.TestCase):
 
     def testMirroredReferencePickThenOk(self):
         self.referencePickThenOk("PartDesign::Mirrored", "comboPlane", "MirrorPlane", "YZ_Plane")
+
+    def testMirroredPlaneTakesASketchRegion(self):
+        """Selection parity SQ16 (Onshape's Mirror plane takes a sketch region): a region of a
+        sketch standing at x = 3 (normal +X) mirrors the first bump (x 1..2, y 1..2) to x 4..5;
+        the plane is the sketch itself."""
+        first, second = self.bumps()
+        sk = models.sketch(self.doc, "MirrorSk", models.rectangle(-2, -2, 2, 2), self.body,
+                           placement=App.Placement(App.Vector(3, 0, 0),
+                                                   App.Rotation(App.Vector(0, 1, 0), 90)))
+        sk.MakeInternals = True
+        self.doc.recompute()
+        self.assertEqual(len(sk.InternalShape.Faces), 1)
+        pattern = self.pattern("PartDesign::Mirrored", [first])
+        self.edit(pattern)
+        self.selectReference("comboPlane")
+        Gui.Selection.addSelection(self.doc.Name, self.body.Name, sk.Name + ".InternalFace1")
+        pump(0.3)
+        self.assertLink(pattern.MirrorPlane, sk, [])
+        taskButton(QtWidgets.QDialogButtonBox.Ok).click()
+        self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()))
+        self.assertTrue(pattern.isValid(), pattern.getStatusString())
+        self.assertAlmostEqual(pattern.Shape.Volume, 1003, places=6)
+        self.assertTrue(pattern.Shape.isInside(App.Vector(4.5, 1.5, 10.5), 1e-7, True))
 
     def testPatternOriginalsLabelRenamed(self):
         """A listed original renamed while the panel is open shows its new Label (and the other
@@ -4990,7 +5344,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         The user then sets Reversed the other way, chooses the V axis and the line again: Reversed
         stays as the user set it (each axis choice overwrote it, silently)."""
         feature = self.revolutionAsSuggested()
-        self.edit(feature, count=0)
+        self.edit(feature, count=1)
         combo = self.axisCombo()
         self.selectReference("axis")
         self.pick(self.lines[-1], "")
@@ -5029,7 +5383,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         chosen then sets it as the H axis suggests (off); a one-way "set by the user" mark kept
         it on."""
         feature = self.revolutionAsSuggested()
-        self.edit(feature, count=0)
+        self.edit(feature, count=1)
         box = Gui.getMainWindow().findChild(QtWidgets.QCheckBox, "checkBoxReversed")
         box.click()
         pump(0.2)
@@ -5046,7 +5400,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         axis suggests off, so the choice kept against it is on (keeping off would turn the way
         the new axis suggests: the other side), and the status bar says so."""
         feature = self.revolutionAsSuggested()
-        self.edit(feature, count=0)
+        self.edit(feature, count=1)
         box = Gui.getMainWindow().findChild(QtWidgets.QCheckBox, "checkBoxReversed")
         box.click()
         pump(0.2)
@@ -5089,7 +5443,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         suggestion, opened: the line at x = -1 picked keeps Reversed off (against the line's
         suggestion too), the status bar says so, and the profile sweeps the same side."""
         feature = self.quarterRevolutionBesideABlock(reversed=False)
-        self.edit(feature, count=0)
+        self.edit(feature, count=1)
         self.selectReference("axis")
         self.pick(self.lines[-1], "")
         self.assertLink(feature.ReferenceAxis, self.lines[-1], [])
@@ -5109,7 +5463,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         feature = self.quarterRevolutionBesideABlock(reversed=True)
         feature.ReferenceAxis = None
         self.doc.recompute()
-        self.edit(feature, count=0)
+        self.edit(feature, count=2)
         self.selectReference("axis")
         self.pick(self.lines[-1], "")
         self.assertLink(feature.ReferenceAxis, self.lines[-1], [])
@@ -5139,7 +5493,8 @@ class TestReferenceFieldGui(unittest.TestCase):
         axisSketch.addGeometry(models.polyline([(0, 5), (0, -1)]), False)
         self.doc.recompute()
 
-        self.edit(feature, count=1)
+        # The guessed axis's row and, since rank 21, the Profile field shown with it
+        self.edit(feature, count=2)
         combo = self.axisCombo()
         self.assertFalse(
             any("?" in combo.itemText(i) for i in range(combo.count())),
@@ -5206,9 +5561,14 @@ class TestReferenceFieldGui(unittest.TestCase):
         place of the angle, and a pick of a wall is its entry; Type "Angle" hides and disarms it
         again. Only the recompute waits: the shape is the full ring until OK."""
         feature = self.revolution(core=True)
-        self.edit(feature, count=0)
+        self.edit(feature, count=1)
         update = Gui.getMainWindow().findChild(QtWidgets.QCheckBox, "checkBoxUpdateView")
         update.setChecked(False)
+        settle()
+        # A full turn opens with Full revolve, which hides the end type and the angle (rank 21,
+        # Onshape's): off, with the view not updated, the shape stays the full ring
+        full = Gui.getMainWindow().findChild(QtWidgets.QCheckBox, "checkBoxFullRevolve")
+        full.setChecked(False)
         settle()
         field = findField("fieldUpToFace")
         # Hidden or not by the panel (run alone, the first panel sits in the hidden overlay)
@@ -5247,12 +5607,13 @@ class TestReferenceFieldGui(unittest.TestCase):
 
     def testRevolutionFieldsAndVisibility(self):
         """T24: the start reference armed, an angle change keeps it armed (B17); the axis row
-        armed after it, then disarmed (Esc): the base solid (the core) and the revolution are as
+        armed after it, then disarmed (its `armed` property; Esc cancels the dialog now, ops#640
+        rank 25): the base solid (the core) and the revolution are as
         the edit showed them (B16: the second start of a pick took the shown base for the edited
         feature, which stayed hidden). B15 is testReferencesPanelDisarmsTheAxisRow."""
         feature = self.revolution(core=True)
         core = self.doc.getObject("Cylinder")
-        self.edit(feature, count=0)
+        self.edit(feature, count=1)
         shown = self.visibilities(feature, core, self.ringSketch)
         start = Gui.getMainWindow().findChild(QtWidgets.QComboBox, "startMode")
         self.choose(start, 2)
@@ -5269,9 +5630,8 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.assertTrue(waitFor(lambda: armed(field)), "the axis row isn't armed")
         self.assertFalse(armed(startField))
         self.assertTrue(self.ringSketch.ViewObject.isVisible(), "the profile isn't shown")
-        self.assertTrue(focus(entries(field)))
-        key(QtCore.Qt.Key_Escape)
-        self.assertTrue(waitFor(lambda: not armed(field)), "Esc left the row armed")
+        field.setProperty("armed", False)
+        self.assertTrue(waitFor(lambda: not armed(field)), "the row stays armed")
         self.assertTrue(Gui.Control.activeDialog())
         self.assertEqual(
             self.visibilities(feature, core, self.ringSketch),
@@ -5484,7 +5844,8 @@ class TestReferenceFieldGui(unittest.TestCase):
         axisSketch.deleteAllGeometry()
         axisSketch.addGeometry(models.polyline([(0, 5), (0, -1)]), False)
         self.doc.recompute()
-        self.edit(feature, count=1)
+        # The guessed axis's row and, since rank 21, the Profile field shown with it
+        self.edit(feature, count=2)
         field = findField("fieldReferenceAxis")
         self.arm(field, byFocus=True)
         [panel] = [
@@ -5793,7 +6154,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         so the order isn't told from the shape here.) A point of S30 replaces it, last; moved up
         it is refused with the reason (only the last section can be a point)."""
         pipe = self.rod()
-        self.edit(pipe, count=3)
+        self.edit(pipe, count=4)
         field = self.sectionsField()
         self.assertTrue(field.isVisible(), "the multisection page isn't shown")
         self.assertTrue(waitFor(lambda: armed(field)), "the sections field isn't armed on open")
@@ -5816,12 +6177,103 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.assertIn("last section", status.text())
         self.assertEqual(texts(field), ["1. S10", "2. S30:Vertex1"])
 
+    # -- regions-3: a region picked for a loft's or a pipe's profile or section ------------------
+
+    def splitSquare(self, name, half, z):
+        """A square sketch centred on Z, side 2 x half, at height z, split by the line x = 0;
+        returns it and its left region's name (half x 2 half, centre x = -half / 2)."""
+        geometry = models.rectangle(-half, -half, half, half) + models.polyline(
+            [(0, -half), (0, half)]
+        )
+        sketch = models.sketch(self.doc, name, geometry, self.body, z=z)
+        sketch.MakeInternals = True
+        self.doc.recompute()
+        left = [
+            "InternalFace%d" % (i + 1)
+            for i, f in enumerate(sketch.InternalShape.Faces)
+            if abs(f.Area - 2 * half * half) < 1e-6 and f.CenterOfMass.x < 0
+        ]
+        self.assertEqual(len(left), 1, [f.Area for f in sketch.InternalShape.Faces])
+        return sketch, left[0]
+
+    def pickRegionOf(self, sketch, region):
+        """A sketch's region picked in the 3D view, through the body as the view gives it."""
+        Gui.Selection.addSelection(self.doc.Name, self.body.Name, sketch.Name + "." + region)
+        pump(0.2)
+
+    def flatArea(self, shape, z):
+        """The area of the shape's faces lying in the plane at height z."""
+        return sum(
+            f.Area
+            for f in shape.Faces
+            if abs(f.BoundBox.ZMin - z) < 1e-6 and abs(f.BoundBox.ZMax - z) < 1e-6
+        )
+
+    def testLoftProfileAndSectionRegionPicks(self):
+        """A loft from a 10 x 10 square split at x = 0 (z = 0) to a 20 x 20 one split so (z = 10),
+        both whole: 100 at the bottom, 400 at the top. The profile's left region clicked: the
+        loft's Profile names it and its bottom is 50; the section's left region clicked: its
+        entry names it and the top is 200 (before: the dialogs wrote the whole sketch, silently,
+        though the Python path takes the region)."""
+        self.body = models.body(self.doc)
+        profile, profileLeft = self.splitSquare("Profile", 5, 0)
+        section, sectionLeft = self.splitSquare("Section", 10, 10)
+        loft = self.body.newObject("PartDesign::AdditiveLoft", "Loft")
+        loft.Profile = profile
+        loft.Sections = [(section, [""])]
+        self.doc.recompute()
+        self.assertTrue(loft.isValid(), loft.getStatusString())
+        self.assertAlmostEqual(self.flatArea(loft.Shape, 0), 100, places=4)
+        self.assertAlmostEqual(self.flatArea(loft.Shape, 10), 400, places=4)
+
+        profileField, sectionsField = self.edit(loft, count=2)
+        self.arm(profileField, byFocus=True)
+        self.pickRegionOf(profile, profileLeft)
+        self.assertLink(loft.Profile, profile, [profileLeft])
+        self.arm(sectionsField, byFocus=True)
+        self.pickRegionOf(section, sectionLeft)
+        self.assertEqual([list(subs) for obj, subs in loft.Sections], [[sectionLeft]])
+        self.doc.recompute()
+        self.assertTrue(loft.isValid(), loft.getStatusString())
+        self.assertAlmostEqual(self.flatArea(loft.Shape, 0), 50, places=4)
+        self.assertAlmostEqual(self.flatArea(loft.Shape, 10), 200, places=4)
+
+    def testPipeProfileAndSectionRegionPicks(self):
+        """The Rod's pipe with a 2 x 2 profile split at x = 0 and a 4 x 4 section at z = 10 split
+        so, both whole: 4 at the bottom, the slice at z = 10 16. The profile's left region
+        clicked: the pipe's Profile names it, its bottom is 2; the section's left region clicked:
+        its entry names it, the slice at z = 10 is 8 (before: the whole sketches, silently)."""
+        pipe = self.rod()
+        profile, profileLeft = self.splitSquare("Split", 1, 0)
+        section, sectionLeft = self.splitSquare("Split10", 2, 10)
+        pipe.Profile = profile
+        pipe.Sections = [(section, [""])]
+        self.doc.recompute()
+        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+        self.assertAlmostEqual(self.flatArea(pipe.Shape, 0), 4, places=4)
+        self.assertThroughSection(pipe, 10, 16)
+
+        self.edit(pipe, count=4)
+        profileField = findField("fieldProfile")
+        self.assertIsNotNone(profileField, "no profile field")
+        self.arm(profileField, byFocus=True)
+        self.pickRegionOf(profile, profileLeft)
+        self.assertLink(pipe.Profile, profile, [profileLeft])
+        sectionsField = self.sectionsField()
+        self.arm(sectionsField, byFocus=True)
+        self.pickRegionOf(section, sectionLeft)
+        self.assertEqual([list(subs) for obj, subs in pipe.Sections], [[sectionLeft]])
+        self.doc.recompute()
+        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+        self.assertAlmostEqual(self.flatArea(pipe.Shape, 0), 2, places=4)
+        self.assertThroughSection(pipe, 10, 8)
+
     def testPipeDeleteRemovesAllSelected(self):
         """B11, B12: no Remove Section toggle; Delete removes every selected section."""
         pipe = self.rod()
         pipe.Sections = [(self.s10, [""]), (self.s30, [""])]
         self.assertThroughSection(pipe, 10, 16)
-        self.edit(pipe, count=3)
+        self.edit(pipe, count=4)
         buttons = Gui.getMainWindow().findChildren(QtWidgets.QToolButton)
         self.assertFalse([b for b in buttons if b.text() == "Remove Section"])
         field = self.sectionsField()
@@ -5835,7 +6287,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         """T35 for the pipe: a constant pipe's sections field is hidden and not armed; switching to
         Multisection arms it (it has no sections)."""
         pipe = self.rod("Constant")
-        self.edit(pipe, count=2)
+        self.edit(pipe, count=3)
         field = findField("fieldSections")
         self.assertFalse(field.isVisible())
         self.assertFalse(armed(field))
@@ -5858,7 +6310,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.spine.ViewObject.Visibility = False
         self.s10.ViewObject.Visibility = False
         self.s30.ViewObject.Visibility = True
-        self.edit(pipe, count=3)
+        self.edit(pipe, count=4)
         self.assertTrue(self.s10.ViewObject.Visibility)
         self.assertTrue(self.spine.ViewObject.Visibility)
         button = QtWidgets.QDialogButtonBox.Ok if ok else QtWidgets.QDialogButtonBox.Cancel
@@ -5997,7 +6449,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         again, 120. The Spine's subs follow each pick."""
         pipe = self.rod("Constant")
         self.assertVolume(pipe, 120)
-        self.edit(pipe, count=2)
+        self.edit(pipe, count=3)
         field = self.spineField()
         self.assertEqual(texts(field), ["Spine (whole)"])
         self.arm(field, byFocus=False)
@@ -6034,7 +6486,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         pipe.Spine = (self.spine, ["Edge1", "Edge2"])
         self.doc.recompute()
         self.assertVolume(pipe, 120)
-        self.edit(pipe, count=2)
+        self.edit(pipe, count=3)
         field = self.spineField()
         self.assertEqual(texts(field), ["Spine:Edge1", "Spine:Edge2"])
         self.arm(field, byFocus=False)
@@ -6066,7 +6518,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         pipe = self.rod("Constant")
         pipe.Spine = (self.spine, ["Edge1", "Edge2"])
         self.doc.recompute()
-        self.edit(pipe, count=2)
+        self.edit(pipe, count=3)
         buttons = [b.text() for b in Gui.getMainWindow().findChildren(QtWidgets.QToolButton)]
         for text in ("Object", "Add edge", "Remove edge", "Add Edge", "Remove Edge"):
             self.assertNotIn(text, buttons)
@@ -6083,10 +6535,11 @@ class TestReferenceFieldGui(unittest.TestCase):
         replaces it (a 4 x 4 square along the spine: 480); the spine is refused as the profile,
         with the reason."""
         pipe = self.rod("Constant")
-        self.edit(pipe, count=2)
-        profile, spine = fields()
+        self.edit(pipe, count=3)
+        profile, spine, more = fields()
         self.assertEqual(profile.objectName(), "fieldProfile")
         self.assertEqual(spine.objectName(), "fieldSpine")
+        self.assertEqual(more.objectName(), "fieldSpineMore")
         self.assertEqual(texts(profile), ["Profile"])
         self.arm(profile, byFocus=False)
         self.pick(self.spine, "Edge1")
@@ -6122,7 +6575,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         # y = +-1.758; without it the prism is exact
         pipe.AuxiliaryCurvilinear = False
         self.doc.recompute()
-        self.edit(pipe, count=2)
+        self.edit(pipe, count=3)
         field = findField("fieldAuxiliarySpine")
         self.assertIsNotNone(field)
         self.assertFalse(field.isVisible(), "the auxiliary path shows outside Mode Auxiliary")
@@ -6167,7 +6620,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         Gui.Selection.clearSelection()
         Gui.Selection.addSelection(self.doc.Name, profile.Name)
         Gui.runCommand("PartDesign_AdditivePipe")
-        self.assertTrue(waitFor(lambda: len(fields()) == 2), "the pipe's fields")
+        self.assertTrue(waitFor(lambda: len(fields()) == 3), "the pipe's fields")
         settle()
         field = self.spineField()
         self.assertTrue(waitFor(lambda: armed(field)), "the new pipe's spine isn't armed")
@@ -6196,7 +6649,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         and as a section, with the reason; a sketch whole is still taken as a section."""
         pipe = self.rod()
         wire, dot = self.wireAndPoint()
-        self.edit(pipe, count=3)
+        self.edit(pipe, count=4)
         profile = findField("fieldProfile")
         self.arm(profile, byFocus=False)
         for obj in (wire, dot):
@@ -6231,7 +6684,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         refused (the same element on both sides)."""
         pipe = self.rod()
         block, bottom, corner = self.block()
-        self.edit(pipe, count=3)
+        self.edit(pipe, count=4)
         profile = findField("fieldProfile")
         self.arm(profile, byFocus=False)
         self.pick(block, bottom)
@@ -6255,7 +6708,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         aux = self.auxiliarySketch()
         pipe.AuxiliarySpine = aux
         self.doc.recompute()
-        self.edit(pipe, count=2)
+        self.edit(pipe, count=3)
         profile = findField("fieldProfile")
         self.arm(profile, byFocus=False)
         self.pick(aux, "")
@@ -6273,7 +6726,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         """Low 1: the auxiliary path, armed, disarms when the mode leaves Auxiliary (its page
         hides)."""
         pipe = self.rod("Constant")
-        self.edit(pipe, count=2)
+        self.edit(pipe, count=3)
         field = findField("fieldAuxiliarySpine")
         box = Gui.getMainWindow().findChild(QtWidgets.QComboBox, "comboBoxMode")
         self.choose(box, 3)
@@ -6289,7 +6742,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         wire, dot = self.wireAndPoint()
         pipe.Spine = (wire, ["Edge1"])
         self.assertVolume(pipe, 40)
-        self.edit(pipe, count=2)
+        self.edit(pipe, count=3)
         field = self.spineField()
         self.assertEqual(texts(field), ["Wire:Edge1"])
         clickRow(field, 0)
@@ -6306,7 +6759,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         pipe.Mode = "Auxiliary"
         pipe.AuxiliarySpine = (aux, ["Edge1"])
         self.doc.recompute()
-        self.edit(pipe, count=3)
+        self.edit(pipe, count=4)
         field = findField("fieldAuxiliarySpine")
         clear = Gui.getMainWindow().findChild(QtWidgets.QToolButton, "buttonProfileClear")
         self.assertTrue(clear.isVisible())
@@ -6325,7 +6778,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         pipe.Sections = [(self.s10, [""])]
         self.doc.recompute()
         self.s10.ViewObject.Visibility = True
-        self.edit(pipe, count=2)
+        self.edit(pipe, count=3)
         taskButton(QtWidgets.QDialogButtonBox.Ok).click()
         self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "OK didn't close")
         pump(0.2)
@@ -6341,7 +6794,7 @@ class TestReferenceFieldGui(unittest.TestCase):
         self.doc.recompute()
         aux.ViewObject.Visibility = False
         self.doc.openTransaction("Edit Pipe")  # as the edit command does
-        self.edit(pipe, count=2)
+        self.edit(pipe, count=3)
         profile = findField("fieldProfile")
         self.arm(profile, byFocus=False)
         self.pick(big, "")
@@ -6929,24 +7382,15 @@ class TestReferenceFieldGui(unittest.TestCase):
         )
 
     def testShadingRestoredOnEscIn3DView(self):
-        """Esc in the 3D view disarms the profile field and the dialog stays: the sketch hides
-        again, its regions drawn as saved, and the pad shows as in the dialog."""
-        pad, sketch, regions = self.regionsPad()
-        sketch.ViewObject.Visibility = False
-        saved = sketch.ViewObject.ShapeAppearance[0].Transparency
-        [field] = self.edit(pad)
-        padShown = pad.ViewObject.Visibility
-        self.arm(field, byFocus=False)
-        self.assertTrue(sketch.ViewObject.Visibility)
-        self.assertFalse(pad.ViewObject.Visibility)
-        self.assertTrue(focus(views3D()[0]), "the 3D view doesn't take the focus")
-        key(QtCore.Qt.Key_Escape)
-        self.assertTrue(waitFor(lambda: not armed(field)), "Esc in the 3D view didn't disarm")
-        pump(0.5)
-        self.assertTrue(Gui.Control.activeDialog(), "Esc in the 3D view closed the dialog")
-        self.assertFalse(sketch.ViewObject.Visibility)
-        self.assertAlmostEqual(self.regionTransparency(sketch), saved, places=5)
-        self.assertEqual(pad.ViewObject.Visibility, padShown)
+        """Esc in the 3D view with the profile field armed cancels the dialog at once (ops#640
+        rank 25; it only disarmed before): the sketch hides again, its regions drawn as saved,
+        and the pad shows as before the edit."""
+
+        def escInTheView():
+            self.assertTrue(focus(views3D()[0]), "the 3D view doesn't take the focus")
+            key(QtCore.Qt.Key_Escape)
+
+        self.shadingRestoredWhenTheEditEnds(escInTheView, editEnds=True, transaction="Edit Pad")
 
     def testRegionWhoseFaceVanished(self):
         """Regions B and the disk listed; the disk's circle deleted from the sketch, so its

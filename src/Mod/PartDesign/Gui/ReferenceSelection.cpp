@@ -53,6 +53,8 @@
 #include <Mod/PartDesign/App/DatumPlane.h>
 #include <Mod/PartDesign/App/DatumPoint.h>
 #include <Mod/PartDesign/App/ShapeBinder.h>
+#include <Mod/PartDesign/App/StudioList.h>
+#include <Mod/PartDesign/App/StraightEdge.h>
 
 #include "ui_DlgReference.h"
 #include "ReferenceSelection.h"
@@ -64,6 +66,31 @@ using namespace PartDesignGui;
 using namespace Gui;
 
 /* TRANSLATOR PartDesignGui::ReferenceSelection.cpp */
+
+namespace
+{
+// FreeCAD-CH (ops#640, RT-2): an origin feature of the Part Studio (an App::Part, not an assembly)
+// holding @p body: a field that takes other bodies' elements (OTHERBODY, the Sketch plane) takes
+// it unmapped when the Body sits off the studio's origin
+bool isOwnStudioOrigin(const App::DocumentObject* body, const App::DocumentObject* obj)
+{
+    auto datum = freecad_cast<const App::DatumElement*>(obj);
+    const App::DocumentObject* lcs = datum ? datum->getLCS() : nullptr;
+    if (!lcs || !body) {
+        return false;
+    }
+    const Base::Type assembly = Base::Type::fromName("Assembly::AssemblyObject");
+    for (auto user : lcs->getInList()) {
+        auto part = freecad_cast<App::Part*>(user);
+        if (part && part->Origin.getValue() == lcs
+            && !(!assembly.isBad() && part->isDerivedFrom(assembly))
+            && part->hasObject(body, /*recursive=*/true)) {
+            return true;
+        }
+    }
+    return false;
+}
+}  // namespace
 
 bool ReferenceSelection::allow(App::Document* pDoc, App::DocumentObject* pObj, const char* sSubName)
 {
@@ -166,7 +193,9 @@ bool ReferenceSelection::allowOrigin(
                 // FreeCAD-CH (ops#325): another Body's origin in the same studio is the same
                 // plane or axis; the pick is relinked to this Body's own
                 if (body->hasObject(pObj, true)
-                    || Part::BodyBase::studioOriginFeature(body, pObj)) {
+                    || Part::BodyBase::studioOriginFeature(body, pObj)
+                    || (type.testFlag(AllowSelection::OTHERBODY)
+                        && isOwnStudioOrigin(body, pObj))) {
                     return true;
                 }
             }
@@ -184,8 +213,19 @@ bool ReferenceSelection::allowOrigin(
 
 bool ReferenceSelection::allowDatum(PartDesign::Body* body, App::DocumentObject* pObj) const
 {
-    if (!body) {  // Allow selecting Part::Datum features from the active Body
-        return false;
+    if (!body) {
+        // FreeCAD-CH (ops#654 S4): a studio feature takes the datums of its studio's parts
+        const PartDesign::StudioList* list =
+            support ? PartDesign::StudioList::holding(support) : nullptr;
+        App::Part* studio = nullptr;
+        auto datumBody = PartDesign::Body::findBodyOf(pObj);
+        if (!list || !PartDesign::isStudioOwner(support) || !datumBody
+            || !Part::BodyBase::studioOf(datumBody, studio) || studio != list->studio()) {
+            return false;
+        }
+        return (type.testFlag(AllowSelection::FACE) && pObj->isDerivedFrom<PartDesign::Plane>())
+            || (type.testFlag(AllowSelection::EDGE) && pObj->isDerivedFrom<PartDesign::Line>())
+            || (type.testFlag(AllowSelection::POINT) && pObj->isDerivedFrom<PartDesign::Point>());
     }
     else if (!type.testFlag(AllowSelection::OTHERBODY) && !body->hasObject(pObj)
              && !Part::BodyBase::isInOneStudio(body, pObj)) {  // FreeCAD-CH (ops#325)
@@ -240,8 +280,10 @@ bool ReferenceSelection::isEdge(App::DocumentObject* pObj, const char* sSubName)
     const TopoDS_Edge& edgeShape = TopoDS::Edge(sh);
     if (!edgeShape.IsNull()) {
         if (type.testFlag(AllowSelection::PLANAR)) {
-            BRepAdaptor_Curve adapt(edgeShape);
-            if (adapt.GetType() == GeomAbs_Line) {
+            // A line, or a B-spline straight by its shape, as the axis reader takes (SW7)
+            gp_Pnt base;
+            gp_Dir dir;
+            if (PartDesign::straightEdge(edgeShape, base, dir)) {
                 return true;
             }
         }

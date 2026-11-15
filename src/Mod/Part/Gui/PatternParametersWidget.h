@@ -158,6 +158,12 @@ public:
     void setTitle(const QString& title);
     void setCheckable(bool on);
     void setChecked(bool on);
+    /// A row added at the end of the direction's group, shown and hidden with it (FreeCAD-CH
+    /// ops#655: the second direction's own Centered)
+    void addRow(QWidget* widget);
+    /// Whether the Direction field is outlined red: a direction in use (count > 1) with no
+    /// reference, Onshape's "Select a pattern direction." (FreeCAD-CH ops#655)
+    bool isDirectionMissing() const;
 
     void applyQuantitySpinboxes() const;
 
@@ -217,6 +223,11 @@ private:
 
     // UI Update and state management
     void adaptVisibilityToMode();
+    /// The Direction field red while isDirectionMissing() (ops#655)
+    void updateDirectionOutline();
+    /// The Direction field on its empty "Select reference" entry while the property has none,
+    /// so OK doesn't write the first axis into an empty direction (ops#655)
+    void showEmptyDirection();
 
     // Dynamic spacing helpers
     void addSpacingRow(double value);
@@ -238,6 +249,9 @@ private:
     App::DocumentObject* m_feature = nullptr;  // Store feature for context
 
     bool blockUpdate = false;  // Prevents signal loops
+    /// The count before the checkable group was unticked, restored when it is ticked again
+    /// (ops#655: Onshape's Second direction box keeps its values)
+    long lastOccurrences = 0;
 
     // Store pointers to dynamically created widgets for removal and access
     QList<QWidget*> dynamicSpacingRows;

@@ -32,6 +32,7 @@ set(PartDesignGui_UIC_SRCS
     TaskChamferParameters.ui
     TaskFilletParameters.ui
     TaskDefeaturingParameters.ui
+    TaskFacePatternParameters.ui
     TaskDraftParameters.ui
     TaskThicknessParameters.ui
     TaskBooleanParameters.ui
@@ -41,6 +42,7 @@ set(PartDesignGui_UIC_SRCS
     TaskTransformedParameters.ui
     TaskMirroredParameters.ui
     TaskPatternParameters.ui
+    TaskCurvePatternParameters.ui
     TaskScaledParameters.ui
     TaskMultiTransformParameters.ui
     TaskShapeBinder.ui
@@ -59,6 +61,8 @@ SET(PartDesignGuiViewProvider_SRCS
     ViewProvider.cpp
     ViewProvider.h
     ViewProviderBody.cpp
+    ViewProviderStudioList.cpp
+    ViewProviderStudioList.h
     FeaturesView.cpp
     FeaturesView.h
     ViewProviderBody.h
@@ -78,6 +82,8 @@ SET(PartDesignGuiViewProvider_SRCS
     ViewProviderFillet.h
     ViewProviderDefeaturing.cpp
     ViewProviderDefeaturing.h
+    ViewProviderFacePattern.cpp
+    ViewProviderFacePattern.h
     ViewProviderDraft.cpp
     ViewProviderDraft.h
     ViewProviderThickness.cpp
@@ -96,6 +102,8 @@ SET(PartDesignGuiViewProvider_SRCS
     ViewProviderLinearPattern.h
     ViewProviderPolarPattern.cpp
     ViewProviderPolarPattern.h
+    ViewProviderCurvePattern.cpp
+    ViewProviderCurvePattern.h
     ViewProviderScaled.cpp
     ViewProviderScaled.h
     ViewProviderMultiTransform.cpp
@@ -141,6 +149,8 @@ SET(PartDesignGuiTaskDlgs_SRCS
     ReferenceActions.h
     ReferenceField.cpp
     ReferenceField.h
+    RollbackView.cpp
+    RollbackView.h
     TaskReferences.cpp
     TaskReferences.h
     TaskSketchBasedParameters.cpp
@@ -161,6 +171,9 @@ SET(PartDesignGuiTaskDlgs_SRCS
     TaskDefeaturingParameters.ui
     TaskDefeaturingParameters.cpp
     TaskDefeaturingParameters.h
+    TaskFacePatternParameters.ui
+    TaskFacePatternParameters.cpp
+    TaskFacePatternParameters.h
     TaskDraftParameters.ui
     TaskDraftParameters.cpp
     TaskDraftParameters.h
@@ -183,6 +196,9 @@ SET(PartDesignGuiTaskDlgs_SRCS
     TaskPatternParameters.ui
     TaskPatternParameters.cpp
     TaskPatternParameters.h
+    TaskCurvePatternParameters.ui
+    TaskCurvePatternParameters.cpp
+    TaskCurvePatternParameters.h
     TaskScaledParameters.ui
     TaskScaledParameters.cpp
     TaskScaledParameters.h
@@ -202,6 +218,10 @@ SET(PartDesignGuiTaskDlgs_SRCS
     TaskBooleanParameters.h
     TaskSplitParameters.cpp
     TaskSplitParameters.h
+    TaskDerived.cpp
+    TaskDerived.h
+    TaskDeletePart.cpp
+    TaskDeletePart.h
     TaskPrimitiveParameters.h
     TaskPrimitiveParameters.cpp
     TaskPipeParameters.ui
@@ -230,6 +250,10 @@ SET(PartDesignGuiModule_SRCS
     PreCompiled.h
     SketchWorkflow.cpp
     SketchWorkflow.h
+    StudioGui.cpp
+    StudioGui.h
+    TaskSketchPlane.cpp
+    TaskSketchPlane.h
     StyleParameters.h
     Utils.cpp
     Utils.h

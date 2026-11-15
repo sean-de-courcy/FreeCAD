@@ -22,10 +22,12 @@
 
 """Onshape's defaults for a new user and a new document (FreeCAD-CH, ops#605 Tier 1, 2a, 2f).
 
-- The task box's OK and Cancel are a check and a cross, and OK is the default button: Enter in a
-  feature's panel accepts it, as in Onshape.
-- Std_New in PartDesign makes a part studio: one Body, its Origin's three planes shown until its
-  first sketch. Std_New with 1 (the Start page's cards) is an empty document.
+- The task box's OK and Cancel are a check and a cross, and OK is the default button: Enter in the
+  graphics area or on a check box accepts a feature's panel, as in Onshape; Enter in a value field
+  only commits the value (ops#640 rank 38).
+- Std_New in PartDesign makes a part studio: one Body, its Origin's three planes shown; they stay
+  shown after its first sketch, as Onshape's default planes do (ops#626). Std_New with 1 (the
+  Start page's cards) is an empty document.
 - A new settings folder starts with the "FreeCAD-CH Onshape" preference pack; an existing user.cfg,
   and a run started with a script (the test runners), keep their settings.
 
@@ -46,8 +48,10 @@ from PySide import QtCore, QtWidgets
 from PySide6 import QtTest
 
 from PartDesignTests.Scenarios import models
+from PartDesignTests.TestExpressionFieldsGui import liveButtonBoxes
+from PartDesignTests.TestCrossBodyGui import siblingEraPath  # ops#654 list on first use
 
-TINKERCAD = "Gui::TinkerCADNavigationStyle"
+ONSHAPE = "Gui::OnshapeNavigationStyle"  # the pack's and the code's default since ops#640
 
 # The probe: an add-on in the settings folder whose InitGui.py, once the event loop runs (after
 # the start-up steps, the first-start apply among them), writes the navigation style and exits
@@ -60,10 +64,21 @@ from PySide import QtCore
 
 def report():
     style = FreeCAD.ParamGet("User parameter:BaseApp/Preferences/View").GetString("NavigationStyle")
+    # the style a new 3D view runs: the parameter where it is set, else the code default
+    try:
+        import FreeCADGui
+
+        FreeCAD.newDocument("Probe")
+        viewStyle = FreeCADGui.ActiveDocument.ActiveView.getNavigationType()
+    except Exception as error:  # noqa: BLE001  reported, not raised: the probe must exit
+        viewStyle = "error: %s" % error
     with open(os.environ["FC_ONSHAPE_PROBE_OUT"], "w", encoding="utf-8") as out:
         out.write("style=" + style + "\n")
+        out.write("viewStyle=" + viewStyle + "\n")
         units = FreeCAD.ParamGet("User parameter:BaseApp/Preferences/Units")
         out.write("decimals=%d\n" % units.GetInt("Decimals", -1))
+        view = FreeCAD.ParamGet("User parameter:BaseApp/Preferences/View")
+        out.write("orbit=%d\n" % view.GetInt("OrbitStyle", -1))
     if os.name == "nt":
         import ctypes
         from ctypes import wintypes
@@ -103,16 +118,19 @@ def pump(seconds=0.3):
 
 
 def taskButton(which):
-    """The task panel's OK or Cancel button."""
-    for box in Gui.getMainWindow().findChildren(QtWidgets.QDialogButtonBox):
-        button = box.button(which)
-        if button is None or not button.isVisible():
+    """The task panel's OK or Cancel button (dead wrappers: TestExpressionFieldsGui.liveButtonBoxes)."""
+    for box in liveButtonBoxes():
+        try:
+            button = box.button(which)
+            if button is None or not button.isVisible():
+                continue
+            parent = box.parentWidget()
+            while parent is not None:
+                if parent.metaObject().className() == "Gui::TaskView::TaskView":
+                    return button
+                parent = parent.parentWidget()
+        except RuntimeError:  # a box (or a parent) deleted under its wrapper: not the panel's
             continue
-        parent = box.parentWidget()
-        while parent is not None:
-            if parent.metaObject().className() == "Gui::TaskView::TaskView":
-                return button
-            parent = parent.parentWidget()
     return None
 
 
@@ -227,10 +245,12 @@ class TestOnshapeStudioGui(unittest.TestCase):
         self.assertTrue(Gui.Control.activeDialog(), "no Pad panel")
         return doc
 
+    @siblingEraPath
     def testEnterInThePadPanelAcceptsIt(self):
-        """A Pad panel on a 10 x 20 sketch, length 5: Enter in the length field closes the panel
-        and keeps the Pad (volume 1000). OK is a check icon with no words and the default button;
-        Cancel is a cross."""
+        """A Pad panel on a 10 x 20 sketch, length 5: Enter in the length field commits the value
+        and leaves the panel open (ops#640 rank 38, the hands-on notes); Enter in the graphics area
+        then closes the panel and keeps the Pad (volume 1000). OK is a check icon with no words and
+        the default button; Cancel is a cross."""
         doc = self.openPadPanel()
 
         ok = taskButton(QtWidgets.QDialogButtonBox.Ok)
@@ -250,8 +270,15 @@ class TestOnshapeStudioGui(unittest.TestCase):
         pump(0.3)
         QtTest.QTest.keyClick(length, QtCore.Qt.Key_Return)
         pump(0.5)
+        self.assertTrue(Gui.Control.activeDialog(), "Enter in the length field closed the panel")
 
-        self.assertFalse(Gui.Control.activeDialog(), "Enter left the Pad panel open")
+        viewport = Gui.ActiveDocument.ActiveView.graphicsView().viewport()
+        viewport.setFocus(QtCore.Qt.OtherFocusReason)
+        pump(0.3)
+        QtTest.QTest.keyClick(viewport, QtCore.Qt.Key_Return)
+        pump(0.5)
+
+        self.assertFalse(Gui.Control.activeDialog(), "Enter in the graphics left the Pad panel open")
         pads = [o for o in doc.Objects if o.isDerivedFrom("PartDesign::Pad")]
         self.assertEqual(len(pads), 1)
         self.assertAlmostEqual(pads[0].Shape.Volume, 1000.0, places=6)
@@ -345,7 +372,9 @@ class TestOnshapeStudioGui(unittest.TestCase):
 
     def testNewDocumentInPartDesignIsAPartStudio(self):
         """Std_New in PartDesign: one Body, active, its three planes shown, its axes and point
-        not. A cancelled first sketch leaves them shown; a sketch on the XY plane hides them."""
+        not. New Sketch with nothing selected opens a sketch with no plane in the sketch editor
+        (ops#640 rank 2, hands-on C-1: its Sketch plane field armed); the planes stay shown after
+        it and after a sketch on the selected XY plane (ops#626)."""
         doc = self.newDocument()
         bodies = [o for o in doc.Objects if o.isDerivedFrom("PartDesign::Body")]
         self.assertEqual(len(bodies), 1, [o.Name for o in doc.Objects])
@@ -354,30 +383,31 @@ class TestOnshapeStudioGui(unittest.TestCase):
         self.assertEqual(active.Name if active else None, body.Name)
         self.assertStudioPlanes(body, True)
 
-        # New Sketch with nothing selected opens the attachment dialog; Cancel removes the sketch
+        # New Sketch with nothing selected opens a sketch with no plane in the sketch editor
+        plane = models.originFeature(body, "XY_Plane")
         Gui.Selection.clearSelection()
         Gui.runCommand("PartDesign_NewSketch")
         pump(0.5)
-        self.assertTrue(Gui.Control.activeDialog(), "no attachment dialog")
-        taskButton(QtWidgets.QDialogButtonBox.Cancel).click()
-        pump(0.5)
-        self.assertFalse(Gui.Control.activeDialog())
-        self.assertEqual([o for o in body.Group if o.isDerivedFrom("Sketcher::SketchObject")], [])
+        self.assertTrue(Gui.ActiveDocument.getInEdit(), "the new sketch isn't in edit")
+        sketches = [o for o in body.Group if o.isDerivedFrom("Sketcher::SketchObject")]
+        self.assertEqual(len(sketches), 1, [o.Name for o in body.Group])
+        self.assertEqual(sketches[0].AttachmentSupport, [])
+        self.assertEqual(sketches[0].MapMode, "Deactivated")
+        self.assertStudioPlanes(body, True)
+        Gui.ActiveDocument.resetEdit()
+        pump(0.3)
         self.assertStudioPlanes(body, True)
 
-        # A sketch on the selected XY plane: the planes go
-        plane = models.originFeature(body, "XY_Plane")
+        # A sketch on the selected XY plane: the planes stay
         Gui.Selection.addSelection(doc.Name, body.Name, body.Origin.Name + "." + plane.Name + ".")
         Gui.runCommand("PartDesign_NewSketch")
         pump(0.5)
         sketches = [o for o in body.Group if o.isDerivedFrom("Sketcher::SketchObject")]
-        self.assertEqual(len(sketches), 1, [o.Name for o in body.Group])
+        self.assertEqual(len(sketches), 2, [o.Name for o in body.Group])
         if Gui.ActiveDocument.getInEdit():
             Gui.ActiveDocument.resetEdit()
             pump(0.3)
-        self.assertStudioPlanes(body, False)
-        # The cancelled attachment dialog's own temporary visibility didn't leave the Origin on
-        self.assertFalse(body.Origin.ViewObject.Visibility)
+        self.assertStudioPlanes(body, True)
 
     def testNewDocumentWithOneIsEmpty(self):
         """Std_New with 1, as the Start page's cards run it: an empty document in PartDesign too."""
@@ -388,8 +418,9 @@ class TestOnshapeStudioGui(unittest.TestCase):
 
     def runOnNewHome(self, userCfg=None, script=False):
         """FreeCAD.exe on a new settings folder holding the probe (and `userCfg` as user.cfg),
-        started with no file or with an empty script. Returns the navigation style it reports and
-        whether it has the pack's three decimals (a key nothing else writes on start)."""
+        started with no file or with an empty script. Returns the navigation style parameter it
+        reports, the style a new 3D view runs there, and whether it has the pack's three decimals
+        (a key nothing else writes on start)."""
         exe = freecadExecutable()
         if exe is None:
             self.skipTest("no FreeCAD executable beside the build")
@@ -419,20 +450,28 @@ class TestOnshapeStudioGui(unittest.TestCase):
         self.assertTrue(os.path.isfile(out), "the probe didn't report")
         with open(out, encoding="utf-8") as f:
             lines = dict(line.rstrip("\n").split("=", 1) for line in f if "=" in line)
-        return lines.get("style"), lines.get("decimals") == "3"
+        self.probe = lines  # every key the probe reported, for checks beyond the three
+        return lines.get("style"), lines.get("viewStyle"), lines.get("decimals") == "3"
 
     def testFirstStartAppliesTheOnshapePack(self):
-        """A settings folder with no user.cfg starts with the pack's TinkerCAD navigation style."""
-        self.assertEqual(self.runOnNewHome(), (TINKERCAD, True))
+        """A settings folder with no user.cfg starts with the pack's Onshape navigation style."""
+        style, _, decimals = self.runOnNewHome()
+        self.assertEqual((style, decimals), (ONSHAPE, True))
+        # rank 90 (hands-on R12b): Onshape's plain right-drag is a free trackball, so the pack
+        # sets the free orbit (4, RoundedArcball) over a turntable; Alt+right-drag keeps Z up
+        self.assertEqual(self.probe.get("orbit"), "4", "the pack's orbit is not the free one")
 
     def testFirstStartLeavesAnExistingUserCfgAlone(self):
         """A settings folder with a user.cfg keeps its own navigation style."""
-        self.assertEqual(self.runOnNewHome(userCfg=USER_CFG), ("Gui::CADNavigationStyle", False))
+        style, _, decimals = self.runOnNewHome(userCfg=USER_CFG)
+        self.assertEqual((style, decimals), ("Gui::CADNavigationStyle", False))
 
     def testFirstStartSkipsARunWithAScript(self):
         """A run started with a script (as the test runners start FreeCAD) keeps the code
-        defaults on a new folder: not the pack's decimals, nor its navigation style (the view
-        writes its own default)."""
-        style, decimals = self.runOnNewHome(script=True)
-        self.assertNotEqual(style, TINKERCAD)
+        defaults on a new folder: not the pack's decimals, and no navigation style written (the
+        pack is skipped; the status bar's indicator writes none when the key is unset, ops#640),
+        so a new 3D view runs the code default, the Onshape style."""
+        style, viewStyle, decimals = self.runOnNewHome(script=True)
+        self.assertIn(style, ("", ONSHAPE))
+        self.assertEqual(viewStyle, ONSHAPE)
         self.assertFalse(decimals)

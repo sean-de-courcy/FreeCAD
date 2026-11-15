@@ -61,15 +61,21 @@ public:
 
     const std::vector<std::string> getBodies() const;
     int getType() const;
+    /// Keep tools (FreeCAD-CH ops#640 rank 28)
+    bool getKeepTools() const;
 
 private Q_SLOTS:
     void onButtonBodyAdd(const bool checked);
     void onButtonBodyRemove(const bool checked);
     void onBodyDeleted();
     void onTypeChanged(int index);
+    void onKeepToolsChanged(bool on);
 
 protected:
     void exitSelectionMode();
+    /// The fields of the operation: Union and Intersect list this part among the tools,
+    /// Subtract shows it as the target, with Offset (ops#640 rank 28, hands-on A-5)
+    void showFieldsOf(int index);
 
 protected:
     void changeEvent(QEvent* e) override;
@@ -87,6 +93,8 @@ private:
         bodyRemove
     };
     selectionModes selectionMode;
+    /// A Boolean studio feature's Targets and Tools (ops#654 P5), or null
+    QWidget* studioBox = nullptr;
 };
 
 /// simulation dialog for the TaskView

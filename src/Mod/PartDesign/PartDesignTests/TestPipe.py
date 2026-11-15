@@ -67,6 +67,47 @@ class TestPipe(unittest.TestCase):
         self.Doc.recompute()
         self.assertAlmostEqual(self.AdditivePipe.Shape.Volume, 3.14159265)
 
+    def testRecomputeWithNothingTouchedRunsNothing(self):
+        """A recompute with nothing touched runs no object of a Body with a pipe (ops#640). Pipe
+        declared a Midplane of its own beside ProfileBased's: the inherited one then was in no
+        property list, so no recompute cleared the touched state it was constructed with, and
+        the pipe, with every feature after it, ran in every recompute."""
+        self.testSimpleAdditivePipeCase()
+        pad = self.Doc.addObject("PartDesign::Pad", "Pad")
+        self.Body.addObject(pad)
+        pad.Profile = self.ProfileSketch
+        pad.Length = 3
+        self.Doc.recompute()
+        self.assertTrue(pad.isValid() and self.AdditivePipe.isValid())
+        volume = self.Body.Shape.Volume
+        for obj in self.Doc.Objects:
+            self.assertFalse(obj.MustExecute, obj.Name)
+            self.assertNotIn("Touched", obj.State, obj.Name)
+        self.assertEqual(self.Doc.recompute(), 0)
+        self.assertEqual(self.Doc.recompute(), 0)
+        # A change of the pipe still runs it and what follows: the wall option that shares the
+        # name (the registered Midplane) is the pipe's one input here
+        self.AdditivePipe.Midplane = True
+        self.assertTrue(self.AdditivePipe.MustExecute)
+        self.assertEqual(self.Doc.recompute(), 3)  # the pipe, the pad, the Body
+        self.assertAlmostEqual(self.Body.Shape.Volume, volume)
+        self.assertEqual(self.Doc.recompute(), 0)
+
+    def testNewPurgedObjectAsksNothing(self):
+        """No PartDesign object asks to run once it is purged with nothing set since (ops#640):
+        one that does reads a property no purge reaches, as the three pipe types did."""
+        made = 0
+        for name in sorted(t for t in self.Doc.supportedTypes() if t.startswith("PartDesign::")):
+            try:
+                obj = self.Doc.addObject(name, "Probe")
+            except Exception:
+                continue  # an abstract type
+            made += 1
+            obj.purgeTouched()
+            self.assertFalse(obj.MustExecute, name)
+            self.Doc.removeObject(obj.Name)
+        self.assertGreater(made, 50)
+
     def testSimpleSubtractivePipeCase(self):
         self.Body = self.Doc.addObject("PartDesign::Body", "Body")
         self.ProfileSketch = self.Doc.addObject("Sketcher::SketchObject", "ProfileSketch")
@@ -182,6 +223,9 @@ class TestPipeEndNames(unittest.TestCase):
         pipe = self.body.newObject("PartDesign::" + kind, "Pipe")
         pipe.Profile = profile
         pipe.Spine = (spine, [])
+        # These pipes sweep both ways from a profile in the middle (ops#351's ends), as before
+        # Onshape's one-way default (ops#640, SW0)
+        properties.setdefault("ExtendToFullPath", True)
         for name, value in properties.items():
             setattr(pipe, name, value)
         self.doc.recompute()
@@ -2382,7 +2426,9 @@ class TestPipeCorners(unittest.TestCase):
         profile = self.profile(models.rectangle(-1, -1, 1, 1))
         pipe, seconds = self.timedPipe(spine, profile, Transition="Transformed", Refine=False)
         self.assertValidSolid(pipe)
-        self.assertAlmostEqual(pipe.Shape.Volume, 218.489, 3)
+        # SC7's readout (ops#640): C++ meshes at deflection 0.01 and 0.005 read 217.185 and 217.181;
+        # OCCT's default integration read 218.489 (0.6 % over)
+        self.assertAlmostEqual(pipe.Shape.Volume, 217.213, 3)
         self.assertLess(seconds, 10)
 
     def arcAfterACorner(self, degrees, tilt, radius, arc):
@@ -3637,9 +3683,12 @@ class TestLoosePipeWarns(unittest.TestCase):
 
     def testLongSpiral(self):
         """A circle of radius 0.5 along a 3D spiral through 1000 points (radius 10 to 30 mm,
-        rising 0.05 mm a point; curvature radius at least 10 mm), Standard mode: at degree 14 it
-        builds 0.43 mm off the tube with tolerances of 2 mm (at OCCT's default degree it failed to
-        build). Before, the Pipe was "Valid" with no warning"""
+        rising 0.05 mm a point; curvature radius at least 10 mm), Standard mode. OCCT's corrected
+        Frenet law drifts along it: at degree 14 the sweep was 0.43 mm off the tube with vertex
+        tolerances of 2 mm, warned on Windows and refused on macOS (one face failed the shape
+        check there, ops#667). A circle about the spine sweeps to the same solid in any frame: the
+        loose sweep is built again with the Frenet frame, within 1e-4 of the tube on every
+        platform, valid with no warning"""
         points = [
             V((10 + 0.02 * i) * math.cos(i * 0.05), (10 + 0.02 * i) * math.sin(i * 0.05), 0.05 * i)
             for i in range(1000)
@@ -3659,7 +3708,25 @@ class TestLoosePipeWarns(unittest.TestCase):
         pipe = self.body.newObject("PartDesign::AdditivePipe", "Pipe")
         pipe.Profile = profile
         pipe.Spine = (spine, ["Edge1"])
-        self.assertWarns(pipe)
+        pipe.Mode = "Standard"  # not None's Frenet off a plane (ops#640), which builds it tight
+        self.doc.recompute()
+        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+        self.assertNotIn("tolerance of", pipe.getStatusString())
+        shape = pipe.Shape
+        self.assertLess(shape.getTolerance(1), 1e-3)
+        # Pappus: the tube's volume is the circle's area times the spine's length
+        volume = math.pi * 0.25 * curve.length()
+        self.assertAlmostEqual(shape.Volume, volume, delta=1e-5 * volume)
+        # The side within 1e-4 of the tube: its distance from the spine is the radius
+        side = [face for face in shape.Faces if face.Surface.TypeId == "Part::GeomBSplineSurface"]
+        self.assertEqual(len(side), 1)
+        u0, u1, v0, v1 = side[0].ParameterRange
+        spineEdge = curve.toShape()
+        for i in range(10):
+            for j in range(30):
+                point = side[0].valueAt(u0 + (u1 - u0) * (i + 0.5) / 10, v0 + (v1 - v0) * (j + 0.5) / 30)
+                distance = spineEdge.distToShape(Part.Vertex(point))[0]
+                self.assertAlmostEqual(distance, 0.5, delta=1e-4)
 
     def testTwistedSquareAlongAnAuxiliarySpine(self):
         """A square of side 2 along a 50 mm line up Z, a helix of radius 5 and pitch 50 as

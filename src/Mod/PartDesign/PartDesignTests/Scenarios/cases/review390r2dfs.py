@@ -301,8 +301,22 @@ case("R2dfsTwoHolesMoveA", E, "Two holes in one sketch (two groups of two crossi
 case("R2dfsTwoHolesMoveAFlip", R2dfsTwoHolesMoveA, "Flipped as well.", flip=True)
 case("R2dfsTwoHolesMoveAOver", R2dfsTwoHolesMoveA, "The first (100) moved 4 next to the second (102).",
      groups=NEXT, dx=4.0)
+class UnionOfCircles:
+    """Overlapping circles of one sketch cut their union (Onshape's regions; profile regions 3):
+    a crossing inside another circle of the same sketch is gone, so its point breaks."""
+
+    def expected(self, name):
+        j, g, c, label = self.place(name)
+        x = self.crossingsOf(g, c)[label]
+        for other in range(len(self.groups[g])):
+            if other != c and self.groups[g][other][0] == "circle" and abs(x - self.pos[(g, other)]) < HALF - 1e-9:
+                return BROKEN
+        return super().expected(name)
+
+
 case("R2dfsTwoHolesOverlapMerge", R2dfsTwoHolesMoveA, "The first (100) moved 1.5 onto the second (102): "
-     "the rims merge, crossings 4 -> 2.", groups=NEXT, dx=1.5)
+     "the rims merge, crossings 4 -> 2; the sketch cuts the circles' union (Onshape), so the inner crossings "
+     "c0_R and c1_L break (batch 3, R2).", UnionOfCircles, groups=NEXT, dx=1.5)
 case("R2dfsTwoHolesOtherSketchMoveA", R2dfsTwoHolesMoveA, "Two pockets, the second hole in another sketch.",
      groups=((("circle", 100.0),), (("circle", 104.0),)), REFS=refs((0, 0, LR), (1, 0, LR)))
 case("R2dfsTwoHolesOtherSketchMoveAFlip", R2dfsTwoHolesOtherSketchMoveA, "Flipped as well.", flip=True)

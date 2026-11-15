@@ -26,11 +26,17 @@
 
 #include <QAction>
 #include <QApplication>
+#include <QCheckBox>
 #include <QLabel>
+#include <QLineEdit>
 #include <QMessageBox>
 #include <QPushButton>
 
+#include <algorithm>
+#include <array>
 
+
+#include <App/Application.h>
 #include <App/Document.h>
 #include <App/DocumentObject.h>
 #include <Gui/Application.h>
@@ -42,6 +48,7 @@
 #include <Gui/ViewProvider.h>
 #include <Mod/PartDesign/App/Body.h>
 #include <Mod/PartDesign/App/FeatureBoolean.h>
+#include <Mod/PartDesign/App/StudioList.h>
 
 #include "ui_TaskBooleanParameters.h"
 #include "TaskBooleanParameters.h"
@@ -50,10 +57,31 @@
 using namespace PartDesignGui;
 using namespace Gui;
 
+namespace PartDesignGui
+{
+// StudioGui.cpp (FreeCAD-CH ops#654 P5): a Boolean studio feature's Targets and Tools
+QWidget* makeStudioBooleanBox(App::DocumentObject* owner);
+void studioBooleanBoxSetType(QWidget* box, const char* type);
+void studioBooleanBoxSetKeepTools(QWidget* box, bool on);
+}  // namespace PartDesignGui
+
 /* TRANSLATOR PartDesignGui::TaskBooleanParameters */
 
 namespace
 {
+
+// The tools list's row of the Boolean's own part (FreeCAD-CH ops#640 rank 28): a tool of a Union or
+// an Intersect, which getBodies() leaves out (the Boolean is in it)
+constexpr int ownPartRole = Qt::UserRole + 1;
+
+constexpr const char* keepToolsParam = "BooleanKeepTools";
+
+// Union, Subtract, Intersect: Type's Fuse, Cut, Common (of the generated form, whatever its scope)
+template<typename Form>
+std::array<QPushButton*, 3> typeButtons(const Form& ui)
+{
+    return {ui.buttonUnion, ui.buttonSubtract, ui.buttonIntersect};
+}
 
 PartDesign::Body* getBodyOfSelection(App::DocumentObject* object)
 {
@@ -108,18 +136,21 @@ TaskBooleanParameters::TaskBooleanParameters(ViewProviderBoolean* BooleanView, Q
     ui->setupUi(proxy);
     QMetaObject::connectSlotsByName(this);
 
-    // clang-format off
-    connect(ui->buttonBodyAdd, &QToolButton::toggled,
-            this, &TaskBooleanParameters::onButtonBodyAdd);
-    connect(ui->buttonBodyRemove, &QToolButton::toggled,
-            this, &TaskBooleanParameters::onButtonBodyRemove);
-    connect(ui->comboType, qOverload<int>(&QComboBox::currentIndexChanged),
-            this, &TaskBooleanParameters::onTypeChanged);
-    // clang-format on
-
     this->groupLayout()->addWidget(proxy);
 
     PartDesign::Boolean* pcBoolean = BooleanView->getObject<PartDesign::Boolean>();
+    // Onshape's Boolean (ops#640 rank 28, hands-on A-5): its own part is a tool of a Union or an
+    // Intersect, listed first, and the Targets of a Subtract
+    PartDesign::Body* own = pcBoolean->getFeatureBody();
+    if (own && !pcBoolean->isMerge()) {
+        const QString label = QString::fromUtf8(own->Label.getValue());
+        auto item = new QListWidgetItem(ui->listWidgetBodies);
+        item->setText(tr("%1 (this part)").arg(label));
+        item->setData(Qt::UserRole, QString::fromLatin1(own->getNameInDocument()));
+        item->setData(ownPartRole, true);
+        item->setFlags(Qt::ItemIsEnabled);
+        ui->targetsField->setText(label);
+    }
     std::vector<App::DocumentObject*> bodies = pcBoolean->Group.getValues();
     for (auto body : bodies) {
         QListWidgetItem* item = new QListWidgetItem(ui->listWidgetBodies);
@@ -138,15 +169,50 @@ TaskBooleanParameters::TaskBooleanParameters(ViewProviderBoolean* BooleanView, Q
     connect(action, &QAction::triggered, this, &TaskBooleanParameters::onBodyDeleted);
     ui->listWidgetBodies->setContextMenuPolicy(Qt::ActionsContextMenu);
 
-    int index = pcBoolean->Type.getValue();
-    ui->comboType->setCurrentIndex(index);
+    // A new Boolean opens on Union, Keep tools as last accepted (the Boolean's default)
+    const int index = std::clamp(static_cast<int>(pcBoolean->Type.getValue()), 0, 2);
+    typeButtons(*ui)[index]->setChecked(true);
+    ui->checkKeepTools->setChecked(pcBoolean->KeepTools.getValue());
+    showFieldsOf(index);
+
+    // clang-format off
+    connect(ui->buttonBodyAdd, &QToolButton::toggled,
+            this, &TaskBooleanParameters::onButtonBodyAdd);
+    connect(ui->buttonBodyRemove, &QToolButton::toggled,
+            this, &TaskBooleanParameters::onButtonBodyRemove);
+    connect(ui->checkKeepTools, &QCheckBox::toggled,
+            this, &TaskBooleanParameters::onKeepToolsChanged);
+    // clang-format on
+    const auto buttons = typeButtons(*ui);
+    for (int i = 0; i < static_cast<int>(buttons.size()); ++i) {
+        connect(buttons[i], &QPushButton::toggled, this, [this, i](bool on) {
+            if (on) {
+                onTypeChanged(i);
+            }
+        });
+    }
+
+    // A Boolean studio feature (FreeCAD-CH ops#654 P5): its targets and tools are parts of the
+    // studio by id, ticked among the live parts at its place; the Body list and its picks aren't
+    // used
+    studioBox = makeStudioBooleanBox(pcBoolean);
+    if (studioBox) {
+        ui->labelTools->setVisible(false);
+        ui->buttonBodyAdd->setVisible(false);
+        ui->buttonBodyRemove->setVisible(false);
+        ui->listWidgetBodies->setVisible(false);
+        showFieldsOf(index);
+        groupLayout()->addWidget(studioBox);
+    }
 
     // A Merge (FreeCAD-CH ops#325, design 2.6): its tool is the merged part's feature, which a
     // pick here would replace by a Body; Accept clears its warning, in this dialog's transaction
     if (pcBoolean->isMerge()) {
         ui->buttonBodyAdd->setEnabled(false);
         ui->buttonBodyRemove->setEnabled(false);
-        ui->comboType->setEnabled(false);
+        for (auto button : typeButtons(*ui)) {
+            button->setEnabled(false);
+        }
         QStringList merged;
         for (auto body : pcBoolean->mergedBodies()) {
             merged << QString::fromUtf8(body->Label.getValue());
@@ -325,6 +391,13 @@ void TaskBooleanParameters::onButtonBodyRemove(bool checked)
 void TaskBooleanParameters::onTypeChanged(int index)
 {
     PartDesign::Boolean* pcBoolean = BooleanView->getObject<PartDesign::Boolean>();
+    if (studioBox) {
+        // A list edit in the dialog's transaction (ops#654 P5)
+        const char* types[] = {"Fuse", "Cut", "Common"};
+        studioBooleanBoxSetType(studioBox, types[std::clamp(index, 0, 2)]);
+        showFieldsOf(index);
+        return;
+    }
 
     switch (index) {
         case 0:
@@ -340,37 +413,88 @@ void TaskBooleanParameters::onTypeChanged(int index)
             pcBoolean->Type.setValue("Fuse");
     }
 
+    showFieldsOf(index);
+
     // Force UI update before starting heavy computation to show user's selection immediately
     QApplication::processEvents();
 
     pcBoolean->getDocument()->recomputeFeature(pcBoolean);
 }
 
+void TaskBooleanParameters::onKeepToolsChanged(bool on)
+{
+    if (studioBox) {
+        studioBooleanBoxSetKeepTools(studioBox, on);  // ops#654 P5: it changes what is consumed
+        return;
+    }
+    PartDesign::Boolean* pcBoolean = BooleanView->getObject<PartDesign::Boolean>();
+    pcBoolean->KeepTools.setValue(on);
+    // An Intersect that misses keeps its part with Keep tools
+    pcBoolean->getDocument()->recomputeFeature(pcBoolean);
+}
+
+void TaskBooleanParameters::showFieldsOf(int index)
+{
+    // Union and Intersect: Tools, Keep tools; Subtract: Tools, Targets, Offset, Keep tools (A-5)
+    const bool merge = BooleanView->getObject<PartDesign::Boolean>()->isMerge();
+    const bool subtract = index == 1 && !merge;
+    ui->checkKeepTools->setVisible(!merge);
+    if (studioBox) {
+        // A studio Boolean's targets are its box's (ops#654 P5)
+        ui->labelTargets->setVisible(false);
+        ui->targetsField->setVisible(false);
+        ui->checkOffset->setVisible(false);
+        return;
+    }
+    ui->labelTargets->setVisible(subtract);
+    ui->targetsField->setVisible(subtract);
+    ui->checkOffset->setVisible(subtract);
+    if (ui->listWidgetBodies->count() > 0) {
+        QListWidgetItem* first = ui->listWidgetBodies->item(0);
+        if (first->data(ownPartRole).toBool()) {
+            first->setHidden(subtract);
+        }
+    }
+}
+
 const std::vector<std::string> TaskBooleanParameters::getBodies() const
 {
     std::vector<std::string> result;
     for (int i = 0; i < ui->listWidgetBodies->count(); i++) {
-        result.push_back(ui->listWidgetBodies->item(i)->data(Qt::UserRole).toString().toStdString());
+        QListWidgetItem* item = ui->listWidgetBodies->item(i);
+        if (!item->data(ownPartRole).toBool()) {
+            result.push_back(item->data(Qt::UserRole).toString().toStdString());
+        }
     }
     return result;
 }
 
 int TaskBooleanParameters::getType() const
 {
-    return ui->comboType->currentIndex();
+    const auto buttons = typeButtons(*ui);
+    const auto checked = std::ranges::find_if(buttons, [](QPushButton* button) {
+        return button->isChecked();
+    });
+    return checked == buttons.end() ? 0 : static_cast<int>(checked - buttons.begin());
+}
+
+bool TaskBooleanParameters::getKeepTools() const
+{
+    return ui->checkKeepTools->isChecked();
 }
 
 void TaskBooleanParameters::onBodyDeleted()
 {
     PartDesign::Boolean* pcBoolean = BooleanView->getObject<PartDesign::Boolean>();
     std::vector<App::DocumentObject*> bodies = pcBoolean->Group.getValues();
-    int index = ui->listWidgetBodies->currentRow();
-    if (index < 0 && (size_t)index > bodies.size()) {
+    // By the row's name: the first row may be the Boolean's own part, which stays (ops#640 rank 28)
+    QListWidgetItem* current = ui->listWidgetBodies->currentItem();
+    if (!current || current->data(ownPartRole).toBool()) {
         return;
     }
 
-    App::DocumentObject* body = bodies[index];
-    QString internalName = ui->listWidgetBodies->item(index)->data(Qt::UserRole).toString();
+    App::DocumentObject* body = nullptr;
+    QString internalName = current->data(Qt::UserRole).toString();
     for (auto it = bodies.begin(); it != bodies.end(); ++it) {
         if (internalName == QLatin1String((*it)->getNameInDocument())) {
             body = *it;
@@ -379,7 +503,10 @@ void TaskBooleanParameters::onBodyDeleted()
         }
     }
 
-    ui->listWidgetBodies->model()->removeRow(index);
+    delete ui->listWidgetBodies->takeItem(ui->listWidgetBodies->row(current));
+    if (!body) {
+        return;
+    }
     pcBoolean->setObjects(bodies);
     pcBoolean->getDocument()->recomputeFeature(pcBoolean);
 
@@ -412,10 +539,7 @@ void TaskBooleanParameters::changeEvent(QEvent* e)
 {
     TaskBox::changeEvent(e);
     if (e->type() == QEvent::LanguageChange) {
-        ui->comboType->blockSignals(true);
-        int index = ui->comboType->currentIndex();
         ui->retranslateUi(proxy);
-        ui->comboType->setCurrentIndex(index);
     }
 }
 
@@ -478,6 +602,39 @@ bool TaskDlgBooleanParameters::accept()
     if (!obj || !obj->isAttachedToDocument()) {
         return false;
     }
+    // A Boolean studio feature (ops#654 P5): its list edits are made; Keep tools remembered
+    if (PartDesign::isStudioOwner(obj)) {
+        try {
+            App::GetApplication()
+                .GetParameterGroupByPath("User parameter:BaseApp/Preferences/Mod/PartDesign")
+                ->SetBool(keepToolsParam, parameter->getKeepTools());
+            Gui::Command::doCommand(Gui::Command::Doc, "App.ActiveDocument.recompute()");
+            Gui::Command::doCommand(Gui::Command::Gui, "Gui.activeDocument().resetEdit()");
+            // FreeCAD-CH (ops#654 P6p): the OK is the command that makes a split's pieces parts
+            // (once the edit has ended; a step of its own when the edit's is closed by then)
+            App::Document* document = obj->getDocument();
+            const bool own = !document->hasPendingTransaction();
+            if (own) {
+                document->openTransaction(QT_TRANSLATE_NOOP("Command", "Make pieces parts"));
+            }
+            Gui::Command::doCommand(
+                Gui::Command::Doc,
+                "import PartDesign\nPartDesign.studioMakePieces(%s)",
+                Gui::Command::getObjectCmd(obj).c_str()
+            );
+            document->commitTransaction();
+        }
+        catch (const Base::Exception& e) {
+            obj->getDocument()->abortTransaction();
+            QMessageBox::warning(
+                parameter,
+                tr("Boolean: Accept: Input error"),
+                QCoreApplication::translate("Exception", e.what())
+            );
+            return false;
+        }
+        return true;
+    }
     BooleanView->Visibility.setValue(true);
 
     try {
@@ -495,9 +652,32 @@ bool TaskDlgBooleanParameters::accept()
         str << "])";
         Gui::Command::runCommand(Gui::Command::Doc, str.str().c_str());
         FCMD_OBJ_CMD(obj, "Type = " << parameter->getType());
+        // Keep tools, remembered for the next Boolean (ops#640 rank 28, hands-on A-5)
+        auto boolean = freecad_cast<PartDesign::Boolean*>(obj);
+        const bool plain = boolean && !boolean->isMerge();
+        if (plain) {
+            const bool keep = parameter->getKeepTools();
+            FCMD_OBJ_CMD(obj, "KeepTools = " << (keep ? "True" : "False"));
+            App::GetApplication()
+                .GetParameterGroupByPath("User parameter:BaseApp/Preferences/Mod/PartDesign")
+                ->SetBool(keepToolsParam, keep);
+        }
 
         Gui::Command::doCommand(Gui::Command::Doc, "App.ActiveDocument.recompute()");
         Gui::Command::doCommand(Gui::Command::Gui, "Gui.activeDocument().resetEdit()");
+        // A kept tool, or one a Union left apart, is a part still: shown; a consumed part is
+        // hidden, as Onshape deletes it (B3-3a, A-2' b)
+        if (plain) {
+            const std::vector<App::DocumentObject*> separate = boolean->SeparateTools.getValues();
+            for (auto tool : boolean->Group.getValues()) {
+                if (boolean->KeepTools.getValue() || std::ranges::find(separate, tool) != separate.end()) {
+                    FCMD_OBJ_SHOW(tool);
+                }
+                else if (tool->isDerivedFrom<PartDesign::Body>()) {
+                    FCMD_OBJ_HIDE(tool);
+                }
+            }
+        }
         obj->getDocument()->commitTransaction();
     }
     catch (const Base::Exception& e) {

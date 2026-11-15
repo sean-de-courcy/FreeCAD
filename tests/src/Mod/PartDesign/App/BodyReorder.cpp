@@ -463,7 +463,22 @@ TEST_F(BodyReorderChain, aParkedGuessRecordKeepsItsOriginalFingerprint)
     auto pattern = _doc->addObject<PartDesign::LinearPattern>("Pattern");
     _body->addObject(pattern);
     pattern->Originals.setValues({p(3)});
-    pattern->Direction.setValue(p(4), {"Edge1"});
+    // Along the block's front bottom edge (x): the copy sits on the top face. Along Edge1, the
+    // block's vertical edge, it floated above the part, and a copy that touches nothing of the
+    // part is dropped since Onshape's pattern rules (7756c9901e), the pattern failing (ops#652)
+    std::string alongX;
+    const auto& shape = p(4)->Shape.getShape();
+    for (unsigned long i = 1; i <= shape.countSubShapes(TopAbs_EDGE) && alongX.empty(); ++i) {
+        const auto name = "Edge" + std::to_string(i);
+        const auto box = shape.getSubTopoShape(name.c_str()).getBoundBox();
+        if (box.MaxX - box.MinX > 1 && std::abs(box.MaxY - box.MinY) < 1e-6
+            && std::abs(box.MaxZ - box.MinZ) < 1e-6 && std::abs(box.MinY) < 1e-6
+            && std::abs(box.MinZ) < 1e-6) {
+            alongX = name;
+        }
+    }
+    ASSERT_FALSE(alongX.empty());
+    pattern->Direction.setValue(p(4), {alongX});
     pattern->Length.setValue(6.0);
     pattern->Occurrences.setValue(2);
     _body->Tip.setValue(pattern);

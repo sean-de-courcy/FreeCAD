@@ -161,7 +161,8 @@ App::DocumentObjectExecReturn* Thickness::execute()
             TopoShape res = makeTopoShape(false);
             try {
                 if (getSelectedHistoryAlgorithm() == App::HistoryAlgorithm::V2) {
-                    solid.Tag = getID();
+                    // a studio step names by its owner (ops#654, notes/stored-tags.md 3 item 2)
+                    solid.Tag = namingTag() ? namingTag() : getID();
                 }
 
                 res = solid.makeElementThickSolid(
@@ -198,6 +199,14 @@ App::DocumentObjectExecReturn* Thickness::execute()
     // store shape before refinement
     this->rawShape = result;
     result = refineShapeIfActive(result);
+    // A shell may fall apart (a pocket's cup standing free in the open box, ops#640): with
+    // the single-solid rule on, that is an error, not the first solid alone.
+    if (!isSingleSolidRuleSatisfied(result.getShape())) {
+        return new App::DocumentObjectExecReturn(QT_TRANSLATE_NOOP(
+            "Exception",
+            "Result has multiple solids: enable 'Allow Compound' in the active body."
+        ));
+    }
     TopoShape finalShape = getSolid(result);
     if (!finalShape.isValid()) {
         return new App::DocumentObjectExecReturn(

@@ -125,6 +125,7 @@ class TestDimensionInPlaceGui(SketcherGuiTestCase):
         self.pump(200)
         self.assertIsNotNone(FreeCADGui.ActiveDocument.getInEdit(), "Expected sketch edit mode")
         self.view = FreeCADGui.ActiveDocument.ActiveView
+        self.fix_view_height(self.view)
         self.view.setCamera(TOP_VIEW_CAMERA)
         self.flush_gui(100)
         self.viewport = self.view.graphicsView().viewport()
@@ -766,29 +767,27 @@ class TestDimensionInPlaceGui(SketcherGuiTestCase):
         sketch.addConstraint(Sketcher.Constraint("Distance", 2, 3.0))
         self.doc.recompute()
 
-    def test_d17_retry_after_a_solver_failure(self):
-        """D17: on the triangle's hypotenuse, 100 fails in the solver (the legs allow 1 to 7):
-        the field stays open. Then 6 and Enter sets 6. The failed setDatum replaced the
-        constraint objects; the retry must not use the old one."""
+    def test_d17_an_impossible_value_is_kept_and_named(self):
+        """D17: on the triangle's hypotenuse, 100 can't be solved (the legs allow 1 to 7). As in
+        Onshape (SK8b, PL1d) the value is kept: the field closes, the Distance holds 100, the
+        triangle stays as drawn (the hypotenuse 5 long), the new Distance is named in the
+        conflict and the sketch warns. One undo step. (Before the conflict was solved around,
+        the field stayed open for a retry.)"""
         self.add_triangle()
         self.start_edit()
-        state = self.answer_fields(
-            [
-                {"text": "100", "key": QtCore.Qt.Key_Return},
-                {"text": "6", "key": QtCore.Qt.Key_Return},
-            ]
-        )
+        state = self.answer_fields([{"text": "100", "key": QtCore.Qt.Key_Return}])
         self.run_with_selection(["Edge2"], "Sketcher_ConstrainDistance")
-        self.wait_answered(state, 2)
+        self.wait_answered(state, 1)
 
-        first, second = state["seen"]
-        self.assertTrue(first["open_after"], "Expected the field to stay open after 100")
-        self.assertFalse(second["open_after"])
+        self.assertFalse(state["seen"][0]["open_after"], "Expected the field to close on 100")
         new = self.sketch.Constraints[-1]
         self.assertEqual(new.Type, "Distance")
-        self.assertAlmostEqual(new.Value, 6.0, places=9)
+        self.assertAlmostEqual(new.Value, 100.0, places=9)
         self.doc.recompute()
-        self.assertAlmostEqual(self.sketch.Geometry[1].length(), 6.0, places=7)
+        self.assertIn(len(self.sketch.Constraints), self.sketch.ConflictingConstraints)
+        self.assertAlmostEqual(self.sketch.Geometry[1].length(), 5.0, places=7)
+        self.assertAlmostEqual(self.sketch.Geometry[0].length(), 4.0, places=7)
+        self.assertAlmostEqual(self.sketch.Geometry[2].length(), 3.0, places=7)
         self.assert_one_undo_step()
 
     def test_d18_failed_link_then_escape_keeps_the_measured_value(self):
