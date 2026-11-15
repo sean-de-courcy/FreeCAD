@@ -2265,7 +2265,8 @@ void CmdPartDesignPad::activated(int iMsg)
     Q_UNUSED(iMsg);
 
     leaveSketchForProfile();
-    prepareProfileBased(this, "Pad", 10.0);
+    // FreeCAD-CH (ops#640 gaps3 row 15): Onshape's Extrude opens at 25 mm (oracle 24, G3-1)
+    prepareProfileBased(this, "Pad", 25.0);
 }
 
 bool CmdPartDesignPad::isActive()
@@ -2295,7 +2296,8 @@ void CmdPartDesignPocket::activated(int iMsg)
 {
     Q_UNUSED(iMsg);
 
-    prepareProfileBased(this, "Pocket", 5.0);
+    // FreeCAD-CH (ops#640 gaps3 row 15): Onshape's Extrude (remove) opens at 25 mm, as Extrude
+    prepareProfileBased(this, "Pocket", 25.0);
 }
 
 bool CmdPartDesignPocket::isActive()
