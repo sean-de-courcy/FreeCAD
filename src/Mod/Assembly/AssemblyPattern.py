@@ -486,8 +486,7 @@ class InstancePattern:
             # for one) is not an error printed with a traceback: no copies yet, the dialog says what
             # to pick. A picked reference that is gone still raises
             if missingPick(fp):
-                self.reconcile(fp)
-                return
+                return  # nothing to copy along yet: the copies come with the direction
             # Raises when the direction is lost, before anything changes: the copies stay
             self.transforms(fp)
         self.reconcile(fp)
