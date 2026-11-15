@@ -13366,6 +13366,119 @@ bool contactOnPartOfAnEdge(
     return false;
 }
 
+bool kinkedContour(
+    const std::vector<std::vector<TopoDS_Shape>>& contours,
+    std::string* where,
+    std::vector<std::vector<TopoDS_Shape>>* runs
+)
+{
+    bool found = false;
+    if (runs) {
+        runs->clear();
+    }
+    // A turn OCCT's tooth shows at: 1e-4 rad leaves 1e-5 of the round's volume (measured: 0.004
+    // degrees, 4.9e-5 mm3 of 4.29), and the mitre is built exactly down to it
+    constexpr double kink = 1.0e-4;
+    // OCCT's own tolerance for edges that carry on tangentially (ChFi3d_Builder's angular): below
+    // it a contour is a tangent chain in every one of its tests, and a pick still carries on
+    constexpr double chain = 1.0e-2;
+    try {
+        // The edge's direction leaving the vertex
+        const auto leaving = [](const TopoDS_Edge& edge, const TopoDS_Vertex& vertex, gp_Vec& out) {
+            if (BRep_Tool::Degenerated(edge) || BRep_Tool::IsClosed(edge)) {
+                return false;
+            }
+            const BRepAdaptor_Curve curve(edge);
+            const double t = BRep_Tool::Parameter(vertex, edge);
+            gp_Pnt point;
+            gp_Vec tangent;
+            curve.D1(t, point, tangent);
+            if (tangent.Magnitude() <= gp::Resolution()) {
+                return false;
+            }
+            const double middle = (curve.FirstParameter() + curve.LastParameter()) / 2;
+            out = t < middle ? tangent : -tangent;
+            return true;
+        };
+        for (const auto& contour : contours) {
+            const std::size_t count = contour.size();
+            // Whether the contour is cut after its edge i
+            std::vector<bool> cut(count, false);
+            if (count == 1 || count == 2) {
+                cut[count - 1] = true;
+            }
+            // Each edge and the next, and the last with the first where the contour closes
+            for (std::size_t i = 0; count >= 2 && i < (count > 2 ? count : count - 1); ++i) {
+                const TopoDS_Shape& a = contour[i];
+                const TopoDS_Shape& b = contour[(i + 1) % count];
+                // An open contour ends after its last edge
+                bool joined = false;
+                if (a.IsNull() || b.IsNull() || a.ShapeType() != TopAbs_EDGE
+                    || b.ShapeType() != TopAbs_EDGE || a.IsSame(b)) {
+                    cut[i] = cut[i] || i + 1 == count;
+                    continue;
+                }
+                const TopoDS_Edge& first = TopoDS::Edge(a);
+                const TopoDS_Edge& second = TopoDS::Edge(b);
+                for (TopExp_Explorer it(first, TopAbs_VERTEX); it.More(); it.Next()) {
+                    const TopoDS_Vertex& vertex = TopoDS::Vertex(it.Current());
+                    bool shared = false;
+                    for (TopExp_Explorer other(second, TopAbs_VERTEX); other.More() && !shared;
+                         other.Next()) {
+                        shared = other.Current().IsSame(vertex);
+                    }
+                    joined = joined || shared;
+                    gp_Vec out1;
+                    gp_Vec out2;
+                    if (!shared || !leaving(first, vertex, out1) || !leaving(second, vertex, out2)) {
+                        continue;
+                    }
+                    // Carrying straight on, the two leave the vertex in opposite directions
+                    const double turn = pi - out1.Angle(out2);
+                    if (turn > kink) {
+                        if (where && !found) {
+                            const gp_Pnt p = BRep_Tool::Pnt(vertex);
+                            std::ostringstream text;
+                            text << "at (" << p.X() << ", " << p.Y() << ", " << p.Z()
+                                 << ") the edges turn by " << turn * 180 / pi << " degrees";
+                            *where = text.str();
+                        }
+                        found = true;
+                        cut[i] = cut[i] || turn > chain;
+                    }
+                }
+                if (!joined && i + 1 == count) {
+                    cut[i] = true;
+                }
+            }
+            if (!runs || count == 0) {
+                continue;
+            }
+            // From the edge after a cut, round the contour; from its first edge where there is none
+            std::size_t start = 0;
+            for (std::size_t i = 0; i < count; ++i) {
+                if (cut[i]) {
+                    start = (i + 1) % count;
+                }
+            }
+            runs->emplace_back();
+            for (std::size_t k = 0; k < count; ++k) {
+                const std::size_t i = (start + k) % count;
+                runs->back().push_back(contour[i]);
+                if (cut[i] && k + 1 < count) {
+                    runs->emplace_back();
+                }
+            }
+        }
+    }
+    catch (const Standard_Failure&) {
+        if (runs) {
+            *runs = contours;
+        }
+    }
+    return found;
+}
+
 void finish(TopoShape& result, const Construction& construction, const TopoShape& base, const char* op)
 {
     // A copy keeps the result's tag, hasher and history algorithm, which name the elements
