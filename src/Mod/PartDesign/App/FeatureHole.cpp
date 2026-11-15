@@ -54,6 +54,7 @@
 #include <gp_Ax2.hxx>
 #include <gp_Pln.hxx>
 #include <BRepAlgoAPI_Common.hxx>
+#include <BRepExtrema_DistShapeShape.hxx>
 #include <BRepGProp.hxx>
 #include <GProp_GProps.hxx>
 #include <GC_MakeArcOfCircle.hxx>
@@ -192,59 +193,79 @@ bool diskOnMaterial(
     return std::fabs(props.Mass() - full) <= 1e-6 * full + Precision::Confusion();
 }
 
-// Start from part (Onshape's default, ops#828 HC5): the distance along `dir` from the profile
-// plane to the highest level, at or past the plane, where the start disk (`radius`: the hole cut
-// diameter, or the hole's for a simple hole) lies wholly on material; the earliest of the holes'.
-// The candidates are the plane itself and the planes of the part's faces normal to the axis, so a
-// countersink whose disk overhangs a boss's edge drops to the face below. With no such level, the
-// old rule: where the axis meets the part ahead of the plane (0 on or in it, or meeting none), never
-// behind the plane, so a hole drilled away from the part doesn't start at its far face (E-fix review)
-double startFromPart(
+// Start from part (Onshape's default, ops#828 HC5): where a hole starts along `dir` from its
+// profile plane, the earliest of the holes', and whether every hole sits on a seat there
+struct PartStart
+{
+    double offset = 0.0;
+    bool seated = false;
+};
+
+// The seat is the highest level, at or past the plane, where a planar face of the part normal to
+// the axis meets the start disk (`radius`: the hole cut's, or the hole's for a simple hole) and
+// the disk lies wholly on material: a countersink whose disk overhangs a boss's edge drops to
+// the face below. Only a seated hole clears upward (Hole::execute). With no seat, the old rule:
+// where the axis meets the part ahead of the plane (0 on or in it, or meeting none), never
+// behind the plane, so a hole drilled away from the part doesn't start at its far face (E-fix
+// review)
+PartStart startFromPart(
     const Part::TopoShape& base,
     const std::vector<gp_Pnt>& centres,
     const gp_Dir& dir,
     double radius
 )
 {
-    if (base.isNull() || base.countSubShapes(TopAbs_SOLID) == 0) {
-        return 0.0;
+    PartStart result;
+    if (base.isNull() || base.countSubShapes(TopAbs_SOLID) == 0 || centres.empty()) {
+        return result;
     }
     const TopoDS_Shape& solid = base.getShape();
-    // the levels of the part's planar faces normal to the axis, as distances along `dir` from a
-    // point on the profile plane
-    std::vector<gp_Pln> planes;
+    // the part's planar faces normal to the axis
+    std::vector<std::pair<TopoDS_Face, gp_Pln>> seats;
     for (const auto& sub : base.getSubTopoShapes(TopAbs_FACE)) {
-        BRepAdaptor_Surface surface(TopoDS::Face(sub.getShape()));
+        const TopoDS_Face& face = TopoDS::Face(sub.getShape());
+        BRepAdaptor_Surface surface(face);
         if (surface.GetType() == GeomAbs_Plane
             && surface.Plane().Axis().Direction().IsParallel(dir, Precision::Angular())) {
-            planes.push_back(surface.Plane());
+            seats.emplace_back(face, surface.Plane());
         }
     }
     std::optional<double> first;
+    bool allSeated = true;
     BRepClass3d_SolidClassifier classifier(solid);
     for (const gp_Pnt& centre : centres) {
-        std::vector<double> levels {0.0};
-        for (const gp_Pln& plane : planes) {
+        // the faces' levels at or past the plane, highest (nearest) first
+        std::vector<std::pair<double, const TopoDS_Face*>> levels;
+        for (const auto& [face, plane] : seats) {
             const double t = gp_Vec(centre, plane.Location()).Dot(gp_Vec(dir));
-            if (t > Precision::Confusion()) {
-                levels.push_back(t);
+            if (t >= -Precision::Confusion()) {
+                levels.emplace_back(std::max(t, 0.0), &face);
             }
         }
-        std::ranges::sort(levels);
-        levels.erase(
-            std::unique(levels.begin(), levels.end(), [](double a, double b) {
-                return std::fabs(a - b) <= Precision::Confusion();
-            }),
-            levels.end()
-        );
+        std::ranges::sort(levels, {}, &std::pair<double, const TopoDS_Face*>::first);
         std::optional<double> start;
-        for (double t : levels) {
-            if (diskOnMaterial(solid, classifier, centre.Translated(gp_Vec(dir) * t), dir, radius)) {
+        std::optional<double> rejected;  // a level whose disk is not on material
+        for (const auto& [t, face] : levels) {
+            if (rejected && std::fabs(*rejected - t) <= Precision::Confusion()) {
+                continue;
+            }
+            const gp_Pnt at = centre.Translated(gp_Vec(dir) * t);
+            const TopoDS_Face disk = BRepBuilderAPI_MakeFace(
+                BRepBuilderAPI_MakeWire(BRepBuilderAPI_MakeEdge(gp_Circ(gp_Ax2(at, dir), radius)))
+                    .Wire()
+            );
+            BRepExtrema_DistShapeShape distance(disk, *face);
+            if (!distance.IsDone() || distance.Value() > Precision::Confusion()) {
+                continue;  // this face is elsewhere at that level
+            }
+            if (diskOnMaterial(solid, classifier, at, dir, radius)) {
                 start = t;
                 break;
             }
+            rejected = t;
         }
         if (!start) {
+            allSeated = false;
             classifier.Perform(centre, Precision::Confusion());
             if (classifier.State() == TopAbs_IN || classifier.State() == TopAbs_ON) {
                 start = 0.0;
@@ -261,7 +282,9 @@ double startFromPart(
         const double t = start.value_or(0.0);
         first = first ? std::min(*first, t) : t;
     }
-    return first.value_or(0.0);
+    result.offset = first.value_or(0.0);
+    result.seated = allSeated;
+    return result;
 }
 
 // Up to next: the distance along `dir` from the profile plane to the face where the part's
@@ -941,11 +964,12 @@ double Hole::getStartOffset() const
             return 0.0;
         }
         return startFromPart(
-            base,
-            holeCentres(profileShape, BaseProfileType.getValue()),
-            direction,
-            startDiskRadius()
-        );
+                   base,
+                   holeCentres(profileShape, BaseProfileType.getValue()),
+                   direction,
+                   startDiskRadius()
+        )
+            .offset;
     }
 
     TopLoc_Location identity;
@@ -2331,17 +2355,20 @@ App::DocumentObjectExecReturn* Hole::execute()
         holeDirection.Reverse();
         const char* startType = StartType.getValueAsString();
         double startOffset = 0.0;
+        bool clearUpward = false;  // ops#828: a hole seated from the part clears upward
         if (std::strcmp(startType, "Offset") == 0) {
             startOffset = StartOffset.getValue();
         }
         else if (std::strcmp(startType, "Part") == 0) {
             // Start from part: where the part begins on the hole axes (rank 23)
-            startOffset = startFromPart(
+            const PartStart start = startFromPart(
                 base,
                 holeCentres(profileshape, BaseProfileType.getValue()),
                 holeDirection,
                 startDiskRadius()
             );
+            startOffset = start.offset;
+            clearUpward = start.seated;
         }
         else if (std::strcmp(startType, "Profile plane") != 0) {
             startOffset = getStartReferenceOffset(
@@ -2442,9 +2469,12 @@ App::DocumentObjectExecReturn* Hole::execute()
         double zPosCounter = 0.0;
 
         // The profile's edges: a point equal to the last adds none, and one straight on from the
-        // last edge extends it (FreeCAD-CH ops#828: the upward clearance and the wall below it,
-        // as wide, are one edge, so the faces' places in the profile stay as they were)
+        // upward clearance's wall extends it (FreeCAD-CH ops#828): for a simple hole or a
+        // counterbore the clearance and the wall below it are one face, so the faces' places in
+        // the profile stay as they were; a countersink's or a tapered hole's clearance wall is a
+        // face of its own, one place more
         gp_Pnt edgeStart;
+        std::optional<gp_Pnt> clearCorner;
         bool edgePending = false;
         const auto flushEdge = [&]() {
             if (edgePending) {
@@ -2456,15 +2486,15 @@ App::DocumentObjectExecReturn* Hole::execute()
             if (point.IsEqual(lastPoint, Precision::Confusion())) {
                 return;
             }
-            if (edgePending) {
+            if (edgePending && clearCorner && edgeStart.IsEqual(*clearCorner, Precision::Confusion())) {
                 const gp_Vec before(edgeStart, lastPoint);
                 const gp_Vec after(lastPoint, point);
                 if (before.IsParallel(after, Precision::Angular()) && before.Dot(after) > 0.0) {
                     lastPoint = point;
                     return;
                 }
-                flushEdge();
             }
+            flushEdge();
             edgeStart = lastPoint;
             lastPoint = point;
             edgePending = true;
@@ -2476,10 +2506,12 @@ App::DocumentObjectExecReturn* Hole::execute()
             );
         }
 
-        // FreeCAD-CH (ops#828, TW2 and HC5): started from the part, as in Onshape, the hole also
+        // FreeCAD-CH (ops#828, TW2 and HC5): seated from the part, as in Onshape, the hole also
         // clears its start disk upward, through all, so material above the start (a boss over a
-        // countersink) is cut too: the profile starts above the start. Not from a plane or offset.
-        if (std::strcmp(startType, "Part") == 0) {
+        // countersink) is cut too: the profile starts above the start. Not from a plane or
+        // offset, nor from the part without a seat (a sketch inside the part, a hole drilled
+        // away from it).
+        if (clearUpward) {
             const double clearRadius = startDiskRadius();
             double up = 0.0;
             if (holeRun) {
@@ -2498,6 +2530,7 @@ App::DocumentObjectExecReturn* Hole::execute()
             lastPoint = firstPoint;
             gp_Pnt newPoint = toPnt(clearRadius * xDir + up * zDir);
             addEdge(newPoint);
+            clearCorner = newPoint;
             newPoint = toPnt(clearRadius * xDir);
             addEdge(newPoint);
         }

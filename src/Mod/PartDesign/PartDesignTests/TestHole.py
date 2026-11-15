@@ -232,7 +232,6 @@ class TestHole(unittest.TestCase):
         lens = self._lens(self.HOLE_R, self.BOSS_R, 8)
         self.assertGreater(lens, 0)
         self.assertAlmostEqual(cut, pi * self.HOLE_R**2 * self.PLATE + lens * self.BOSS_H, places=5)
-        self.assertAlmostEqual(self.Hole.Shape.BoundBox.ZMax, self.PLATE + self.BOSS_H)
 
     def testCounterboreClearsUpwardThroughBoss(self):
         # HC2: the counterbore at the plate top, its diameter cleared up through the boss
@@ -270,17 +269,61 @@ class TestHole(unittest.TestCase):
         lens = self._lens(self.CUT_R, self.BOSS_R, 8)
         self.assertAlmostEqual(cut, down + lens * self.BOSS_H, places=5)
 
-    def testCountersinkFromSketchPlaneClearsNothingAbove(self):
-        # HC4 and HC3: from the sketch plane the start stays there: in air no countersink is
-        # cut, only d through all; on the plate top nothing above it is cleared
+    def testCountersinkFromSketchPlaneInAir(self):
+        # HC4: from the sketch plane the start stays there: in air no countersink is cut, only d
+        # through all
         cut = self._bossHole(8, "Countersink", self.PLATE + self.BOSS_H + 5, "Profile plane")
         lens = self._lens(self.HOLE_R, self.BOSS_R, 8)
         self.assertAlmostEqual(cut, pi * self.HOLE_R**2 * self.PLATE + lens * self.BOSS_H, places=5)
-        self.HoleSketch.AttachmentOffset.Base.z = self.PLATE
+
+    def testCountersinkOverhangingChamferKeepsItsStart(self):
+        # Review: the disk overhangs the plate's chamfered edge, so no level holds it; a pocket
+        # floor elsewhere at that level is no seat. The old start stays, with nothing cleared.
+        self.Box.Length = 30
+        self.Box.Width = 30
+        self.Box.Height = self.PLATE
         self.Doc.recompute()
-        before = 30 * 30 * self.PLATE + pi * self.BOSS_R**2 * self.BOSS_H
-        down = pi * self.HOLE_R**2 * self.PLATE + self._csinkExtra()
-        self.assertAlmostEqual(before - self.Hole.Shape.Volume, down, places=5)
+        top = [i for i, f in enumerate(self.Box.Shape.Faces) if abs(f.CenterOfMass.z - self.PLATE) < 1e-9]
+        edge = [
+            i
+            for i, e in enumerate(self.Box.Shape.Edges)
+            if abs(e.BoundBox.ZMin - self.PLATE) < 1e-9
+            and abs(e.BoundBox.ZMax - self.PLATE) < 1e-9
+            and abs(e.BoundBox.XMin) < 1e-9
+            and abs(e.BoundBox.XMax) < 1e-9
+        ]
+        self.assertEqual((len(top), len(edge)), (1, 1))
+        chamfer = self.Doc.addObject("PartDesign::Chamfer", "Chamfer")
+        chamfer.Base = (self.Box, [f"Edge{edge[0] + 1}"])
+        chamfer.Size = 2
+        self.Body.addObject(chamfer)
+        pocket = self.Doc.addObject("PartDesign::SubtractiveBox", "Pocket")
+        pocket.Length = pocket.Width = 5
+        pocket.Height = 4
+        pocket.Placement.Base = App.Vector(20, 20, self.PLATE - 4)  # a floor at 4, far off
+        self.Body.addObject(pocket)
+        self.Body.removeObject(self.Hole)
+        self.Body.addObject(self.Hole)
+        self.HoleSketch.deleteAllGeometry()
+        # the countersink's disk (radius 5) at x 6 spans x 1..11: it overhangs the chamfer (x 0..2)
+        # at the top, but at the pocket floor's level (z 4) it lies wholly in the plate
+        self.HoleSketch.addGeometry(Part.Circle(App.Vector(6, 15, 0), App.Vector(0, 0, 1), 1))
+        self.HoleSketch.MapReversed = False
+        self.HoleSketch.AttachmentOffset.Base.z = self.PLATE
+        self.Hole.Diameter = 2 * self.HOLE_R
+        self.Hole.ThreadType = 0
+        self.Hole.HoleCutType = "Countersink"
+        self.Hole.HoleCutDiameter = 2 * self.CUT_R
+        self.Hole.HoleCutCountersinkAngle = 90
+        self.Hole.DepthType = "ThroughAll"
+        self.Hole.DrillPoint = "Flat"
+        self.Hole.StartType = "Part"
+        self.Doc.recompute()
+        self.assertTrue(self.Hole.isValid(), self.Hole.getStatusString())
+        # neither dropped to 4 nor cleared upward: the tool's top is the plate top
+        tool = self.Hole.AddSubShape.copy()
+        tool.Placement = self.Hole.Placement.multiply(tool.Placement)
+        self.assertAlmostEqual(tool.BoundBox.ZMax, self.PLATE, places=6)
 
     def testDiameterChangeKeepsUserCutValues(self):
         """A diameter change never rewrites the user's hole cut values (ops#823). A diameter

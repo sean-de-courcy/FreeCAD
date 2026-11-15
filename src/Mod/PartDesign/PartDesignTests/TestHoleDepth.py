@@ -91,8 +91,10 @@ class TestHoleDepth(unittest.TestCase):
         hole.Depth = 4
         self.doc.recompute()
         self.assertAlmostEqual(self.removed(hole, 1000), math.pi * 4, delta=TOL)
-        self.assertAlmostEqual(self.tool(hole).ZMin, 3, delta=TOL)
+        # the tool ends at 7; seated on the box's face at 3, it also clears its disk the other
+        # way, through the air below (ops#828), so it reaches past the sketch
         self.assertAlmostEqual(self.tool(hole).ZMax, 7, delta=TOL)
+        self.assertLess(self.tool(hole).ZMin, 0)
         hole.StartType = "Profile plane"
         self.doc.recompute()
         self.assertAlmostEqual(self.removed(hole, 1000), math.pi * 1, delta=TOL)
