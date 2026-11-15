@@ -511,3 +511,57 @@ class TestOperationRowGui(RevolveCase):
             {"Union": 4000, "Subtraction": 4000 - coil, "Common": coil},
             flips=False,
         )
+
+
+class TestProfileDeletedGui(RevolveCase):
+    """ops#812: a Revolve, Groove or Helix about the Origin's Z axis whose profile sketch is then
+    deleted keeps its axis and loses its profile. Opening it for edit asked the feature which way
+    to turn (suggestedReversed) and read through the empty profile: a crash. Now the dialog opens,
+    and the feature stays in error, waiting for a profile, as Onshape's Revolve waits for its
+    picks. Before the profile goes the Revolve is the tube, 210 pi."""
+
+    def orphan(self, kind):
+        if kind == "AdditiveHelix":
+            # model()'s Angle 360 is a Helix's taper: build it on the Revolve's model instead
+            self.model()
+            feature = self.body.newObject("PartDesign::AdditiveHelix", kind)
+            feature.Profile = models.sketch(
+                self.doc, "CoilSk", models.rectangle(2, -4, 4, -2), self.body, placement=XZ
+            )
+        else:
+            feature = self.model(kind)
+        [zAxis] = [o for o in self.body.Origin.OriginFeatures if o.Role == "Z_Axis"]
+        feature.ReferenceAxis = (zAxis, [""])
+        if kind == "AdditiveHelix":
+            feature.Angle = 0
+            feature.Mode = 0
+            feature.Pitch = 5
+            feature.Height = 5
+            feature.HasBeenEdited = True
+        self.doc.recompute()
+        self.assertTrue(feature.isValid(), feature.getStatusString())
+        if kind == "Revolution":
+            self.assertAlmostEqual(feature.AddSubShape.Volume, 210 * math.pi, places=3)
+        profile = feature.Profile[0]
+        # As the Features list's delete: the Body lets it go, then the document
+        self.body.removeObject(profile)
+        self.doc.removeObject(profile.Name)
+        self.doc.recompute()
+        self.assertIsNone(feature.Profile)
+        self.assertIs(feature.ReferenceAxis[0], zAxis)
+        return feature
+
+    def assertOpensWaiting(self, kind):
+        feature = self.orphan(kind)
+        self.edit(feature)
+        self.assertIsNotNone(Gui.Control.activeDialog())
+        self.assertFalse(feature.isValid())
+
+    def testRevolveWithItsProfileDeletedOpens(self):
+        self.assertOpensWaiting("Revolution")
+
+    def testGrooveWithItsProfileDeletedOpens(self):
+        self.assertOpensWaiting("Groove")
+
+    def testHelixWithItsProfileDeletedOpens(self):
+        self.assertOpensWaiting("AdditiveHelix")

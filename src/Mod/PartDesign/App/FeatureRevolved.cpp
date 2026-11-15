@@ -3941,7 +3941,8 @@ bool Revolved::suggestReversed()
 std::optional<bool> Revolved::suggestedReversed()
 {
     // without an axis, getAxis leaves a null direction, and the angle reads 0: no suggestion
-    if (!ReferenceAxis.getValue()) {
+    // nor without a profile (deleted under the feature, ops#812): nothing to measure from
+    if (!ReferenceAxis.getValue() || !Profile.getValue()) {
         return std::nullopt;
     }
     try {

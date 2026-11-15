@@ -2125,6 +2125,11 @@ void ProfileBased::getAxis(
     }
 
     App::DocumentObject* profile = Profile.getValue();
+    // a feature whose profile was deleted keeps its axis link (ops#812): opening it for edit
+    // asked for the axis and read through the empty link
+    if (!profile) {
+        throw Base::ValueError("No profile linked");
+    }
     gp_Pln sketchplane;
 
     if (profile->isDerivedFrom<Part::Part2DObject>()) {

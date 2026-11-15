@@ -101,6 +101,7 @@ from PartDesignTests.TestDialogFlowGui import TestAnotherToolGui  # FreeCAD-CH, 
 from PartDesignTests.TestDialogFlowGui import TestStudioPlanesStayGui  # FreeCAD-CH, ops#640
 from PartDesignTests.TestRevolveFieldsGui import TestRevolveFieldsGui  # FreeCAD-CH, ops#640 ranks 20, 21, 52
 from PartDesignTests.TestRevolveFieldsGui import TestOperationRowGui  # FreeCAD-CH, ops#640 rank 20
+from PartDesignTests.TestRevolveFieldsGui import TestProfileDeletedGui  # FreeCAD-CH, ops#812
 from PartDesignTests.TestLoftFilletOptionsGui import TestLoftConditionsGui  # FreeCAD-CH, ops#655
 from PartDesignTests.TestLoftFilletOptionsGui import TestTangentPropagationGui  # FreeCAD-CH, ops#655
 from PartDesignTests.TestLoftConnectionsGui import TestLoftConnectionsGui  # FreeCAD-CH, ops#640
