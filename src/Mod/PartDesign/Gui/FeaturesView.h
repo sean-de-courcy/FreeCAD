@@ -135,6 +135,8 @@ public:
     /// The PartDesign feature that made the shape's element (such as "Face3"): a sketch's or a
     /// binder's element is the feature's whose profile it is. Null when none
     static App::DocumentObject* creatorOf(App::DocumentObject* shape, const char* element);
+    /// The sketch a feature is made from (its Profile, a sketch), or null
+    static App::DocumentObject* sketchOf(App::DocumentObject* feature);
 
     /// PartDesign's activation: the lists in place of the Model panel's tree, unless the user chose
     /// the tree (toggleModelTree()). Without the Combo view (turned off in the preferences) it
