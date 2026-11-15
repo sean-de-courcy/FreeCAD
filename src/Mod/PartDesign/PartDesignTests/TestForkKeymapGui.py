@@ -1202,6 +1202,20 @@ class TestForkKeymapGui(unittest.TestCase):
             self.assertEqual(fired, ["Assembly_ToggleSnapMode"])
             self.assertTrue(CommandSnapMode.isSnapModeOn())
             CommandSnapMode.setSnapMode(False)
+            # Onshape's i inserts a part (GB16, gaps3 row 8): I opens the Insert Component panel
+            # (a Python command's getAction() is empty here, so the panel is the check)
+            self.assertEqual(toolKey("Assembly_InsertLink"), "I")
+            self.assertFalse(Gui.Control.activeDialog())
+            self.press(QtCore.Qt.Key_I)
+            self.assertTrue(waitFor(lambda: Gui.Control.activeDialog()), "I opened no panel")
+            panels = [
+                w
+                for w in Gui.getMainWindow().findChildren(QtWidgets.QWidget, "TaskAssemblyInsertLink")
+                if w.isVisible()
+            ]
+            self.assertTrue(panels, "the panel I opened isn't Insert Component")
+            Gui.Control.closeDialog()
+            pump()
             # the fork's general keys: the sketch's keys meet Assembly's letters only on actions
             # that aren't reachable there (D: the sketch's dimension group, its toolbar hidden),
             # and Assembly's letters meet upstream's own (S and Std_LinkSelectActions' S, G)
@@ -1219,6 +1233,7 @@ class TestForkKeymapGui(unittest.TestCase):
             wrong = [f"{n}: {toolKey(n)!r}" for n, k in ASSEMBLY_KEYS.items() if toolKey(n) != k]
             self.assertEqual(wrong, [], "FreeCAD")
             self.assertEqual(toolKey("Assembly_CreateJointFixed"), "F")
+            self.assertEqual(toolKey("Assembly_InsertLink"), "I")  # upstream's key too
         finally:
             if Gui.Control.activeDialog():
                 Gui.Control.closeDialog()
