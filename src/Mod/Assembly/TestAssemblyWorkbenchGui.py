@@ -24,6 +24,10 @@ from AssemblyTests.TestFastenedPickOrderGui import TestFastenedPickOrderGui  # o
 
 True if TestFastenedPickOrderGui else False
 
+from AssemblyTests.TestJointDialogWrappersGui import TestJointDialogWrappersGui  # ops#790
+
+True if TestJointDialogWrappersGui else False
+
 from AssemblyTests.TestOnshapeAssembliesGui import (  # ops#640, ops#651
     TestSeveralAssembliesGui,
     TestJointErrorsGui,
