@@ -51,6 +51,7 @@ SET(Test_SRCS
     TestPresence.py
     TestPresenceGui.py
     TestVariableStudioGui.py
+    TestUiLoaderWrappersGui.py
 )
 
 SET(TestData_SRCS
