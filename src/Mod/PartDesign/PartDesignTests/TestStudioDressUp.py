@@ -21,6 +21,7 @@ import unittest
 import zipfile
 
 import FreeCAD as App
+import Part
 import PartDesign
 
 from PartDesignTests.TestStudio import pad, rect, sketch, xyPlane
@@ -412,6 +413,83 @@ class TestStudioDressUp(unittest.TestCase):
         f = self.doc.getObject("F")
         self.assertClean(f)
 
+
+    # ------------------------------------------------------------------------------- ops#808
+    def bossOnAPlate(self):
+        """Part P: a plate 80 x 50 x 10 (y -25..25) and a round boss (r 12 at (60, 0), from z 5
+        to 30) whose cylinder cuts the plate's top; F rounds the circle where the boss leaves
+        the top (r 2). Returns P, the plate, the boss, F and P's volume."""
+        p = self.doc.addObject("PartDesign::Body", "P")
+        self.S.addObject(p)
+        plate = pad(p, "Plate", sketch(p, "PlateSk", xyPlane(p), (0, -25, 80, 25)), 10)
+        circle = sketch(p, "BossSk", xyPlane(p), z=5)
+        circle.addGeometry(Part.Circle(V(60, 0, 0), V(0, 0, 1), 12))
+        boss = pad(p, "Boss", circle, 25)
+        PartDesign.studioReconcile(self.list)
+        self.doc.recompute()
+        f = makeDressUp(self.doc, self.S, "F", [pickAt(p, V(60, 0, 10))], 2)
+        self.assertClean(f)
+        # A concave round r on a circle R: the fillet adds material
+        added = p.Shape.Volume - (80 * 50 * 10 + math.pi * 144 * 20)
+        self.assertAlmostEqual(added, self.concaveRound(2, 12), places=3)
+        return p, plate, boss, f, p.Shape.Volume
+
+    @staticmethod
+    def concaveRound(r, R):
+        """The material a concave round r adds around a cylinder R standing on a plane (Pappus:
+        the corner r x r less its quarter disc, turned about the axis)."""
+        square = r * r * (R + r / 2)
+        disc = math.pi * r * r / 4 * (R + r - 4 * r / (3 * math.pi))
+        return 2 * math.pi * (square - disc)
+
+    def insertBefore(self, part, objects, target):
+        """Moves the objects, made at part's tip, to just after target, in order"""
+        for obj in objects:
+            part.removeObject(obj)
+        for obj in objects:
+            part.insertObject(obj, target, True)
+            target = obj
+        PartDesign.studioReconcile(self.list)
+        self.doc.recompute()
+
+    def testAWallInsertedBeforeTheBossKeepsTheFarJunctionEdge(self):
+        """ops#808: a wall across the plate (x 25..27, 2 high), inserted before the boss, leaves
+        the plate's top in two pieces, so the junction circle, 21 mm away and unchanged, is
+        generated from a piece of the top. F still rounds it: the part is as before plus the
+        wall (2 x 50 x 2), and without the wall again it is as before."""
+        p, plate, boss, f, before = self.bossOnAPlate()
+        pick = list(f.StudioPickIds)
+        wallSketch = sketch(p, "WallSk", xyPlane(p), (25, -25, 27, 25), z=10)
+        wall = pad(p, "Wall", wallSketch, 2)
+        self.insertBefore(p, [wallSketch, wall], plate)
+        self.assertEqual(boss.BaseFeature, wall)
+        name = App.expandMappedName(boss.Shape.getElementMappedName(edgeAt(boss.Shape, V(60, 0, 10))))
+        self.assertIn(";MOD;", name.replace("^", ""), "the junction edge is made from a piece")
+        self.assertClean(f)
+        self.assertAlmostEqual(p.Shape.Volume, before + 200, places=3)
+        self.assertEqual(list(f.StudioPickIds), pick, "the pick is stored as it was")
+        for obj in (wall, wallSketch):
+            p.removeObject(obj)
+            self.doc.removeObject(obj.Name)
+        PartDesign.studioReconcile(self.list)
+        self.doc.recompute()
+        self.assertClean(f)
+        self.assertAlmostEqual(p.Shape.Volume, before, places=3)
+
+    def testAnotherBossesJunctionIsNotThePick(self):
+        """The rule names only what the pick's maker made from the pick's sources: with the wall
+        in place, a second boss (r 8 at (10, 0)) on the other piece of the top has a junction
+        circle of its own, which F leaves square."""
+        p, plate, boss, f, before = self.bossOnAPlate()
+        wallSketch = sketch(p, "WallSk", xyPlane(p), (25, -25, 27, 25), z=10)
+        wall = pad(p, "Wall", wallSketch, 2)
+        circle = sketch(p, "Boss2Sk", xyPlane(p), z=5)
+        circle.addGeometry(Part.Circle(V(10, 0, 0), V(0, 0, 1), 8))
+        boss2 = pad(p, "Boss2", circle, 25)
+        self.insertBefore(p, [wallSketch, wall, circle, boss2], plate)
+        self.assertEqual(boss.BaseFeature, boss2)
+        self.assertClean(f)
+        self.assertAlmostEqual(p.Shape.Volume, before + 200 + math.pi * 64 * 20, places=3)
 
     # ------------------------------------------------------------------------------- ops#640 C1
     def notchedFillet(self, r=1):

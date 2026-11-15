@@ -980,6 +980,73 @@ bool NameAncestry::isPieceOf(std::string_view name, std::string_view oldName)
     return true;
 }
 
+bool NameAncestry::isMadeFromPiecesOf(std::string_view name, std::string_view oldName)
+{
+    const auto sections = splitSections(name);
+    const auto oldSections = splitSections(oldName);
+    if (oldSections.empty() || sections.size() < oldSections.size()) {
+        return false;
+    }
+    for (std::size_t i = 1; i < oldSections.size(); ++i) {
+        if (sections[i] != oldSections[i]) {
+            return false;
+        }
+    }
+    if (sections.size() > oldSections.size()) {
+        // The further sections: a split of the element made from the pieces
+        const auto& last = sections[oldSections.size() - 1];
+        if (!isPieceOf(name, name.substr(0, last.data() + last.size() - name.data()))) {
+            return false;
+        }
+    }
+    if (sections.front() == oldSections.front()) {
+        return false;
+    }
+    // Copies: decoding another section may grow the cache the references point into
+    const DecodedMappedSection made = decodeSection(sections.front());
+    const DecodedMappedSection old = decodeSection(oldSections.front());
+    if (old.linkedNames.empty() || made.linkedNames.size() != old.linkedNames.size()
+        || made.referenceIDs != old.referenceIDs || made.iterationTag != old.iterationTag
+        || made.opCode != old.opCode || made.index != old.index
+        || made.elementType != old.elementType || made.duplicateCount != old.duplicateCount
+        || sortedFlags(made) != sortedFlags(old)
+        || made.connectedElements != old.connectedElements) {
+        return false;
+    }
+    // Each linked name takes one of the old ones: an equal one first, then one it is a piece of
+    // or made from pieces of
+    std::vector<bool> taken(old.linkedNames.size(), false);
+    std::vector<const std::string*> pending;
+    for (const auto& linked : made.linkedNames) {
+        bool same = false;
+        for (std::size_t j = 0; j < old.linkedNames.size() && !same; ++j) {
+            if (!taken[j] && old.linkedNames[j] == linked) {
+                taken[j] = same = true;
+            }
+        }
+        if (!same) {
+            pending.push_back(&linked);
+        }
+    }
+    if (pending.empty()) {
+        return false;
+    }
+    for (const auto* linked : pending) {
+        bool found = false;
+        for (std::size_t j = 0; j < old.linkedNames.size() && !found; ++j) {
+            if (!taken[j]
+                && (isPieceOf(*linked, old.linkedNames[j])
+                    || isMadeFromPiecesOf(*linked, old.linkedNames[j]))) {
+                taken[j] = found = true;
+            }
+        }
+        if (!found) {
+            return false;
+        }
+    }
+    return true;
+}
+
 namespace
 {
 
