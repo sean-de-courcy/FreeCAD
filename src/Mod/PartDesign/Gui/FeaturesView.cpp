@@ -2970,6 +2970,21 @@ void FeaturesView::onFeatureMenu(const QPoint& pos)
     dependencies->setObjectName(QStringLiteral("featureDependencies"));
     auto fit = menu.addAction(tr("Zoom to selection"), [runByName]() { runByName("Std_ViewFitSelection"); });
     fit->setObjectName(QStringLiteral("featureZoom"));
+    // Onshape's sketch row (DX8): Export as DXF/DWG, for one sketch; here the Sketcher's Export
+    // DXF, run on the row's sketch
+    if (obj->isDerivedFrom<Sketcher::SketchObject>() && selected.size() <= 1) {
+        auto exportDxf = menu.addAction(tr("Export DXF..."), [self, name, runByName]() {
+            auto doc = self ? self->document() : nullptr;
+            if (auto target = doc ? doc->getObject(name.c_str()) : nullptr) {
+                self->pushSelection({target});
+                runByName("Sketcher_ExportDxf");
+            }
+        });
+        exportDxf->setObjectName(QStringLiteral("featureExportDxf"));
+        exportDxf->setEnabled(
+            Gui::Application::Instance->commandManager().getCommandByName("Sketcher_ExportDxf") != nullptr
+        );
+    }
     menu.addSeparator();
     auto remove = menu.addAction(tr("Delete"), [self, runByName, rowsNamed]() {
         try {
