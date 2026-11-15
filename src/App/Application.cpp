@@ -1163,6 +1163,24 @@ Document* Application::openDocument(const char * FileName, DocumentInitFlags ini
     return nullptr;
 }
 
+namespace
+{
+// FreeCAD-CH (folder-sync item 4): whether two paths name the same existing file on disk
+// (`std::filesystem::equivalent`), whatever their spelling: case, `..`, a symlink. False when
+// either doesn't exist.
+bool isSameFile(const char* first, const char* second)
+{
+    if (Base::Tools::isNullOrEmpty(first) || Base::Tools::isNullOrEmpty(second)) {
+        return false;
+    }
+    std::error_code ec;
+    const bool same = std::filesystem::equivalent(Base::FileInfo::stringToPath(first),
+                                                  Base::FileInfo::stringToPath(second),
+                                                  ec);
+    return same && !ec;
+}
+}  // namespace
+
 Document *Application::getDocumentByPath(const char *path, PathMatchMode checkCanonical) const {
     if(Base::Tools::isNullOrEmpty(path))
         return nullptr;
@@ -1185,7 +1203,11 @@ Document *Application::getDocumentByPath(const char *path, PathMatchMode checkCa
     const QString canonicalPath = QFileInfo(QString::fromUtf8(path)).canonicalFilePath();
     for (const auto &v : DocMap) {
         QFileInfo fi(QString::fromUtf8(v.second->FileName.getValue()));
-        if (canonicalPath == fi.canonicalFilePath()) {
+        // FreeCAD-CH (folder-sync item 4): the same file on disk also matches when only the case
+        // of its spelling differs (`Parts` and `PARTS` on Windows or APFS), which the canonical
+        // path doesn't fold
+        if (canonicalPath == fi.canonicalFilePath()
+            || isSameFile(path, v.second->FileName.getValue())) {
             if (checkCanonical == PathMatchMode::MatchCanonical) {
                 return v.second;
             }
@@ -1419,8 +1441,11 @@ Document* Application::openDocumentPrivate(const char * FileName,
         throw Base::FileSystemError(str.str());
     }
 
-    // Before creating a new document we check whether the document is already open
-    auto doc = getDocumentByPath(File.filePath().c_str(), PathMatchMode::MatchCanonicalWarning);
+    // Before creating a new document we check whether the document is already open.
+    // FreeCAD-CH (folder-sync item 4, PLAN decision 441): one file is one document whatever the
+    // spelling of its path, so a canonical match returns the open document (upstream warned and
+    // opened a second copy, for symlink users who want that; Onshape can't have two)
+    auto doc = getDocumentByPath(File.filePath().c_str(), PathMatchMode::MatchCanonical);
     if(doc) {
         if(doc->testStatus(Document::PartialDoc)
                 || doc->testStatus(Document::PartialRestore)) {
