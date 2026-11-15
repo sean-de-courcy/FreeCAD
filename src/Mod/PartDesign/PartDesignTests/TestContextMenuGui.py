@@ -139,7 +139,8 @@ def onSelection(normalTo=True, deletePart=True):
 
 ON_FACE = onSelection()
 ON_OTHER = onSelection(normalTo=False)
-FIRST_ON_FACE = ("PartDesign_NewSketch", "PartDesign_Fillet", "PartDesign_Chamfer")
+# New sketch and Extrude on a planar face (GB16; Extrude is PartDesign_Pad)
+FIRST_ON_FACE = ("PartDesign_NewSketch", "PartDesign_Pad", "PartDesign_Fillet", "PartDesign_Chamfer")
 FIRST_ON_EDGE = ("PartDesign_Fillet", "PartDesign_Chamfer")
 
 ON_EMPTY_SPACE = [
@@ -447,6 +448,11 @@ class TestContextMenuGui(unittest.TestCase):
         expected = [menuText(c) for c in tuple(firstCommands) + tuple(expectedCommands)]
         self.assertNotIn(None, expected, "a command is missing")
         found = texts(actions)
+        # Onshape's Edit <feature>... and Edit <sketch>... lead a face's menu, and Section view...
+        # follows the hide group (GB16): testEditEntriesOnAFace checks them
+        while found and found[0].startswith("Edit ") and found[0].endswith("..."):
+            found.pop(0)
+        found = [t for t in found if t != menuText("Std_SectionView")]
         self.assertEqual(found[: len(expected)], expected, found)
         self.assertEqual(found[-1], MORE, found)
         for text in ADDED_FOR_THE_HIT:
@@ -482,6 +488,16 @@ class TestContextMenuGui(unittest.TestCase):
             self.assertNotIn(menuText(name), found, found)
 
     # --- tests
+
+    def testEditEntriesOnAFace(self):
+        """A face of the pad: Edit Pad... and Edit Sketch... first, Section view... before Select
+        other (GB16, gaps3 row 12)."""
+        self.pick("Face6")
+        found = texts(self.openMenu())
+        self.assertEqual(found[:2], ["Edit Pad...", "Edit Sketch..."], found)
+        section = menuText("Std_SectionView")
+        self.assertIn(section, found, found)
+        self.assertLess(found.index(section), found.index(menuText("Std_SelectOther")), found)
 
     def testOnAFace(self):
         """On a face of the body's pad: Sketch on face, Fillet and Chamfer first, View normal to
