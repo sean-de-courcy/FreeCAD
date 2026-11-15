@@ -1075,9 +1075,64 @@ void AssemblyObject::refreshStaleRigidCaches()
     const bool back = doc && std::ranges::any_of(rigidDroppedIds, [&](long id) {
         return doc->getObjectByID(id) != nullptr;
     });
-    if (gone || back) {
+    // FreeCAD-CH (ops#789): a rigid group suppressed or edited, or a pattern changed, with nothing
+    // deleted: the caches are stale too
+    if (gone || back || rigidInputsSignature() != rigidSignature) {
         rebuildRigidClusters();
     }
+}
+
+std::vector<long> AssemblyObject::rigidInputsSignature()
+{
+    // Layout: per rigid group, groupMark, ID, error, suppression, then per member its ID and
+    // whether getRigidGroups keeps it (-1 for a null link); per active pattern, patternMark, ID,
+    // then per cluster clusterMark and the member IDs. IDs are >= 0, so the marks can't be IDs.
+    constexpr long nullMember = -1;
+    constexpr long groupMark = -2;
+    constexpr long patternMark = -3;
+    constexpr long clusterMark = -4;
+    std::vector<long> sig;
+    JointGroup* jointGroup = getJointGroup();
+    if (!jointGroup) {
+        return sig;
+    }
+    Base::PyGILStateLocker lock;
+    for (auto* const obj : jointGroup->getObjects()) {
+        auto* const members = obj ? dynamic_cast<App::PropertyLinkList*>(
+                                        obj->getPropertyByName("ObjectsToRigidGroup")
+                                    )
+                                  : nullptr;
+        if (!members) {
+            continue;
+        }
+        auto* const suppressed = dynamic_cast<App::PropertyBool*>(obj->getPropertyByName("Suppressed"));
+        sig.push_back(groupMark);
+        sig.push_back(obj->getID());
+        sig.push_back(obj->isError() ? 1 : 0);
+        sig.push_back(!suppressed ? 2 : (suppressed->getValue() ? 1 : 0));
+        for (auto* const member : members->getValues()) {
+            if (!member) {
+                sig.push_back(nullMember);
+                continue;
+            }
+            sig.push_back(member->getID());
+            const bool kept = !member->isError() && hasObject(member)
+                && member->getPropertyByName("Placement") != nullptr;
+            sig.push_back(kept ? 1 : 0);
+        }
+    }
+    for (auto* const pattern : activePatterns(jointGroup)) {
+        sig.push_back(patternMark);
+        sig.push_back(pattern->getID());
+        for (const auto& cluster : patternClusters({pattern})) {
+            sig.push_back(clusterMark);
+            for (auto* const member : cluster) {
+                // rebuildRigidClusters unites the members the assembly has
+                sig.push_back(hasObject(member) ? member->getID() : nullMember);
+            }
+        }
+    }
+    return sig;
 }
 
 void AssemblyObject::rebuildRigidClusters()
@@ -1208,6 +1263,9 @@ void AssemblyObject::rebuildRigidClusters()
 
         rigidMembersByRep[rep] = std::move(members);
     }
+
+    // FreeCAD-CH (ops#789): after getRigidGroups above dropped invalid members from the groups
+    rigidSignature = rigidInputsSignature();
 }
 
 App::DocumentObject* AssemblyObject::getRigidRepresentative(App::DocumentObject* part) const

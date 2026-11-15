@@ -73,7 +73,11 @@ True if TestOnshapeConnectors else False
 from AssemblyTests.TestRigidCachePointers import (  # FreeCAD-CH, ops#778
     TestRigidCachePointers,
     TestRigidCacheUndo,
+    TestRigidCacheInputs,  # FreeCAD-CH, ops#789
+    TestRigidCachePatternInputs,
 )
 
 True if TestRigidCachePointers else False
 True if TestRigidCacheUndo else False
+True if TestRigidCacheInputs else False
+True if TestRigidCachePatternInputs else False
