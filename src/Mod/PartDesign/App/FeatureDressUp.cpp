@@ -56,6 +56,7 @@
 #include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
 #include <TopExp_Explorer.hxx>
 
+#include <cstdio>
 #include <cstring>
 #include <map>
 #include <memory>
@@ -620,11 +621,18 @@ struct KeptDressUp
     std::vector<std::pair<std::string, std::string>> parameters;  ///< name, saved value
     Part::TopoShape raw;
 };
-std::map<const App::DocumentObject*, KeptDressUp> keptDressUps;
+// Per thread, as dressUpRun: the try and the take are one recompute's (review r2)
+thread_local std::map<const App::DocumentObject*, KeptDressUp> keptDressUps;
 
 /// A property's value as it is saved (a copy's type can differ from its original's)
 std::string savedValue(const App::Property* prop)
 {
+    // A number in full: the writer's stream keeps six digits (review r2)
+    if (auto number = freecad_cast<const App::PropertyFloat*>(prop)) {
+        char text[40];
+        std::snprintf(text, sizeof(text), "%.17g", number->getValue());
+        return text;
+    }
     Base::StringWriter writer;
     prop->Save(writer);
     return writer.getString();
