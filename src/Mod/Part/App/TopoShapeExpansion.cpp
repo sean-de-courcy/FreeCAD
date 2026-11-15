@@ -6640,11 +6640,14 @@ TopoShape& TopoShape::makeElementThickSolid(
         remFace.Append(face.getShape());
     }
     // On a worker under the feature's time limit (kernel safety S1)
-    auto build = [&shape, &remFace, offset, tol, offsetMode, selfInter, join](bool withIntersection) {
+    auto build = [&shape, &remFace, offset, tol, offsetMode, selfInter](
+                     bool withIntersection,
+                     JoinType joinType
+                 ) {
         auto maker = std::make_shared<BRepOffsetAPI_MakeThickSolid>();
         KernelBudget::run(
             "The thickness",
-            [maker, base = shape.getShape(), remFace, offset, tol, offsetMode, withIntersection, selfInter, join](
+            [maker, base = shape.getShape(), remFace, offset, tol, offsetMode, withIntersection, selfInter, joinType](
                 const Message_ProgressRange& range
             ) {
                 maker->MakeThickSolidByJoin(
@@ -6655,7 +6658,7 @@ TopoShape& TopoShape::makeElementThickSolid(
                     BRepOffset_Mode(offsetMode),
                     withIntersection ? Standard_True : Standard_False,
                     selfInter ? Standard_True : Standard_False,
-                    GeomAbs_JoinType(join),
+                    GeomAbs_JoinType(joinType),
                     Standard_False,
                     range
                 );
@@ -6683,7 +6686,7 @@ TopoShape& TopoShape::makeElementThickSolid(
         return maker.IsDone() && !maker.Shape().IsNull() && !unchanged(maker)
             && KernelBudget::checkValid(maker.Shape());
     };
-    auto mkThickPtr = build(intersection);
+    auto mkThickPtr = build(intersection, join);
     // Offset faces that are not neighbours can meet: the wall around a hole reaches the shell's
     // side wall once the hole is closer to it than its radius and twice the thickness. OCCT
     // trims each offset face only by its neighbours unless told to intersect them all, and then
@@ -6692,9 +6695,22 @@ TopoShape& TopoShape::makeElementThickSolid(
     const bool fallsApart = !mkThickPtr->IsDone()
         && mkThickPtr->MakeOffset().Error() == BRepOffset_NotConnectedShell;
     if (!intersection && !fallsApart && !built(*mkThickPtr)) {
-        auto withAll = build(true);
+        auto withAll = build(true, join);
         if (built(*withAll)) {
             mkThickPtr = withAll;
+        }
+    }
+    // OCCT's Arc join gives an invalid outward shell, in both modes, where an open face has a
+    // hole with sharp corners (a rectangular through pocket: ops#807). Onshape's outward shell
+    // keeps sharp corners anyway (oracle 25, SL1), so there the Intersection join is built
+    // instead. Inward, or where that fails too, the Arc join's failure is the one reported.
+    if (offset > 0 && join == JoinType::arc && !fallsApart && !built(*mkThickPtr)) {
+        for (bool withIntersection : {intersection, !intersection}) {
+            auto sharp = build(withIntersection, JoinType::intersection);
+            if (built(*sharp)) {
+                mkThickPtr = sharp;
+                break;
+            }
         }
     }
     BRepOffsetAPI_MakeThickSolid& mkThick = *mkThickPtr;
