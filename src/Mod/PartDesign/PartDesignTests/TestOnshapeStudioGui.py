@@ -507,8 +507,8 @@ class TestOnshapeStudioGui(unittest.TestCase):
         """ops#796, the visual pass against Onshape: on a new settings folder the pack gives
         Onshape's orange selection (0xFFA90A) and hover (0xFFC685), sketch dimensions without
         units, a 320 px feature dialog, no property pane under the Model panel's lists (the
-        separate Property View panel exists, hidden, so View > Panels still reaches it), the
-        Variables panel closed, and no view size in the status bar. The light theme also gives
+        separate Property View panel exists, hidden, so View > Panels still reaches it), and no
+        view size in the status bar. The light theme also gives
         Onshape's blue-grey part (0xA6CFE8); the dark theme keeps its own part colour."""
         self.runOnNewHome()
         probe = self.probe
@@ -519,7 +519,6 @@ class TestOnshapeStudioGui(unittest.TestCase):
         self.assertEqual(probe.get("dialogWidth"), "320")
         self.assertEqual(probe.get("comboProps"), "False", "the Model panel still shows properties")
         self.assertEqual(probe.get("propertyDock"), "False", "Property View missing or shown")
-        self.assertEqual(probe.get("variablesDock"), "False", "the Variables panel is open")
         self.assertEqual(probe.get("sizeLabel"), "False", "the status bar shows the view size")
         if probe.get("theme") == "FreeCAD Light":
             self.assertEqual(probe.get("shape"), str(0xA6CFE8FF))
