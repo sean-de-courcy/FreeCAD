@@ -42,6 +42,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <charconv>
 #include <cstdlib>
 #include <string>
 #include <cctype>
@@ -11135,9 +11136,8 @@ TopoShape& TopoShape::makeElementFace(
 namespace
 {
 
-/// The tag and op code of a name's section if it is a split's (the MOD flag), as "<tag>;<op>";
-/// empty otherwise. The section's own fields end at each `;` that no `^` escapes.
-std::string splitEventOf(std::string_view section)
+/// The fields of a name's section: they end at each `;` that no `^` escapes
+std::vector<std::string_view> sectionFields(std::string_view section)
 {
     std::vector<std::string_view> fields;
     std::size_t start = 0;
@@ -11147,7 +11147,17 @@ std::string splitEventOf(std::string_view section)
             start = i + 1;
         }
     }
-    if (fields.size() != static_cast<std::size_t>(Data::SECTION_SIZE)) {
+    return fields;
+}
+
+/// The tag and op code of a name's section if it is a split's (the MOD flag), as "<tag>;<op>";
+/// empty otherwise. A link copy's section (`CPY`, ops#523) carries MOD too, but tells the copy
+/// from its source: it is no split.
+std::string splitEventOf(std::string_view section)
+{
+    const auto fields = sectionFields(section);
+    if (fields.size() != static_cast<std::size_t>(Data::SECTION_SIZE)
+        || fields[Data::SECTION_OPCODE_INDEX] == Part::OpCodes::Copy) {
         return {};
     }
     const std::string_view flags = fields[Data::SECTION_MAPPER_FLAGS_INDEX];
@@ -11172,18 +11182,40 @@ std::string splitEventOf(std::string_view section)
     return event;
 }
 
+/// The tag of a name's last section (the feature that named the element last), 0 if unreadable
+long lastTagOf(std::string_view name)
+{
+    const auto sections = Data::NameAncestry::splitSections(name);
+    if (sections.empty()) {
+        return 0;
+    }
+    const auto fields = sectionFields(sections.back());
+    if (fields.size() != static_cast<std::size_t>(Data::SECTION_SIZE)) {
+        return 0;
+    }
+    long tag = 0;
+    const std::string_view text = fields[Data::SECTION_ITERATION_TAG_INDEX];
+    std::from_chars(text.data(), text.data() + text.size(), tag);
+    return std::labs(tag);
+}
+
 /** A face split by a feature and made whole again by the refine after it gets its name back
- * (ops#806). A flush rib's fusion cuts the plate's top face along the rib's outline, so the
- * top's piece is named `<top>|...;FUS;...;MOD;...`; the refine merges the pieces and the rib's
- * top into one face, which kept only the pieces' names. Every element a later feature
- * generated on that face was then named from the piece, not from `<top>`, and a reference to it
- * broke though it is far from the rib and unchanged (a boss's junction edge under a fillet).
+ * (ops#806). A flush rib that reaches into a plate is fused in two steps: the fusion cuts the
+ * plate's top face along the rib's outline, so the top's piece is named
+ * `<top>|...;FUS;...;MOD;...` (a face only trimmed keeps its name; a cut into pieces adds the
+ * section); the refine merges the pieces and the rib's top into one face, which kept only the
+ * pieces' names. Every element a later feature generated on that face was then named from the
+ * piece, not from `<top>`, and a reference to it broke though it is far from the rib and
+ * unchanged (a boss's junction edge under a fillet).
  *
  * The rule: a face of \a result merged from several faces of \a input (\a mapper's modified
- * lists) that holds a piece `X|<split>` takes the name X again, before its other names, when no
- * face outside the merge holds a piece of the same split of X: the merged face then contains
- * all of X the split left. A piece of a piece comes back level by level. The pieces' own names
- * stay on the face, after the whole names, for references made to them.
+ * lists) that holds a piece `X|<split>` takes the name X again when no face outside the merge
+ * holds a piece of the same split of X: the merged face then contains all of X the split left.
+ * A piece of a piece comes back level by level. The whole names come first, the one with the
+ * fewest splits left on it before the others, then the one named by the older feature (the
+ * smaller tag; a feature inserted earlier in the history is the newer one, so the names of what
+ * was there stay first), then in the input's order. The pieces' own names stay on the face
+ * after them, for references made to them.
  */
 void restoreWholeFaceNames(TopoShape& result, const TopoShape& input, const TopoShape::Mapper& mapper)
 {
@@ -11209,13 +11241,14 @@ void restoreWholeFaceNames(TopoShape& result, const TopoShape& input, const Topo
     }
 
     using NameList = std::vector<std::pair<Data::MappedName, Data::ElementIDRefs>>;
+    using Level = std::pair<std::string, std::string>;
     auto& table = Data::NameTable::instance();
     const bool interned = input.getInternNames();
     // The splits a name went through, outermost first: the name each split cut (in the map's
     // form) and the split ("<tag>;<op>"). An interned piece of a piece is `~<ID>|<split>`,
     // whose prefix is a bare reference: its entry's content is the name one level down.
     auto splitsOf = [&](std::string name) {
-        std::vector<std::pair<std::string, std::string>> levels;
+        std::vector<Level> levels;
         while (true) {
             const auto sections = Data::NameAncestry::splitSections(name);
             if (sections.size() < 2) {
@@ -11235,55 +11268,112 @@ void restoreWholeFaceNames(TopoShape& result, const TopoShape& input, const Topo
         }
         return levels;
     };
-    auto key = [](const std::pair<std::string, std::string>& level) {
+    auto key = [](const Level& level) {
         return level.first + '\n' + level.second;
     };
-    std::vector<NameList> inputNames(inputCount + 1);
-    // Per split of a name, the faces of the input that hold a piece of it
-    std::map<std::string, std::set<int>> holders;
-    for (int i = 1; i <= inputCount; ++i) {
-        inputNames[i] = input.getElementMappedNames(Data::IndexedName::fromConst("Face", i));
-        for (const auto& entry : inputNames[i]) {
-            for (const auto& level : splitsOf(entry.first.toString())) {
-                holders[key(level)].insert(i);
+
+    // The merged faces' own pieces first: most refines merge none, and end here
+    struct Piece
+    {
+        int face;                   // of the input
+        Data::ElementIDRefs sids;
+        std::vector<Level> levels;  // outermost first
+    };
+    std::map<int, std::vector<Piece>> pieces;  // by face of the result
+    std::map<std::string, std::set<int>> holders;  // per split of a name, the input faces with a piece
+    std::set<int> members;
+    for (const auto& [index, faces] : merged) {
+        for (int face : faces) {
+            members.insert(face);
+            for (const auto& entry :
+                 input.getElementMappedNames(Data::IndexedName::fromConst("Face", face))) {
+                auto levels = splitsOf(entry.first.toString());
+                if (levels.empty()) {
+                    continue;
+                }
+                for (const Level& level : levels) {
+                    holders[key(level)].insert(face);
+                }
+                pieces[index].push_back({face, entry.second, std::move(levels)});
             }
         }
     }
-    if (holders.empty()) {
+    if (pieces.empty()) {
         return;
     }
-
-    for (const auto& [index, members] : merged) {
-        const std::set<int> inside(members.begin(), members.end());
-        NameList whole;
-        std::set<std::string> seen;
-        for (int member : members) {
-            for (const auto& entry : inputNames[member]) {
-                for (const auto& level : splitsOf(entry.first.toString())) {
-                    // Level by level: a split with a piece left outside ends it
-                    if (!std::ranges::includes(inside, holders.at(key(level)))) {
-                        break;
-                    }
-                    if (seen.insert(level.first).second) {
-                        whole.emplace_back(Data::MappedName(level.first), entry.second);
-                    }
+    // The pieces of the same splits on the other faces. A plain name's prefix is written out,
+    // so only a name that starts with a split name can be its piece; an interned one hides its
+    // deeper levels behind a reference, and is short.
+    std::set<std::string_view> prefixes;
+    for (const auto& [text, faces] : holders) {
+        prefixes.insert(std::string_view(text).substr(0, text.find('\n')));
+    }
+    for (int face = 1; face <= inputCount; ++face) {
+        if (members.contains(face)) {
+            continue;
+        }
+        for (const auto& entry :
+             input.getElementMappedNames(Data::IndexedName::fromConst("Face", face))) {
+            const std::string name = entry.first.toString();
+            if (!interned
+                && std::ranges::none_of(prefixes, [&](std::string_view prefix) {
+                       return name.size() > prefix.size() && name[prefix.size()] == '|'
+                           && name.starts_with(prefix);
+                   })) {
+                continue;
+            }
+            for (const Level& level : splitsOf(name)) {
+                if (auto found = holders.find(key(level)); found != holders.end()) {
+                    found->second.insert(face);
                 }
             }
         }
+    }
+
+    for (const auto& [index, list] : pieces) {
+        const auto& faces = merged.at(index);
+        const std::set<int> inside(faces.begin(), faces.end());
+        struct Whole
+        {
+            std::size_t splitsLeft;
+            long tag;
+            Data::MappedName name;
+            Data::ElementIDRefs sids;
+        };
+        std::vector<Whole> whole;
+        std::set<std::string> seen;
+        for (const Piece& piece : list) {
+            // Level by level: a split with a piece left outside ends it
+            std::size_t undone = 0;
+            while (undone < piece.levels.size()
+                   && std::ranges::includes(inside, holders.at(key(piece.levels[undone])))) {
+                ++undone;
+            }
+            for (std::size_t k = 0; k < undone; ++k) {
+                const std::string& name = piece.levels[k].first;
+                if (seen.insert(name).second) {
+                    // The splits the name still carries below the ones undone here
+                    whole.push_back(
+                        {piece.levels.size() - 1 - k, lastTagOf(name), Data::MappedName(name), piece.sids}
+                    );
+                }
+            }
+        }
+        const Data::IndexedName element = Data::IndexedName::fromConst("Face", index);
+        // A name another element holds stays there (setElementName would count a duplicate)
+        std::erase_if(whole, [&](const Whole& entry) {
+            const Data::IndexedName holder = result.getIndexedName(entry.name);
+            return holder && holder != element;
+        });
         if (whole.empty()) {
             continue;
         }
-        const Data::IndexedName element = Data::IndexedName::fromConst("Face", index);
+        std::ranges::stable_sort(whole, [](const Whole& a, const Whole& b) {
+            return std::tie(a.splitsLeft, a.tag) < std::tie(b.splitsLeft, b.tag);
+        });
         NameList names;
-        for (auto& entry : whole) {
-            // A name another element holds stays there (setElementName would count a duplicate)
-            const Data::IndexedName holder = result.getIndexedName(entry.first);
-            if (!holder || holder == element) {
-                names.push_back(std::move(entry));
-            }
-        }
-        if (names.empty()) {
-            continue;
+        for (Whole& entry : whole) {
+            names.emplace_back(std::move(entry.name), std::move(entry.sids));
         }
         for (auto& entry : result.getElementMappedNames(element)) {
             if (std::ranges::none_of(names, [&](const auto& held) {
@@ -11296,6 +11386,24 @@ void restoreWholeFaceNames(TopoShape& result, const TopoShape& input, const Topo
             // The first one replaces the face's names; the rest follow in order
             result.setElementName(element, names[i].first, result.Tag, &names[i].second, i == 0);
         }
+    }
+}
+
+/// restoreWholeFaceNames(), which never fails the refine: the names stay as they were
+void restoreWholeFaceNamesSafely(
+    TopoShape& result,
+    const TopoShape& input,
+    const TopoShape::Mapper& mapper
+)
+{
+    try {
+        restoreWholeFaceNames(result, input, mapper);
+    }
+    catch (const Base::Exception& e) {
+        FC_WARN("refine: whole face names not restored: " << e.what());
+    }
+    catch (const std::exception& e) {
+        FC_WARN("refine: whole face names not restored: " << e.what());
     }
 }
 
@@ -11351,7 +11459,7 @@ TopoShape& TopoShape::makeElementRefine(const TopoShape& shape, const char* op, 
         mkRefine.populate(mapper);
         mapper.init(input, mkRefine.Shape());
         makeShapeWithElementMap(mkRefine.Shape(), mapper, {input}, op);
-        restoreWholeFaceNames(*this, input, mapper);
+        restoreWholeFaceNamesSafely(*this, input, mapper);
         // For some reason, refine operation may reverse the solid
         fixSolidOrientation();
         if (isClosed() == closed) {
@@ -11444,7 +11552,7 @@ TopoShape& TopoShape::makeElementRefine(const TopoShape& shape, const char* op, 
             && BRepCheck_Analyzer(unified).IsValid()) {
             const MapperHistory history(unify.History());
             makeShapeWithElementMap(unified, history, {fresh}, op);
-            restoreWholeFaceNames(*this, fresh, history);
+            restoreWholeFaceNamesSafely(*this, fresh, history);
             fixSolidOrientation();
             if (isClosed() == closed) {
                 return *this;
