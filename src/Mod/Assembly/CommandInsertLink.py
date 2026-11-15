@@ -149,6 +149,8 @@ def studioParts(members):
             obj.isDerivedFrom("PartDesign::Feature")
             or obj.isDerivedFrom("PartDesign::SubShapeBinder")
             or obj.isDerivedFrom("Part::Part2DObject")
+            or obj.isDerivedFrom("Part::Datum")
+            or obj.isDerivedFrom("PartDesign::ShapeBinder")
         ):
             continue
         if obj.TypeId == "PartDesign::StudioList":
