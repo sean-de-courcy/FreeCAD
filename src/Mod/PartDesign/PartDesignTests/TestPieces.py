@@ -1231,6 +1231,50 @@ class TestPieces(unittest.TestCase):
         self.assertVolume(left, 3000)
         self.assertVolume(right, 6900)
 
+    def testCommandAfterAComputedMoveOfThePartMakesThePieces(self):
+        # The same slot and bridge, the part moved 2 against y and recomputed before the
+        # command: the step noticed its part moved (ops#813) and fails, two pieces; the
+        # command makes them, 3000 and 6900
+        self.studio()
+        e = self.pocket("E", ((30, -20, 31, 9),), ("P",), length=11)
+        self.assertEqual(list(self.command(e)), [])
+        p = self.doc.getObject("P")
+        p.Placement = App.Placement(V(0, -2, 0), App.Rotation())
+        self.doc.recompute()
+        self.assertFalse(self.step(e, p).isValid())
+        left, right = self.leftRight(list(self.command(e)))
+        self.assertVolume(left, 3000)
+        self.assertVolume(right, 6900)
+
+    def testAMovedPartIsCutWhereTheToolIs(self):
+        # A pocket x 10..20, y 5..12, 4 deep, over the bar's edge (y 0..10): it takes
+        # 10 x 5 x 4. The part moved 2 against y and recomputed: the tool stays where it is, so
+        # it takes 10 x 3 x 4 (ops#813: the step reads its part's frame)
+        self.studio()
+        e = self.pocket("E", ((10, 5, 20, 12),), ("P",), length=4)
+        p = self.doc.getObject("P")
+        self.assertVolume(p, 100 * 10 * 10 - 10 * 5 * 4)
+        p.Placement = App.Placement(V(0, -2, 0), App.Rotation())
+        self.doc.recompute()
+        self.assertVolume(p, 100 * 10 * 10 - 10 * 3 * 4)
+        self.assertValid(e, self.step(e, p))
+        # Moved back: as at first
+        p.Placement = App.Placement()
+        self.doc.recompute()
+        self.assertVolume(p, 100 * 10 * 10 - 10 * 5 * 4)
+
+    def testTheStudioMovedWholeComputesNoStep(self):
+        # The same pocket, the whole studio moved: the part and the tool move together, so
+        # the step stays as it is and isn't computed again (ops#813 checks only the relative frame)
+        self.studio()
+        e = self.pocket("E", ((10, 5, 20, 12),), ("P",), length=4)
+        p = self.doc.getObject("P")
+        step = self.step(e, p)
+        self.S.Placement = App.Placement(V(7, 3, 1), App.Rotation(V(0, 0, 1), 30))
+        _, names = self.recomputedDuring(self.doc.recompute)
+        self.assertNotIn(step.Name, names)
+        self.assertVolume(p, 100 * 10 * 10 - 10 * 5 * 4)
+
     def testCommandAfterAnEditThatSplitsMakesThePieces(self):
         # The slot across the bar, 4 deep first (one solid: nothing to make), then deepened
         # through it: computed, it fails (two pieces, no parts yet), so the command doesn't take
