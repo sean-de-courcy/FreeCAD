@@ -377,6 +377,55 @@ class TestMateOffsetPickOrder(MateEditsBase):
         self.doc.getObject("Assembly").solve()
         self.assertNear(self.b.Placement.multVec(V(10, 5, 5)), V(20, 10, 15), "offset 5 after the reopen")
 
+    def repickSetup(self):
+        """A grounded first, B and C free; picks go through setJointConnectors as the dialog's do."""
+        self.bodyA, _ = self.studio("PartA", 40, 20, 10)
+        self.bodyB, _ = self.studio("PartB", 20, 10, 5)
+        self.asm = self.assembly()
+        self.a = self.instance(self.asm, "A", self.bodyA)
+        self.b = self.instance(self.asm, "B", self.bodyB, V(60, 0, 0))
+        self.c = self.instance(self.asm, "C", self.bodyB, V(-60, 0, 0))
+        self.doc.recompute()
+        self.ground(self.a)
+        self.topA = self.topFace(self.bodyA.Shape, 10)
+        self.topB = self.topFace(self.bodyB.Shape, 5)
+        joint = self.joints.newObject("App::FeaturePython", "Fastened")
+        JointObject.Joint(joint, 0)
+        joint.Offset2 = App.Placement(V(0, 0, 3), App.Rotation())
+        return joint
+
+    def pick(self, joint, *parts):
+        subs = {self.a: self.topA, self.b: self.topB, self.c: self.topB}
+        joint.Proxy.setJointConnectors(joint, [[p, [subs[p], subs[p]]] for p in parts])
+        self.doc.recompute()
+        self.asm.solve()
+        self.doc.recompute()
+
+    def above(self, part):
+        """part's top centre minus A's (A grounded at the origin)"""
+        return part.Placement.multVec(V(10, 5, 5)) - V(20, 10, 10)
+
+    def testRepicksKeepThePickOrder(self):
+        """Review r1 (ops#826): the first pick is the earlier one through deselects and re-picks,
+        and through the panel's calls in stored order (ops#772), a reopen included."""
+        joint = self.repickSetup()
+        self.pick(joint, self.b)
+        self.pick(joint, self.b, self.a)  # B first: B's top 3 above A's
+        self.assertNear(self.above(self.b), V(0, 0, 3), "B then A")
+        self.pick(joint, self.a, self.b)  # the panel's stored order, same picks
+        self.assertNear(self.above(self.b), V(0, 0, 3), "B then A, re-called in stored order")
+        self.pick(joint, self.a)  # B deselected: A is now the first pick
+        self.pick(joint, self.a, self.c)  # A first: C's top 3 below A's
+        self.assertNear(self.above(self.c), V(0, 0, -3), "A then C")
+        self.pick(joint, self.c)  # A deselected, then picked again after C
+        self.pick(joint, self.c, self.a)
+        self.assertNear(self.above(self.c), V(0, 0, 3), "C then A")
+        self.saveAndReopen()
+        self.a, self.c = self.doc.getObject("A"), self.doc.getObject("C")
+        self.asm, joint = self.doc.getObject("Assembly"), self.doc.getObject("Fastened")
+        self.pick(joint, self.a, self.c)  # stored order after the reopen
+        self.assertNear(self.above(self.c), V(0, 0, 3), "C then A, after the reopen")
+
 
 class TestRedMateOffset(MateEditsBase):
     """ops#827 (Onshape B3): a mate whose pick is gone is in error and drives nothing; editing its
