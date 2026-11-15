@@ -1056,6 +1056,23 @@ void attachDialogHistory(Gui::TaskView::TaskDialog* dlg, App::DocumentObject* fe
             }
         }
     ));
+    // The same for a document recompute that had more than the feature to compute: an object
+    // that fails there without running sends no signal of its own (review r2)
+    history->connections.emplace_back(doc->signalRecomputed.connect(
+        [name](const App::Document&, const std::vector<App::DocumentObject*>& objs) {
+            DialogHistory* found = findHistory(name);
+            if (!found || found->othersComputed) {
+                return;
+            }
+            const bool others = std::ranges::any_of(objs, [found](const App::DocumentObject* obj) {
+                return obj && obj->getNameInDocument()
+                    && found->feature != obj->getNameInDocument();
+            });
+            if (others && !found->holdsOriginals()) {
+                found->othersComputed = true;
+            }
+        }
+    ));
     history->connections.emplace_back(doc->signalNewObject.connect(structural));
     history->connections.emplace_back(doc->signalDeletedObject.connect(structural));
     history->updateActions();

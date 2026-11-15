@@ -3962,7 +3962,7 @@ bool Gui::editStartedComputed(const App::Document* doc, const App::DocumentObjec
                                                          : nullptr;
     auto it = guiDoc ? stepDocuments.find(guiDoc) : stepDocuments.end();
     return it != stepDocuments.end() && obj && obj->getNameInDocument()
-        && guiDoc->getInEdit() != nullptr
+        && guiDoc->getEditViewProvider() != nullptr
         && !it->second->_editStartedWaiting.count(obj->getNameInDocument());
 }
 
