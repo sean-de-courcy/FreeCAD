@@ -29,10 +29,12 @@ def tilted_cube_face(axis, sign, degrees):
     """The +Z face of a 10 mm cube rotated by `degrees` so its normal leans toward sign*axis."""
     box = Part.makeBox(10, 10, 10, V(-5, -5, -5))
     # A rotation about Y by +t tips +Z toward +X; about X by -t tips +Z toward +Y.
+    # transformGeometry, not rotate: the attacher reads the support's placement as its axes.
     if axis == "X":
-        box.rotate(V(0, 0, 0), V(0, 1, 0), sign * degrees)
+        rotation = App.Rotation(V(0, 1, 0), sign * degrees)
     else:
-        box.rotate(V(0, 0, 0), V(1, 0, 0), -sign * degrees)
+        rotation = App.Rotation(V(1, 0, 0), -sign * degrees)
+    box = box.transformGeometry(App.Placement(V(), rotation).toMatrix())
     t = math.radians(degrees)
     want = V(sign * math.sin(t), 0, math.cos(t)) if axis == "X" else V(0, sign * math.sin(t), math.cos(t))
     for i, face in enumerate(box.Faces):
@@ -89,7 +91,7 @@ class FlatFaceAxesTest(unittest.TestCase):
                 with self.subTest(nx=nx, nz=nz, sign=sign):
                     normal = V(sign * nx, 0, nz).normalize()
                     plane = Part.Plane(V(0, 0, 0), normal)
-                    face = Part.Face(plane, -5, 5, -5, 5)
+                    face = plane.toShape(-5, 5, -5, 5)
                     got = self.sketch_x(face, "Face1")
                     self.assertLess((got - V(0, sign, 0)).Length, 1e-6, "x %s" % got)
 
