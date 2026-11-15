@@ -279,3 +279,30 @@ class TestCore(AssemblyTestBase):
         joint.Proxy.setJointConnectors(joint, refs)
 
         self.assertTrue(box.Placement.isSame(box2.Placement, 1e-6), "'{}'".format(operation))
+
+    def test_grounded_part_deleted_and_undone(self):
+        """ops#787: box A grounded, deleted in a transaction, undone: A reads grounded again,
+        before and after a solve, the grounding joint is kept and A's placement is locked again
+        (before, the undo left it unlocked and the solve deleted the joint)."""
+        self.doc.UndoMode = 1
+        a = self.assembly.newObject("Part::Box", "A")
+        b = self.assembly.newObject("Part::Box", "B")
+        b.Placement.Base = App.Vector(30, 0, 0)
+        ground = self.jointgroup.newObject("App::FeaturePython", "GroundedA")
+        JointObject.GroundedJoint(ground, a)
+        self.doc.recompute()
+        self.assembly.solve()
+        self.assertTrue(self.assembly.isPartGrounded(a))
+        self.doc.openTransaction("delete A")
+        self.doc.removeObject("A")
+        self.doc.commitTransaction()
+        self.doc.undo()
+        a = self.doc.getObject("A")
+        self.assertIsNotNone(a)
+        self.assertIs(ground.ObjectToGround, a)
+        self.assertTrue(self.assembly.isPartGrounded(a), "grounded before a solve")
+        self.doc.recompute()
+        self.assembly.solve()
+        self.assertIn(ground, self.jointgroup.Group, "the grounding joint is kept")
+        self.assertTrue(self.assembly.isPartGrounded(a), "grounded after a solve")
+        self.assertIn("ReadOnly", a.getPropertyStatus("Placement"))
