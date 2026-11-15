@@ -850,6 +850,45 @@ class TestHistoryOrder(unittest.TestCase):
         self.assertIs(self.skF.AttachmentSupport[0][0], self.padA)
         self.checkVolumes(self.filletVolume, 32)
 
+    def testInTheListAPadGoesAboveTheFilletItsSketchIsOn(self):
+        """s37d5 (ops#647): the list holding Body2's sketch above the Fillet whose face it is on,
+        as a part studio lists its sketches first. PadF dragged alone above the Fillet reads the
+        Fillet through its sketch: the sketch is put on the Pad's top face, the face the Fillet
+        trimmed, rather than the drop making a cycle that every recompute runs twice"""
+        self.listedFilletedBlock()
+        lst = PartDesign.studioList(self.doc, True)
+        lst.Entries = [self.skA, self.skF, self.padA, self.fillet, self.padF]
+        self.assertEqual(self.order(), ["SkA", "SkF", "PadA", "Fillet", "PadF"])
+        self.assertTrue(PartDesign.moveInStudio(self.doc, self.padF, self.padA))
+        self.doc.recompute()
+        self.assertEqual(self.order(), ["SkA", "SkF", "PadA", "PadF", "Fillet"])
+        self.assertIs(self.skF.AttachmentSupport[0][0], self.padA)
+        self.assertAlmostEqual(self.skF.Placement.Base.z, 5, places=9)
+        self.checkVolumes(self.filletVolume, 32)
+        # Nothing left to run: no cycle
+        self.assertEqual([o.Name for o in self.doc.Objects if "Touched" in o.State], [])
+        self.assertEqual(self.doc.recompute(), 0)
+
+    def testInTheListAPadIsRefusedAboveAnEdgeItsSketchReads(self):
+        """The same with a reference that has no earlier version (the Fillet's tangent edge):
+        the drop is refused, writing nothing"""
+        self.listedFilletedBlock()
+        tangent = next(
+            f"Edge{i}"
+            for i, e in enumerate(self.fillet.Shape.Edges, 1)
+            if all(abs(v.Point.z - 5) < 1e-9 and abs(v.Point.y - 1) < 1e-9 for v in e.Vertexes)
+        )
+        self.skF.AttachmentSupport = [(self.fillet, tangent)]
+        self.skF.MapMode = "NormalToEdge"
+        self.doc.recompute()
+        lst = PartDesign.studioList(self.doc, True)
+        lst.Entries = [self.skA, self.skF, self.padA, self.fillet, self.padF]
+        before = self.order()
+        with self.assertRaisesRegex(ValueError, "'PadF' uses 'Fillet' of 'Body1'"):
+            PartDesign.moveInStudio(self.doc, self.padF, self.padA)
+        self.assertEqual(self.order(), before)
+        self.assertIs(self.skF.AttachmentSupport[0][0], self.fillet)
+
     def testInTheListAnEdgeTheFilletMadeIsStillRefused(self):
         """In the list too, a reference with no earlier version refuses the drop, writing
         nothing: a sketch normal to the Fillet's tangent edge (y = 1), which the Pad hasn't"""
