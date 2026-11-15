@@ -2862,6 +2862,7 @@ void Application::runApplication()
 
     Application app(true);
     StartupProcess::applyFirstStartPack();
+    StartupProcess::reapplyPackColours();
     MainWindow mw;
     mw.setProperty("QuitOnClosed", true);
 

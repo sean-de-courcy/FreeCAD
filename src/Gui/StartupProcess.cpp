@@ -41,7 +41,10 @@
 
 #include <Inventor/SoDB.h>
 
+#include <filesystem>
+#include <initializer_list>
 #include <set>
+#include <vector>
 #include <string>
 #include <ranges>
 
@@ -60,6 +63,8 @@
 #include <App/Application.h>
 #include <App/ApplicationDirectories.h>
 #include <Base/Console.h>
+#include <Base/FileInfo.h>
+#include <Base/Parameter.h>
 
 
 using namespace Gui;
@@ -386,6 +391,94 @@ void StartupProcess::applyFirstStartPack()
     }
     catch (const std::exception& e) {
         Base::Console().warning("First start: %s\n", e.what());
+    }
+}
+
+void StartupProcess::reapplyPackColours()
+{
+    // FreeCAD-CH (ops#796): the Onshape pack's colours (orange selection, blue-grey parts) came
+    // after many settings folders were made, and packs apply only to a new folder. Once per folder
+    // (marker General/CHColourPackApplied), copy only these colour keys from the pack, and only
+    // where the folder still holds an old default (unset, or the Light/Dark pack's or the old
+    // code value): a colour the user chose stays, and a colour changed afterwards is never touched.
+    // The selection pair comes from the Onshape pack (both themes); the part and edge
+    // colours from the Light pack, and only in the light theme: dark keeps its own.
+    constexpr long version = 1;
+    auto general = App::GetApplication().GetParameterGroupByPath(
+        "User parameter:BaseApp/Preferences/General"
+    );
+    if (general->GetInt("CHColourPackApplied", 0) >= version) {
+        return;
+    }
+    const auto mode = App::Application::Config().find("RunMode");
+    if (mode != App::Application::Config().end() && mode->second == "Internal") {
+        return;
+    }
+    try {
+        auto view = App::GetApplication().GetParameterGroupByPath(
+            "User parameter:BaseApp/Preferences/View"
+        );
+        auto packs = Application::Instance->prefPackManager();
+        const auto dir = packs->getResourcePreferencePacksPath();
+        // The managers stay alive while their groups are read: a group outlives its document
+        // only as an empty shell.
+        std::vector<Base::Reference<ParameterManager>> managers;
+        const auto loadView = [&dir, &managers](const char* name) -> ParameterGrp::handle {
+            const auto file = dir / name / (std::string(name) + ".cfg");
+            if (!std::filesystem::exists(file)) {
+                return {};
+            }
+            auto params = ParameterManager::Create();
+            params->LoadDocument(Base::FileInfo::pathToString(file).c_str());
+            managers.push_back(params);
+            return params->GetGroup("BaseApp")->GetGroup("Preferences")->GetGroup("View");
+        };
+        auto onshape = loadView("FreeCAD-CH Onshape");
+        auto light = loadView("FreeCAD Light");
+        const std::string theme = App::GetApplication()
+                                      .GetParameterGroupByPath(
+                                          "User parameter:BaseApp/Preferences/MainWindow"
+                                      )
+                                      ->GetASCII("Theme", "");
+        const bool isLight = theme == "FreeCAD Light";
+        struct Key
+        {
+            const char* name;
+            bool lightOnly;  // from the Light pack, and only in the light theme
+            std::initializer_list<unsigned long> oldValues;  // old pack and code values
+        };
+        const Key keys[] = {
+            {"SelectionColor", false, {11272191ul, 0x1CAD1CFFul}},
+            {"HighlightColor", false, {180944895ul}},
+            {"DefaultShapeColor", true, {2914369023ul, 0xCCCCCCFFul}},
+            {"DefaultShapeLineColor", true, {255ul}},
+        };
+        constexpr unsigned long unset = 0x12345678ul;  // not a colour any pack or default uses
+        for (const auto& key : keys) {
+            if (key.lightOnly && !isLight) {
+                continue;
+            }
+            const auto& pack = key.lightOnly ? light : onshape;
+            if (pack.isNull()) {
+                continue;
+            }
+            const auto target = pack->GetUnsigned(key.name, unset);
+            if (target == unset) {
+                continue;
+            }
+            const auto current = view->GetUnsigned(key.name, unset);
+            bool oldDefault = current == unset;
+            for (const auto old : key.oldValues) {
+                oldDefault = oldDefault || current == old;
+            }
+            if (oldDefault && current != target) {
+                view->SetUnsigned(key.name, target);
+            }
+        }
+        general->SetInt("CHColourPackApplied", version);
+    }
+    catch (const std::exception& e) {
+        Base::Console().warning("Colour re-apply: %s\n", e.what());
     }
 }
 

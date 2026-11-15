@@ -415,7 +415,7 @@ void ViewParams::setup()
     addParameter("SelectionLineMaxWidth", Double {4.0});
     addParameter("SelectionBBoxLineWidth", Double {3.0});
     addParameter("MaxViewSelections", Int {100});
-    addParameter("SelectionColor", Unsigned {0x1cad1cff});
+    addParameter("SelectionColor", Unsigned {0xFFA90AFF});  // FreeCAD-CH ops#796: Onshape orange
     addParameter("UseTightBoundingBox", Bool {true});
     addParameter("RenderProjectedBBox", Bool {true});
 }
