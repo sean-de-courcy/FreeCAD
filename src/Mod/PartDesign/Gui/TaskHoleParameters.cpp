@@ -1672,9 +1672,11 @@ void TaskHoleParameters::onReferenceSelectionTaken()
 
 void TaskHoleParameters::updateHoleCutLimits(PartDesign::Hole* hole)
 {
-    constexpr double minHoleCutDifference = 0.1;
-    // HoleCutDiameter must not be smaller or equal than the Diameter
-    ui->HoleCutDiameter->setMinimum(hole->Diameter.getValue() + minHoleCutDifference);
+    // FreeCAD-CH (ops#847): no minimum from the Diameter. Raising it clamped the field and
+    // wrote the clamped value over the user's; a cut no wider than the hole is reported by
+    // the feature instead, as Onshape does
+    Q_UNUSED(hole);
+    ui->HoleCutDiameter->setMinimum(0.0);
 }
 
 void TaskHoleParameters::setupGizmos(ViewProviderHole* vp)
