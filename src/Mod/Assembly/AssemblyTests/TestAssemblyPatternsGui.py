@@ -71,9 +71,9 @@ class TestAssemblyPatternsGui(AssembliesGuiBase):
         edge = None
         for i, e in enumerate(body.Shape.Edges, 1):
             p0, p1 = e.Vertexes[0].Point, e.Vertexes[-1].Point
-            along = p1 - p0
-            if min(p0.Length, p1.Length) < 1e-9 and abs(abs(along.normalize().dot(X)) - 1) < 1e-12:
-                edge, self.along = f"Edge{i}", along.normalize()
+            along = AssemblyPattern.axisOfShape(e)[1]
+            if min(p0.Length, p1.Length) < 1e-9 and abs(abs(along.dot(X)) - 1) < 1e-12:
+                edge, self.along = f"Edge{i}", along
         self.assertIsNotNone(edge)
         return doc, asm, seed, edge
 
@@ -154,13 +154,13 @@ class TestAssemblyPatternsGui(AssembliesGuiBase):
             self.assertIsNone(doc.getObject(n), n)
 
     def edgeAlong(self, body, direction):
-        """The name and the way (first vertex to last) of the box's edge through its origin along
-        direction"""
+        """The name and the way (its tangent, as the pattern takes it) of the box's edge through its
+        origin along direction"""
         for i, e in enumerate(body.Shape.Edges, 1):
             p0, p1 = e.Vertexes[0].Point, e.Vertexes[-1].Point
-            along = p1 - p0
-            if min(p0.Length, p1.Length) < 1e-9 and abs(abs(along.normalize().dot(direction)) - 1) < 1e-12:
-                return f"Edge{i}", along.normalize()
+            along = AssemblyPattern.axisOfShape(e)[1]
+            if min(p0.Length, p1.Length) < 1e-9 and abs(abs(along.dot(direction)) - 1) < 1e-12:
+                return f"Edge{i}", along
         self.fail("no such edge")
 
     def testSecondDirectionJourney(self):
