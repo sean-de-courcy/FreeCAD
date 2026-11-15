@@ -4396,3 +4396,14 @@ class DocumentTeamFolderCases(unittest.TestCase):
         self.group.SetString("TeamFolder", "")
         self.group.SetString("TeamFolder", self.team)
         self.assertEqual(FreeCAD.teamFolderProblem(), "", "setting it again restores it")
+
+    def testRelativeOrFileIsRefused(self):
+        """Review F1, F3: a relative path would follow the working directory; a file is no folder."""
+        self.group.SetString("TeamFolder", "team")
+        self.assertIn("not an absolute", FreeCAD.teamFolderProblem())
+        afile = os.path.join(self.root, "afile.txt")
+        with open(afile, "w", encoding="utf-8") as f:
+            f.write("x")
+        self.group.SetString("TeamFolder", afile)
+        self.assertIn("not a folder", FreeCAD.teamFolderProblem())
+        self.assertFalse(os.path.exists(os.path.join(self.root, ".stignore")))
