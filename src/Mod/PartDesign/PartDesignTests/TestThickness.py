@@ -450,6 +450,96 @@ class TestThickness(unittest.TestCase):
                 FreeCAD.closeDocument(self.Doc.Name)
                 self.Doc = FreeCAD.newDocument("PartDesignTestThickness")
 
+    def _outwardShellOfABlockWithAPocket(self, length, width, height, pocket, join, removeTop):
+        """A <length> x <width> x <height> block with a through pocket <pocket> = (x, y, dx, dy),
+        shelled outward by 1.5 with <join>, its top (or bottom) face removed."""
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        block = body.newObject("PartDesign::AdditiveBox", "Block")
+        block.Length, block.Width, block.Height = length, width, height
+        x, y, dx, dy = pocket
+        hole = body.newObject("PartDesign::SubtractiveBox", "Pocket")
+        hole.Length, hole.Width, hole.Height = dx, dy, height
+        hole.Placement.Base = FreeCAD.Vector(x, y, 0)
+        self.Doc.recompute()
+        z = height if removeTop else 0
+        removed = [
+            "Face" + str(i)
+            for i, face in enumerate(hole.Shape.Faces, 1)
+            if isinstance(face.Surface, Part.Plane) and abs(face.CenterOfMass.z - z) < 1e-7
+        ]
+        self.assertEqual(len(removed), 1)
+        thickness = body.newObject("PartDesign::Thickness", "Thickness")
+        thickness.Base = (hole, removed)
+        thickness.Value = 1.5
+        thickness.Join = join
+        thickness.Reversed = False
+        self.Doc.recompute()
+        return thickness
+
+    def testOutwardShellOfABlockWithARectangularPocket(self):
+        """Onshape's SL1 (oracle 25): a 40 x 30 x 20 block with a 10 x 20 through pocket, top
+        removed, shelled outward by 1.5, keeps sharp corners: 20 planar faces, V 7950 =
+        43*33*21.5 - 7*17*21.5 - 20000. OCCT's Arc join gives an invalid solid there in both
+        modes, so the Intersection join is built (ops#807); with it the result is the same."""
+        for join in ("Arc", "Intersection"):
+            with self.subTest(join=join):
+                thickness = self._outwardShellOfABlockWithAPocket(
+                    40, 30, 20, (15, 5, 10, 20), join, True
+                )
+                self.assertTrue(thickness.isValid(), thickness.getStatusString())
+                shape = thickness.Shape
+                self.assertTrue(shape.isValid())
+                self.assertEqual(len(shape.Solids), 1)
+                self.assertAlmostEqual(shape.Volume, 43 * 33 * 21.5 - 7 * 17 * 21.5 - 20000, places=5)
+                self.assertEqual(len(shape.Faces), 20)
+                self.assertTrue(all(isinstance(f.Surface, Part.Plane) for f in shape.Faces))
+                box = shape.BoundBox
+                for got, want in zip(
+                    (box.XMin, box.YMin, box.ZMin, box.XMax, box.YMax, box.ZMax),
+                    (-1.5, -1.5, -1.5, 41.5, 31.5, 20),
+                ):
+                    self.assertAlmostEqual(got, want, places=6)
+                FreeCAD.closeDocument(self.Doc.Name)
+                self.Doc = FreeCAD.newDocument("PartDesignTestThickness")
+
+    def testOutwardShellOfAPlateWithARectangularPocket(self):
+        """ops#807's smallest case: a 120 x 80 x 10 plate with a 10 x 20 through pocket, bottom
+        removed, outward 1.5 with the Arc join: built sharp, V 22035 = 123*83*11.5 -
+        7*17*11.5 - (120*80 - 200)*10."""
+        thickness = self._outwardShellOfABlockWithAPocket(
+            120, 80, 10, (55, 30, 10, 20), "Arc", False
+        )
+        self.assertTrue(thickness.isValid(), thickness.getStatusString())
+        self.assertTrue(thickness.Shape.isValid())
+        self.assertAlmostEqual(
+            thickness.Shape.Volume, 123 * 83 * 11.5 - 7 * 17 * 11.5 - 9400 * 10, places=5
+        )
+
+    def testOutwardArcShellOfAPlateWithARoundHoleStaysRound(self):
+        """Where OCCT's Arc join builds the outward shell, it is kept: a plate 120 x 80 x 10 with
+        a hole d6, bottom removed, outward 1.5 has rounded outer edges (not all faces planar)."""
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        plate = body.newObject("PartDesign::AdditiveBox", "Plate")
+        plate.Length, plate.Width, plate.Height = 120, 80, 10
+        hole = body.newObject("PartDesign::SubtractiveCylinder", "Hole")
+        hole.Radius, hole.Height = 3, 10
+        hole.Placement.Base = FreeCAD.Vector(60, 40, 0)
+        self.Doc.recompute()
+        bottom = [
+            "Face" + str(i)
+            for i, face in enumerate(hole.Shape.Faces, 1)
+            if isinstance(face.Surface, Part.Plane) and abs(face.CenterOfMass.z) < 1e-7
+        ]
+        thickness = body.newObject("PartDesign::Thickness", "Thickness")
+        thickness.Base = (hole, bottom)
+        thickness.Value = 1.5
+        thickness.Join = "Arc"
+        thickness.Reversed = False
+        self.Doc.recompute()
+        self.assertTrue(thickness.isValid(), thickness.getStatusString())
+        self.assertTrue(thickness.Shape.isValid())
+        self.assertFalse(all(isinstance(f.Surface, Part.Plane) for f in thickness.Shape.Faces))
+
     def tearDown(self):
         # closing doc
         FreeCAD.closeDocument("PartDesignTestThickness")
