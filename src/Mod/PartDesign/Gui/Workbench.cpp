@@ -765,22 +765,19 @@ Gui::ToolBarItem* Workbench::setupToolBars() const
 {
     Gui::ToolBarItem* root = StdWorkbench::setupToolBars();
 
-    // FreeCAD-CH (ops#605): one toolbar in Onshape's order. Groove and the subtractive Pipe and
-    // Loft stay beside their additive twins. Pocket is off it (ops#640, rank 22): Onshape has one
-    // Extrude, whose Remove does a pocket; PartDesign_Pocket stays in the Part Design menu and
-    // the stock toolbars. The four stock toolbars are kept for those who show them from the
-    // toolbar menu.
+    // FreeCAD-CH (ops#605): one toolbar in Onshape's order. Pocket is off it (ops#640, rank 22):
+    // Onshape has one Extrude, whose Remove does a pocket. So are Groove and the subtractive Pipe
+    // and Loft (ops#796): Revolve, Sweep and Loft each have Remove in their dialog. They stay in
+    // the Part Design menu and the stock toolbars. The four stock toolbars are kept for those who
+    // show them from the toolbar menu.
     Gui::ToolBarItem* part = new Gui::ToolBarItem(root);
     part->setCommand("Features");
 
     *part << "PartDesign_NewSketch"
           << "PartDesign_Pad"
           << "PartDesign_Revolution"
-          << "PartDesign_Groove"
           << "PartDesign_AdditivePipe"
-          << "PartDesign_SubtractivePipe"
           << "PartDesign_AdditiveLoft"
-          << "PartDesign_SubtractiveLoft"
           << "Separator"
           << "PartDesign_Fillet"
           << "PartDesign_Chamfer"

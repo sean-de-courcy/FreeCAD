@@ -23,7 +23,8 @@
 """The PartDesign toolbar in Onshape's order, and Onshape's words (FreeCAD-CH, ops#605 brief C).
 
 PartDesign has one "Features" toolbar in Onshape's order (notes/onshape-gui-plan.md 2.0, as
-corrected by section 7: Groove and the subtractive Pipe and Loft stay beside their additive twins).
+corrected by section 7). Groove and the subtractive Pipe and Loft are off it (ops#796): Remove is in
+the dialogs of Revolve, Pipe and Loft.
 Pocket is off it (ops#640, rank 22: Onshape's one Extrude removes too), and Onshape's Variable tool
 (Std_AddVariable, rank 15) is on it. The four stock toolbars are still there, hidden until
 the user shows them from the toolbar menu. Pad, Pocket, Thickness, Mirrored, LinearPattern and
@@ -51,11 +52,8 @@ FEATURES = [
     "PartDesign_NewSketch",
     "PartDesign_Pad",
     "PartDesign_Revolution",
-    "PartDesign_Groove",
     "PartDesign_AdditivePipe",
-    "PartDesign_SubtractivePipe",
     "PartDesign_AdditiveLoft",
-    "PartDesign_SubtractiveLoft",
     SEP,
     "PartDesign_Fillet",
     "PartDesign_Chamfer",
