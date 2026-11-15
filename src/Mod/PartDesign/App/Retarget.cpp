@@ -1238,7 +1238,9 @@ public:
                 any = true;
             }
         }
-        if (any) {
+        // A line putBack() ends without a write (its geometries linked again, or the element
+        // projected again) goes too, as planLinks() drops it, or every drop meets it again
+        if (any || std::ranges::find(keep, false) != keep.end()) {
             std::vector<std::string> kept;
             for (std::size_t i = 0; i < lines.size(); ++i) {
                 if (keep[i]) {
@@ -1246,6 +1248,7 @@ public:
                 }
             }
             writeParkedLines(owner, kept);
+            any = true;
         }
         return any;
     }
