@@ -24,6 +24,7 @@
 
 
 #include <functional>
+#include <string_view>
 
 #include <BRep_Tool.hxx>
 #include <BRepAdaptor_Surface.hxx>
@@ -5083,6 +5084,14 @@ App::DocumentObject* pickCreator()
     return PartDesignGui::FeaturesView::creatorOf(selection.front().pObject, element.c_str());
 }
 
+/// Whether one face is selected (cheap: the history is read only when a command runs)
+bool oneFacePicked()
+{
+    const auto selection = Gui::Selection().getSelection();
+    return selection.size() == 1 && selection.front().pObject && selection.front().SubName
+        && std::string_view(selection.front().SubName).starts_with("Face");
+}
+
 void editObject(App::DocumentObject* obj)
 {
     auto vp = obj ? Gui::Application::Instance->getViewProvider(obj) : nullptr;
@@ -5113,7 +5122,7 @@ void CmdPartDesignEditPickFeature::activated(int /*iMsg*/)
 
 bool CmdPartDesignEditPickFeature::isActive()
 {
-    return !Gui::Control().activeDialog() && pickCreator() != nullptr;
+    return !Gui::Control().activeDialog() && oneFacePicked();
 }
 
 DEF_STD_CMD_A(CmdPartDesignEditPickSketch)
@@ -5137,8 +5146,7 @@ void CmdPartDesignEditPickSketch::activated(int /*iMsg*/)
 
 bool CmdPartDesignEditPickSketch::isActive()
 {
-    return !Gui::Control().activeDialog()
-        && PartDesignGui::FeaturesView::sketchOf(pickCreator()) != nullptr;
+    return !Gui::Control().activeDialog() && oneFacePicked();
 }
 
 void CreatePartDesignCommands()

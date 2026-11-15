@@ -245,22 +245,25 @@ void Workbench::setupContextMenu(const char* recipient, Gui::MenuItem* item) con
                 App::DocumentObject* creator = FeaturesView::creatorOf(feature, element.c_str());
                 App::DocumentObject* sketch = FeaturesView::sketchOf(creator);
                 auto& commands = Gui::Application::Instance->commandManager();
+                // the shared action's text: the object's name in this menu, the command's own
+                // text otherwise (toolbars, Customize)
                 auto label = [&commands](const char* name, App::DocumentObject* obj) {
                     Gui::Command* command = commands.getCommandByName(name);
                     Gui::Action* action = command ? command->getAction() : nullptr;
                     if (action) {
                         action->setText(
-                            QApplication::translate("Workbench", "Edit %1...")
-                                .arg(QString::fromUtf8(obj->Label.getValue()))
+                            obj ? QApplication::translate("Workbench", "Edit %1...")
+                                      .arg(QString::fromUtf8(obj->Label.getValue()))
+                                : QCoreApplication::translate(command->className(), command->getMenuText())
                         );
                     }
                 };
+                label("PartDesign_EditPickFeature", creator);
+                label("PartDesign_EditPickSketch", sketch);
                 if (creator) {
-                    label("PartDesign_EditPickFeature", creator);
                     *item << "PartDesign_EditPickFeature";
                 }
                 if (sketch) {
-                    label("PartDesign_EditPickSketch", sketch);
                     *item << "PartDesign_EditPickSketch";
                 }
             }
