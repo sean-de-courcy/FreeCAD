@@ -1767,6 +1767,55 @@ double reachOf(const TopoDS_Shape& base, const TopTools_IndexedMapOfShape& chain
     return size * (1.0 + 1.0 / halfCosine) + tolerance;
 }
 
+// Where every chain edge lies between two planes, the band's far side: within the size times
+// max(1, tan(a / 2)) of its edge (a fillet's tangent line, a chamfer's distance along a face),
+// with a margin for the corners' blends (ops#612). A negative value elsewhere, or where the
+// reach is unknown
+double bandOf(const TopoDS_Shape& base, const TopTools_IndexedMapOfShape& chain, double size)
+{
+    // Room for a corner's blend or setback beyond the strips
+    constexpr double cornerMargin = 1.1;
+    TopTools_IndexedDataMapOfShapeListOfShape facesOfEdges;
+    TopExp::MapShapesAndAncestors(base, TopAbs_EDGE, TopAbs_FACE, facesOfEdges);
+    double largest = 0.0;
+    double tolerance = 0.0;
+    for (int i = 1; i <= chain.Extent(); ++i) {
+        const TopoDS_Edge& edge = TopoDS::Edge(chain(i));
+        const int index = facesOfEdges.FindIndex(edge);
+        if (index == 0 || BRep_Tool::Degenerated(edge)) {
+            return -1.0;
+        }
+        TopTools_IndexedMapOfShape faces;
+        for (const auto& face : facesOfEdges(index)) {
+            faces.Add(face);
+        }
+        if (faces.Extent() != 2) {
+            return -1.0;
+        }
+        for (int k = 1; k <= 2; ++k) {
+            if (BRepAdaptor_Surface(TopoDS::Face(faces(k)), false).GetType() != GeomAbs_Plane) {
+                return -1.0;
+            }
+        }
+        double first = 0.0;
+        double last = 0.0;
+        BRep_Tool::Range(edge, first, last);
+        // Planes: one oriented normal each
+        const gp_Vec one = normalAt(edge, TopoDS::Face(faces(1)), (first + last) / 2);
+        const gp_Vec other = normalAt(edge, TopoDS::Face(faces(2)), (first + last) / 2);
+        if (one.Magnitude() <= gp::Resolution() || other.Magnitude() <= gp::Resolution()) {
+            return -1.0;
+        }
+        largest = std::max(largest, one.Angle(other));
+        tolerance = std::max(tolerance, BRep_Tool::Tolerance(edge));
+    }
+    const double halfCosine = std::cos(largest / 2);
+    if (halfCosine < leastHalfCosine) {
+        return -1.0;
+    }
+    return cornerMargin * size * std::max(1.0, std::tan(largest / 2)) + tolerance;
+}
+
 // Points inside the face, on a grid of its parameters
 std::vector<gp_Pnt> samplesOf(const TopoDS_Face& face)
 {
@@ -2054,10 +2103,16 @@ std::string lostMaterial(
         if (!changes.away) {
             return {};
         }
-        const double reach = reachOf(dressed, chain, size);
+        double reach = reachOf(dressed, chain, size);
         if (reach < 0.0) {
             FC_LOG("Dress-up result not checked for a lost part of the base: its reach is unknown");
             return {};
+        }
+        // Between planes the band's far side is known: a part dropped within the reach shows
+        // (ops#612)
+        const double band = bandOf(dressed, chain, size);
+        if (band >= 0.0) {
+            reach = std::min(reach, band);
         }
         BRep_Builder builder;
         TopoDS_Compound chainEdges;
