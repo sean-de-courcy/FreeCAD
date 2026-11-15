@@ -236,26 +236,37 @@ class TestStudioOwner(unittest.TestCase):
                           and b.Name not in ("A", "B", "C")])
 
     def testNewPartNames(self):
-        """ops#797: the studio's empty part (the "Part 1" a new studio starts with) becomes the
-        first New part, keeping its name; the next New part is "Part 2" (Onshape's Part 1, Part
-        2), not "Body"."""
-        empty = self.doc.addObject("PartDesign::Body", "Body")
-        empty.Label = "Part 1"
-        self.studio.addObject(empty)
-        sk1 = studioSketch(self.doc, self.studio, "N1Sk", ((60, 0, 70, 10),), z=0)
-        n1 = makeOwner(self.doc, self.studio, "Pad", "N1", sk1, (), Length=5)
-        first = PartDesign.studioNewPart(n1)
-        sk2 = studioSketch(self.doc, self.studio, "N2Sk", ((80, 0, 90, 10),), z=0)
-        n2 = makeOwner(self.doc, self.studio, "Pad", "N2", sk2, (), Length=5)
-        second = PartDesign.studioNewPart(n2)
-        self.doc.recompute()
-        self.assertIs(first, empty)
-        self.assertEqual(first.Label, "Part 1")
-        self.assertEqual(first.StudioPartId, "N1:1")
-        self.assertIsNot(second, empty)
-        self.assertEqual(second.Label, "Part 2")
-        self.assertAlmostEqual(first.Shape.Volume, 500, places=3)
-        self.assertAlmostEqual(second.Shape.Volume, 500, places=3)
+        """ops#797: a new studio's only part, the empty "Part 1" it starts with, becomes the first
+        New part, keeping its name; the next New part is "Part 2" (Onshape's Part 1, Part 2), not
+        "Body". In a studio with other parts an empty part is not taken (a record the list keeps
+        or retires): the setUp studio's New part is a new Body, named the next free "Part n"."""
+        doc, studio = newStudio("TestStudioOwnerNames", parts=())
+        try:
+            empty = doc.addObject("PartDesign::Body", "Body")
+            empty.Label = "Part 1"
+            studio.addObject(empty)
+            doc.recompute()
+            studioList(doc)
+            sk1 = studioSketch(doc, studio, "N1Sk", ((60, 0, 70, 10),), z=0)
+            n1 = makeOwner(doc, studio, "Pad", "N1", sk1, (), Length=5)
+            first = PartDesign.studioNewPart(n1)
+            sk2 = studioSketch(doc, studio, "N2Sk", ((80, 0, 90, 10),), z=0)
+            n2 = makeOwner(doc, studio, "Pad", "N2", sk2, (), Length=5)
+            second = PartDesign.studioNewPart(n2)
+            doc.recompute()
+            self.assertIs(first, empty)
+            self.assertEqual(first.Label, "Part 1")
+            self.assertEqual(first.StudioPartId, "N1:1")
+            self.assertIsNot(second, empty)
+            self.assertEqual(second.Label, "Part 2")
+            self.assertAlmostEqual(first.Shape.Volume, 500, places=3)
+            self.assertAlmostEqual(second.Shape.Volume, 500, places=3)
+        finally:
+            App.closeDocument(doc.Name)
+        sk = studioSketch(self.doc, self.studio, "N3Sk", ((60, 0, 70, 10),), z=0)
+        n3 = makeOwner(self.doc, self.studio, "Pad", "N3", sk, (), Length=5)
+        third = PartDesign.studioNewPart(n3)
+        self.assertEqual(third.Label, "Part 1")  # A, B, C are named so: Part 1 is free
 
     # ------------------------------------------------------------------------------- Hole
     def testHoleOwnerThroughAllOnTwoParts(self):
