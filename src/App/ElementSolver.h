@@ -101,6 +101,20 @@ public:
      */
     static bool isPieceOf(std::string_view name, std::string_view oldName);
 
+    /** True if \a name is \a oldName made again from pieces of its sources (ops#808): the same
+     * sections, but in the first one, which says how the element was made, at least one linked
+     * name is a split piece of \a oldName's (isPieceOf()), or is itself made from pieces of it;
+     * the other linked names and every other field are equal (the flags and the linked names
+     * compared as sets). E.g. a boss's junction edge with a plate's top face,
+     * `_;{<top>, <cylinder>};<boss>;FUS;0;E;0;GEN;_`, once a wall inserted before the boss has cut
+     * the top in two: `_;{<top>|<split>, <cylinder>};<boss>;FUS;0;E;0;GEN;_`. The same feature
+     * made the element in the same way from what is left of the same sources; an edge that runs
+     * over two pieces gives one such name per piece. Sections after the first must be equal,
+     * or \a name's further ones its own split's. A name is not made from pieces of itself, and
+     * a plain piece of \a oldName isn't either.
+     */
+    static bool isMadeFromPiecesOf(std::string_view name, std::string_view oldName);
+
     /** True if \a a and \a b are single sections naming the same element of a source shape by
      * its index (the IDX flag, e.g. `Face6;_;<tag>;MKR;0;F;0;IDX,SRC;_`): equal in every field
      * but the op code, the flags compared as sets. A shape without an element map gives its

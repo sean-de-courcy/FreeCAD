@@ -848,14 +848,17 @@ Part::Feature* dressUpBaseOf(const DressUp* owner, const Body* part)
 }
 
 /// Whether the element named candidate (expanded) is the pick's element: the same name, a piece
-/// of it (a split, NameAncestry::isPieceOf), or the name modified by a later feature (";:M", a
+/// of it (a split, NameAncestry::isPieceOf), the name made again by the same feature from pieces
+/// of its sources (ops#808: a face split by a feature inserted before the element's maker,
+/// NameAncestry::isMadeFromPiecesOf), or the name modified by a later feature (";:M", a
 /// merge's fuse); never by equality of a stored, possibly shortened form (skeptic 1)
 bool namesPick(const std::string& candidate, const std::string& pick)
 {
     if (candidate == pick) {
         return true;
     }
-    if (Data::NameAncestry::isPieceOf(candidate, pick)) {
+    if (Data::NameAncestry::isPieceOf(candidate, pick)
+        || Data::NameAncestry::isMadeFromPiecesOf(candidate, pick)) {
         return true;
     }
     return candidate.size() > pick.size() + 3 && candidate.starts_with(pick)
