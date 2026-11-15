@@ -1683,6 +1683,15 @@ std::unordered_set<App::DocumentObject*> AssemblyObject::getGroundedParts()
         }
     }
 
+    // FreeCAD-CH (ops#787): a grounding joint's part is grounded before the solve re-locks its
+    // placement too (an undone delete brings it back unlocked)
+    for (auto joint : getGroundedJoints()) {
+        auto propObj = dynamic_cast<App::PropertyLink*>(joint->getPropertyByName("ObjectToGround"));
+        if (propObj && propObj->getValue()) {
+            groundedSet.insert(propObj->getValue());
+        }
+    }
+
     // We also need to add all the root-level datums objects that are not attached.
     std::vector<App::DocumentObject*> objs = Group.getValues();
     for (auto* obj : objs) {
@@ -3106,9 +3115,12 @@ void AssemblyObject::syncGroundedJoints()
             catch (...) {
             }
         }
-        // Delete grounding joint if placement lock was lifted
+        // FreeCAD-CH (ops#787): the grounding joint is the truth, as Onshape's Fix: a part
+        // with one has its placement locked again. An undone delete of the part brings it back
+        // with the placement status its transaction saved, unlocked, and the joint was deleted
+        // here ("lock lifted"); unfixing is deleting the joint (the Unground command)
         else if (!isReadOnly && hasJoint) {
-            getDocument()->removeObject(it->second->getNameInDocument());
+            propPlc->setStatus(App::Property::ReadOnly, true);
         }
     }
 }
