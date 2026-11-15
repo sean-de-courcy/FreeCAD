@@ -85,7 +85,7 @@ class TestPresenceGui(unittest.TestCase):
                 if d.FileName and os.path.samefile(d.FileName, self.file)]
 
     def statusLine(self):
-        return Gui.getMainWindow().findChild(QtWidgets.QLabel, "PresenceLabel").text()
+        return Gui.getMainWindow().findChild(QtWidgets.QLabel, "presenceLabel").text()
 
     def testCancelLeavesItClosed(self):
         self.writeForeign(age=5)
