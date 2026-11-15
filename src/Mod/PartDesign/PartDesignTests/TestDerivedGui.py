@@ -25,7 +25,7 @@ import PartDesign
 from PySide import QtCore, QtWidgets
 
 from PartDesignTests.TestDerived import boxBody
-from PartDesignTests.TestExpressionFieldsGui import pump, taskButton, waitFor
+from PartDesignTests.TestExpressionFieldsGui import pump, taskButton, typeDesignedLength, waitFor
 from PartDesignTests.TestStudioSequence import sketch
 from PartDesignTests.TestCrossBodyGui import siblingEraPath  # ops#654 list on first use
 
@@ -259,6 +259,7 @@ class TestDerivedGui(unittest.TestCase):
         Gui.runCommand("PartDesign_Pad")
         self.assertTrue(waitFor(lambda: Gui.Control.activeDialog()), "no Pad dialog")
         pump(0.3)
+        typeDesignedLength("PartDesign_Pad")
         [pad] = [o for o in self.doc.Objects if o.TypeId == "PartDesign::Pad"]
         derived = Gui.Command.get("PartDesign_Derived")
         self.assertTrue(derived.isActive())

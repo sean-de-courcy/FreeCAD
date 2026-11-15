@@ -69,8 +69,8 @@ class TestProfileFieldStaysArmedGui(DialogFlowCase):
     def testSecondRegionAfterTheOpeningMoveIsAdded(self):
         """Nothing selected, Pad: its Profile field is armed. R1 picked: the pad and its sketch
         move to a new part (the edit restarts), and the Profile field is armed again. R2 picked:
-        the Profile holds both regions, nothing is left selected; OK: the new part 1500, the
-        Enclosure 16000."""
+        the Profile holds both regions, nothing is left selected; OK: the new part 150 x 25 (Onshape's
+        opening depth, gaps3 row 15) = 3750, the Enclosure 16000."""
         self.enclosure()
         sk, regions = self.regionsSketch()
         bodies = self.bodyNames()
@@ -101,7 +101,7 @@ class TestProfileFieldStaysArmedGui(DialogFlowCase):
         self.close(ok=True)
         self.doc.recompute()
         self.assertTrue(made.isValid(), made.getStatusString())
-        self.assertAlmostEqual(part.Shape.Volume, 1500, places=3)
+        self.assertAlmostEqual(part.Shape.Volume, 3750, places=3)
         self.assertAlmostEqual(self.body.Shape.Volume, ENCLOSURE, places=3)
 
 

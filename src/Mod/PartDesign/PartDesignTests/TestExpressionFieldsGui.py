@@ -41,6 +41,28 @@ from PySide import QtCore, QtWidgets
 from PySide6 import QtTest
 
 
+# FreeCAD-CH (ops#640 gaps3 row 15): Extrude and Extrude (remove) open at Onshape's 25 mm. The GUI tests'
+# models were designed for the old openings, a pad 10 deep and a pocket 5 deep, and type those lengths
+# in the dialog, as a user overtypes the default (TestDialogFlowGui tests the opening itself).
+DESIGNED_LENGTH = {"PartDesign_Pad": 10.0, "PartDesign_Pocket": 5.0}
+
+
+def typeDesignedLength(command):
+    """Types the model's length for `command` (a Pad or Pocket) in its open dialog's length field."""
+    value = DESIGNED_LENGTH.get(command)
+    if value is None:
+        return
+    QtCore.QCoreApplication.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
+    found = [
+        w
+        for w in Gui.getMainWindow().findChildren(QtWidgets.QWidget, "lengthEdit")
+        if w.isVisible()
+    ]
+    if found:
+        found[0].setProperty("rawValue", value)
+        pump(0.3)
+
+
 def pump(seconds=0.3):
     app = QtWidgets.QApplication.instance()
     end = time.time() + seconds
