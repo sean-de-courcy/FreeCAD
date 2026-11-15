@@ -28,7 +28,11 @@
 
 #include <Standard_Failure.hxx>
 
+#include <QApplication>
+
 #include <App/Document.h>
+#include <App/ElementNamingUtils.h>
+#include <Gui/Action.h>
 #include <Gui/Application.h>
 #include <Gui/Command.h>
 #include <Gui/Control.h>
@@ -234,12 +238,39 @@ void Workbench::setupContextMenu(const char* recipient, Gui::MenuItem* item) con
             // sketch's edges would make a failing Fillet)
             const std::string_view kind = subElementKind(selection);
             PartDesign::Body* target = kind.empty() ? nullptr : commandBody();
+            // Onshape's Edit <feature>... and Edit <sketch>... (GB16): the feature that made the
+            // face, and its sketch, by name
+            if (kind == "Face" && selection.size() == 1) {
+                const std::string element = Data::oldElementName(selection.front().SubName);
+                App::DocumentObject* creator = FeaturesView::creatorOf(feature, element.c_str());
+                App::DocumentObject* sketch = FeaturesView::sketchOf(creator);
+                auto& commands = Gui::Application::Instance->commandManager();
+                auto label = [&commands](const char* name, App::DocumentObject* obj) {
+                    Gui::Command* command = commands.getCommandByName(name);
+                    Gui::Action* action = command ? command->getAction() : nullptr;
+                    if (action) {
+                        action->setText(
+                            QApplication::translate("Workbench", "Edit %1...")
+                                .arg(QString::fromUtf8(obj->Label.getValue()))
+                        );
+                    }
+                };
+                if (creator) {
+                    label("PartDesign_EditPickFeature", creator);
+                    *item << "PartDesign_EditPickFeature";
+                }
+                if (sketch) {
+                    label("PartDesign_EditPickSketch", sketch);
+                    *item << "PartDesign_EditPickSketch";
+                }
+            }
             // the sketch goes into target without a dialog: it holds the face's feature, or
             // (ops#325) the feature is a sibling part's of its studio
             if (kind == "Face" && selection.size() == 1 && target
                 && (target->hasObject(feature) || PartDesignGui::isStudioSelection(target, feature))
                 && isPlanarFace(feature, selection.front().SubName)) {
-                *item << "PartDesign_NewSketch";
+                // Onshape's New sketch... then Extrude... on a planar face (the face is the profile)
+                *item << "PartDesign_NewSketch" << "PartDesign_Pad";
             }
             // body: the active Body when it holds the feature, else the feature's own
             if (!kind.empty() && body && body->hasObject(feature)
@@ -309,6 +340,17 @@ void Workbench::setupContextMenu(const char* recipient, Gui::MenuItem* item) con
         }
     }
     Gui::StdWorkbench::setupContextMenu(recipient, item);
+
+    // Onshape's Section view... on a face (GB16), after the Hide and Isolate group
+    if (onshape && Gui::Selection().hasPreselection() && subElementKind(selection) == "Face") {
+        if (Gui::MenuItem* before = item->findItem("Std_SelectOther")) {
+            auto section = new Gui::MenuItem;
+            section->setCommand("Std_SectionView");
+            if (!item->insertItem(before, section)) {
+                delete section;
+            }
+        }
+    }
 
     // Onshape's Delete part on a Body or its features: Std_DeletePart deletes the part (Std_Delete
     // on the Body, which ViewProviderBody::onDelete makes a Delete part feature of its history,

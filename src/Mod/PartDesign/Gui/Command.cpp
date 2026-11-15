@@ -78,6 +78,7 @@
 #include <Mod/PartDesign/App/StudioList.h>
 
 #include "DlgActiveBody.h"
+#include "FeaturesView.h"
 #include "ReferenceField.h"
 #include "ReferenceSelection.h"
 #include "SketchWorkflow.h"
@@ -5062,6 +5063,84 @@ bool CmdPartDesignTogglePlanes::isActive()
     return PartDesignGui::getBody(/*messageIfNot = */ false, false) != nullptr;
 }
 
+//===========================================================================
+// PartDesign_EditPickFeature, PartDesign_EditPickSketch (FreeCAD-CH, ops#640 gaps3 row 12)
+//===========================================================================
+// Onshape's "Edit <feature>..." and "Edit <sketch>..." on a face in the 3D view (GB16): the
+// feature that made the picked element, or its sketch, opens for editing. The face menu sets the
+// texts to the feature's and the sketch's names
+
+namespace
+{
+/// The feature that made the first selected element, or null
+App::DocumentObject* pickCreator()
+{
+    const auto selection = Gui::Selection().getSelection();
+    if (selection.size() != 1 || !selection.front().pObject || !selection.front().SubName) {
+        return nullptr;
+    }
+    const std::string element = Data::oldElementName(selection.front().SubName);
+    return PartDesignGui::FeaturesView::creatorOf(selection.front().pObject, element.c_str());
+}
+
+void editObject(App::DocumentObject* obj)
+{
+    auto vp = obj ? Gui::Application::Instance->getViewProvider(obj) : nullptr;
+    if (vp && !Gui::Control().activeDialog()) {
+        vp->doubleClicked();
+    }
+}
+}  // namespace
+
+DEF_STD_CMD_A(CmdPartDesignEditPickFeature)
+
+CmdPartDesignEditPickFeature::CmdPartDesignEditPickFeature()
+    : Command("PartDesign_EditPickFeature")
+{
+    sAppModule = "PartDesign";
+    sGroup = QT_TR_NOOP("PartDesign");
+    sMenuText = QT_TR_NOOP("Edit feature...");
+    sToolTipText = QT_TR_NOOP("Edits the feature that made the selected face");
+    sWhatsThis = "PartDesign_EditPickFeature";
+    sStatusTip = sToolTipText;
+    eType = ForEdit;
+}
+
+void CmdPartDesignEditPickFeature::activated(int /*iMsg*/)
+{
+    editObject(pickCreator());
+}
+
+bool CmdPartDesignEditPickFeature::isActive()
+{
+    return !Gui::Control().activeDialog() && pickCreator() != nullptr;
+}
+
+DEF_STD_CMD_A(CmdPartDesignEditPickSketch)
+
+CmdPartDesignEditPickSketch::CmdPartDesignEditPickSketch()
+    : Command("PartDesign_EditPickSketch")
+{
+    sAppModule = "PartDesign";
+    sGroup = QT_TR_NOOP("PartDesign");
+    sMenuText = QT_TR_NOOP("Edit sketch...");
+    sToolTipText = QT_TR_NOOP("Edits the sketch of the feature that made the selected face");
+    sWhatsThis = "PartDesign_EditPickSketch";
+    sStatusTip = sToolTipText;
+    eType = ForEdit;
+}
+
+void CmdPartDesignEditPickSketch::activated(int /*iMsg*/)
+{
+    editObject(PartDesignGui::FeaturesView::sketchOf(pickCreator()));
+}
+
+bool CmdPartDesignEditPickSketch::isActive()
+{
+    return !Gui::Control().activeDialog()
+        && PartDesignGui::FeaturesView::sketchOf(pickCreator()) != nullptr;
+}
+
 void CreatePartDesignCommands()
 {
     Gui::CommandManager& rcCmdMgr = Gui::Application::Instance->commandManager();
@@ -5113,4 +5192,6 @@ void CreatePartDesignCommands()
     rcCmdMgr.addCommand(new CmdPartDesignCompSketches());
     rcCmdMgr.addCommand(new CmdPartDesignToggleSketches());
     rcCmdMgr.addCommand(new CmdPartDesignTogglePlanes());
+    rcCmdMgr.addCommand(new CmdPartDesignEditPickFeature());
+    rcCmdMgr.addCommand(new CmdPartDesignEditPickSketch());
 }
