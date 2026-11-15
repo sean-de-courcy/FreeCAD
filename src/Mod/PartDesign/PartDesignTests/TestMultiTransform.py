@@ -631,11 +631,16 @@ class TestMultiTransform(unittest.TestCase):
             if abs(centre.z - 15) < 1e-6 and abs(centre.x + 5.5) < 1e-6:
                 top = f"Face{i + 1}"
         self.assertIsNotNone(top)
-        sketch = body.newObject("Sketcher::SketchObject", "OnCopy")
-        sketch.AttachmentSupport = (mirrored, [top])
-        sketch.MapMode = "FlatFace"
+        # three of them: each relink takes one out of the Mirrored's in-list (review prs5425-r1 T1)
+        sketches = []
+        for i in range(3):
+            sketch = body.newObject("Sketcher::SketchObject", f"OnCopy{i}")
+            sketch.AttachmentSupport = (mirrored, [top])
+            sketch.MapMode = "FlatFace"
+            sketches.append(sketch)
         self.Doc.recompute()
-        self.assertAlmostEqual(sketch.Placement.Base.z, 15, places=6)
+        for sketch in sketches:
+            self.assertAlmostEqual(sketch.Placement.Base.z, 15, places=6)
 
         body.Tip = boss
         multi = body.newObject("PartDesign::MultiTransform", "MultiTransform")
@@ -647,12 +652,14 @@ class TestMultiTransform(unittest.TestCase):
         self.Doc.recompute()
         body.Tip = multi
         self.Doc.recompute()
-        self.assertEqual(sketch.AttachmentSupport[0][0], multi)
+        for sketch in sketches:
+            self.assertEqual(sketch.AttachmentSupport[0][0], multi, sketch.Name)
 
         boss.Length = 8
         self.Doc.recompute()
-        self.assertTrue(sketch.isValid(), sketch.getStatusString())
-        self.assertAlmostEqual(sketch.Placement.Base.z, 18, places=6)
+        for sketch in sketches:
+            self.assertTrue(sketch.isValid(), f"{sketch.Name}: {sketch.getStatusString()}")
+            self.assertAlmostEqual(sketch.Placement.Base.z, 18, places=6)
         self.assertAlmostEqual(body.Shape.Volume, 4000 + 2 * 200, places=6)
 
     def tearDown(self):

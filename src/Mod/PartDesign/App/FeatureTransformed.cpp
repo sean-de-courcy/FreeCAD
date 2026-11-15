@@ -1384,7 +1384,9 @@ namespace
 void moveAttachmentsToMulti(Transformed* step, MultiTransform* multi)
 {
     const Part::TopoShape stepShape = step->Shape.getShape();
-    for (auto user : step->getInList()) {
+    // A copy: each relink below takes its user out of the step's in-list (review prs5425-r1 T1)
+    const std::vector<App::DocumentObject*> users = step->getInList();
+    for (auto user : users) {
         if (user == multi) {
             continue;
         }
