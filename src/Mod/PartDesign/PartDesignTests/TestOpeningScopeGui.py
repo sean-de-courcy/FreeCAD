@@ -13,7 +13,7 @@ from PySide import QtCore, QtWidgets
 
 from PartDesignTests.Scenarios import models
 from PartDesignTests.TestCrossBodyGui import ResultBoxGuiCase
-from PartDesignTests.TestExpressionFieldsGui import pump
+from PartDesignTests.TestExpressionFieldsGui import pump, typeDesignedLength
 from PartDesignTests.TestCrossBodyGui import siblingEraPath  # ops#654 list on first use
 
 V = App.Vector
@@ -70,6 +70,8 @@ class TestOpeningScopeGui(ResultBoxGuiCase):
         self.watchModals()
         Gui.runCommand(command)
         self.waitForPanel()
+        if selection:
+            typeDesignedLength(command)
 
     def made(self, typeId):
         [feature] = [o for o in self.doc.Objects if o.TypeId == typeId]

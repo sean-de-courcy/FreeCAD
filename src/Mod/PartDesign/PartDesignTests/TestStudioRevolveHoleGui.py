@@ -20,7 +20,7 @@ import Part
 import PartDesign
 from PySide import QtWidgets
 
-from PartDesignTests.TestExpressionFieldsGui import pump, waitFor
+from PartDesignTests.TestExpressionFieldsGui import pump, typeDesignedLength, waitFor
 from PartDesignTests.TestStudio import xyPlane
 from PartDesignTests.TestStudioFeatureGui import QA, StudioDialog, twoBoxStudio
 
@@ -39,6 +39,7 @@ class TestStudioRevolveHoleGui(StudioDialog, unittest.TestCase):
         before = set(self.objects())
         Gui.runCommand(command)
         self.waitForPanel()
+        typeDesignedLength(command)
         made = [self.doc.getObject(n) for n in set(self.objects()) - before]
         made = [o for o in made if o.TypeId == typeId and not getattr(o, "StudioOwner", None)]
         self.assertEqual(len(made), 1, [o.Name for o in made])
