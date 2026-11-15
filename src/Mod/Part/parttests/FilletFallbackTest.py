@@ -1897,6 +1897,15 @@ class LostStepTest(unittest.TestCase):
                                 self.assertKeptOrFails(feature, None)
                                 continue
                             self.assertTrue(feature.Shape.isValid())
+                            if which == "one":
+                                # A triangle of legs 5 and 5 tan(a) along the 40 mm edge, which
+                                # ever face takes the distance (a Boolean common with a boss
+                                # whose faces lie on the step's is unreliable at 1e-7)
+                                removed = 0.5 * 5 * 5 * math.tan(math.radians(angle)) * 40
+                                self.assertAlmostEqual(
+                                    feature.Shape.Volume, base.Volume - removed, delta=1e-4
+                                )
+                                continue
                             walls = (
                                 (inset, inset, 40 - inset, 40 - inset)
                                 if which == "four"
