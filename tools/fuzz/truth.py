@@ -9,6 +9,8 @@
 #           Onshape queue (R3), with what FreeCAD did;
 #   WARN    the face count by surface type differs from the first OK state of the same regime (counts only warn);
 #   REWRITE FreeCAD changed a parameter the walk set (read back after every step); the walk then follows the document.
+#   REFUSED the property's own limit refused the value (ValueError "above the maximum", e.g. Revolution Angle > 360):
+#           nothing is set and the walk keeps the old value (EXC before scout 4, 11-15).
 # Every 25 steps the document is saved, reopened and recomputed, and V must not change.
 #
 # Templates: T1 plate (through pocket, boss, through hole, countersink Hole); T2 linear pattern of blind or through
@@ -843,6 +845,13 @@ def main():
                 rv = reopenVol(doc)
                 if (rv is None) != (m.get("vol") is None) or (rv is not None and abs(rv - m["vol"]) > 1e-6 * max(1, abs(rv))):
                     rec["reopen"] = rv; tally["reopen_fail"] += 1
+        except ValueError as e:   # the property's own limit refused the value (Revolution Angle > 360): not set, the
+            # walk keeps the old value, as the dialog refuses it (Onshape's field refuses it too); not a harness error
+            if "above the maximum" not in str(e) and "below the minimum" not in str(e):
+                rec["v"] = "EXC"; rec["exc"] = "%s: %s" % (type(e).__name__, e)
+                rec["tb"] = traceback.format_exc().splitlines()[-3:]
+            else:
+                rec["v"] = "REFUSED"; rec["exc"] = str(e)
         except Exception as e:
             rec["v"] = "EXC"; rec["exc"] = "%s: %s" % (type(e).__name__, e)
             rec["tb"] = traceback.format_exc().splitlines()[-3:]
