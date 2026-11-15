@@ -16,6 +16,8 @@
 # Undo history is keyed by unique transaction names (App caps its stack at 20 without a GUI). Suppress steps avoid the
 # ops#592 state (a live pattern whose originals are all suppressed keeps a stale shape).
 #
+# FUZZ_OWNER=1 (default, ops#842): Pad/Pocket/Hole/Revolution/Groove are studio owners as the GUI makes them (pattern
+# originals stay Body members, as in truth.py); 0 builds Body members only (upstream's in-Body path, the runs before 11-15).
 # Run: FUZZ_SEED=<n> FUZZ_STEPS=<n> [FUZZ_HEAL=1] [FUZZ_OUT=<dir>] FreeCADCmd tools/fuzz/fuzzplus.py
 #   writes <out>/<tag>.jsonl and .sum. FUZZ_STOP=<k> saves the document after step k. FUZZ_FRESH=0 skips the fresh check.
 import os, json, random, time, traceback
@@ -33,6 +35,7 @@ TAG = os.environ.get("FUZZ_TAG", "plus%d" % SEED)
 HEAL = os.environ.get("FUZZ_HEAL") == "1"
 FRESH = os.environ.get("FUZZ_FRESH", "1") != "0"
 FRESHMODE = os.environ.get("FUZZ_FRESHMODE", "jump")   # jump | scratch (see freshBuild)
+OWNER = os.environ.get("FUZZ_OWNER", "1") == "1"   # Pad/Pocket/Hole/Revolution/Groove as studio owners, as the GUI makes them
 STOPAT = set(x for x in os.environ.get("FUZZ_STOPAT", "").split(",") if x)   # e.g. SILENT,LOUD: end the seed at the first one
 SAVED = [0]
 LOG = open("%s/%s.jsonl" % (OUT, TAG), "w", buffering=1)
@@ -180,9 +183,20 @@ class Studio:
         drawSketch(s, {k[len(pre):]: x for k, x in self.vals.items() if k.startswith(pre)}, self.variants.get(name, ""))
         return s
 
-    def feat(self, kind, name, **props):
+    OWNABLE = ("Pad", "Pocket", "Hole", "Revolution", "Groove")
+
+    def feat(self, kind, name, owner=True, **props):
+        # FUZZ_OWNER=1 (default): the GUI makes these studio owners (outside every Body, with a FeatureApply step
+        # <name>_at_Plate in the Body; Command.cpp prepareStudioOwner) once the studio has a solid, as truth.py does
+        # (TRUTH_OWNER, ops#842). 0 keeps them Body members (upstream's in-Body path). A pattern's originals stay Body
+        # members (owner=False), as in truth.py. Picks on an owner go on its step (shapeOf).
         props = {k: self.pv(name, k, x) for k, x in props.items()}
-        if kind in self.PATTERNS:
+        if OWNER and owner and kind in self.OWNABLE and not self.body.Shape.isNull():
+            f = self.doc.addObject("PartDesign::" + kind, name)
+            f.StudioScope = [self.body.StudioPartId or self.body.Name]
+            for k, x in props.items():
+                setattr(f, k, x)
+        elif kind in self.PATTERNS:
             f = self.doc.addObject("PartDesign::" + kind, name)
             for k, x in props.items():
                 setattr(f, k, x)
@@ -194,6 +208,12 @@ class Studio:
         PartDesign.studioInsert(f, -1)
         self.doc.recompute()
         return f
+
+    def shapeOf(self, f):
+        """the Body feature that carries f's result: f itself, or an owner's step"""
+        if self.body.hasObject(f):
+            return f
+        return PartDesign.studioStepOf(f, self.body) or self.doc.getObject(f.Name + "_at_Plate")
 
     def p(self, obj, key, lo, hi, kind="datum", integer=False):
         self.params.append((obj.Name, kind, key, lo, hi, integer))
@@ -225,17 +245,17 @@ class Studio:
         pk1 = self.feat("Pocket", "Pocket1", Profile=s, Length=14); self.p(pk1, "Length", 12, 16, "prop")
         s = self.sk("Pk2Sk")
         self.p(s, "P2x", -22, -14); self.p(s, "P2w", 6, 12)
-        pk2 = self.feat("Pocket", "Pocket2", Profile=s, Length=13); self.p(pk2, "Length", 11.5, 15, "prop")
+        pk2 = self.feat("Pocket", "Pocket2", owner=False, Profile=s, Length=13); self.p(pk2, "Length", 11.5, 15, "prop")
         lp = self.feat("LinearPattern", "LinPat", Originals=[pk2], Direction=(o[0], [""]), Length=40, Occurrences=3)
         self.p(lp, "Length", 30, 48, "prop"); self.p(lp, "Occurrences", 2, 4, "prop", True)
         s = self.sk("HoleSk")
         self.p(s, "Hx", 24, 32); self.p(s, "Hr", 2, 4)
-        hole = self.feat("Pocket", "ThruHole", Profile=s, Type="ThroughAll", SideType="Symmetric")
+        hole = self.feat("Pocket", "ThruHole", owner=False, Profile=s, Type="ThroughAll", SideType="Symmetric")
         pp = self.feat("PolarPattern", "PolPat", Originals=[hole], Axis=(o[2], [""]), Angle=360, Occurrences=6)
         self.p(pp, "Occurrences", 3, 8, "prop", True)
         s = self.sk("BossSk")
         self.p(s, "Cx", -40, -30); self.p(s, "Cy", 14, 22); self.p(s, "Cr", 5, 10)
-        boss = self.feat("Pad", "Boss", Profile=s, Length=8); self.p(boss, "Length", 4, 12, "prop")
+        boss = self.feat("Pad", "Boss", owner=False, Profile=s, Length=8); self.p(boss, "Length", 4, 12, "prop")
         self.feat("Mirrored", "MirBoss", Originals=[boss], MirrorPlane=(o[5], [""]))
         s = self.sk("RingSk")
         self.p(s, "Rx", 40, 46); self.p(s, "Rw", 3, 6); self.p(s, "Rh", 2, 6)
@@ -245,19 +265,19 @@ class Studio:
         self.feat("Groove", "Groove", Profile=s, ReferenceAxis=(o[2], [""]), Angle=360)
         s = self.sk("RibSk")
         self.p(s, "K1w", 15, 30); self.p(s, "K2y", 26, 32)
-        ribs = self.feat("Pad", "Ribs", Profile=s, Length=4); self.p(ribs, "Length", 2, 7, "prop")
+        ribs = self.feat("Pad", "Ribs", owner=False, Profile=s, Length=4); self.p(ribs, "Length", 2, 7, "prop")
         lp2 = self.feat("LinearPattern", "RibPat", Originals=[ribs], Direction=(o[1], [""]), Reversed=True, Length=40, Occurrences=2)
         self.p(lp2, "Length", 36, 46, "prop")
         s = self.sk("HoleFSk")
         self.p(s, "Qx", -50, -42); self.p(s, "Qy", 26, 33)
-        hf = self.feat("Hole", "CBHole", Profile=s, Diameter=5, Depth=7, DepthType="Dimension",
+        hf = self.feat("Hole", "CBHole", owner=False, Profile=s, Diameter=5, Depth=7, DepthType="Dimension",
                        HoleCutType="Counterbore", HoleCutDiameter=9, HoleCutDepth=2)
         self.p(hf, "Diameter", 3, 6, "prop"); self.p(hf, "Depth", 4, 9, "prop")
         pp2 = self.feat("PolarPattern", "CBPat", Originals=[hf], Axis=(o[2], [""]), Angle=360, Occurrences=4)
         self.p(pp2, "Occurrences", 2, 5, "prop", True)
         s = self.sk("SlotSk")
         self.p(s, "Sx", 5, 15); self.p(s, "Sw", 20, 34); self.p(s, "Sh", 3, 6)
-        slot = self.feat("Pocket", "Slot", Profile=s, Length=12); self.p(slot, "Length", 11, 14, "prop")
+        slot = self.feat("Pocket", "Slot", owner=False, Profile=s, Length=12); self.p(slot, "Length", 11, 14, "prop")
         self.feat("Mirrored", "MirSlot", Originals=[slot], MirrorPlane=(o[4], [""]))
         s = self.sk("Boss2Sk")
         self.p(s, "Dx", 12, 16); self.p(s, "Dw", 7, 10)
@@ -268,7 +288,8 @@ class Studio:
         Dw, Dh = self.v("Boss2Sk", "Dw", 10), self.v("Boss2Sk", "Dh", 10)
         ztop2 = 10 + float(boss2.Length)
         inD = lambda p: Dx - E < p.x < Dx + Dw + E and Dy - E < p.y < Dy + Dh + E
-        sh = boss2.Shape
+        boss2s = self.shapeOf(boss2)
+        sh = boss2s.Shape
         def onSide(f):
             bb = f.BoundBox
             if abs(f.normalAt(0, 0).z) > 1e-6 or bb.ZMin < 10 - E or bb.ZMax > ztop2 + E:
@@ -279,7 +300,7 @@ class Studio:
         sides = ["Face%d" % i for i, f in enumerate(sh.Faces, 1) if onSide(f)]
         topf = ["Face%d" % i for i, f in enumerate(sh.Faces, 1)
                 if abs(f.normalAt(0, 0).z - 1) < 1e-6 and abs(f.CenterOfMass.z - ztop2) < 1e-6 and inD(f.CenterOfMass)]
-        dr = self.feat("Draft", "Boss2Draft", Base=(boss2, sides), NeutralPlane=(boss2, topf[:1]), Angle=3)
+        dr = self.feat("Draft", "Boss2Draft", Base=(boss2s, sides), NeutralPlane=(boss2s, topf[:1]), Angle=3)
         self.p(dr, "Angle", 1, 6, "prop")
         doc.recompute()
         Bx, By = self.v("BaseSk", "Bx", -60), self.v("BaseSk", "By", -40)
@@ -290,9 +311,9 @@ class Studio:
         f1 = self.feat("Fillet", "CornerFillet", Base=(last, self.mapEdges(base, last, vert)), Radius=4)
         self.p(f1, "Radius", 2, 6, "prop")
         doc.recompute()
-        top = self.edgesWhere(boss2, lambda e: all(abs(x.Point.z - ztop2) < 1e-6 and inD(x.Point) for x in e.Vertexes))
+        top = self.edgesWhere(boss2s, lambda e: all(abs(x.Point.z - ztop2) < 1e-6 and inD(x.Point) for x in e.Vertexes))
         last = self.body.Tip
-        c1 = self.feat("Chamfer", "Boss2Chamfer", Base=(last, self.mapEdges(boss2, last, top)), Size=1)
+        c1 = self.feat("Chamfer", "Boss2Chamfer", Base=(last, self.mapEdges(boss2s, last, top)), Size=1)
         self.p(c1, "Size", 0.5, 2, "prop")
         doc.recompute()
         zb = 10 + float(boss.Length)
@@ -307,9 +328,10 @@ class Studio:
         P1w, P1h = self.v("Pk1Sk", "P1w", 20), self.v("Pk1Sk", "P1h", 15)
         zt = float(base.Length)
         in1 = lambda p: P1x - E < p.x < P1x + P1w + E and P1y - E < p.y < P1y + P1h + E
-        rim1 = self.edgesWhere(pk1, lambda e: all(abs(x.Point.z - zt) < 1e-6 and in1(x.Point) for x in e.Vertexes))
+        pk1s = self.shapeOf(pk1)
+        rim1 = self.edgesWhere(pk1s, lambda e: all(abs(x.Point.z - zt) < 1e-6 and in1(x.Point) for x in e.Vertexes))
         last = self.body.Tip
-        c2 = self.feat("Chamfer", "Pk1Chamfer", Base=(last, self.mapEdges(pk1, last, rim1)), Size=0.8)
+        c2 = self.feat("Chamfer", "Pk1Chamfer", Base=(last, self.mapEdges(pk1s, last, rim1)), Size=0.8)
         self.p(c2, "Size", 0.3, 1.5, "prop")
         doc.recompute()
         s = self.sk("LateSk")
@@ -324,11 +346,12 @@ class Studio:
         tab = self.feat("Pad", "Tab", Profile=s, Length=5); self.p(tab, "Length", 2, 9, "prop")
         Tx, Tw = self.v("TabSk", "Tx", -58), self.v("TabSk", "Tw", 8)
         zT = 10 + float(tab.Length)
-        edges = self.edgesWhere(tab, lambda e: all(abs(x.Point.z - zT) < 1e-6 and x.Point.x < Tx + Tw + 1 for x in e.Vertexes))
+        tabs = self.shapeOf(tab)
+        edges = self.edgesWhere(tabs, lambda e: all(abs(x.Point.z - zT) < 1e-6 and x.Point.x < Tx + Tw + 1 for x in e.Vertexes))
         last = self.body.Tip
-        c3 = self.feat("Chamfer", "TabChamfer", Base=(last, self.mapEdges(tab, last, edges)), Size=0.6)
+        c3 = self.feat("Chamfer", "TabChamfer", Base=(last, self.mapEdges(tabs, last, edges)), Size=0.6)
         self.p(c3, "Size", 0.3, 1.2, "prop")
-        self.features = [x for x in self.body.Group if x.isDerivedFrom("PartDesign::Feature")]
+        self.features = listFeatures(self.doc)
         return self
 
     def applyStructure(self, state):
@@ -355,6 +378,12 @@ class Studio:
 
 
 # ------------------------------------------------------------------ state vector and signatures
+def listFeatures(doc):
+    """the studio list's features, owners included (their steps are not list entries)"""
+    lst = PartDesign.studioList(doc)
+    return [e for e in lst.Entries if e.isDerivedFrom("PartDesign::Feature")] if lst is not None else []
+
+
 def stateOf(doc, params):
     vals, variants = {}, {}
     for n in SPECS:
@@ -372,8 +401,7 @@ def stateOf(doc, params):
                 continue
             x = getattr(o, key)
             props["%s.%s" % (name, key)] = int(x) if integer else float(getattr(x, "Value", x))
-    body = doc.getObject("Plate")
-    sup = sorted(o.Name for o in body.Group if o.isDerivedFrom("PartDesign::Feature") and getattr(o, "Suppressed", False))
+    sup = sorted(o.Name for o in listFeatures(doc) if getattr(o, "Suppressed", False))
     lst = PartDesign.studioList(doc)
     return dict(vals=vals, props=props, variants=variants, suppressed=sup,
                 order=[e.Name for e in lst.Entries] if lst is not None else None)
@@ -406,7 +434,7 @@ def signature(doc):
         out["faces_by_name"] = names
         out["named"] = sum(1 for k in names if k != "None")
     feats = {}
-    for o in body.Group:
+    for o in list(body.Group) + [x for x in listFeatures(doc) if not body.hasObject(x)]:   # members, steps, owners
         if o.isDerivedFrom("PartDesign::Feature"):
             s = o.Shape
             feats[o.Name] = (("Invalid" in o.State) or ("Error" in o.State),
@@ -627,8 +655,7 @@ def stepTopo(doc, rng):
 
 
 def stepSuppress(doc, rng):
-    body = doc.getObject("Plate")
-    feats = [o for o in body.Group if o.isDerivedFrom("PartDesign::Feature") and o.Name != "Base"]
+    feats = [o for o in listFeatures(doc) if o.Name != "Base"]
     sup = [o for o in feats if getattr(o, "Suppressed", False)]
     # unsuppress more often when several are off, so the model stays mostly whole
     offn = {y.Name for y in sup}
@@ -687,7 +714,8 @@ def main():
     params = st.params
     sig0 = signature(doc)
     emit(step=0, what="build", wall_s=round(time.perf_counter() - t0, 3), vol=sig0.get("vol"), faces=sig0.get("faces"),
-         errors=sig0["errors"], nlist=len(sig0["list"] or []))
+         errors=sig0["errors"], nlist=len(sig0["list"] or []),
+         owners=sorted(o.Name for o in listFeatures(doc) if not st.body.hasObject(o)))
     full0, tf = fullFrom(doc)
     rec0 = dict(step=0, what="build checks", diffs=compare(sig0, full0), full_s=round(tf, 3))
     if FRESH:
