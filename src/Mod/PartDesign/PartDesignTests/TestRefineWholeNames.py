@@ -43,6 +43,7 @@ The models (designed, no file): a plate 80 x 50 x 10 with its top at z 10.
   pieces: neither takes its name.
 """
 
+import re
 import unittest
 
 import FreeCAD as App
@@ -169,6 +170,25 @@ class TestRefineWholeNames(unittest.TestCase):
         self.assertNotEqual(self.topAt(rib, 2, 0), self.topAt(rib, 60, 20), "the groove's cut stays")
         self.assertEqual(after[0][0], before[0][0], "the top's piece is named as before, first")
         self.assertEqual(after[1], before[1], "the junction edge keeps its name")
+
+    def testGrooveInsertedUnderAFlushRibKeepsThePlateTopFirst(self):
+        """The groove is the newest feature and the earliest in the history: the top's piece
+        carries its tag, yet comes from the plate, so it stays before the rib's top (review r3)"""
+        _, _, rib = self.rib(3, 5)
+        plate = self.doc.getObject("Plate")
+        boss = self.doc.getObject("Boss")
+        top = self.names(plate, self.topAt(plate, 40, 0))[0]
+        sketch = self.sketch("GrooveSk", TOP, [(5, -25, 9, 25)])
+        groove = self.feature("Pocket", "Groove", sketch, 3)
+        self.insertAfter([sketch, groove], plate)
+        for obj in (groove, rib, boss):
+            self.assertTrue(obj.isValid(), obj.getStatusString())
+        self.assertNotEqual(self.topAt(boss, 2, 0), self.topAt(boss, 60, 20), "the groove's cut")
+        for feature in (rib, boss):
+            first = self.names(feature, self.topAt(feature, 60, 20))[0]
+            self.assertTrue(first.startswith(top + "|"), first)
+            # One section after the top's name (no further unescaped `|`): the groove's piece, whole
+            self.assertIsNone(re.search(r"(?<!\^)\|", first[len(top) + 1 :]), first)
 
     def testFlushRibFittingTheSlotKeepsTheFarJunctionEdge(self):
         """The rib ends at the slot's walls: the top face isn't cut, only merged"""
