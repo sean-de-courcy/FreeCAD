@@ -777,6 +777,40 @@ class TestStudioOwner(unittest.TestCase):
         self.assertTrue(boss.isValid(), boss.getStatusString())
         self.assertAlmostEqual(boss.AddSubShape.Volume, tool, places=3)
 
+    def testUpToCylinderFaceSplitBossUnderEitherPiece(self):
+        """The boss under the second piece, or across the split: the face is still the cylinder."""
+        for slot, centre in (((5, 7, 11, 7.5), (8, 9)), ((5, 7, 11, 7.5), (8, 7.25)),
+                             ((5, 2, 11, 2.5), (8, 3))):
+            with self.subTest(slot=slot, centre=centre):
+                self.tearDown()
+                self.setUp()
+                boss, tool = self.cylinderAndBoss()
+                sk = self.doc.getObject("BossSk")
+                sk.delGeometry(0)
+                sk.addGeometry(Part.Circle(V(*centre, 0), V(0, 0, 1), 0.5))
+                self.membersBefore(boss, (self.slotAcross(slot, 14, 4.5),))
+                tool = Part.makeCylinder(0.5, 5, V(*centre, 10)).common(
+                    Part.makeCylinder(2, 10, V(8, 10, 10), V(0, -1, 0))
+                ).Volume
+                self.assertTrue(boss.isValid(), boss.getStatusString())
+                self.assertAlmostEqual(boss.AddSubShape.Volume, tool, places=3)
+
+    def testUpToFaceAfterAnOutwardThicknessWithItsOuterFaceRemoved(self):
+        """An outward Thickness, then a pocket z 14.5..15 over the whole top: nothing faces as
+        picked where Step's top was, only the cavity's ceiling facing down: the boss fails."""
+
+        def thickness(a, last):
+            thick = a.newObject("PartDesign::Thickness", "Thick")
+            thick.Base = (last, [faceAt(last, 0, -1)])
+            thick.Value = 1
+            thick.Reversed = False
+            return thick
+
+        _, boss = self.stepAndBoss()
+        self.membersBefore(boss, (thickness, self.slotAcross((4, -2, 12, 12), 15, 0.5)))
+        self.assertFalse(boss.isValid())
+        self.assertIn("faces the other way", boss.getStatusString())
+
     def testUpToFaceAfterAnOutwardThickness(self):
         """An outward Thickness of A (Reversed False, no Draft) between Step and Boss: Step's top
         is the cavity's ceiling at z = 14, facing down, and the outer top z = 15 faces as picked:
