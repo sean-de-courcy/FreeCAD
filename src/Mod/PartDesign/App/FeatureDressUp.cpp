@@ -57,6 +57,7 @@
 #include <TopExp_Explorer.hxx>
 
 #include <cstring>
+#include <map>
 #include <regex>
 #include <string>
 
@@ -594,8 +595,28 @@ struct DressUpRun
     Part::TopoShape base;
     std::vector<Part::TopoShape> edges;
     Part::TopoShape result;
+    // ops#796: the shape before the refine, when the run's caller asked for it and the run is
+    // one the feature's own compute would repeat as it is
+    bool keep = false;
+    bool kept = false;
+    Part::TopoShape raw;
 };
 thread_local DressUpRun* dressUpRun = nullptr;
+
+/// ops#796: what a studio dress-up owner's try built at a step (studioDressUpOwnerRun), for the
+/// step's own compute, which follows in the same recompute on the same base and edges: the
+/// second build of the same fillet was an eighth of a mid-history edit. By the step's address
+/// and id (an id is never used twice in a document)
+struct KeptDressUp
+{
+    long step = 0;
+    const App::DocumentObject* owner = nullptr;
+    TopoDS_Shape base;
+    std::vector<TopoDS_Shape> edges;
+    Part::TopoShape raw;
+    Part::TopoShape refined;
+};
+std::map<const App::DocumentObject*, KeptDressUp> keptDressUps;
 }  // namespace
 
 namespace PartDesign
@@ -618,6 +639,49 @@ PartDesignExport void dressUpReapplied(const Part::TopoShape& result)
     }
 }
 
+/// As dressUpReapplied(), with the shape before the refine. \a plain: the run built it the way
+/// the feature's own compute reports nothing about (no exact construction's Report line)
+PartDesignExport void dressUpReappliedFrom(const Part::TopoShape& raw,
+                                           const Part::TopoShape& result,
+                                           bool plain)
+{
+    if (dressUpRun) {
+        dressUpRun->result = result;
+        if (dressUpRun->keep && plain) {
+            dressUpRun->raw = raw;
+            dressUpRun->kept = true;
+        }
+    }
+}
+
+/// ops#796: a studio step's compute takes what its owner's try built on this base and these
+/// edges, if it did: \a raw before the refine, \a refined after it. The entry goes either way
+PartDesignExport bool studioDressUpTake(const DressUp* step,
+                                        const Part::TopoShape& base,
+                                        const std::vector<Part::TopoShape>& edges,
+                                        Part::TopoShape& raw,
+                                        Part::TopoShape& refined)
+{
+    auto found = keptDressUps.find(step);
+    if (found == keptDressUps.end()) {
+        return false;
+    }
+    const KeptDressUp kept = std::move(found->second);
+    keptDressUps.erase(found);
+    if (kept.step != step->getID() || kept.owner != step->StudioOwner.getValue()
+        || !kept.base.IsEqual(base.getShape()) || kept.edges.size() != edges.size()) {
+        return false;
+    }
+    for (std::size_t i = 0; i < edges.size(); ++i) {
+        if (!kept.edges[i].IsEqual(edges[i].getShape())) {
+            return false;
+        }
+    }
+    raw = kept.raw;
+    refined = kept.refined;
+    return true;
+}
+
 }  // namespace PartDesign
 
 #include "FeatureChamfer.h"
@@ -628,6 +692,17 @@ namespace PartDesign
 
 /// feature (a Chamfer or a Fillet) run on base's edges instead of its own: the result, or null
 /// with why (ops#654 T3; declared where used, FeatureTransformed.cpp)
+namespace
+{
+Part::TopoShape reapplyDressUpRun(
+    DressUp* feature,
+    const Part::TopoShape& base,
+    const std::vector<Part::TopoShape>& edges,
+    std::string& why,
+    Part::TopoShape* raw
+);
+}  // namespace
+
 PartDesignExport Part::TopoShape reapplyDressUp(
     DressUp* feature,
     const Part::TopoShape& base,
@@ -635,7 +710,22 @@ PartDesignExport Part::TopoShape reapplyDressUp(
     std::string& why
 )
 {
+    return reapplyDressUpRun(feature, base, edges, why, nullptr);
+}
+
+namespace
+{
+/// \a raw: asked for, it takes the shape before the refine when the run kept one (null otherwise)
+Part::TopoShape reapplyDressUpRun(
+    DressUp* feature,
+    const Part::TopoShape& base,
+    const std::vector<Part::TopoShape>& edges,
+    std::string& why,
+    Part::TopoShape* raw
+)
+{
     DressUpRun run {base, edges, Part::TopoShape()};
+    run.keep = raw != nullptr;
     DressUpRun* outer = dressUpRun;
     dressUpRun = &run;
     App::DocumentObjectExecReturn* ret = nullptr;
@@ -665,8 +755,12 @@ PartDesignExport Part::TopoShape reapplyDressUp(
     if (run.result.isNull() && why.empty()) {
         why = "it made nothing there";
     }
+    if (raw && why.empty() && run.kept) {
+        *raw = run.raw;
+    }
     return why.empty() ? run.result : Part::TopoShape();
 }
+}  // namespace
 
 }  // namespace PartDesign
 
@@ -828,6 +922,17 @@ std::vector<const char*> ownerParameters(const DressUp* step)
     return {"Radius", "UseAllEdges", "TangentPropagation", "Refine"};
 }
 
+void takeOwnerParameters(DressUp* step, const DressUp* owner)
+{
+    for (const char* name : ownerParameters(step)) {
+        auto from = owner->getPropertyByName(name);
+        auto to = step->getPropertyByName(name);
+        if (from && to && from->getTypeId() == to->getTypeId() && !to->isSame(*from)) {
+            to->Paste(*from);
+        }
+    }
+}
+
 }  // namespace
 
 std::vector<StudioDressUpPick> studioDressUpPicks(const DressUp* owner)
@@ -901,6 +1006,11 @@ PartDesignExport App::DocumentObjectExecReturn* studioDressUpOwnerRun(DressUp* o
     std::vector<std::string> failed;
     int tried = 0;
     int done = 0;
+    // ops#796: what an earlier run of this owner kept and no step took
+    std::erase_if(keptDressUps, [owner](const auto& entry) { return entry.second.owner == owner; });
+    if (keptDressUps.size() > 256) {
+        keptDressUps.clear();
+    }
     for (auto part : studioScopeOf(owner)) {
         auto step = freecad_cast<DressUp*>(StudioList::stepOf(owner, part));
         auto base = dressUpBaseOf(owner, part);
@@ -954,7 +1064,25 @@ PartDesignExport App::DocumentObjectExecReturn* studioDressUpOwnerRun(DressUp* o
         }
         ++tried;
         std::string why;
-        if (reapplyDressUp(owner, shape, edges, why).isNull()) {
+        // ops#796: tried as the step itself, with the owner's parameters (which it reads when
+        // it runs anyway): the same feature on the same base and edges builds the same shape
+        // with the same names, so the step's compute takes this one instead of building again
+        takeOwnerParameters(step, owner);
+        Part::TopoShape raw;
+        const Part::TopoShape tryResult = reapplyDressUpRun(step, shape, edges, why, &raw);
+        if (!tryResult.isNull() && !raw.isNull()) {
+            KeptDressUp kept;
+            kept.step = step->getID();
+            kept.owner = owner;
+            kept.base = shape.getShape();
+            for (const auto& edge : edges) {
+                kept.edges.push_back(edge.getShape());
+            }
+            kept.raw = raw;
+            kept.refined = tryResult;
+            keptDressUps[step] = std::move(kept);
+        }
+        if (tryResult.isNull()) {
             // Onshape O2: this part is left unchanged, the others are rounded
             failed.push_back(studioPartId(part));
             notes.push_back(std::string("'") + part->Label.getValue() + "': " + why);
@@ -995,13 +1123,7 @@ PartDesignExport bool studioDressUpStepPassesThrough(DressUp* step)
     if (!owner || Body::findBodyOf(owner)) {
         return false;
     }
-    for (const char* name : ownerParameters(step)) {
-        auto from = owner->getPropertyByName(name);
-        auto to = step->getPropertyByName(name);
-        if (from && to && from->getTypeId() == to->getTypeId() && !to->isSame(*from)) {
-            to->Paste(*from);
-        }
-    }
+    takeOwnerParameters(step, owner);
     const auto failed = stringsOf(owner, "StudioFailedParts");
     return std::ranges::find(failed, studioPartId(step->getFeatureBody())) != failed.end();
 }
