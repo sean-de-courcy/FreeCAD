@@ -113,9 +113,15 @@ def patternLabel(assembly, kind):
 
 
 def missingPick(fp):
-    """True while a direction the pattern needs has never been picked (FreeCAD-CH ops#801)."""
-    ref = fp.Direction
-    return not ref or ref[0] is None
+    """True while a direction the pattern needs has never been picked (FreeCAD-CH ops#801): a
+    pattern without copies yet (one whose direction's object was deleted has copies, and still
+    raises), its direction, or its second one when that is on, not picked."""
+    if fp.Instances:
+        return False
+    refs = [fp.Direction]
+    if fp.Proxy.secondCount(fp) >= 2:
+        refs.append(getattr(fp, "Direction2", None))
+    return any(not ref or ref[0] is None for ref in refs)
 
 
 def referenceAxis(fp, second=False):
