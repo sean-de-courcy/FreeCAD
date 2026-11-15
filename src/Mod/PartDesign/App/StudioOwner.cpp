@@ -9,13 +9,12 @@
 #include <cstring>
 #include <iterator>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepTools.hxx>
-#include <Bnd_Box2d.hxx>
-#include <gp_Pnt2d.hxx>
 #include <BRep_Tool.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
 #include <BRepLProp_SLProps.hxx>
@@ -178,6 +177,12 @@ Part::TopoShape studioPartShapeAt(
 namespace
 {
 
+/// Whether shape is a face
+bool isFace(const TopoDS_Shape& shape)
+{
+    return !shape.IsNull() && shape.ShapeType() == TopAbs_FACE;
+}
+
 /// Whether shape is a planar face
 bool isPlanarFace(const TopoDS_Shape& shape)
 {
@@ -205,6 +210,27 @@ bool faceNormal(const TopoDS_Shape& shape, gp_Dir& normal)
         normal.Reverse();
     }
     return true;
+}
+
+/// The parameter range covering every piece's range. The picked face's own range when every
+/// piece lies in it (a split keeps the surface's parametrisation): it keeps the face's seam where
+/// it was, and a seam under the profile is what an extrude up to a periodic face can't cross
+std::pair<double, double> coveringRange(
+    const std::vector<std::pair<double, double>>& ranges,
+    const std::pair<double, double>* picked
+)
+{
+    double low = ranges.front().first;
+    double high = ranges.front().second;
+    for (const auto& [a, b] : ranges) {
+        low = std::min(low, a);
+        high = std::max(high, b);
+    }
+    constexpr double tolerance = 1e-7;
+    if (picked && picked->first - tolerance <= low && high <= picked->second + tolerance) {
+        return *picked;
+    }
+    return {low, high};
 }
 
 /// Whether two faces are pieces of one face: on one underlying surface (a cylinder, cone or
@@ -275,16 +301,14 @@ Part::TopoShape studioElementAt(
     };
     // Not a face a later feature made from it on its other side (a Thickness's inner face): the
     // picked face's own normal decides, between planar faces only
+    const TopoDS_Shape pickedFace = Part::Feature::getTopoShape(
+        from,
+        Part::ShapeOption::NeedSubElement | Part::ShapeOption::ResolveLink
+            | Part::ShapeOption::Transform,
+        element.c_str()
+    ).getShape();
     gp_Dir pickedNormal;
-    const bool oriented = faceNormal(
-        Part::Feature::getTopoShape(
-            from,
-            Part::ShapeOption::NeedSubElement | Part::ShapeOption::ResolveLink
-                | Part::ShapeOption::Transform,
-            element.c_str()
-        ).getShape(),
-        pickedNormal
-    );
+    const bool oriented = faceNormal(pickedFace, pickedNormal);
     auto facesAway = [&](const Part::TopoShape& shape) {
         gp_Dir normal;
         return oriented && faceNormal(shape.getShape(), normal) && normal.Dot(pickedNormal) <= 0;
@@ -384,18 +408,30 @@ Part::TopoShape studioElementAt(
     // Pieces of one curved surface: a piece is not extended as a plane is, so one face on that
     // surface over all the pieces' parameter ranges stands for them (Onshape UT2 keeps them all)
     if (found.size() > 1 && !isPlanarFace(found.front().getShape())) {
-        Bnd_Box2d range;
-        for (const auto& piece : found) {
-            double u0, u1, v0, v1;
-            BRepTools::UVBounds(TopoDS::Face(piece.getShape()), u0, u1, v0, v1);
-            range.Add(gp_Pnt2d(u0, v0));
-            range.Add(gp_Pnt2d(u1, v1));
-        }
-        double u0, v0, u1, v1;
-        range.Get(u0, v0, u1, v1);
         TopLoc_Location location;
         const TopoDS_Face first = TopoDS::Face(found.front().getShape());
         const Handle(Geom_Surface) surface = BRep_Tool::Surface(first, location);
+        std::vector<std::pair<double, double>> us;
+        std::vector<std::pair<double, double>> vs;
+        for (const auto& piece : found) {
+            double u0, u1, v0, v1;
+            BRepTools::UVBounds(TopoDS::Face(piece.getShape()), u0, u1, v0, v1);
+            us.emplace_back(u0, u1);
+            vs.emplace_back(v0, v1);
+        }
+        // The picked face, when on a surface of the same kind: its range
+        std::pair<double, double> pickedU;
+        std::pair<double, double> pickedV;
+        bool samePicked = false;
+        if (isFace(pickedFace)) {
+            const TopoDS_Face face = TopoDS::Face(pickedFace);
+            if (BRepAdaptor_Surface(face).GetType() == BRepAdaptor_Surface(first).GetType()) {
+                BRepTools::UVBounds(face, pickedU.first, pickedU.second, pickedV.first, pickedV.second);
+                samePicked = true;
+            }
+        }
+        const auto [u0, u1] = coveringRange(us, samePicked ? &pickedU : nullptr);
+        const auto [v0, v1] = coveringRange(vs, samePicked ? &pickedV : nullptr);
         BRepBuilderAPI_MakeFace make(surface, u0, u1, v0, v1, Precision::Confusion());
         if (make.IsDone()) {
             TopoDS_Face whole = make.Face();
