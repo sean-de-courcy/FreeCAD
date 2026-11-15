@@ -136,6 +136,10 @@ protected:
     App::DocumentObjectWeakPtrT previouslyShownFeature {nullptr};
     /// The body showed a feature when the edit began (it may be gone since)
     bool hadShownFeature {false};
+    /// FreeCAD-CH (gaps3 row 7, Onshape G3-6): the Body this edit showed because the user had
+    /// hidden it. Onshape shows a hidden part as the dialog's preview and hides it again after
+    /// OK; unsetEdit hides it again
+    App::DocumentObjectWeakPtrT bodyShownForEdit {nullptr};
 
     bool isSetTipIcon {false};
 

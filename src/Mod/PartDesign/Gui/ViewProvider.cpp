@@ -208,6 +208,14 @@ bool ViewProvider::setEdit(int ModNum)
             previouslyShownFeature = bodyViewProvider->getShownFeature();
         }
         hadShownFeature = !previouslyShownFeature.expired();
+        // A part the user hid shows for the edit, as Onshape's preview does (gaps3 row 7, G3-6)
+        bodyShownForEdit = nullptr;
+        if (ViewProviderBody* bodyViewProvider = getBodyViewProvider()) {
+            if (!bodyViewProvider->isShow()) {
+                bodyShownForEdit = bodyViewProvider->getObject();
+                bodyViewProvider->show();
+            }
+        }
 
         // clear the selection (convenience)
         Gui::Selection().clearSelection();
@@ -274,6 +282,13 @@ void ViewProvider::unsetEdit(int ModNum)
             shown->show();
         }
     }
+    // The part the user hid is hidden again, OK or Cancel (gaps3 row 7, G3-6)
+    if (auto body = bodyShownForEdit.get<App::DocumentObject>()) {
+        if (Gui::ViewProvider* bodyView = Gui::Application::Instance->getViewProvider(body)) {
+            bodyView->hide();
+        }
+    }
+    bodyShownForEdit = nullptr;
 
     if (ModNum == ViewProvider::Default) {
         // when pressing ESC make sure to close the dialog
