@@ -50,7 +50,7 @@ PartDesignExport Part::TopoShape studioPartShapeAt(
 );
 
 /// Whether prop is an up-to link (UpToFace/2, UpToShape/2) that names parts of a studio whole: every
-/// entry without an element, on a Body or a solid feature of one. Such a link is read at the
+/// entry without an element, on a Body or a solid feature of one, of a reader outside every Body. Such a link is read at the
 /// reader's place whatever it names (studioPartShapeAt()) and reconcile re-targets it, so it is no
 /// read of the feature it names (a reorder, a kept step)
 PartDesignExport bool studioWholePartLink(const App::Property* prop);

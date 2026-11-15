@@ -598,6 +598,13 @@ class TestStudioOwner(unittest.TestCase):
         doc.recompute()
         self.assertEqual(ring.UpToFace[0].Name, "WPad")
         self.assertRing(doc, ring)
+        # Above the part's first solid there is no part to stop at: it runs again and fails
+        doc.openTransaction("up")
+        PartDesign.studioMove(ring, entries().index("WPad"))
+        doc.commitTransaction()
+        doc.recompute()
+        self.assertFalse(ring.isValid())
+        self.assertIn("no solid before", ring.getStatusString())
 
     def testAWholePartLinkToAPlacedPart(self):
         """The part's placement counts whichever object the link names: W turned -30 degrees about

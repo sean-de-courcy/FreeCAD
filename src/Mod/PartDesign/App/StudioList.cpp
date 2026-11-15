@@ -1715,11 +1715,17 @@ bool StudioList::reconcile(std::string* why)
                 if (!body && Body::isSolidFeature(obj)) {
                     body = bodyOf(Body::findBodyOf(obj));
                 }
-                App::DocumentObject* last = body ? solidBefore(body, nullptr) : nullptr;
-                if (!last || last == obj) {
+                if (!body) {
                     return false;
                 }
-                obj = last;
+                // Nothing of the part before it (moved above the part's first solid): the Body,
+                // so that it runs again and fails for it
+                App::DocumentObject* last = solidBefore(body, nullptr);
+                App::DocumentObject* target = last ? last : body;
+                if (target == obj) {
+                    return false;
+                }
+                obj = target;
                 return true;
             };
             for (const char* name : {"UpToFace", "UpToFace2", "UpToShape", "UpToShape2"}) {
