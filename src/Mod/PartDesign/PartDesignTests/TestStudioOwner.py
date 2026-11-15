@@ -795,6 +795,38 @@ class TestStudioOwner(unittest.TestCase):
                 self.assertTrue(boss.isValid(), boss.getStatusString())
                 self.assertAlmostEqual(boss.AddSubShape.Volume, tool, places=3)
 
+    def testUpToConeFaceSplitThroughItsSeam(self):
+        """Step, a tapered Pad (circle r 2 at (7, 5), 4 tall, taper -10): its side is one cone all
+        round. A slot y 4.9..5.1 through it splits the side in two; a boss r 0.2 over either gap
+        (one of them at the cone's seam) ends on the cone as before the slot."""
+        for centre in ((5.4, 5), (8.6, 5), (7, 6.6)):
+            with self.subTest(centre=centre):
+                self.tearDown()
+                self.setUp()
+                stepSk = studioSketch(self.doc, self.studio, "StepSk", z=10, circles=((7, 5, 2),))
+                step = makeOwner(
+                    self.doc, self.studio, "Pad", "Step", stepSk, ("A",), Length=4, TaperAngle=-10
+                )
+                self.doc.recompute()
+                made = self.step(step, "A")
+                cone = next(
+                    f"Face{i}" for i, f in enumerate(made.Shape.Faces, 1)
+                    if f.Surface.__class__.__name__ == "Cone"
+                )  # fmt: skip
+                bossSk = studioSketch(self.doc, self.studio, "BossSk", z=10, circles=((*centre, 0.2),))
+                boss = makeOwner(self.doc, self.studio, "Pad", "Boss", bossSk, ("A",), Type="UpToFace")
+                boss.UpToFace = (made, [cone])
+                self.doc.recompute()
+                top = 2 - 4 * math.tan(math.radians(10))
+                tool = Part.makeCylinder(0.2, 5, V(*centre, 10)).common(
+                    Part.makeCone(2, top, 4, V(7, 5, 10))
+                ).Volume
+                self.assertTrue(boss.isValid(), boss.getStatusString())
+                self.assertAlmostEqual(boss.AddSubShape.Volume, tool, places=3)
+                self.membersBefore(boss, (self.slotAcross((4, 4.9, 10, 5.1), 14, 4),))
+                self.assertTrue(boss.isValid(), boss.getStatusString())
+                self.assertAlmostEqual(boss.AddSubShape.Volume, tool, places=3)
+
     def testUpToFaceAfterAnOutwardThicknessWithItsOuterFaceRemoved(self):
         """An outward Thickness, then a pocket z 14.5..15 over the whole top: nothing faces as
         picked where Step's top was, only the cavity's ceiling facing down: the boss fails."""
