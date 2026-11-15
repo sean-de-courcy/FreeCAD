@@ -95,6 +95,25 @@ class FlatFaceAxesTest(unittest.TestCase):
                     got = self.sketch_x(face, "Face1")
                     self.assertLess((got - V(0, sign, 0)).Length, 1e-6, "x %s" % got)
 
+    def test_three_axis_tilts_and_placed_support(self):
+        # GS12c: (1,2,3) Z-dominant -> world X projected; (3,1,2) X-dominant -> +Y projected;
+        # (-1,-3,2) Y-dominant, -Y leaning -> +X projected.
+        def proj(v, n):
+            return (v - n * v.dot(n)).normalize()
+
+        for raw, axis in ((V(1, 2, 3), V(1, 0, 0)), (V(3, 1, 2), V(0, 1, 0)), (V(-1, -3, 2), V(1, 0, 0))):
+            with self.subTest(normal=raw):
+                n = V(raw).normalize()
+                face = Part.Plane(V(0, 0, 0), n).toShape(-5, 5, -5, 5)
+                got = self.sketch_x(face, "Face1")
+                self.assertLess((got - proj(axis, n)).Length, 1e-9, "x %s" % got)
+        # A support with a placement picks in its own frame: a 45-degree face toward local +X
+        # under a 90-degree turn about Z gives local +Y, i.e. world -X.
+        face = Part.Plane(V(0, 0, 0), V(1, 0, 1)).toShape(-5, 5, -5, 5)
+        face.Placement = App.Placement(V(7, 3, 1), App.Rotation(V(0, 0, 1), 90))
+        got = self.sketch_x(face, "Face1")
+        self.assertLess((got - V(-1, 0, 0)).Length, 1e-9, "x %s" % got)
+
 
 if __name__ == "__main__":
     unittest.main()
