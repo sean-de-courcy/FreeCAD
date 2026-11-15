@@ -58,6 +58,8 @@ class TestExportPartsGui(unittest.TestCase):
         ExportPartsGui.exportParts([self.boxBody], binary, "STL")
         with open(text, "rb") as f:
             self.assertTrue(f.read(5).lower() == b"solid")
+        with open(binary, "rb") as f:
+            self.assertFalse(f.read(5).lower() == b"solid")
         self.assertEqual(self.readMesh(text).CountFacets, self.readMesh(binary).CountFacets)
 
     def testResolution(self):
@@ -86,6 +88,16 @@ class TestExportPartsGui(unittest.TestCase):
         box = self.readMesh(path).BoundBox
         self.assertAlmostEqual(box.XMin, -5, places=3)
         self.assertAlmostEqual(box.XMax, 110, places=3)
+
+    def testPartInContainer(self):
+        """A Body inside an App::Part placed at x = 50 exports at x = 50."""
+        container = self.doc.addObject("App::Part", "Container")
+        container.Placement = App.Placement(App.Vector(50, 0, 0), App.Rotation())
+        container.addObject(self.cylBody)
+        self.doc.recompute()
+        path = self.path("contained.stl")
+        ExportPartsGui.exportParts([self.cylBody], path, "STL")
+        self.assertAlmostEqual(self.readMesh(path).BoundBox.XMin, 45, places=3)
 
     def testStep(self):
         """STEP keeps the solid: volume 6000 mm^3, at x = 100 mm."""
