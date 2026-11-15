@@ -2535,9 +2535,35 @@ private:
         for (int n = 1; id.empty() || taken.count(id); ++n) {
             id = std::string(owner->getNameInDocument()) + ":" + std::to_string(n);
         }
-        auto body = static_cast<PartDesign::Body*>(doc->addObject("PartDesign::Body", "Body"));
-        if (App::Part* studio = list->studio()) {
-            studio->getExtensionByType<App::GroupExtension>()->addObject(body);
+        // FreeCAD-CH (ops#797): the studio's own empty part (the "Part 1" a new studio starts
+        // with) becomes this part, as Onshape's first Extrude makes "Part 1"; else a new part
+        // named "Part <n>", the lowest n no part of the studio has (it was left "Body")
+        App::Part* studio = list->studio();
+        PartDesign::Body* body = nullptr;
+        std::set<std::string> labels;
+        for (auto obj : doc->getObjectsOfType(PartDesign::Body::getClassTypeId())) {
+            auto other = static_cast<PartDesign::Body*>(obj);
+            if (App::Part::getPartOfObject(other, false) != studio) {
+                continue;
+            }
+            labels.insert(other->Label.getValue());
+            if (!body && studio && other->Group.getValues().empty()
+                && std::string(other->StudioPartId.getValue()).empty()
+                && !other->StudioMadeBy.getValue()
+                && other->getInList().size() <= 1) {
+                body = other;
+            }
+        }
+        if (!body) {
+            body = static_cast<PartDesign::Body*>(doc->addObject("PartDesign::Body", "Body"));
+            if (studio) {
+                studio->getExtensionByType<App::GroupExtension>()->addObject(body);
+            }
+            std::string label;
+            for (int n = 1; label.empty() || labels.count(label); ++n) {
+                label = "Part " + std::to_string(n);
+            }
+            body->Label.setValue(label);
         }
         body->StudioPartId.setValue(id);
         body->StudioMadeBy.setValue(owner);

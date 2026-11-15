@@ -235,6 +235,28 @@ class TestStudioOwner(unittest.TestCase):
         self.assertFalse([b for b in self.doc.Objects if b.TypeId == "PartDesign::Body"
                           and b.Name not in ("A", "B", "C")])
 
+    def testNewPartNames(self):
+        """ops#797: the studio's empty part (the "Part 1" a new studio starts with) becomes the
+        first New part, keeping its name; the next New part is "Part 2" (Onshape's Part 1, Part
+        2), not "Body"."""
+        empty = self.doc.addObject("PartDesign::Body", "Body")
+        empty.Label = "Part 1"
+        self.studio.addObject(empty)
+        sk1 = studioSketch(self.doc, self.studio, "N1Sk", ((60, 0, 70, 10),), z=0)
+        n1 = makeOwner(self.doc, self.studio, "Pad", "N1", sk1, (), Length=5)
+        first = PartDesign.studioNewPart(n1)
+        sk2 = studioSketch(self.doc, self.studio, "N2Sk", ((80, 0, 90, 10),), z=0)
+        n2 = makeOwner(self.doc, self.studio, "Pad", "N2", sk2, (), Length=5)
+        second = PartDesign.studioNewPart(n2)
+        self.doc.recompute()
+        self.assertIs(first, empty)
+        self.assertEqual(first.Label, "Part 1")
+        self.assertEqual(first.StudioPartId, "N1:1")
+        self.assertIsNot(second, empty)
+        self.assertEqual(second.Label, "Part 2")
+        self.assertAlmostEqual(first.Shape.Volume, 500, places=3)
+        self.assertAlmostEqual(second.Shape.Volume, 500, places=3)
+
     # ------------------------------------------------------------------------------- Hole
     def testHoleOwnerThroughAllOnTwoParts(self):
         """A Hole owner through all: one r1 hole per centre, through A and through B."""
