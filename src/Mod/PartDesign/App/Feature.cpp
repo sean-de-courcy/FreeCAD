@@ -1136,22 +1136,41 @@ namespace
 // Without the solver (ops#285) the references are found by their name only, as upstream's
 // missing references are. Returns false, leaving the link as it is, if a reference has no mapped
 // name or a sub-object path, as the name match does.
+//
+// With \a home (a dress-up's Base, ops#818) each reference also keeps what it was on the base it
+// leaves, in its re-target record: that base, the element's mapped name and index, its
+// fingerprint and its guess record. When the link comes back to that base the reference is
+// written as it was there, whatever the solver made of it meanwhile (as the re-target rule's
+// restore, N1 3.2): a move and its undo give the same references. The name it got on the base in
+// between isn't carried back: where the solver found it there by geometry, that name is another
+// element's history (a draft's edge on the boss before the draft), which the first base's shape
+// doesn't hold. A reference moved on again keeps the record of its first base. A user's pick, a
+// repair and accepting a guess end the record, as every setter does.
 bool relinkAsMissing(
     App::PropertyLinkSub& link,
     const Part::TopoShape& oldShape,
     App::DocumentObject* newBase,
-    bool solver
+    bool solver,
+    bool home = false
 )
 {
     const auto& oldSubs = link.getSubValues();
     const auto& oldShadows = link.getShadowSubs();
+    const auto oldRecords = link.getElementRecords();
+    const auto oldFingerprints = link.getElementFingerprints();
+    App::DocumentObject* oldBase = link.getValue();
     std::vector<std::string> subs;
     std::vector<App::PropertyLinkBase::ShadowSub> shadows;
+    std::vector<App::ElementRecords> records;
+    std::vector<std::string> fingerprints;
+    std::set<std::string> restored;
     for (std::size_t i = 0; i < oldSubs.size(); ++i) {
         const auto& sub = oldSubs[i];
         if (sub.empty()) {
             subs.emplace_back();
             shadows.emplace_back();
+            records.emplace_back();
+            fingerprints.emplace_back();
             continue;
         }
         if (Data::findElementName(sub.c_str()) != sub.c_str()) {
@@ -1175,14 +1194,64 @@ bool relinkAsMissing(
         if (mapped.empty() || index.empty()) {
             return false;
         }
+        App::ElementRecords record = i < oldRecords.size() ? oldRecords[i] : App::ElementRecords();
+        std::string fingerprint = i < oldFingerprints.size() ? oldFingerprints[i] : std::string();
+        if (home && newBase) {
+            auto& was = record.retarget;
+            // The base the record names, if it is still that object (ops#165)
+            auto doc = newBase->getDocument();
+            auto first = !was.empty() && doc ? doc->getObject(was.target.c_str()) : nullptr;
+            if (first && !was.isTarget(first->getID())) {
+                first = nullptr;
+            }
+            if (first == newBase && !was.origName.empty() && !was.origIndex.empty()) {
+                // Back on the base it left: the reference it was there
+                mapped = was.origName;
+                index = was.origIndex;
+                fingerprint = was.origFp;
+                App::ElementRecords back;
+                back.guess = was.guess;
+                record = std::move(back);
+                // The pieces the solver expanded it to in between are one reference again
+                if (!restored.insert(mapped + "." + index).second) {
+                    continue;
+                }
+            }
+            else if (first && first != newBase) {
+                // Moved on: the record stays its first base's
+            }
+            else if (oldBase && oldBase->isAttachedToDocument()) {
+                was = App::RetargetRecord();
+                was.target = oldBase->getNameInDocument();
+                was.targetId = oldBase->getID();
+                was.origName = mapped;
+                was.origIndex = index;
+                was.origFp = fingerprint;
+                was.guess = record.guess;
+            }
+            else {
+                was = App::RetargetRecord();
+            }
+        }
         std::string missing = Data::MISSING_PREFIX + index;
         subs.push_back(missing);
         shadows.emplace_back(
             Data::ComplexGeoData::elementMapPrefix() + mapped + "." + index,
             missing
         );
+        records.push_back(std::move(record));
+        fingerprints.push_back(std::move(fingerprint));
     }
     link.setValue(newBase, std::move(subs), std::move(shadows));
+    if (home) {
+        // The setter passed the shadows on: the records and fingerprints are set beside them
+        link.setElementRecords(std::move(records));
+        for (std::size_t i = 0; i < fingerprints.size(); ++i) {
+            if (!fingerprints[i].empty()) {
+                link.setElementFingerprint(i, fingerprints[i]);
+            }
+        }
+    }
     // A new base that hasn't computed yet (insert at the roll-back bar, ops#127): its first shape
     // solves the references, since a missing reference is solved on every update of its target
     auto newFeature = freecad_cast<Part::Feature*>(newBase);
@@ -1327,10 +1396,13 @@ bool Feature::relinkToMatchingSubelements(
     auto newFeature = freecad_cast<Part::Feature*>(newBase);
     const Part::TopoShape oldShape = oldFeature ? oldFeature->Shape.getShape() : Part::TopoShape();
     const bool solver = link.inSolverDocument();
+    // A dress-up's Base keeps what each reference was on the base it leaves (ops#818)
+    auto dressUp = freecad_cast<DressUp*>(link.getContainer());
+    const bool home = solver && dressUp && &dressUp->Base == &link;
     if (newFeature && !oldShape.isNull()) {
         if (solver) {
             // Also onto a new base without a shape yet (ops#127, N1 2.2)
-            if (relinkAsMissing(link, oldShape, newBase, true)) {
+            if (relinkAsMissing(link, oldShape, newBase, true, home)) {
                 return true;
             }
         }
@@ -1342,7 +1414,7 @@ bool Feature::relinkToMatchingSubelements(
     // (a feature that never computed) the names come from the link's shadows here too, or the link
     // stays on an object no longer before the owner (fork PR 282 round 2 verification, A)
     if (newFeature && follow && (!solver || oldShape.isNull())) {
-        if (relinkAsMissing(link, oldShape, newBase, solver)) {
+        if (relinkAsMissing(link, oldShape, newBase, solver, home)) {
             // With its references missing; also from an old base without a shape (one that
             // failed), the names coming from the link's shadows (fork PR 282 review, F2). In a
             // reorder the new base still has its shape from before the reorder, which can hold
