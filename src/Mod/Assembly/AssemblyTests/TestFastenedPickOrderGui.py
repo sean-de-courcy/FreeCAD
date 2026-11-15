@@ -199,7 +199,7 @@ class TestFastenedPickOrderGui(unittest.TestCase):
         self.pick(*C_TOP)
         self.pick(*A_BOTTOM)
         self.assertEqual(self.pickNames(panel), before)
-        self.assertEqual(panel.addition_rejected, 0, "Expected each refused removal swallowed")
+        self.assertEqual(panel.rejected_picks, [], "Expected each refused removal swallowed")
         self.assertMated(panel, b_moves=False)
 
     def test_edit_click_on_its_own_face_keeps_both(self):
@@ -215,10 +215,34 @@ class TestFastenedPickOrderGui(unittest.TestCase):
             self.pick(*A_TOP)
             self.assertEqual(len(panel.refs), 2, f"Expected both kept, got {self.pickNames(panel)}")
             self.assertTrue(panel.okButton.isEnabled())
-            self.assertEqual(panel.addition_rejected, 0)
+            self.assertEqual(panel.rejected_picks, [])
         finally:
             panel.reject()
             pump()
+
+    def test_whole_part_click_keeps_panel_and_view_agreed(self):
+        """ops#788: with A's face kept, a click on the whole of A is refused (one part, picked
+        twice). Its removal also removes the kept face from the view (prefix match): the panel
+        drops it as well, nothing refused is left pending, and the view and the panel agree."""
+        Gui.ActiveDocument = Gui.getDocument(self.doc.Name)
+        Gui.ActiveDocument.setEdit(self.assembly.Name)
+        self.assertTrue(waitFor(lambda: Gui.ActiveDocument.getInEdit() is not None))
+        self.openFastened()
+        self.assertTrue(waitFor(lambda: JointObject.activeTask is not None), "no joint dialog")
+        panel = JointObject.activeTask
+        self.pick(*A_TOP)
+        self.assertEqual(self.pickNames(panel), ["A.Face6"])
+        Gui.Selection.addSelection(self.doc.Name, self.assembly.Name, "A.")
+        pump()
+        self.assertEqual(panel.rejected_picks, [])
+        viewed = sorted(
+            sub for sel in Gui.Selection.getSelectionEx("", 0) for sub in sel.SubElementNames
+        )
+        kept = self.pickNames(panel)
+        self.assertEqual(len(viewed), len(kept), f"view {viewed}, panel {kept}")
+        # a pick after it is taken as the first one
+        self.pick(*B_TOP)
+        self.assertEqual(panel.rejected_picks, [])
 
     def test_grounded_part_picked_second_commits(self):
         """B grounded, A's face first, B's second, then OK: one Fastened joint between A and B,
