@@ -1134,9 +1134,10 @@ void ReferenceField::reload()
         // One entry per object, by its Label; objects of one Label are told apart by their
         // names (B6). An object is there or not: no states.
         const std::vector<App::DocumentObject*> objs = linkedObjects();
-        std::map<std::string, int> labels;
+        // (counted by the name shown: two Origins' XY planes both show as Top)
+        std::map<QString, int> labels;
         for (App::DocumentObject* obj : objs) {
-            ++labels[obj->Label.getValue()];
+            ++labels[entryLabel(obj)];
         }
         const int current = entryList->currentRow();
         QSignalBlocker block(entryList);
@@ -1148,7 +1149,7 @@ void ReferenceField::reload()
             item->setData(IndexRole, static_cast<int>(i));
             item->setData(SubRole, name);
             item->setData(StateRole, QStringLiteral("exact"));
-            item->setText(labels[objs[i]->Label.getValue()] > 1
+            item->setText(labels[label] > 1
                               ? QStringLiteral("%1 (%2)").arg(label, name)
                               : label);
             item->setToolTip(name);

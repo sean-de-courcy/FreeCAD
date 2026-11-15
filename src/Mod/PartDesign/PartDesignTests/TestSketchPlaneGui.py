@@ -190,14 +190,16 @@ class TestSketchPlaneGui(unittest.TestCase):
     # -- the tests --------------------------------------------------------------------------------
 
     def testTheSketchDialogHasTheSketchPlaneBox(self):
-        """The sketch dialog's Sketch plane box lists the sketch's plane, XY, and isn't armed."""
+        """The sketch dialog's Sketch plane box lists the sketch's plane, XY, by Onshape's name,
+        Top (gaps3 row 24), and isn't armed."""
         sketch = self.circleSketch()
         self.openSketch(sketch)
         self.assertIsNotNone(visibleChild("sketchPlaneBox"))
         field = self.planeField()
         entries = field.findChild(QtWidgets.QListWidget, "entries")
         self.assertEqual(entries.count(), 1)
-        self.assertIn(self.xy.Label, entries.item(0).text())
+        self.assertEqual(self.xy.Label, "XY-plane")
+        self.assertIn("Top", entries.item(0).text())
         self.assertFalse(field.property("armed"))
 
     def testAPickedFaceTakesTheSketchAndItsGeometryAlong(self):
