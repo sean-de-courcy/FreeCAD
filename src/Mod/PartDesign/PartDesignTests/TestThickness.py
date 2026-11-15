@@ -972,6 +972,52 @@ class TestThickness(unittest.TestCase):
                 self.assertLess(abs(shell.Volume - volume), 1e-6 * volume)
         self.assertAlmostEqual(11990 - (6656 - (2 * math.sqrt(2) - 1) ** 2 / 2 * 16), 5360.745, places=3)
 
+    def testShellUnderARampOrATiltedStepIsNeverThinnerOrClosed(self):
+        """Two shells OCCT's offset of the whole solid gets wrong, both refused (ops#811, the
+        review's finds). A 40 x 40 x 10 block with a ramp on a quarter of its top (x 0..20,
+        y 0..20, from the top's level at y 20 up to 2 at y 0), shelled 2 inward from the
+        L-shaped rest of the top: the ramp has no offset face, and the cavity ran flat under
+        it, the roof as thin as the ramp is high (6032 = 16400 - 36 x 36 x 8). And a
+        40 x 20 x 10 block with a step on x 0..20 whose top tilts down to the open face's
+        level at the one corner (20, 20, 10): the offset came back as a closed pocket under
+        the step's top, 17 mm^3, nowhere near the open face (8623.014 for 8640). Where a
+        kernel builds either, it has a real cavity and a roof left under the ramp."""
+        V = FreeCAD.Vector
+        ramp = Part.Face(
+            Part.makePolygon([V(0, 0, 10), V(0, 20, 10), V(0, 0, 12), V(0, 0, 10)])
+        ).extrude(V(20, 0, 0))
+        ramped = Part.makeBox(40, 40, 10).fuse(ramp).removeSplitter()
+        self.assertAlmostEqual(ramped.Volume, 16400, places=6)
+        under = Part.Face(
+            Part.makePolygon(
+                [V(-10, -10, 14.8), V(30, -10, 11.6), V(30, 30, 8.4), V(-10, 30, 11.6), V(-10, -10, 14.8)]
+            )
+        ).extrude(V(0, 0, -30))
+        tilted = (
+            Part.makeBox(40, 20, 10)
+            .fuse(under.common(Part.makeBox(20, 20, 30, V(0, 0, 10))))
+            .removeSplitter()
+        )
+        self.assertAlmostEqual(tilted.Volume, 8640, places=6)
+        for name, solid, point, least, most in (
+            ("ramp", ramped, V(30, 30, 10), 16400 - 36 * 36 * 8 + 100, 16400 - 1000),
+            ("tilted step", tilted, V(30, 10, 10), 8640 - 36 * 16 * 8, 8640 - 1000),
+        ):
+            with self.subTest(name=name):
+                self.assertTrue(solid.isValid())
+                opened = [
+                    face for face in solid.Faces if face.distToShape(Part.Vertex(point))[0] < 1e-7
+                ]
+                self.assertEqual(len(opened), 1)
+                try:
+                    shell = solid.makeThickness(opened, -2, 1e-7, False, False, 0, 2)
+                except Exception as error:  # the kernel's refusal
+                    self.assertIn("no shell was built", str(error))
+                else:
+                    self.assertTrue(shell.isValid())
+                    self.assertGreater(shell.Volume, least)
+                    self.assertLess(shell.Volume, most)
+
     def testShellBesideAStepWithARoundOnTheOpenFaceIsRefused(self):
         """The L-block with a round of 0.5 or 1 on the open face's side edge (y 0, z 10), which
         OCCT's thick-solid builder returned as a solid larger than the L. The round's offset
