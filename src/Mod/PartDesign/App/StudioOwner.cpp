@@ -12,12 +12,15 @@
 #include <vector>
 
 #include <BRepAdaptor_Surface.hxx>
+#include <BRep_Tool.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
 #include <BRepLProp_SLProps.hxx>
 #include <GeomAbs_SurfaceType.hxx>
+#include <Geom_Surface.hxx>
 #include <Precision.hxx>
 #include <TopAbs_ShapeEnum.hxx>
 #include <TopoDS.hxx>
+#include <TopLoc_Location.hxx>
 #include <TopoDS_Face.hxx>
 #include <gp_Dir.hxx>
 #include <gp_Pln.hxx>
@@ -171,10 +174,18 @@ Part::TopoShape studioPartShapeAt(
 namespace
 {
 
-/// A face's outward normal at the middle of its parameter range
+/// Whether shape is a planar face
+bool isPlanarFace(const TopoDS_Shape& shape)
+{
+    return !shape.IsNull() && shape.ShapeType() == TopAbs_FACE
+        && BRepAdaptor_Surface(TopoDS::Face(shape)).GetType() == GeomAbs_Plane;
+}
+
+/// A planar face's outward normal. Only for planes: a curved face's normal at the middle of its
+/// parameter range says nothing about how two pieces of different ranges face (ops#848 review)
 bool faceNormal(const TopoDS_Shape& shape, gp_Dir& normal)
 {
-    if (shape.IsNull() || shape.ShapeType() != TopAbs_FACE) {
+    if (!isPlanarFace(shape)) {
         return false;
     }
     const TopoDS_Face face = TopoDS::Face(shape);
@@ -192,21 +203,26 @@ bool faceNormal(const TopoDS_Shape& shape, gp_Dir& normal)
     return true;
 }
 
-/// Whether two faces lie on one plane
-bool onOnePlane(const TopoDS_Shape& a, const TopoDS_Shape& b)
+/// Whether two faces are pieces of one face: on one underlying surface (a cylinder, cone or
+/// spline a slot split keeps its surface), or on one plane
+bool oneFace(const TopoDS_Shape& a, const TopoDS_Shape& b)
 {
     if (a.IsNull() || b.IsNull() || a.ShapeType() != TopAbs_FACE || b.ShapeType() != TopAbs_FACE) {
         return false;
     }
-    const BRepAdaptor_Surface first(TopoDS::Face(a));
-    const BRepAdaptor_Surface second(TopoDS::Face(b));
-    if (first.GetType() != GeomAbs_Plane || second.GetType() != GeomAbs_Plane) {
+    TopLoc_Location la;
+    TopLoc_Location lb;
+    const Handle(Geom_Surface) sa = BRep_Tool::Surface(TopoDS::Face(a), la);
+    const Handle(Geom_Surface) sb = BRep_Tool::Surface(TopoDS::Face(b), lb);
+    if (!sa.IsNull() && sa == sb && la.IsEqual(lb)) {
+        return true;
+    }
+    if (!isPlanarFace(a) || !isPlanarFace(b)) {
         return false;
     }
-    const gp_Pln plane = first.Plane();
-    const gp_Pln other = second.Plane();
-    return plane.Axis().IsParallel(other.Axis(), Precision::Angular())
-        && plane.Distance(other.Location()) < 1e-6;
+    const gp_Pln plane = BRepAdaptor_Surface(TopoDS::Face(a)).Plane();
+    const gp_Pln other = BRepAdaptor_Surface(TopoDS::Face(b)).Plane();
+    return plane.Axis().IsParallel(other.Axis(), 1e-9) && plane.Distance(other.Location()) < 1e-6;
 }
 
 }  // namespace
@@ -253,9 +269,29 @@ Part::TopoShape studioElementAt(
             sub.c_str()
         );
     };
-    // Under the same name: the element as it is there (a Draft keeps the name of a face it tilts)
+    // Not a face a later feature made from it on its other side (a Thickness's inner face): the
+    // picked face's own normal decides, between planar faces only
+    gp_Dir pickedNormal;
+    const bool oriented = faceNormal(
+        Part::Feature::getTopoShape(
+            from,
+            Part::ShapeOption::NeedSubElement | Part::ShapeOption::ResolveLink
+                | Part::ShapeOption::Transform,
+            element.c_str()
+        ).getShape(),
+        pickedNormal
+    );
+    auto facesAway = [&](const Part::TopoShape& shape) {
+        gp_Dir normal;
+        return oriented && faceNormal(shape.getShape(), normal) && normal.Dot(pickedNormal) <= 0;
+    };
+    // Under the same name: the element as it is there (a Draft keeps the name of a face it tilts),
+    // unless it now faces the other way
     if (const Data::IndexedName same = lastShape.getIndexedName(mapped)) {
-        return read(same);
+        Part::TopoShape shape = read(same);
+        if (!facesAway(shape)) {
+            return shape;
+        }
     }
     // What became of it. A feature that changes the element renames it, and the new name's
     // history names the old one in full (un-hashed), as the old name's own history does under its
@@ -281,19 +317,8 @@ Part::TopoShape studioElementAt(
             key = second.element;
         }
     }
-    // Not a face a later feature made from it on its other side (a Thickness's inner face): the
-    // picked face's own normal decides
-    gp_Dir pickedNormal;
-    const bool oriented = faceNormal(
-        Part::Feature::getTopoShape(
-            from,
-            Part::ShapeOption::NeedSubElement | Part::ShapeOption::ResolveLink
-                | Part::ShapeOption::Transform,
-            element.c_str()
-        ).getShape(),
-        pickedNormal
-    );
     std::vector<Part::TopoShape> found;
+    unsigned away = 0;
     const char* type = picked.getType();
     const unsigned count = lastShape.countSubElements(type);
     for (unsigned i = 1; i <= count; ++i) {
@@ -320,25 +345,36 @@ Part::TopoShape studioElementAt(
         if (shape.isNull()) {
             continue;
         }
-        gp_Dir normal;
-        if (oriented && faceNormal(shape.getShape(), normal) && normal.Dot(pickedNormal) <= 0) {
+        if (facesAway(shape)) {
+            ++away;
             continue;
         }
         found.push_back(shape);
     }
     if (found.empty()) {
+        // What became of it faces the other way only: never the old face in silence
+        if (away && why) {
+            *why = "The face '" + element + "' of '" + linked->Label.getValue()
+                + "' faces the other way before this feature: select the face to go up to";
+        }
         return {};
     }
-    // Several: pieces of one plane are the face still (Onshape UT2); pieces that differ are not
-    for (std::size_t i = 1; i < found.size(); ++i) {
-        if (!onOnePlane(found.front().getShape(), found[i].getShape())) {
-            if (why) {
-                *why = "The face '" + element + "' of '" + linked->Label.getValue() + "' is "
-                    + std::to_string(found.size())
-                    + " different faces before this feature: select the one to go up to";
-            }
-            return {};
+    // Several: pieces of one face are the face still (Onshape UT2); pieces that differ are not
+    std::vector<const Part::TopoShape*> faces {&found.front()};
+    for (const auto& piece : found) {
+        if (std::none_of(faces.begin(), faces.end(), [&](const Part::TopoShape* face) {
+                return oneFace(face->getShape(), piece.getShape());
+            })) {
+            faces.push_back(&piece);
         }
+    }
+    if (faces.size() > 1) {
+        if (why) {
+            *why = "The face '" + element + "' of '" + linked->Label.getValue() + "' is "
+                + std::to_string(faces.size())
+                + " different faces before this feature: select the one to go up to";
+        }
+        return {};
     }
     return found.front();
 }
