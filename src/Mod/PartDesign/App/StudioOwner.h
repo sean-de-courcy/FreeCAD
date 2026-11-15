@@ -53,11 +53,14 @@ PartDesignExport Part::TopoShape studioPartShapeAt(
 /// owner's place (FreeCAD-CH ops#848, Onshape UT5: an up-to face is read as it is at the feature,
 /// so a face a later-inserted Draft tilts is followed): the element as the part's last solid
 /// before owner has it, traced by name from linked. Null when owner is no studio owner, linked is
-/// that last solid or no solid of a studio part, or the element can't be traced there: the caller then reads linked itself, as before
+/// that last solid or no solid of a studio part, or the element can't be traced there: the
+/// caller then reads linked itself, as before. A face that became several faces there on
+/// different surfaces (one piece of a split tilted) is null with why: no piece is the face
 PartDesignExport Part::TopoShape studioElementAt(
     const App::DocumentObject* owner,
     const App::DocumentObject* linked,
-    const std::string& element
+    const std::string& element,
+    std::string* why = nullptr
 );
 
 /// Whether prop is an up-to link (UpToFace/2, UpToShape/2) that names parts of a studio whole: every

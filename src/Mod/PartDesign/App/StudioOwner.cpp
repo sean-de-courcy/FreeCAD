@@ -11,9 +11,16 @@
 #include <string>
 #include <vector>
 
+#include <BRepAdaptor_Surface.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
+#include <BRepLProp_SLProps.hxx>
+#include <GeomAbs_SurfaceType.hxx>
 #include <Precision.hxx>
 #include <TopAbs_ShapeEnum.hxx>
+#include <TopoDS.hxx>
+#include <TopoDS_Face.hxx>
+#include <gp_Dir.hxx>
+#include <gp_Pln.hxx>
 
 #include <App/Document.h>
 #include <App/PropertyLinks.h>
@@ -161,10 +168,54 @@ Part::TopoShape studioPartShapeAt(
     return shape;
 }
 
+namespace
+{
+
+/// A face's outward normal at the middle of its parameter range
+bool faceNormal(const TopoDS_Shape& shape, gp_Dir& normal)
+{
+    if (shape.IsNull() || shape.ShapeType() != TopAbs_FACE) {
+        return false;
+    }
+    const TopoDS_Face face = TopoDS::Face(shape);
+    const BRepAdaptor_Surface surface(face);
+    const double u = (surface.FirstUParameter() + surface.LastUParameter()) / 2;
+    const double v = (surface.FirstVParameter() + surface.LastVParameter()) / 2;
+    BRepLProp_SLProps props(surface, u, v, 1, Precision::Confusion());
+    if (!props.IsNormalDefined()) {
+        return false;
+    }
+    normal = props.Normal();
+    if (face.Orientation() == TopAbs_REVERSED) {
+        normal.Reverse();
+    }
+    return true;
+}
+
+/// Whether two faces lie on one plane
+bool onOnePlane(const TopoDS_Shape& a, const TopoDS_Shape& b)
+{
+    if (a.IsNull() || b.IsNull() || a.ShapeType() != TopAbs_FACE || b.ShapeType() != TopAbs_FACE) {
+        return false;
+    }
+    const BRepAdaptor_Surface first(TopoDS::Face(a));
+    const BRepAdaptor_Surface second(TopoDS::Face(b));
+    if (first.GetType() != GeomAbs_Plane || second.GetType() != GeomAbs_Plane) {
+        return false;
+    }
+    const gp_Pln plane = first.Plane();
+    const gp_Pln other = second.Plane();
+    return plane.Axis().IsParallel(other.Axis(), Precision::Angular())
+        && plane.Distance(other.Location()) < 1e-6;
+}
+
+}  // namespace
+
 Part::TopoShape studioElementAt(
     const App::DocumentObject* owner,
     const App::DocumentObject* linked,
-    const std::string& element
+    const std::string& element,
+    std::string* why
 )
 {
     const StudioList* list = linked && !element.empty() ? StudioList::holding(owner) : nullptr;
@@ -230,6 +281,19 @@ Part::TopoShape studioElementAt(
             key = second.element;
         }
     }
+    // Not a face a later feature made from it on its other side (a Thickness's inner face): the
+    // picked face's own normal decides
+    gp_Dir pickedNormal;
+    const bool oriented = faceNormal(
+        Part::Feature::getTopoShape(
+            from,
+            Part::ShapeOption::NeedSubElement | Part::ShapeOption::ResolveLink
+                | Part::ShapeOption::Transform,
+            element.c_str()
+        ).getShape(),
+        pickedNormal
+    );
+    std::vector<Part::TopoShape> found;
     const char* type = picked.getType();
     const unsigned count = lastShape.countSubElements(type);
     for (unsigned i = 1; i <= count; ++i) {
@@ -253,11 +317,30 @@ Part::TopoShape studioElementAt(
             continue;
         }
         Part::TopoShape shape = read(index);
-        if (!shape.isNull()) {
-            return shape;
+        if (shape.isNull()) {
+            continue;
+        }
+        gp_Dir normal;
+        if (oriented && faceNormal(shape.getShape(), normal) && normal.Dot(pickedNormal) <= 0) {
+            continue;
+        }
+        found.push_back(shape);
+    }
+    if (found.empty()) {
+        return {};
+    }
+    // Several: pieces of one plane are the face still (Onshape UT2); pieces that differ are not
+    for (std::size_t i = 1; i < found.size(); ++i) {
+        if (!onOnePlane(found.front().getShape(), found[i].getShape())) {
+            if (why) {
+                *why = "The face '" + element + "' of '" + linked->Label.getValue() + "' is "
+                    + std::to_string(found.size())
+                    + " different faces before this feature: select the one to go up to";
+            }
+            return {};
         }
     }
-    return {};
+    return found.front();
 }
 
 bool studioWholePartLink(const App::Property* prop)

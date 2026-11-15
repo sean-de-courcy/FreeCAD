@@ -1276,9 +1276,14 @@ void ProfileBased::getUpToFaceFromLinkSub(TopoShape& upToFace, const App::Proper
     // A studio owner's face: as the part has it just before the owner (ops#848, Onshape UT5)
     if (subs.size() == 1) {
         auto owner = freecad_cast<App::DocumentObject*>(refFace.getContainer());
-        if (TopoShape at = studioElementAt(owner, ref, subs[0]); at.hasSubShape(TopAbs_FACE)) {
+        std::string why;
+        if (TopoShape at = studioElementAt(owner, ref, subs[0], &why);
+            at.hasSubShape(TopAbs_FACE)) {
             upToFace = at;
             return;
+        }
+        if (!why.empty()) {
+            throw Base::ValueError(why);
         }
     }
     upToFace = Part::Feature::getTopoShape(
