@@ -2288,6 +2288,44 @@ class FailurePassThroughBase:
         )
         self.assertFalse(late.isValid(), "the Plate's corner is gone with the Pipe back")
 
+    def testAnEditAfterASuppressionMovesAReferenceAboveIt(self):
+        """ops#833: a chamfer on the block's top edge, taken on a boss after the hole, follows
+        the block's thickness after the hole is suppressed, as a model built with the hole
+        suppressed does. The suppression's recompute judged the reference (kept where it was)
+        while the boss was still to be recomputed: its record takes that world then, so the
+        edit after it is no switch to veto."""
+        if not self.solver:
+            self.skipTest("rule PS is the reference solver's")
+        block = self.block()
+        hole = self.hole()
+        boss = self.boss(hole)
+        self.recompute()
+        top = elementWhere(
+            boss.Shape,
+            "Edge",
+            lambda e: isinstance(e.Curve, Part.Line)
+            and all(abs(v.Point.y) < TOL and abs(v.Point.z - 10) < TOL for v in e.Vertexes),
+        )
+        chamfer = self.body.newObject("PartDesign::Chamfer", "TopChamfer")
+        chamfer.Base = (boss, [top])
+        chamfer.Size = 1
+        self.recompute()
+        self.assertValid(chamfer)
+        edgeChamfer = 0.5 * 1**2 * 20
+        self.assertVolume(chamfer, BLOCK - HOLE + BOSS - edgeChamfer)
+
+        hole.Suppressed = True
+        self.recompute()
+        self.assertValid(chamfer)
+        self.assertVolume(chamfer, BLOCK + BOSS - edgeChamfer)
+
+        block.Length = 12
+        self.recompute()
+        self.assertValid(chamfer)
+        self.assertVolume(chamfer, BLOCK * 1.2 + BOSS - edgeChamfer)
+        edge = chamfer.Base[0].Shape.getElement(chamfer.Base[1][0])
+        self.assertTrue(all(abs(v.Point.z - 12) < TOL for v in edge.Vertexes), chamfer.Base[1])
+
     def testReopenedWhileSuppressed(self):
         """Saved and reopened with the hole suppressed, a sketch on the top still follows the
         block: the record keeps the world it was taken in (ops#549 PS)."""
