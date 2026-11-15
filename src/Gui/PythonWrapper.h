@@ -79,6 +79,11 @@ public:
     Py::Object fromQDir(const QDir&);
     QDir* toQDir(PyObject* pyobj);
     static void createChildrenNameAttributes(PyObject* root, QObject* object);
+    /*!
+      FreeCAD-CH (ops#790): drops from shiboken's map a wrapper left at the address of a widget
+      that was just created. Only call it for an object made since the last Python call.
+     */
+    static void dropStaleWrapper(QObject* object);
     static void setParent(PyObject* pyWdg, QObject* parent);
 
 private:
