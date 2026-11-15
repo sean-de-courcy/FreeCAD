@@ -317,5 +317,102 @@ class TestMateFaceGone(MateEditsBase):
         self.assertTrue(self.b.Placement.isSame(placed, 1e-9), "B moved on a split face")
 
 
+class TestMateOffsetPickOrder(MateEditsBase):
+    """ops#826 (oracle 26, MO1): a Fastened mate's offset runs from the second pick to the first,
+    Onshape's "first connector = second connector x offset", whatever part is grounded and whether
+    it was grounded before the picks (which stores the references grounded-first). A (40 x 20 x 10)
+    and B (20 x 10 x 5), top-face centres fastened unflipped, offset Z +3: B first -> B's top 3 above
+    A's (z 13); A first -> A's top 3 above B's, so B's top at z 7."""
+
+    def build(self, bFirst, groundFirst):
+        self.bodyA, _ = self.studio("PartA", 40, 20, 10)
+        self.bodyB, _ = self.studio("PartB", 20, 10, 5)
+        self.asm = self.assembly()
+        self.a = self.instance(self.asm, "A", self.bodyA)
+        self.b = self.instance(self.asm, "B", self.bodyB, V(60, 0, 0))
+        self.doc.recompute()
+        if groundFirst:
+            self.ground(self.a)
+        topA = self.topFace(self.bodyA.Shape, 10)
+        topB = self.topFace(self.bodyB.Shape, 5)
+        if bFirst:
+            joint = self.fastened(self.b, (topB, topB), self.a, (topA, topA))
+        else:
+            joint = self.fastened(self.a, (topA, topA), self.b, (topB, topB))
+        if not groundFirst:
+            self.ground(self.a)
+        joint.Offset2 = App.Placement(V(0, 0, 3), App.Rotation())
+        self.doc.recompute()
+        self.asm.solve()
+        self.doc.recompute()
+        return joint
+
+    def testOffsetFollowsThePickOrderNotTheGrounding(self):
+        for bFirst, expected in ((True, 13), (False, 7)):
+            for groundFirst in (True, False):
+                with self.subTest(bFirst=bFirst, groundFirst=groundFirst):
+                    joint = self.build(bFirst, groundFirst)
+                    self.assertTrue(joint.isValid(), joint.getStatusString())
+                    # A moves when it is picked first with nothing grounded yet: compare B's top
+                    # centre with A's
+                    aTop = self.a.Placement.multVec(V(20, 10, 10))
+                    self.assertNear(self.b.Placement.multVec(V(10, 5, 5)) - aTop, V(0, 0, expected - 10), "B's top above A's")
+                    self.assertNear(self.b.Placement.Rotation.multVec(V(0, 0, 1)), V(0, 0, 1), "B's top normal")
+                    App.closeDocument(self.doc.Name)
+                    self.doc = App.newDocument(self.__class__.__name__)
+
+    def testOffsetSurvivesSaveAndReopen(self):
+        """The pick order is saved with the mate: B picked first on an A grounded before (the stored
+        references swapped) reopens at z 13, and an offset edit after the reopen still runs from A's
+        pick to B's."""
+        self.build(True, True)
+        self.saveAndReopen()
+        self.a, self.b = self.doc.getObject("A"), self.doc.getObject("B")
+        joint = self.doc.getObject("Fastened")
+        self.doc.recompute()
+        self.doc.getObject("Assembly").solve()
+        self.assertNear(self.b.Placement.multVec(V(10, 5, 5)), V(20, 10, 13), "after the reopen")
+        joint.Offset2 = App.Placement(V(0, 0, 5), App.Rotation())
+        self.doc.recompute()
+        self.doc.getObject("Assembly").solve()
+        self.assertNear(self.b.Placement.multVec(V(10, 5, 5)), V(20, 10, 15), "offset 5 after the reopen")
+
+
+class TestRedMateOffset(MateEditsBase):
+    """ops#827 (Onshape B3): a mate whose pick is gone is in error and drives nothing; editing its
+    offset (as one does while repairing it) moves no part. Before, each edit moved the part on from
+    the missing pick's fallback placement: (10, 10, -10) -> (20, 20, -3) -> (30, 30, 7)."""
+
+    def testOffsetEditOfARedMateMovesNothing(self):
+        self.bodyA, _ = self.studio("PartA", 20, 20, 10)
+        self.bodyB = self.doc.addObject("PartDesign::Body", "PartB")
+        cyl = self.bodyB.newObject("PartDesign::AdditiveCylinder", "Cyl")
+        cyl.Radius, cyl.Height = 5, 20
+        self.asm = self.assembly()
+        self.a = self.instance(self.asm, "A", self.bodyA)
+        self.b = self.instance(self.asm, "B", self.bodyB, V(60, 0, 0))
+        self.doc.recompute()
+        self.ground(self.a)
+        topA = self.topFace(self.bodyA.Shape, 10)
+        topB = self.topFace(self.bodyB.Shape, 20)
+        joint = self.fastened(self.b, (topB, topB), self.a, (topA, topA))
+        self.doc.recompute()
+        self.assertNear(self.b.Placement.Base, V(10, 10, -10), "B on A's top")
+        # B's cylinder replaced by a hexagonal prism: the picked face is gone
+        self.bodyB.removeObject(cyl)
+        self.doc.removeObject(cyl.Name)
+        hexagon = self.bodyB.newObject("PartDesign::AdditivePrism", "Hex")
+        hexagon.Polygon, hexagon.Circumradius, hexagon.Height = 6, 5, 20
+        self.doc.recompute()
+        self.asm.solve()
+        self.assertFalse(joint.isValid(), "the mate is not in error with its face gone")
+        placed = App.Placement(self.b.Placement)
+        for z in (3, 0, -2):
+            joint.Offset2 = App.Placement(V(0, 0, z), App.Rotation())
+            self.doc.recompute()
+            self.asm.solve()
+            self.assertTrue(self.b.Placement.isSame(placed, 1e-9), f"offset {z}: B moved to {self.b.Placement.Base}")
+
+
 if __name__ == "__main__":
     unittest.main()
