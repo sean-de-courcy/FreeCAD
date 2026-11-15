@@ -853,6 +853,89 @@ class TestDxfReviewCases(unittest.TestCase):
         self.assertGreater(rep.open_ends, 0)
 
 
+def _lwrect(x0, y0, x1, y1):
+    """A closed LWPOLYLINE rectangle"""
+    pts = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+    return "0\nLWPOLYLINE\n8\n0\n90\n4\n70\n1\n" + "".join(f"10\n{x!r}\n20\n{y!r}\n" for x, y in pts)
+
+
+class TestDxfOnshapeInsert(unittest.TestCase):
+    """Onshape's Insert DXF (onshape-facts DX2-DX4, gaps3 row 5): the extents' centre on the
+    sketch origin unless the file's origin is asked for; the Units field wins over the file's;
+    no constraints on a polyline"""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="dxf_")
+        self.doc = FreeCAD.newDocument("DxfOnshape")
+
+    def tearDown(self):
+        FreeCAD.closeDocument(self.doc.Name)
+
+    def insert(self, text, name, **kw):
+        sk = new_sketch(self.doc, "S" + str(len(self.doc.Objects)))
+        rep = SketcherDxf.insert(sk, write(self.dir, name, text), **kw)
+        self.doc.recompute()
+        return sk, rep
+
+    def test_extents_centre_goes_on_the_origin(self):
+        # a rectangle x 10..50, y 20..40 and a circle (60, 30) r 5: extents x 10..65, y 20..40,
+        # centre (37.5, 30)
+        ents = _lwrect(10.0, 20.0, 50.0, 40.0) + "0\nCIRCLE\n8\n0\n10\n60.0\n20\n30.0\n30\n0.0\n40\n5.0\n"
+        text = dxf_text(ents)
+        sk, rep = self.insert(text, "c.dxf", origin="centre", hold="free")
+        bb = sk.Shape.BoundBox
+        for got, want in ((bb.XMin, -27.5), (bb.XMax, 27.5), (bb.YMin, -10.0), (bb.YMax, 10.0)):
+            self.assertAlmostEqual(got, want, 7)
+        circles = [g for g in sk.Geometry if g.TypeId == "Part::GeomCircle"]
+        self.assertEqual(len(circles), 1)
+        self.assertAlmostEqual((circles[0].Center - V(22.5, 0, 0)).Length, 0.0, 9)
+        self.assertEqual(rep.origin, "centre")
+        self.assertAlmostEqual(rep.shift[0], -37.5, 9)
+        self.assertAlmostEqual(rep.shift[1], -30.0, 9)
+        self.assertTrue(any("centre of its extents" in ln for ln in rep.lines()))
+        # "Use file origin position": the file's (0, 0) on the sketch origin
+        sk2, rep2 = self.insert(text, "f.dxf", origin="file", hold="free")
+        c2 = [g for g in sk2.Geometry if g.TypeId == "Part::GeomCircle"][0]
+        self.assertAlmostEqual((c2.Center - V(60, 30, 0)).Length, 0.0, 9)
+        self.assertEqual(rep2.shift, (0.0, 0.0))
+        with self.assertRaises(ValueError):
+            self.insert(text, "x.dxf", origin="middle")
+
+    def test_an_arc_counts_only_its_own_extent(self):
+        # a quarter arc of radius 10 about (100, 100), 0 to 90 degrees: extents x 100..110,
+        # y 100..110, so the arc's centre lands at (-5, -5), not on the origin
+        ents = "0\nARC\n8\n0\n10\n100.0\n20\n100.0\n30\n0.0\n40\n10.0\n50\n0.0\n51\n90.0\n"
+        sk, rep = self.insert(dxf_text(ents), "a.dxf", origin="centre", hold="free")
+        arc = sk.Geometry[0]
+        self.assertAlmostEqual((arc.Center - V(-5, -5, 0)).Length, 0.0, 7)
+        self.assertAlmostEqual((arc.StartPoint - V(5, -5, 0)).Length, 0.0, 7)
+        self.assertAlmostEqual((arc.EndPoint - V(-5, 5, 0)).Length, 0.0, 7)
+
+    def test_units_field_wins_over_the_file(self):
+        # the file states millimetres ($INSUNITS 4); the field says inch: 10 -> 254 mm (DX2)
+        ents = "0\nLINE\n8\n0\n10\n0.0\n20\n0.0\n30\n0.0\n11\n10.0\n21\n0.0\n31\n0.0\n"
+        sk, rep = self.insert(dxf_text(ents, insunits=4), "u.dxf", units="in", hold="free")
+        self.assertAlmostEqual(sk.Geometry[0].length(), 254.0, 9)
+        self.assertEqual(rep.units, "in")
+        self.assertFalse(rep.units_from_file)
+        # and the other way: a file in inches ($INSUNITS 1) read as millimetres
+        sk, rep = self.insert(dxf_text(ents, insunits=1), "u2.dxf", units="mm", hold="free")
+        self.assertAlmostEqual(sk.Geometry[0].length(), 10.0, 9)
+
+    def test_polyline_comes_in_free(self):
+        # a 40 x 20 closed polyline in a millimetre file, read in inches and centred: corners at
+        # (+-20, +-10) in = (+-508, +-254) mm, four free lines and no constraints (DX4, DX5)
+        sk, rep = self.insert(
+            dxf_text(_lwrect(10.0, 20.0, 50.0, 40.0), insunits=4), "p.dxf", units="in", hold="free", origin="centre"
+        )
+        self.assertEqual(sorted(g.TypeId for g in sk.Geometry), ["Part::GeomLineSegment"] * 4)
+        self.assertEqual(sk.ConstraintCount, 0)
+        corners = sorted((round(v.X, 6), round(v.Y, 6)) for v in sk.Shape.Vertexes)
+        self.assertEqual(corners, [(-508.0, -254.0), (-508.0, 254.0), (508.0, -254.0), (508.0, 254.0)])
+        self.assertTrue(sk.Shape.Wires[0].isClosed())
+        self.assertAlmostEqual(Part.Face(sk.Shape.Wires[0]).Area, 1016.0 * 508.0, 6)
+
+
 def _read_curves(path):
     """The curves of a DXF as Part geometry, without fitting (for comparisons)"""
     from SketcherDxf import importer

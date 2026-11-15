@@ -54,6 +54,7 @@ from SketcherTests.TestSketchTrimSplit import TestSketchTrimSplit  # FreeCAD-CH,
 from SketcherTests.TestSketchTrimSplitAttacks import TestSketchTrimSplitAttacks  # FreeCAD-CH, ops#656
 from SketcherTests.TestSketchDxf import TestDxfReader, TestDxfFitting, TestDxfExport  # FreeCAD-CH, DXF lane
 from SketcherTests.TestSketchDxf import TestDxfSkepticCases, TestDxfReviewCases  # FreeCAD-CH, DXF lane
+from SketcherTests.TestSketchDxf import TestDxfOnshapeInsert  # FreeCAD-CH, Onshape's Insert DXF
 from SketcherTests.TestSketchTrimSplit import TestSketchRepeatedConstraints  # FreeCAD-CH, ops#656
 from SketcherTests.TestSketchTrimSplit import TestSketchArcMidpoint  # FreeCAD-CH, ops#656
 from SketcherTests.TestSketchPierce import TestSketchPierce  # FreeCAD-CH, Onshape's Pierce
