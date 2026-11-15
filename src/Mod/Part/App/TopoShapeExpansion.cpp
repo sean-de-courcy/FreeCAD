@@ -122,6 +122,7 @@
 #include <Geom2d_Curve.hxx>
 #include <Geom2dAdaptor_Curve.hxx>
 #include <BndLib_Add2dCurve.hxx>
+#include <BRepAlgoAPI_Common.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <Bnd_Box.hxx>
@@ -6624,8 +6625,9 @@ TopoShape makeThickSolidByGroups(
 // that distance is no measure: beside a step the cavity runs under the wall within the
 // thickness of its foot, in Onshape's shell too, and under a step exactly as high as the
 // thickness it passes the wall's foot altogether. So a face touching a removed face is held
-// only where it lies farther from that face's box than the thickness. Anything else returns a
-// null shape.
+// only where it lies farther than the thickness from that face's edges. And the cavity must
+// open through each removed face (OCCT's offset can come back as a fragment of it). Anything
+// else returns a null shape.
 
 // BRepOffsetAPI_MakeOffsetShape's join algorithm with an offset of their own for some faces
 class OffsetShapeWithFaceOffsets: public BRepOffsetAPI_MakeOffsetShape
@@ -6739,17 +6741,68 @@ TopoShape makeThickSolidByFaceOffsets(
                 return {};  // the face's image is gone: the cavity would not open there
             }
         }
-        // Every kept face keeps its wall. A face touching a removed face is held only where it
-        // is farther from that face's box than the thickness.
-        TopTools_ListOfShape aroundOpenings;
+        // The cavity opens through every removed face: OCCT's offset can come back as a
+        // fragment, a closed pocket somewhere under the removed face's plane.
         for (TopTools_ListIteratorOfListOfShape it(remFace); it.More(); it.Next()) {
-            Bnd_Box box;
-            BRepBndLib::AddOptimal(it.Value(), box, Standard_False, Standard_False);
-            if (box.IsVoid()) {
+            BRepAlgoAPI_Common opening(it.Value(), cavity.getShape());
+            if (!opening.IsDone() || opening.HasErrors()) {
                 return {};
             }
-            box.Enlarge(thickness);
-            aroundOpenings.Append(BRepPrimAPI_MakeBox(box.CornerMin(), box.CornerMax()).Shape());
+            GProp_GProps whole;
+            GProp_GProps open;
+            BRepGProp::SurfaceProperties(it.Value(), whole);
+            BRepGProp::SurfaceProperties(opening.Shape(), open);
+            if (!TopExp_Explorer(opening.Shape(), TopAbs_FACE).More()
+                || open.Mass() <= 1e-9 * whole.Mass()) {
+                return {};
+            }
+        }
+        // Every kept face keeps its wall. A face touching a removed face is held only where it
+        // is farther than the thickness from that face's edges: outside a box along each
+        // straight edge, and the box of any other edge, grown by the thickness.
+        struct Around
+        {
+            TopoDS_Shape solid;
+            Bnd_Box box;
+        };
+        std::vector<Around> aroundOpenings;
+        TopTools_MapOfShape openingEdges;
+        for (TopTools_ListIteratorOfListOfShape it(remFace); it.More(); it.Next()) {
+            for (TopExp_Explorer xp(it.Value(), TopAbs_EDGE); xp.More(); xp.Next()) {
+                const TopoDS_Edge edge = TopoDS::Edge(xp.Current());
+                if (BRep_Tool::Degenerated(edge) || !openingEdges.Add(edge)) {
+                    continue;
+                }
+                Around around;
+                const BRepAdaptor_Curve curve(edge);
+                const gp_Pnt from = curve.Value(curve.FirstParameter());
+                const gp_Pnt to = curve.Value(curve.LastParameter());
+                if (curve.GetType() == GeomAbs_Line && from.Distance(to) > Precision::Confusion()) {
+                    const gp_Ax2 along(from, gp_Dir(gp_Vec(from, to)));
+                    const gp_Pnt corner = from.Translated(
+                        -thickness
+                        * (gp_Vec(along.Direction()) + gp_Vec(along.XDirection())
+                           + gp_Vec(along.YDirection()))
+                    );
+                    around.solid = BRepPrimAPI_MakeBox(
+                                       gp_Ax2(corner, along.Direction(), along.XDirection()),
+                                       2 * thickness,
+                                       2 * thickness,
+                                       from.Distance(to) + 2 * thickness
+                    ).Shape();
+                }
+                else {
+                    Bnd_Box box;
+                    BRepBndLib::AddOptimal(edge, box, Standard_False, Standard_False);
+                    if (box.IsVoid()) {
+                        return {};
+                    }
+                    box.Enlarge(thickness);
+                    around.solid = BRepPrimAPI_MakeBox(box.CornerMin(), box.CornerMax()).Shape();
+                }
+                BRepBndLib::Add(around.solid, around.box, Standard_False);
+                aroundOpenings.push_back(around);
+            }
         }
         struct CavityFace
         {
@@ -6769,11 +6822,22 @@ TopoShape makeThickSolidByFaceOffsets(
             }
             TopoDS_Shape held = xp.Current();
             if (besideRemoved.Contains(held)) {
+                Bnd_Box own;
+                BRepBndLib::Add(held, own, Standard_False);
+                TopTools_ListOfShape tools;
+                for (const auto& around : aroundOpenings) {
+                    if (!own.IsOut(around.box)) {
+                        tools.Append(around.solid);
+                    }
+                }
+                if (tools.IsEmpty()) {
+                    return {};
+                }
                 TopTools_ListOfShape faces;
                 faces.Append(held);
                 BRepAlgoAPI_Cut away;
                 away.SetArguments(faces);
-                away.SetTools(aroundOpenings);
+                away.SetTools(tools);
                 away.Build();
                 if (!away.IsDone() || away.HasErrors()) {
                     return {};
