@@ -173,9 +173,12 @@ if Gui is not None and App.GuiUp:
         def assertPanelOnPicks(self, pattern, seed, picks):
             """The face pattern panel is the open one, on the feature, its faces field listing
             the picks."""
-            panel = Gui.getMainWindow().findChild(
-                QtWidgets.QWidget, "PartDesignGui::TaskFacePatternParameters"
-            )
+            # uic names the .ui's top widget PartDesignGui__TaskFacePatternParameters in Qt 6.11
+            # (it replaces the "::"), PartDesignGui::TaskFacePatternParameters before (ops#812)
+            mainWindow = Gui.getMainWindow()
+            panel = mainWindow.findChild(
+                QtWidgets.QWidget, "PartDesignGui__TaskFacePatternParameters"
+            ) or mainWindow.findChild(QtWidgets.QWidget, "PartDesignGui::TaskFacePatternParameters")
             self.assertIsNotNone(panel, "the face pattern panel is not open")
             self.assertTrue(panel.isVisible())
             obj, subs = pattern.Base
