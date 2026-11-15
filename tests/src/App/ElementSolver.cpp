@@ -368,6 +368,87 @@ TEST(NameAncestry, piecesAreTheOldNameWithModSections)
     EXPECT_FALSE(NameAncestry::isPieceOf(generated({once}, 11, "FLT", 'E'), x));
 }
 
+
+// ops#808: a boss's junction edge with a plate's top, before and after a wall inserted before
+// the boss has cut the top in two
+TEST(NameAncestry, madeFromPiecesOfTheSameSources)
+{
+    const auto top = generated({lowFace({sketchEdge(1), sketchEdge(2)})}, 6, "XTR", 'F');
+    const auto side = generated({sketchEdge(1)}, 6, "XTR", 'F', 1);
+    const auto cylinder = generated({sketchEdge(1, 7)}, 8, "XTR", 'F');
+    const auto junction = generated({top, cylinder}, 8, "FUS", 'E');
+    const auto left = piece(top, 12, "FUS", 0, 'F', {sketchEdge(2, 11)});
+    const auto right = piece(top, 12, "FUS", 0, 'F', {sketchEdge(4, 11)});
+
+    const auto onLeft = generated({left, cylinder}, 8, "FUS", 'E');
+    EXPECT_TRUE(NameAncestry::isMadeFromPiecesOf(onLeft, junction));
+    EXPECT_TRUE(NameAncestry::isMadeFromPiecesOf(generated({right, cylinder}, 8, "FUS", 'E'), junction));
+    //   the linked names are a set; a piece of a piece; both sources cut
+    EXPECT_TRUE(NameAncestry::isMadeFromPiecesOf(generated({cylinder, left}, 8, "FUS", 'E'), junction));
+    const auto leftAgain = piece(left, 13, "CUT", 0, 'F');
+    EXPECT_TRUE(
+        NameAncestry::isMadeFromPiecesOf(generated({leftAgain, cylinder}, 8, "FUS", 'E'), junction)
+    );
+    const auto cylinderPiece = piece(cylinder, 12, "FUS", 0, 'F');
+    EXPECT_TRUE(
+        NameAncestry::isMadeFromPiecesOf(generated({left, cylinderPiece}, 8, "FUS", 'E'), junction)
+    );
+    //   a split of the edge made from the pieces, and an element made from that edge
+    EXPECT_TRUE(NameAncestry::isMadeFromPiecesOf(piece(onLeft, 14, "CUT", 0, 'E'), junction));
+    EXPECT_TRUE(
+        NameAncestry::isMadeFromPiecesOf(
+            generated({onLeft}, 15, "FIL", 'F'),
+            generated({junction}, 15, "FIL", 'F')
+        )
+    );
+    //   later sections are kept as they are
+    EXPECT_TRUE(
+        NameAncestry::isMadeFromPiecesOf(
+            piece(onLeft, 14, "CUT", 0, 'E'),
+            piece(junction, 14, "CUT", 0, 'E')
+        )
+    );
+    EXPECT_FALSE(
+        NameAncestry::isMadeFromPiecesOf(
+            piece(onLeft, 14, "CUT", 1, 'E'),
+            piece(junction, 14, "CUT", 0, 'E')
+        )
+    );
+
+    //   not itself, not a plain piece, not the whole made from a piece's name
+    EXPECT_FALSE(NameAncestry::isMadeFromPiecesOf(junction, junction));
+    EXPECT_FALSE(NameAncestry::isMadeFromPiecesOf(piece(junction, 14, "CUT", 0, 'E'), junction));
+    EXPECT_FALSE(NameAncestry::isMadeFromPiecesOf(junction, onLeft));
+    EXPECT_FALSE(NameAncestry::isMadeFromPiecesOf(left, top));
+    //   another feature, op, index, type or source; a source more or less
+    EXPECT_FALSE(NameAncestry::isMadeFromPiecesOf(generated({left, cylinder}, 9, "FUS", 'E'), junction));
+    EXPECT_FALSE(NameAncestry::isMadeFromPiecesOf(generated({left, cylinder}, 8, "CUT", 'E'), junction));
+    EXPECT_FALSE(
+        NameAncestry::isMadeFromPiecesOf(generated({left, cylinder}, 8, "FUS", 'E', 1), junction)
+    );
+    EXPECT_FALSE(NameAncestry::isMadeFromPiecesOf(generated({left, cylinder}, 8, "FUS", 'V'), junction));
+    EXPECT_FALSE(
+        NameAncestry::isMadeFromPiecesOf(
+            generated({piece(side, 12, "FUS", 0, 'F'), cylinder}, 8, "FUS", 'E'),
+            junction
+        )
+    );
+    EXPECT_FALSE(NameAncestry::isMadeFromPiecesOf(generated({left}, 8, "FUS", 'E'), junction));
+    EXPECT_FALSE(
+        NameAncestry::isMadeFromPiecesOf(generated({left, right, cylinder}, 8, "FUS", 'E'), junction)
+    );
+    //   two pieces of one source can't stand for two sources
+    EXPECT_FALSE(
+        NameAncestry::isMadeFromPiecesOf(
+            generated({left, right}, 8, "FUS", 'E'),
+            generated({top, cylinder}, 8, "FUS", 'E')
+        )
+    );
+    //   a source generated from the old one is no piece of it
+    const auto after = top + "|" + section({}, {}, 12, "FUS", 0, 'F', {"GEN"});
+    EXPECT_FALSE(NameAncestry::isMadeFromPiecesOf(generated({after, cylinder}, 8, "FUS", 'E'), junction));
+}
+
 TEST(NameAncestry, cornerEdgeAfterTheNotchIsNotAPiece)
 {
     // ops#76: the vertical edge at the sketch corner (20, 0) comes from the vertex `g1v2,g2v1`.
