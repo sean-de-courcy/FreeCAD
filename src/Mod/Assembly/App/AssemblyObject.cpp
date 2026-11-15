@@ -1613,7 +1613,8 @@ std::unordered_set<App::DocumentObject*> AssemblyObject::getGroundedParts()
     // placement too (an undone delete brings it back unlocked)
     for (auto joint : getGroundedJoints()) {
         auto propObj = dynamic_cast<App::PropertyLink*>(joint->getPropertyByName("ObjectToGround"));
-        if (propObj && propObj->getValue()) {
+        if (propObj && propObj->getValue()
+            && std::ranges::find(allParts, propObj->getValue()) != allParts.end()) {
             groundedSet.insert(propObj->getValue());
         }
     }
@@ -3045,6 +3046,9 @@ void AssemblyObject::syncGroundedJoints()
         // here ("lock lifted"); unfixing is deleting the joint (the Unground command)
         else if (!isReadOnly && hasJoint) {
             propPlc->setStatus(App::Property::ReadOnly, true);
+            if (auto linkPlc = part->getPropertyByName("LinkPlacement")) {
+                linkPlc->setStatus(App::Property::ReadOnly, true);  // as GroundedJoint locks it
+            }
         }
     }
 }
