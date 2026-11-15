@@ -1165,6 +1165,55 @@ class TestThickness(unittest.TestCase):
         self.assertNotIn("Intersection join", status)
         self.assertFalse(all(isinstance(f.Surface, Part.Plane) for f in thickness.Shape.Faces))
 
+    def testShellBesideAStepOverABlindHoleOrANotchFromBelow(self):
+        """The L-block with a blind hole from its bottom under the open face (r 1 at (30, 10),
+        up to z 7) or a 2 x 2 notch up its far corner (x 38..40, y 18..20, up to z 7), shelled
+        2 inward from the step's low top with the Intersection join. The cavity is the L's
+        (testShellOfAnLBlockFromItsStep) less what lies within 2 of the hole or the notch: a
+        column r 3 to z 9 over the hole's cap, a box 2 x 2 to z 9 at the notch. The composed
+        shell left a column standing to the open face, 1 too high (5548.204 for 5519.929;
+        5348 for 5344), because a prism from the face's image can't tell the hole's cap from
+        a hole through the face (ops#839)."""
+        cavityL = Part.makeBox(36, 16, 8, FreeCAD.Vector(2, 2, 2)).fuse(
+            Part.makeBox(16, 16, 8, FreeCAD.Vector(2, 2, 10))
+        )
+        for cut, kept, removedVolume, keptVolume in (
+            (
+                Part.makeCylinder(1, 7, FreeCAD.Vector(30, 10, 0)),
+                Part.makeCylinder(3, 7, FreeCAD.Vector(30, 10, 2)),
+                7 * math.pi,
+                63 * math.pi,
+            ),
+            (
+                Part.makeBox(2, 2, 7, FreeCAD.Vector(38, 18, 0)),
+                Part.makeBox(2, 2, 7, FreeCAD.Vector(36, 16, 2)),
+                28,
+                28,
+            ),
+        ):
+            with self.subTest(cut=cut.Volume):
+                solid, faceAt = self._lBlock()
+                solid = solid.cut(cut)
+                self.assertAlmostEqual(solid.Volume, 12000 - removedVolume, places=6)
+                top = faceAt(solid, 30, 5, 10)
+                expected = solid.cut(cavityL.cut(kept))
+                self.assertAlmostEqual(
+                    expected.Volume, 12000 - removedVolume - (6656 - keptVolume), places=6
+                )
+                shell = solid.makeThickness([top], -2, 1e-7, False, False, 0, 2)
+                self.assertTrue(shell.isValid())
+                self.assertLess(abs(shell.Volume - expected.Volume), 1e-6 * expected.Volume)
+                self.assertLess(shell.cut(expected).Volume + expected.cut(shell).Volume, 1e-4)
+                # every face is the solid's own or named through the thickness, none by the
+                # index of an intermediate shape (the review's find: FaceN;_;1;MKR)
+                names = shell.ElementReverseMap
+                for i in range(1, len(shell.Faces) + 1):
+                    name = names.get("Face" + str(i))
+                    self.assertTrue(name, i)
+                    name = name if isinstance(name, str) else name[0]
+                    if "THK" not in name:
+                        self.assertRegex(name, r"^Face\d+;_;0;MKR")
+
     def tearDown(self):
         # closing doc
         FreeCAD.closeDocument("PartDesignTestThickness")
