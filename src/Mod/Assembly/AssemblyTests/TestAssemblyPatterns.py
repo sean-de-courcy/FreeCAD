@@ -434,6 +434,34 @@ class TestAssemblyPatterns(AssemblyTestBase):
         finally:
             shutil.rmtree(folder, ignore_errors=True)
 
+    def test_direction_follows_a_part_turned_inside_a_subassembly(self):
+        """ops#832 review r2: the way kept is the element's own: a part turned half round inside
+        the referenced container turns the pattern's way with it"""
+        body = self.doc.addObject("PartDesign::Body", "Blk")
+        box = body.newObject("PartDesign::AdditiveBox", "BlkBox")
+        box.Length, box.Width, box.Height = 20, 20, 10
+        sub = self.doc.addObject("App::Part", "Sub")
+        inner = self.doc.addObject("App::Link", "BlkInSub")
+        inner.LinkedObject = body
+        sub.addObject(inner)
+        self.doc.recompute()
+        rail = self.instance(sub, App.Placement(App.Vector(0, 0, -100), App.Rotation()))
+        ground = self.jointgroup.newObject("App::FeaturePython", "GroundedSub")
+        JointObject.GroundedJoint(ground, rail)
+        edge = self.edgeAlong(body.Shape, X)
+        way = App.Vector(self.alongX)
+        self.doc.recompute()
+        pattern = AssemblyPattern.makePattern(
+            self.assembly, "Linear", [self.seed], (rail, [f"{inner.Name}.{edge}"])
+        )
+        pattern.Count, pattern.Distance = 3, 25.0
+        self.doc.recompute()
+        self.assertLinear(pattern, self.seed, 3, 25.0, way)
+        inner.Placement = App.Placement(App.Vector(), App.Rotation(App.Vector(0, 0, 1), 180))
+        self.doc.recompute()
+        self.assertEqual(self.assembly.solve(), 0)
+        self.assertLinear(pattern, self.seed, 3, 25.0, -way)
+
     def test_delete_and_suppress(self):
         """A copy deleted by hand comes back; the seed deleted takes its copies; suppressing removes
         the copies and unsuppressing makes them again; deleting the pattern deletes its copies"""
