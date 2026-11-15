@@ -467,6 +467,23 @@ class TestHistoryOrder(unittest.TestCase):
         self.assertEqual(self.order(), ["SkA", "PadA", "SkC", "PadC", "SkA2", "PadA2"])
         self.checkVolumes(500 + 32, 400)
 
+    def assertParkedAndBack(self, reader, drag, after):
+        """RO1 (Onshape: a drag is never refused): drag dropped after after (None: the top) puts
+        reader above what it reads; the read is parked and reader fails alone. Dragged back to
+        its row, it recovers by itself, with nothing parked and everything valid."""
+        before = self.order()
+        i = before.index(drag.Name)
+        previous = self.doc.getObject(before[i - 1]) if i else None
+        self.assertTrue(PartDesign.moveInStudio(self.doc, drag, after))
+        self.assertTrue(list(getattr(reader, "ParkedReferences", [])))
+        self.doc.recompute()
+        self.assertFalse(reader.isValid())
+        self.assertTrue(PartDesign.moveInStudio(self.doc, drag, previous))
+        self.assertEqual(self.order(), before)
+        self.assertEqual(list(getattr(reader, "ParkedReferences", [])), [])
+        self.doc.recompute()
+        self.assertEqual([o.Name for o in self.doc.Objects if not o.isValid()], [])
+
     def checkVolumes(self, v1, v2):
         self.doc.recompute()
         self.assertEqual([o.Name for o in self.doc.Objects if not o.isValid()], [])
@@ -664,23 +681,19 @@ class TestHistoryOrder(unittest.TestCase):
 
     # --------------------------------------------------------------------------- refusals
 
-    def testDropAboveWhatItReadsIsRefused(self):
+    def testDropAboveWhatItReadsIsParked(self):
         """In TestStudioSequence's interleaved model Pocket1 (Body1) reads Body2's sketch SkB and
-        Box (Body2) sits on Body1's PadA. Drops that would put a reader above what it reads, or
-        what is read below its reader, are refused, naming both, and nothing changes."""
+        Box (Body2) sits on Body1's PadA. RO1 (Onshape: a drag is never refused): a reader dropped
+        above what it reads, or what is read dropped below its reader, is accepted; the reader's
+        read is parked and it fails alone; dragged back, everything recovers by itself."""
         model = TestStudioSequence("testInterleavedOrder")
         model.doc = self.doc
         model.interleaved()
-        before = self.order()
-        with self.assertRaisesRegex(ValueError, "'Pocket1' uses 'SkB' of 'Body2'"):
-            PartDesign.moveInStudio(self.doc, model.pocket1, model.padA)
-        with self.assertRaisesRegex(ValueError, "'Box' uses 'PadA' of 'Body1'"):
-            PartDesign.moveInStudio(self.doc, model.box, None)
-        with self.assertRaisesRegex(ValueError, "'Box' of 'Body2' uses 'PadA'"):
-            PartDesign.moveInStudio(self.doc, model.padA, model.box)
-        self.assertEqual(self.order(), before)
+        self.assertParkedAndBack(model.pocket1, model.pocket1, model.padA)
+        self.assertIs(model.pocket1.Profile[0], model.skB)
+        self.assertParkedAndBack(model.box, model.box, None)
+        self.assertParkedAndBack(model.box, model.padA, model.box)
         self.assertEqual(self.names(model.body1.Group), ["SkA", "PadA", "Pocket1"])
-        self.assertEqual(self.ranked(), [])
         model.checkEnd()
 
     def testDropBelowAWholeBodyReaderIsRefused(self):
@@ -869,9 +882,10 @@ class TestHistoryOrder(unittest.TestCase):
         self.assertEqual([o.Name for o in self.doc.Objects if "Touched" in o.State], [])
         self.assertEqual(self.doc.recompute(), 0)
 
-    def testInTheListAPadIsRefusedAboveAnEdgeItsSketchReads(self):
+    def testInTheListAPadAboveAnEdgeItsSketchReadsIsParked(self):
         """The same with a reference that has no earlier version (the Fillet's tangent edge):
-        the drop is refused, writing nothing"""
+        the sketch's support is parked (RO1), so the sketch and its Pad fail; dragged back, the
+        sketch is on the edge again"""
         self.listedFilletedBlock()
         tangent = next(
             f"Edge{i}"
@@ -883,15 +897,13 @@ class TestHistoryOrder(unittest.TestCase):
         self.doc.recompute()
         lst = PartDesign.studioList(self.doc, True)
         lst.Entries = [self.skA, self.skF, self.padA, self.fillet, self.padF]
-        before = self.order()
-        with self.assertRaisesRegex(ValueError, "'PadF' uses 'Fillet' of 'Body1'"):
-            PartDesign.moveInStudio(self.doc, self.padF, self.padA)
-        self.assertEqual(self.order(), before)
+        self.assertParkedAndBack(self.skF, self.padF, self.padA)
         self.assertIs(self.skF.AttachmentSupport[0][0], self.fillet)
 
-    def testInTheListAnEdgeTheFilletMadeIsStillRefused(self):
-        """In the list too, a reference with no earlier version refuses the drop, writing
-        nothing: a sketch normal to the Fillet's tangent edge (y = 1), which the Pad hasn't"""
+    def testInTheListAnEdgeTheFilletMadeIsParked(self):
+        """In the list too, a reference with no earlier version is parked (RO1): a sketch normal
+        to the Fillet's tangent edge (y = 1), which the Pad hasn't, fails alone above the Fillet
+        and is on the edge again when dragged back"""
         self.listedFilletedBlock()
         tangent = next(
             f"Edge{i}"
@@ -902,17 +914,15 @@ class TestHistoryOrder(unittest.TestCase):
         skE.MapMode = "NormalToEdge"
         self.doc.recompute()
         self.assertTrue(skE.isValid())
-        before = self.order()
-        with self.assertRaisesRegex(ValueError, "'SkE' uses 'Fillet' of 'Body1'"):
-            PartDesign.moveInStudio(self.doc, skE, self.padA)
-        self.assertEqual(self.order(), before)
+        self.assertParkedAndBack(skE, skE, self.padA)
         self.assertIs(skE.AttachmentSupport[0][0], self.fillet)
         self.assertIs(self.skF.AttachmentSupport[0][0], self.fillet)
 
-    def testAnEdgeTheFilletMadeIsStillRefused(self):
-        """A reference with no earlier version still refuses the drop, writing nothing: a Body2
-        sketch normal to the Fillet's tangent edge on the top face (y = 1), an edge the Fillet
-        generated from the sharp edge (y = 0), which is another line."""
+    def testAnEdgeTheFilletMadeIsParked(self):
+        """A reference with no earlier version is parked (RO1, Onshape: a drag is never refused):
+        a Body2 sketch normal to the Fillet's tangent edge on the top face (y = 1), an edge the
+        Fillet generated from the sharp edge (y = 0), which is another line, fails alone above the
+        Fillet and is on the edge again when dragged back."""
         self.filletedBlock()
         tangent = next(
             f"Edge{i}"
@@ -923,18 +933,15 @@ class TestHistoryOrder(unittest.TestCase):
         skE.MapMode = "NormalToEdge"
         self.doc.recompute()
         self.assertTrue(skE.isValid())
-        before = self.order()
-        with self.assertRaisesRegex(ValueError, "'SkE' uses 'Fillet' of 'Body1'"):
-            PartDesign.moveInStudio(self.doc, skE, self.padA)
-        self.assertEqual(self.order(), before)
+        self.assertParkedAndBack(skE, skE, self.padA)
         self.assertIs(skE.AttachmentSupport[0][0], self.fillet)
         self.assertIs(self.skF.AttachmentSupport[0][0], self.fillet)
-        self.assertEqual(self.ranked(), [])
 
-    def testAPatternCopysFaceIsRefused(self):
+    def testAPatternCopysFaceIsParked(self):
         """Review sff13-r1 (Opus T1): a pattern copy's top face lies in the original's plane but
         elsewhere; it has no earlier version. Body2's datum point at its centre, dragged above the
-        pattern, is refused (before: it went to the original's face, 20 mm away, silently)."""
+        pattern, is parked and fails alone (RO1; before ops#647: it went to the original's face,
+        20 mm away, silently); dragged back, it is on the copy's face again."""
         doc = self.doc
         self.body1 = doc.addObject("PartDesign::Body", "Body1")
         self.body2 = doc.addObject("PartDesign::Body", "Body2")
@@ -960,16 +967,16 @@ class TestHistoryOrder(unittest.TestCase):
         point.MapMode = "CenterOfMass"
         doc.recompute()
         self.assertAlmostEqual(point.Placement.Base.x, 25, places=6)
-        with self.assertRaisesRegex(ValueError, "'PointCopy' uses 'Pattern' of 'Body1'"):
-            PartDesign.moveInStudio(doc, point, boss)
+        self.assertParkedAndBack(point, point, boss)
         self.assertIs(point.AttachmentSupport[0][0], pattern)
-        self.assertEqual(self.ranked(), [])
+        self.assertAlmostEqual(point.Placement.Base.x, 25, places=6)
         self.assertIsNotNone(plate)
 
-    def testAnEdgeTheFilletTrimmedIsStillRefused(self):
+    def testAnEdgeTheFilletTrimmedIsParked(self):
         """Review sff13-r1 (Sonnet rl1): the top edge at x = 0 runs y = 0..10 on the Pad and
         y = 1..10 after the Fillet, on the same line. A sketch normal to it starts at its first
-        point, so on the Pad's edge it would move by 1: the drop is refused, writing nothing."""
+        point, so on the Pad's edge it would move by 1: the support is parked instead (RO1), and
+        dragged back the sketch is on the trimmed edge again."""
         self.filletedBlock()
         trimmed = next(
             f"Edge{i}"
@@ -981,7 +988,5 @@ class TestHistoryOrder(unittest.TestCase):
         skT.MapMode = "NormalToEdge"
         self.doc.recompute()
         self.assertTrue(skT.isValid())
-        with self.assertRaisesRegex(ValueError, "'SkT' uses 'Fillet' of 'Body1'"):
-            PartDesign.moveInStudio(self.doc, skT, self.padA)
+        self.assertParkedAndBack(skT, skT, self.padA)
         self.assertIs(skT.AttachmentSupport[0][0], self.fillet)
-        self.assertEqual(self.ranked(), [])

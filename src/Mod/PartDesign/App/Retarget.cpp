@@ -987,6 +987,12 @@ private:
                 if (target && x && atOrAfter(target, x)) {
                     continue;  // still after the feature that uses it
                 }
+                if (target && !members.count(target)) {
+                    // Parked by a part studio's drop (parkReadsOf(): a reorder parks only
+                    // references into its own Body): the drop that puts the order right gives it
+                    // back, not this reorder
+                    continue;
+                }
                 if (target && dressUpBase) {
                     // A dress-up's Base follows its base (ops#784): back onto the base it has now,
                     // the parked names looked up on it as moved references are
@@ -1144,6 +1150,103 @@ private:
                });
     }
 
+public:
+    /// A part studio's drop (ops#647, RO1: a drag is never refused): owner's link entries on an
+    /// object match() names are parked as a reorder parks them, so owner fails alone until a drop
+    /// puts it back (putBackReadsOf()). Writes; false when nothing was parked
+    bool parkReadsOf(App::DocumentObject* owner, const std::function<bool(App::DocumentObject*)>& match)
+    {
+        std::vector<std::string> lines = parkedLines(owner);
+        bool any = false;
+        std::vector<App::Property*> props;
+        owner->getPropertyList(props);
+        for (auto prop : props) {
+            if (!isWalked(owner, prop)) {
+                continue;
+            }
+            auto state = readState(owner, prop);
+            if (!state) {
+                continue;
+            }
+            std::vector<std::string> newLines;
+            for (auto& unit : state->units) {
+                if (!unit.dropped && unit.obj && !unit.frozen && match(unit.obj)) {
+                    park(*state, unit, newLines);
+                }
+            }
+            if (state->changed) {
+                write(*state);
+                lines.insert(lines.end(), newLines.begin(), newLines.end());
+                any = true;
+            }
+        }
+        if (any) {
+            writeParkedLines(owner, lines);
+        }
+        return any;
+    }
+
+    /// The parked link entries of owner whose object earlier() takes are put back (N1 3.4 b), the
+    /// moved references found again on them. Writes; false when nothing was put back
+    bool putBackReadsOf(App::DocumentObject* owner, const std::function<bool(App::DocumentObject*)>& earlier)
+    {
+        auto lines = parkedLines(owner);
+        if (lines.empty()) {
+            return false;
+        }
+        auto doc = owner->getDocument();
+        std::vector<ParkedItem> items;
+        for (const auto& line : lines) {
+            auto item = ParkedItem::parse(line);
+            items.push_back(item ? *item : ParkedItem());
+        }
+        std::vector<bool> keep(lines.size(), true);
+        bool any = false;
+        std::vector<App::Property*> props;
+        owner->getPropertyList(props);
+        for (auto prop : props) {
+            if (!isWalked(owner, prop)) {
+                continue;
+            }
+            std::optional<PropertyState> state;
+            for (std::size_t i = 0; i < items.size(); ++i) {
+                if (items[i].expression || items[i].extgeo || items[i].property != prop->getName()) {
+                    continue;
+                }
+                auto target = parkedTarget(doc, items[i]);
+                if (!target || !earlier(target)) {
+                    continue;
+                }
+                if (!state) {
+                    state = readState(owner, prop);
+                    if (!state) {
+                        break;
+                    }
+                }
+                putBack(*state, items[i], target);
+                keep[i] = false;
+            }
+            if (state && state->changed) {
+                write(*state);
+                for (auto target : state->solveOn) {
+                    solve(*state->prop, target);
+                }
+                any = true;
+            }
+        }
+        if (any) {
+            std::vector<std::string> kept;
+            for (std::size_t i = 0; i < lines.size(); ++i) {
+                if (keep[i]) {
+                    kept.push_back(lines[i]);
+                }
+            }
+            writeParkedLines(owner, kept);
+        }
+        return any;
+    }
+
+private:
     void park(PropertyState& state, Unit& unit, std::vector<std::string>& newLines)
     {
         ParkedItem item;
@@ -2120,6 +2223,27 @@ bool parkedReason(const App::DocumentObject* obj, std::string& why)
 bool hasParkedReferences(const App::DocumentObject* obj)
 {
     return !parkedLines(obj).empty();
+}
+
+bool parkReadsOf(App::DocumentObject* owner, const std::function<bool(App::DocumentObject*)>& match)
+{
+    auto body = Body::findBodyOf(owner);
+    if (!body) {
+        return false;
+    }
+    Rule rule(*body, {}, {});
+    return rule.parkReadsOf(owner, match);
+}
+
+bool putBackReadsOf(App::DocumentObject* owner,
+                    const std::function<bool(App::DocumentObject*)>& earlier)
+{
+    auto body = Body::findBodyOf(owner);
+    if (!body || !hasParkedReferences(owner)) {
+        return false;
+    }
+    Rule rule(*body, {}, {});
+    return rule.putBackReadsOf(owner, earlier);
 }
 
 bool parkedAbove(const App::DocumentObject* feature,

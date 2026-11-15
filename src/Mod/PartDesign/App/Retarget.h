@@ -53,6 +53,17 @@ bool parkedReason(const App::DocumentObject* obj, std::string& why);
 /// obj holds a parking record: a reorder set a reference of it aside (N1 3.4 b)
 bool hasParkedReferences(const App::DocumentObject* obj);
 
+/// A part studio's drop (ops#647, RO1: a drag is never refused): parks owner's link entries on
+/// the objects match() names, as a reorder parks them, so owner fails alone. False when owner is
+/// in no Body or nothing was parked
+bool parkReadsOf(App::DocumentObject* owner,
+                 const std::function<bool(App::DocumentObject*)>& match);
+
+/// Puts back owner's parked link entries whose object earlier() takes, finding the references on
+/// them again; false when nothing was put back
+bool putBackReadsOf(App::DocumentObject* owner,
+                    const std::function<bool(App::DocumentObject*)>& earlier);
+
 /// One of holders (feature, or what it reads in its Body) holds a parking record (N1 3.4 b) whose
 /// reference is to a member after feature, and feature is the earliest solid that reads it (N1
 /// 3.1): feature was moved above what it needs, with the inputs only it uses (ops#596: a feature
