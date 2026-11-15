@@ -4,6 +4,9 @@
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <map>
+#include <mutex>
+#include <set>
 #include <sstream>
 
 #include <Base/Console.h>
@@ -11,6 +14,11 @@
 #include <Base/Parameter.h>
 
 #include "Application.h"
+#include "Document.h"
+#include "DocumentObject.h"
+#include "PropertyFile.h"
+#include "PropertyLinks.h"
+#include "PropertyStandard.h"
 #include "TeamFolder.h"
 
 namespace fs = std::filesystem;
@@ -159,23 +167,27 @@ std::string folder()
     return trimmed(documentParameters()->GetASCII("TeamFolder", ""));
 }
 
-bool contains(const std::string& path)
+namespace
 {
-    const std::string team = folder();
-    if (team.empty() || path.empty()) {
+
+/// Whether `path` is `root` or lies under it; both compared as the file system sees them
+/// (`fs::equivalent`, so case and links don't matter), the parts of `path` that don't exist skipped
+bool under(const fs::path& path, const std::string& root)
+{
+    if (root.empty() || path.empty()) {
         return false;
     }
-    const fs::path teamPath = Base::FileInfo::stringToPath(team);
-    if (!teamPath.is_absolute()) {
+    const fs::path rootPath = Base::FileInfo::stringToPath(root);
+    if (!rootPath.is_absolute()) {
         return false;
     }
     std::error_code error;
-    fs::path current = fs::absolute(Base::FileInfo::stringToPath(path), error);
+    fs::path current = fs::absolute(path, error);
     if (error) {
         return false;
     }
     while (!current.empty()) {
-        if (fs::equivalent(current, teamPath, error)) {
+        if (fs::equivalent(current, rootPath, error)) {
             return true;
         }
         const fs::path parent = current.parent_path();
@@ -185,6 +197,120 @@ bool contains(const std::string& path)
         current = parent;
     }
     return false;
+}
+
+/// A file the other computer has too: the installation, its resources, the user's data folder
+bool exempt(const fs::path& path)
+{
+    return under(path, Application::getResourceDir()) || under(path, Application::getHomePath())
+        || under(path, Application::getUserAppDataDir());
+}
+
+std::string fileName(const fs::path& path)
+{
+    return Base::FileInfo::pathToString(path.filename());
+}
+
+}  // namespace
+
+bool contains(const std::string& path)
+{
+    if (path.empty()) {
+        return false;
+    }
+    return under(Base::FileInfo::stringToPath(path), folder());
+}
+
+std::vector<std::string> outsideFiles(const Document& doc, const std::string& target)
+{
+    std::vector<std::string> names;
+    if (!contains(target)) {
+        return names;
+    }
+    const std::string team = folder();
+    auto outside = [&](const fs::path& path) {
+        if (!path.is_absolute() || under(path, team) || exempt(path)) {
+            return;
+        }
+        names.push_back(fileName(path));
+    };
+    // Links and expressions to other documents (the out list holds both, hidden-scope expression
+    // links included): XLinks save their path relative to the document, which only reaches the
+    // same file on the other computer while both lie in the team folder
+    std::set<const Document*> linked;
+    for (const DocumentObject* object : doc.getObjects()) {
+        for (const DocumentObject* target : object->getOutList()) {
+            const Document* other = target ? target->getDocument() : nullptr;
+            if (other && other != &doc) {
+                linked.insert(other);
+            }
+        }
+    }
+    for (const Document* other : linked) {
+        const char* file = other->FileName.getValue();
+        if (file && *file) {
+            outside(Base::FileInfo::stringToPath(file));
+        }
+    }
+    // File and folder paths saved as written: absolute ones name this computer's disk
+    std::vector<Property*> properties;
+    for (const DocumentObject* object : doc.getObjects()) {
+        properties.clear();
+        object->getPropertyList(properties);
+        for (const Property* property : properties) {
+            if (const auto* file = freecad_cast<const PropertyFile*>(property)) {
+                const char* value = file->getValue();
+                if (value && *value) {
+                    outside(Base::FileInfo::stringToPath(value));
+                }
+            }
+            else if (const auto* folderPath = freecad_cast<const PropertyPath*>(property)) {
+                outside(folderPath->getValue());
+            }
+        }
+    }
+    std::sort(names.begin(), names.end());
+    names.erase(std::unique(names.begin(), names.end()), names.end());
+    return names;
+}
+
+void warnOutside(const Document& doc, const std::string& target)
+{
+    // A warning that fails (a path that doesn't convert, a file system error) never stops the save
+    try {
+        if (!contains(target)) {
+            return;  // a copy saved elsewhere leaves the document's last warning as it was
+        }
+        // The last list warned per document and file, so a save warns again only when it changes
+        static std::mutex mutex;
+        static std::map<std::string, std::string> warned;
+        const auto names = outsideFiles(doc, target);
+        std::string list;
+        for (const auto& name : names) {
+            list += (list.empty() ? "" : ", ") + name;
+        }
+        const std::string key = doc.Uid.getValueStr() + "|" + target;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            auto& last = warned[key];
+            if (last == list) {
+                return;
+            }
+            last = list;
+        }
+        if (!list.empty()) {
+            Base::Console().warning("%s uses files outside the team folder (%s); the other "
+                                    "computer will not find them.\n",
+                                    fileName(Base::FileInfo::stringToPath(target)).c_str(),
+                                    list.c_str());
+        }
+    }
+    catch (const std::exception& error) {
+        Base::Console().log("Team folder: the outside-files check failed: %s\n", error.what());
+    }
+    catch (...) {
+        Base::Console().log("Team folder: the outside-files check failed\n");
+    }
 }
 
 std::string apply(const std::string& team)
