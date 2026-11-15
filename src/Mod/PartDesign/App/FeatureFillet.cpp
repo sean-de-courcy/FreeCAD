@@ -59,8 +59,8 @@ PartDesignExport void dressUpReappliedFrom(const Part::TopoShape& raw,
 PartDesignExport bool studioDressUpTake(const DressUp* step,
                                         const Part::TopoShape& base,
                                         const std::vector<Part::TopoShape>& edges,
-                                        Part::TopoShape& raw,
-                                        Part::TopoShape& refined);
+                                        Part::TopoShape& raw);
+PartDesignExport const DressUp* dressUpTriedFor(const DressUp* step);
 // FeatureDressUp.cpp (FreeCAD-CH ops#654 P8a; declared where used)
 PartDesignExport App::DocumentObjectExecReturn* studioDressUpOwnerRun(DressUp* owner);
 PartDesignExport bool studioDressUpStepPassesThrough(DressUp* step);
@@ -176,20 +176,6 @@ App::DocumentObjectExecReturn* Fillet::build()
     if (!reapplying) {
         this->positionByBaseFeature();
     }
-    // ops#796: a studio step's owner built it already, on this base and these edges
-    if (Part::TopoShape raw, refined;
-        !reapplying && StudioOwner.getValue() && studioDressUpTake(this, baseShape, edges, raw, refined)) {
-        this->rawShape = raw;
-        if (!isSingleSolidRuleSatisfied(refined.getShape())) {
-            return new App::DocumentObjectExecReturn(QT_TRANSLATE_NOOP(
-                "Exception",
-                "Result has multiple solids: enable 'Allow Compound' in the active body."
-            ));
-        }
-        this->Shape.setValue(getSolid(refined));
-        return App::DocumentObject::StdReturn;
-    }
-
     try {
         TopoShape shape = makeTopoShape();
         // Add signal handler for segfault protection
@@ -198,6 +184,21 @@ App::DocumentObjectExecReturn* Fillet::build()
 #endif
 
         Part::FilletFallback::Recorder recorder;
+        // ops#796: a studio step's owner built it already, on this base and these edges, with
+        // these parameters, and checked it: the step goes on from the shape before the refine
+        if (Part::TopoShape raw;
+            !reapplying && StudioOwner.getValue() && studioDressUpTake(this, baseShape, edges, raw)) {
+            this->rawShape = raw;
+            shape = refineShapeIfActive(raw);
+            if (!isSingleSolidRuleSatisfied(shape.getShape())) {
+                return new App::DocumentObjectExecReturn(QT_TRANSLATE_NOOP(
+                    "Exception",
+                    "Result has multiple solids: enable 'Allow Compound' in the active body."
+                ));
+            }
+            this->Shape.setValue(getSolid(shape));
+            return App::DocumentObject::StdReturn;
+        }
         // ops#655: with tangent propagation off, an edge whose tangent chain goes on is cut
         // Onshape's way after the others are filleted
         const std::vector<Part::TopoShape> runOut = TangentPropagation.getValue()
@@ -284,7 +285,12 @@ App::DocumentObjectExecReturn* Fillet::build()
         }
         // store shape before refinement
         if (reapplying) {
-            dressUpReappliedFrom(shape, refineShapeIfActive(shape), !recorder.built());
+            auto owner = freecad_cast<Fillet*>(const_cast<DressUp*>(dressUpTriedFor(this)));
+            dressUpReappliedFrom(
+                shape,
+                owner ? owner->refineShapeIfActive(shape) : refineShapeIfActive(shape),
+                !recorder.built()
+            );
             return App::DocumentObject::StdReturn;
         }
         this->rawShape = shape;
