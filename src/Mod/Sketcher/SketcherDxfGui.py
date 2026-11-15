@@ -2,8 +2,11 @@
 """The DXF commands (FreeCAD-CH): Insert DXF into the open sketch, Export DXF of a sketch or face.
 
 - `Sketcher_InsertDxf`, in the Sketch toolbar and the Sketch menu while a sketch is open:
-  pick a file, choose the units when it has none, the fitting tolerance and corner angle, and
-  whether the curves are fixed (one Block each); one undo step; the report says what came in.
+  pick a file, then, as Onshape's Insert dialog: the Units (applied whatever the file says, the
+  document's unit by default), "Use file origin position" (off: the centre of the extents goes on
+  the sketch origin; remembered), plus the fitting tolerance and corner angle, and whether the
+  curves are fixed (one Block each, off by default: Onshape adds no constraints); one undo step;
+  the report says what came in.
 - `Sketcher_ExportDxf`, on the context menu of a sketch (tree and 3D view) and of a planar face:
   an R12 DXF in millimetres of true lines, arcs and circles (`SketcherDxf/exporter.py`).
 The entries are added by a WorkbenchManipulator, so they reach every workbench's menus.
@@ -19,6 +22,29 @@ PARAMS = "User parameter:BaseApp/Preferences/Mod/Sketcher/Dxf"
 
 def _params():
     return FreeCAD.ParamGet(PARAMS)
+
+
+# Block was on by default until 2026-11-15; the stored choice of earlier builds is reset once
+BLOCK_RESET = "BlockDefaultOff1"
+
+
+def _reset_block_once(p):
+    if not p.GetBool(BLOCK_RESET, False):
+        p.SetBool("Block", False)
+        p.SetBool(BLOCK_RESET, True)
+
+
+def document_units(doc):
+    """The length unit of the document's unit system, as one of InsertDialog.UNITS ("mm" when
+    it can't be told): Onshape's Units field starts at the workspace's unit"""
+    names = {"mm": "mm", "cm": "cm", "m": "m", "in": "in", '"': "in", "ft": "ft", "'": "ft"}
+    try:
+        schema = doc.getEnumerationsOfProperty("UnitSystem").index(doc.UnitSystem)
+        q = FreeCAD.Units.Quantity(1.0, FreeCAD.Units.Length)
+        unit = FreeCAD.Units.schemaTranslate(q, schema)[2]
+    except Exception:
+        return "mm"
+    return names.get(unit.strip(), "mm")
 
 
 def _tr(text):
@@ -55,28 +81,32 @@ class InsertDialog:
 
     UNITS = ["mm", "cm", "m", "in", "ft"]
 
-    def __init__(self, drawing, path):
+    def __init__(self, drawing, path, doc=None):
         from PySide import QtWidgets
 
         p = _params()
+        _reset_block_once(p)
         self.d = QtWidgets.QDialog(_main_window())
         self.d.setWindowTitle(_tr("Insert DXF"))
         form = QtWidgets.QFormLayout(self.d)
         segs = sum(1 for it in drawing.items if type(it).__name__ == "Line")
         form.addRow(QtWidgets.QLabel(f"{os.path.basename(path)}: {len(drawing.items)} curves, {segs} line segments"))
-        self.units = None
-        if drawing.mm_per_unit is None:
-            self.units = QtWidgets.QComboBox()
-            self.units.addItems(self.UNITS)
-            last = p.GetString("Units", "mm")
-            if last in self.UNITS:
-                self.units.setCurrentIndex(self.UNITS.index(last))
-            form.addRow(_tr("The file states no units. Units:"), self.units)
-        else:
+        # Onshape: the field applies whatever the file says, and starts at the document's unit
+        self.units = QtWidgets.QComboBox()
+        self.units.addItems(self.UNITS)
+        self.units.setCurrentIndex(self.UNITS.index(document_units(doc) if doc is not None else "mm"))
+        form.addRow(_tr("Units:"), self.units)
+        if drawing.mm_per_unit is not None:
             from SketcherDxf import reader
 
             name = reader.UNIT_NAMES.get(drawing.insunits, f"code {drawing.insunits}")
-            form.addRow(_tr("Units:"), QtWidgets.QLabel(_tr("from the file: ") + name))
+            form.addRow(QtWidgets.QLabel(_tr("The file states ") + name + _tr("; the Units field applies")))
+        self.file_origin = QtWidgets.QCheckBox(_tr("Use file origin position"))
+        self.file_origin.setToolTip(
+            _tr("On: the file's origin goes on the sketch origin. Off: the centre of the curves' extents does")
+        )
+        self.file_origin.setChecked(p.GetBool("UseFileOrigin", False))
+        form.addRow(self.file_origin)
         self.fit = QtWidgets.QCheckBox(_tr("Fit chains of short segments to lines, arcs and splines"))
         self.fit.setChecked(p.GetBool("Fit", True))
         form.addRow(self.fit)
@@ -97,7 +127,7 @@ class InsertDialog:
         self.tol.setEnabled(self.fit.isChecked())
         self.corner.setEnabled(self.fit.isChecked())
         self.block = QtWidgets.QCheckBox(_tr("Fix the imported curves (one Block constraint each)"))
-        self.block.setChecked(p.GetBool("Block", True))
+        self.block.setChecked(p.GetBool("Block", False))
         form.addRow(self.block)
         bb = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
         bb.accepted.connect(self.d.accept)
@@ -106,11 +136,12 @@ class InsertDialog:
 
     def values(self):
         return {
-            "units": self.units.currentText() if self.units is not None else None,
+            "units": self.units.currentText(),
             "fit": self.fit.isChecked(),
             "tolerance": self.tol.value(),
             "corner": self.corner.value(),
             "hold": "block" if self.block.isChecked() else "free",
+            "origin": "file" if self.file_origin.isChecked() else "centre",
         }
 
     def exec(self):
@@ -120,8 +151,7 @@ class InsertDialog:
             return None
         v = self.values()
         p = _params()
-        if v["units"]:
-            p.SetString("Units", v["units"])
+        p.SetBool("UseFileOrigin", v["origin"] == "file")
         p.SetBool("Fit", v["fit"])
         p.SetFloat("Tolerance", v["tolerance"])
         p.SetFloat("CornerAngle", v["corner"])
@@ -152,8 +182,9 @@ class CommandInsertDxf:
             "Pixmap": "Std_Import",
             "MenuText": _tr("Insert DXF..."),
             "ToolTip": _tr(
-                "Insert a DXF file's curves into the open sketch, at its origin and in the file's units; "
-                "long chains of short segments are fitted to lines, arcs and splines"
+                "Insert a DXF file's curves into the open sketch, centred on its origin (or with the "
+                "file's origin there) in the chosen units; long chains of short segments are fitted "
+                "to lines, arcs and splines"
             ),
         }
 
@@ -179,7 +210,7 @@ class CommandInsertDxf:
         except SketcherDxf.DxfError as exc:
             QtWidgets.QMessageBox.warning(_main_window(), _tr("Insert DXF"), f"{os.path.basename(path)}: {exc}")
             return
-        options = InsertDialog(drawing, path).exec()
+        options = InsertDialog(drawing, path, sketch.Document).exec()
         if options is None:
             return
         try:
