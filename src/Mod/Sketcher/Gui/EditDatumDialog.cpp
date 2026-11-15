@@ -461,10 +461,11 @@ void EditDatumDialog::setupValueEdit(QString& title, QString& label)
 
 bool EditDatumDialog::liveTextShown() const
 {
-    // The guard of ops#684 review R1/R2: liveText counts only while it means what the field shows,
-    // to the field's display precision (`(1/8) in` shown as `0.13 in`). Otherwise (a step by the
-    // arrows or the wheel, a history value from the context menu, the formula editor's OK or
-    // Reset) the field's value is applied as a plain value, as before ops#684.
+    // The guard of ops#684 review R1/R2: liveText counts only while it means what the field shows:
+    // the field's own text for it, formatted as the field formats its value (`(1/8) in` shown as
+    // `0.13 in`; any schema, locale, fraction or DMS display). Otherwise (a step by the arrows or
+    // the wheel, a history value, the formula editor's OK or Reset) the field's value is applied
+    // as a plain value, as before ops#684.
     if (!liveTextValid || !valueEdit || liveText.empty()) {
         return false;
     }
@@ -472,43 +473,27 @@ bool EditDatumDialog::liveTextShown() const
     if (shown == liveText) {
         return true;
     }
-    static const std::regex number(R"([+-]?(?:\d+\.?(\d*)|\.(\d+))(?:[eE][+-]?\d+)?)");
-    std::smatch match;
-    if (!std::regex_search(shown, match, number)) {
-        return false;
-    }
-    const std::size_t decimals = match[1].matched ? match[1].length() : match[2].length();
-    const double shownNumber = std::stod(match[0].str());
     try {
-        auto valueOf = [this](const std::string& text) {
-            App::ExpressionPtr result
-                = App::ExpressionParser::parse(sketch, text.c_str())->eval();
-            auto* value = freecad_cast<App::NumberExpression*>(result.get());
-            if (!value) {
-                throw Base::ValueError("no number");
-            }
-            return value->getQuantity();
-        };
-        const Base::Quantity shownQuantity = valueOf(shown);
-        Base::Quantity typed = valueOf(liveText);
-        if (shownNumber == 0.0 || shownQuantity.isDimensionless()) {
+        App::ExpressionPtr result = App::ExpressionParser::parse(sketch, liveText.c_str())->eval();
+        auto* number = freecad_cast<App::NumberExpression*>(result.get());
+        if (!number) {
             return false;
         }
-        // A bare number is in the field's unit (as keptLengthText and the field read it)
-        const double factor = shownQuantity.getValue() / shownNumber;
-        if (typed.isDimensionless()) {
-            typed = Base::Quantity(typed.getValue() * factor, shownQuantity.getUnit());
+        const Base::Quantity fieldValue = valueEdit->value();
+        Base::Quantity typed = number->getQuantity();
+        if (typed.isDimensionless() && !fieldValue.isDimensionless()) {
+            // A bare number is in the unit the field shows (as the field reads it)
+            double factor = 1.0;
+            std::string unitString;
+            fieldValue.getUserString(factor, unitString);
+            typed = Base::Quantity(typed.getValue() * factor, fieldValue.getUnit());
         }
-        if (typed.getUnit() != shownQuantity.getUnit()) {
-            return false;
-        }
-        const double halfStep = 0.5 * std::pow(10.0, -static_cast<double>(decimals)) * std::abs(factor);
-        return std::abs(typed.getValue() - shownQuantity.getValue()) <= halfStep * (1.0 + 1e-9);
+        typed.setFormat(fieldValue.getFormat());
+        double factor = 1.0;
+        std::string unitString;
+        return typed.getUserString(factor, unitString) == shown;
     }
     catch (const Base::Exception&) {
-        return false;
-    }
-    catch (const std::exception&) {
         return false;
     }
 }
