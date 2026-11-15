@@ -866,6 +866,54 @@ class TestThickness(unittest.TestCase):
                         dressed.makeThickness([top], -2, 1e-7, False, False, 0, 0)
                     self.assertIn("no shell was built", str(refusal.exception))
 
+    def _partThicknessOfAPlate(self, hole, join):
+        """Part's Thickness of a 120 x 80 x 10 plate less <hole> (a through solid), bottom face
+        removed, outward 1.5 with <join>."""
+        plate = Part.makeBox(120, 80, 10).cut(hole)
+        source = self.Doc.addObject("Part::Feature", "Plate")
+        source.Shape = plate
+        bottom = [
+            "Face" + str(i)
+            for i, face in enumerate(plate.Faces, 1)
+            if isinstance(face.Surface, Part.Plane)
+            and abs(face.CenterOfMass.z) < 1e-7
+            and abs(face.normalAt(0, 0).z + 1) < 1e-7
+        ]
+        self.assertEqual(len(bottom), 1)
+        thickness = self.Doc.addObject("Part::Thickness", "Thickness")
+        thickness.Faces = (source, bottom)
+        thickness.Value = 1.5
+        thickness.Join = join
+        self.Doc.recompute()
+        return thickness
+
+    def testPartThicknessSaysWhenTheArcJoinFallsBack(self):
+        """ops#807's plate with a 10 x 20 through pocket by Part's Thickness: the Arc join gives
+        no valid outward shell, so the sharp one is built, V 22035 = 123*83*11.5 - 7*17*11.5 -
+        9400*10, with a warning; asked for the Intersection join, the same shell, no warning."""
+        pocket = Part.makeBox(10, 20, 10, FreeCAD.Vector(55, 30, 0))
+        for join, warns in (("Arc", True), ("Intersection", False)):
+            with self.subTest(join=join):
+                thickness = self._partThicknessOfAPlate(pocket, join)
+                status = thickness.getStatusString()
+                self.assertTrue(thickness.isValid(), status)
+                self.assertTrue(thickness.Shape.isValid())
+                self.assertAlmostEqual(
+                    thickness.Shape.Volume, 123 * 83 * 11.5 - 7 * 17 * 11.5 - 9400 * 10, places=5
+                )
+                self.assertEqual("Intersection join" in status, warns, status)
+                FreeCAD.closeDocument(self.Doc.Name)
+                self.Doc = FreeCAD.newDocument("PartDesignTestThickness")
+
+    def testPartThicknessWithAnArcJoinOCCTBuildsHasNoWarning(self):
+        """A round hole d6: OCCT's Arc join builds the outward shell, rounded, and nothing is said."""
+        hole = Part.makeCylinder(3, 10, FreeCAD.Vector(60, 40, 0))
+        thickness = self._partThicknessOfAPlate(hole, "Arc")
+        status = thickness.getStatusString()
+        self.assertTrue(thickness.isValid(), status)
+        self.assertNotIn("Intersection join", status)
+        self.assertFalse(all(isinstance(f.Surface, Part.Plane) for f in thickness.Shape.Faces))
+
     def tearDown(self):
         # closing doc
         FreeCAD.closeDocument("PartDesignTestThickness")
