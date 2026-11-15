@@ -8969,6 +8969,60 @@ TopoShape& TopoShape::makeElementFillet(
     bool prefer = FilletFallback::preferConstruction(input.getShape(), edgeShapes, request);
     gp_Pnt reflexAt;
     const bool reflex = FilletFallback::reflexCircleCorner(input.getShape(), edgeShapes, &reflexAt);
+    // FreeCAD-CH (ops#806): a contact line running along part of a face's boundary crashes OCCT's
+    // fillet (SIGSEGV, no error to catch): the exact construction alone, or an error
+    // OCCT's contours (the selection carried on along its tangent chains, as Onshape's) are what
+    // its fillet would walk: they are read, and the construction must round no less
+    FilletFallback::Request alongContours = request;
+    std::vector<TopoDS_Shape> contourEdges;
+    for (int i = 1; i <= mkFillet->NbContours(); ++i) {
+        for (int j = 1; j <= mkFillet->NbEdges(i); ++j) {
+            alongContours.contour.push_back(mkFillet->Edge(i, j));
+            contourEdges.push_back(mkFillet->Edge(i, j));
+        }
+    }
+    std::string notchAt;
+    if (FilletFallback::contactOnPartOfAnEdge(input.getShape(), contourEdges, request, &notchAt)) {
+        struct Alone
+        {
+            FilletFallback::Construction construction;
+            std::string reason;
+            bool built = false;
+        };
+        auto alone = std::make_shared<Alone>();
+        KernelBudget::run(
+            "The fillet",
+            [base = input.getShape(), edgeShapes, request = alongContours, alone](
+                const Message_ProgressRange& /*range*/
+            ) {
+                alone->built = FilletFallback::construct(
+                    base,
+                    edgeShapes,
+                    request,
+                    alone->construction,
+                    &alone->reason
+                );
+            }
+        );
+        if (alone->built) {
+            try {
+                FilletFallback::finish(*this, alone->construction, input, op);
+                return *this;
+            }
+            catch (const Standard_Failure& e) {
+                alone->reason = std::string("OCCT: ") + e.GetMessageString();
+            }
+            catch (const Base::Exception& e) {
+                alone->reason = e.what();
+            }
+        }
+        FC_THROWM(
+            Base::CADKernelError,
+            "The fillet's tangent line runs along part of an edge of the face next to it ("
+                << notchAt
+                << "), where OCCT's fillet crashes; its exact construction refused: " << alone->reason
+        );
+    }
     if (reflex && !prefer && radius1 == radius2) {
         // The whole rim loops in the direct builder's scope are built by it, and the rest of the
         // selection is rounded on the result: one loop out of its scope does not send the others
