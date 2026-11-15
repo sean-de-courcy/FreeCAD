@@ -3,7 +3,7 @@
 # Triage of D+ undo_fail: a diff here with no fuzz bookkeeping in the way is FreeCAD's, not the harness's.
 # Run: UR_STEPS="BossSk.Cx = -35.72;topo LateSk plain -> split" [UR_UNDO=<n>] [FUZZ_OWNER=0|1] FreeCADCmd undoreplay.py
 #   UR_FULL=1 also compares the undone state with a full recompute of itself (touch all, recompute).
-import os, json
+import os, json, re
 os.environ["FUZZ_NOMAIN"] = "1"
 os.environ.setdefault("FUZZ_TAG", "undoreplay")
 HERE = os.path.dirname(os.path.abspath(os.environ.get("UR_SELF", __file__)))

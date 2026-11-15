@@ -40,6 +40,8 @@ def play(doc, what):
         vals = sketchVals(sk)
         if new != "extra":
             vals = {k: x for k, x in vals.items() if not k.startswith("X")}
+        if TOPOMODE == "edit":
+            topoEdit(sk, new); return
         sk.deleteAllGeometry(); drawSketch(sk, vals, new); return
     m = re.match(r"(un)?suppress (\w+)$", what)
     if m:
