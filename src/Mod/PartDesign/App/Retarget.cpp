@@ -987,10 +987,12 @@ private:
                 if (target && x && atOrAfter(target, x)) {
                     continue;  // still after the feature that uses it
                 }
-                if (target && !members.count(target)) {
+                if (target && !chainPos.count(target)) {
                     // Parked by a part studio's drop (parkReadsOf(): a reorder parks only
-                    // references into its own Body): the drop that puts the order right gives it
-                    // back, not this reorder
+                    // references into solids of its own Body, decide()): the drop that puts the
+                    // order right gives it back, not this reorder. That holds for a sketch or
+                    // datum of this Body too, no solid of the chain (ops#853: an unrelated
+                    // reorder gave a Pocket dragged above its sketch its Profile back)
                     continue;
                 }
                 if (target && dressUpBase) {
@@ -1187,7 +1189,9 @@ public:
     }
 
     /// The parked link entries of owner whose object earlier() takes are put back (N1 3.4 b), the
-    /// moved references found again on them. Writes; false when nothing was put back
+    /// moved references found again on them; a parked projection goes back onto its geometries
+    /// as a reorder puts it back (putBack(), ops#131), since nothing else gives back a studio
+    /// drop's park on a sketch or datum (ops#853). Writes; false when nothing was put back
     bool putBackReadsOf(App::DocumentObject* owner, const std::function<bool(App::DocumentObject*)>& earlier)
     {
         auto lines = parkedLines(owner);
@@ -1210,7 +1214,7 @@ public:
             }
             std::optional<PropertyState> state;
             for (std::size_t i = 0; i < items.size(); ++i) {
-                if (items[i].expression || items[i].extgeo || items[i].property != prop->getName()) {
+                if (items[i].expression || items[i].property != prop->getName()) {
                     continue;
                 }
                 auto target = parkedTarget(doc, items[i]);
