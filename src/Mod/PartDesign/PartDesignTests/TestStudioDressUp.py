@@ -415,23 +415,26 @@ class TestStudioDressUp(unittest.TestCase):
 
 
     # ------------------------------------------------------------------------------- ops#808
-    def bossOnAPlate(self):
+    def bossOnAPlate(self, second=False):
         """Part P: a plate 80 x 50 x 10 (y -25..25) and a round boss (r 12 at (60, 0), from z 5
-        to 30) whose cylinder cuts the plate's top; F rounds the circle where the boss leaves
-        the top (r 2). Returns P, the plate, the boss, F and P's volume."""
+        to 30) whose cylinder cuts the plate's top; with `second`, the boss's sketch holds a
+        second circle (r 8 at (10, 0)). F rounds the circle where the first cylinder leaves the
+        top (r 2). Returns P, the plate, the boss, F and P's volume."""
         p = self.doc.addObject("PartDesign::Body", "P")
         self.S.addObject(p)
         plate = pad(p, "Plate", sketch(p, "PlateSk", xyPlane(p), (0, -25, 80, 25)), 10)
-        circle = sketch(p, "BossSk", xyPlane(p), z=5)
-        circle.addGeometry(Part.Circle(V(60, 0, 0), V(0, 0, 1), 12))
-        boss = pad(p, "Boss", circle, 25)
+        circles = sketch(p, "BossSk", xyPlane(p), z=5)
+        circles.addGeometry(Part.Circle(V(60, 0, 0), V(0, 0, 1), 12))
+        if second:
+            circles.addGeometry(Part.Circle(V(10, 0, 0), V(0, 0, 1), 8))
+        boss = pad(p, "Boss", circles, 25)
         PartDesign.studioReconcile(self.list)
         self.doc.recompute()
         f = makeDressUp(self.doc, self.S, "F", [pickAt(p, V(60, 0, 10))], 2)
         self.assertClean(f)
         # A concave round r on a circle R: the fillet adds material
-        added = p.Shape.Volume - (80 * 50 * 10 + math.pi * 144 * 20)
-        self.assertAlmostEqual(added, self.concaveRound(2, 12), places=3)
+        square = 80 * 50 * 10 + math.pi * (144 + (64 if second else 0)) * 20
+        self.assertAlmostEqual(p.Shape.Volume - square, self.concaveRound(2, 12), places=3)
         return p, plate, boss, f, p.Shape.Volume
 
     @staticmethod
@@ -442,15 +445,20 @@ class TestStudioDressUp(unittest.TestCase):
         disc = math.pi * r * r / 4 * (R + r - 4 * r / (3 * math.pi))
         return 2 * math.pi * (square - disc)
 
-    def insertBefore(self, part, objects, target):
-        """Moves the objects, made at part's tip, to just after target, in order"""
-        for obj in objects:
-            part.removeObject(obj)
-        for obj in objects:
-            part.insertObject(obj, target, True)
-            target = obj
+    def wallBeforeTheBoss(self, p, plate, x):
+        """A wall across the plate (x..x + 2, 2 high) inserted just after the plate"""
+        wallSketch = sketch(p, "WallSk", xyPlane(p), (x, -25, x + 2, 25), z=10)
+        wall = pad(p, "Wall", wallSketch, 2)
+        for obj in (wallSketch, wall):
+            p.removeObject(obj)
+        p.insertObject(wallSketch, plate, True)
+        p.insertObject(wall, wallSketch, True)
         PartDesign.studioReconcile(self.list)
         self.doc.recompute()
+        return wallSketch, wall
+
+    def pickName(self, f):
+        return App.expandMappedName(f.StudioPickIds[0].split("|", 1)[1])
 
     def testAWallInsertedBeforeTheBossKeepsTheFarJunctionEdge(self):
         """ops#808: a wall across the plate (x 25..27, 2 high), inserted before the boss, leaves
@@ -459,12 +467,11 @@ class TestStudioDressUp(unittest.TestCase):
         wall (2 x 50 x 2), and without the wall again it is as before."""
         p, plate, boss, f, before = self.bossOnAPlate()
         pick = list(f.StudioPickIds)
-        wallSketch = sketch(p, "WallSk", xyPlane(p), (25, -25, 27, 25), z=10)
-        wall = pad(p, "Wall", wallSketch, 2)
-        self.insertBefore(p, [wallSketch, wall], plate)
+        wallSketch, wall = self.wallBeforeTheBoss(p, plate, 25)
         self.assertEqual(boss.BaseFeature, wall)
-        name = App.expandMappedName(boss.Shape.getElementMappedName(edgeAt(boss.Shape, V(60, 0, 10))))
-        self.assertIn(";MOD;", name.replace("^", ""), "the junction edge is made from a piece")
+        edge = edgeAt(boss.Shape, V(60, 0, 10))
+        name = App.expandMappedName(boss.Shape.getElementMappedName(edge))
+        self.assertNotEqual(name, self.pickName(f), "the junction edge has another name")
         self.assertClean(f)
         self.assertAlmostEqual(p.Shape.Volume, before + 200, places=3)
         self.assertEqual(list(f.StudioPickIds), pick, "the pick is stored as it was")
@@ -476,20 +483,33 @@ class TestStudioDressUp(unittest.TestCase):
         self.assertClean(f)
         self.assertAlmostEqual(p.Shape.Volume, before, places=3)
 
-    def testAnotherBossesJunctionIsNotThePick(self):
-        """The rule names only what the pick's maker made from the pick's sources: with the wall
-        in place, a second boss (r 8 at (10, 0)) on the other piece of the top has a junction
-        circle of its own, which F leaves square."""
-        p, plate, boss, f, before = self.bossOnAPlate()
-        wallSketch = sketch(p, "WallSk", xyPlane(p), (25, -25, 27, 25), z=10)
-        wall = pad(p, "Wall", wallSketch, 2)
-        circle = sketch(p, "Boss2Sk", xyPlane(p), z=5)
-        circle.addGeometry(Part.Circle(V(10, 0, 0), V(0, 0, 1), 8))
-        boss2 = pad(p, "Boss2", circle, 25)
-        self.insertBefore(p, [wallSketch, wall, circle, boss2], plate)
-        self.assertEqual(boss.BaseFeature, boss2)
+    def testTheSameBossesOtherJunctionIsNotThePick(self):
+        """The boss's sketch has a second circle (r 8 at (10, 0)), on the other side of the
+        wall: its junction circle is made by the same feature from the other piece of the
+        same top, but from another cylinder. F leaves it square: the part is as before plus
+        the wall."""
+        p, plate, boss, f, before = self.bossOnAPlate(second=True)
+        self.wallBeforeTheBoss(p, plate, 25)
         self.assertClean(f)
-        self.assertAlmostEqual(p.Shape.Volume, before + 200 + math.pi * 64 * 20, places=3)
+        self.assertAlmostEqual(p.Shape.Volume, before + 200, places=3)
+
+    def testAWallUnderTheBossLeavesEveryArcPicked(self):
+        """The wall (x 55..57) runs under the boss: the junction circle is left in arcs on both
+        pieces of the top, two of them on one piece (told apart by their ends). F's step holds
+        them all: the circle less the two stretches the wall takes (review 1)."""
+        p, plate, boss, f, before = self.bossOnAPlate()
+        self.wallBeforeTheBoss(p, plate, 55)
+        self.assertNotIn("not found", f.getStatusString())
+        step = self.step(f, p)
+        base, subs = step.Base
+        self.assertEqual(base, boss)
+        held = sum(boss.Shape.getElement(sub).Length for sub in subs)
+        taken = 2 * 12 * (math.acos(-5 / 12) - math.acos(-3 / 12))
+        self.assertAlmostEqual(held, 2 * math.pi * 12 - taken, places=6)
+        for sub in subs:
+            edge = boss.Shape.getElement(sub)
+            self.assertAlmostEqual(edge.Curve.Radius, 12, places=9)
+            self.assertAlmostEqual(edge.CenterOfMass.z, 10, places=9)
 
     # ------------------------------------------------------------------------------- ops#640 C1
     def notchedFillet(self, r=1):
