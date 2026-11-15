@@ -182,6 +182,40 @@ class TestCompatRecord(unittest.TestCase):
             self.assertEqual(masker.tag("-" + str(box.ID)), "{-PartFile#Box}")
         self.assertEqual(masker.tag(str(link.ID)), "{Link}")
 
+    def testSliverGapIsRefusedWithTheHealOff(self):
+        """SliverGap's builder is the Boolean sliver heal's record (ops#640): switched off, the
+        pad's fuse leaves each foot's wall 1.2e-6 off its flank's cylinder and the builder must
+        refuse the model; switched on, it builds at the closed form."""
+        from PartDesignTests.Compat import models
+
+        def make(stem):
+            doc = self.newDocument(stem)
+            doc.HistoryAlgorithm = "V2"
+            doc.InternNames = True
+            doc.ReferenceSolver = True
+            return doc
+
+        group = App.ParamGet("User parameter:BaseApp/Preferences/Mod/Part/Boolean")
+        stored = "HealSliverCorners" in group.GetBools()
+        was = group.GetBool("HealSliverCorners", True)
+        forced = os.environ.pop("FREECAD_CH_HEAL_SLIVER_CORNERS", None)  # it would win
+        try:
+            group.SetBool("HealSliverCorners", False)
+            with self.assertRaisesRegex(AssertionError, "off its flank's cylinder"):
+                models.MODELS["SliverGap"](make)
+            group.SetBool("HealSliverCorners", True)
+            expected = models.MODELS["SliverGap"](make)
+            pad = self.docs[-1].getObject("Grips")
+            self.assertTrue(pad.Shape.isValid())
+            self.assertAlmostEqual(pad.Shape.Volume, expected["volumes"]["Grips"], delta=1e-5)
+        finally:
+            if stored:
+                group.SetBool("HealSliverCorners", was)
+            else:
+                group.RemBool("HealSliverCorners")
+            if forced is not None:
+                os.environ["FREECAD_CH_HEAL_SLIVER_CORNERS"] = forced
+
 
 class TestCompatDeltas(unittest.TestCase):
     """A generation's delta file (beta-compatibility 3.5, ops#640 SC7): an intended change of a

@@ -1116,6 +1116,149 @@ def RevolveFreeFormProfile(make):
     }
 
 
+GRIP_ROOT = 82.345905
+GRIP_FLANK = 0.4
+GRIP_HALF = math.radians(0.068)
+GRIP_PITCH = 2 * math.pi / 229
+GRIP_REACH = 2 * math.asin(GRIP_FLANK / 2 / GRIP_ROOT)
+
+
+def _gripAt(radius, angle):
+    return V(radius * math.cos(angle), radius * math.sin(angle), 0)
+
+
+def _gripArc(centre, radius, start, end):
+    """The circle arc about `centre`, counter-clockwise from `start` to `end`."""
+    a0 = math.atan2(start.y - centre.y, start.x - centre.x)
+    a1 = math.atan2(end.y - centre.y, end.x - centre.x)
+    while a1 <= a0:
+        a1 += 2 * math.pi
+    return Part.ArcOfCircle(Part.Circle(centre, V(0, 0, 1), radius), a0, a1)
+
+
+def gripCell(k, dip, gap):
+    """The outline of grip k: its base arc on the root circle, the tip arc `GRIP_FLANK` beyond it,
+    two flank arcs of that radius centred on the root circle, and at each foot a line from the
+    flank's end `dip` inside the root circle out to the root circle, `gap` along it beside where
+    the flank's circle crosses it: the sliver."""
+    a = k * GRIP_PITCH
+
+    def inner(angle, side):
+        # where the flank's circle about the root circle's point at `angle` meets radius root - dip
+        rho = GRIP_ROOT - dip
+        x = (GRIP_ROOT**2 + rho**2 - GRIP_FLANK**2) / (2 * GRIP_ROOT)
+        up = side * math.sqrt(rho**2 - x**2)
+        c, s = math.cos(angle), math.sin(angle)
+        return V(c * x - s * up, s * x + c * up, 0)
+
+    c1 = _gripAt(GRIP_ROOT, a - GRIP_HALF)
+    c2 = _gripAt(GRIP_ROOT, a + GRIP_HALF)
+    s1 = inner(a - GRIP_HALF, -1)
+    s2 = inner(a + GRIP_HALF, 1)
+    l1 = _gripAt(GRIP_ROOT, a - GRIP_HALF - GRIP_REACH + gap / GRIP_ROOT)
+    l2 = _gripAt(GRIP_ROOT, a + GRIP_HALF + GRIP_REACH - gap / GRIP_ROOT)
+    rise = _gripAt(GRIP_ROOT + GRIP_FLANK, a - GRIP_HALF)
+    fall = _gripAt(GRIP_ROOT + GRIP_FLANK, a + GRIP_HALF)
+    origin = V(0, 0, 0)
+    return [
+        _gripArc(origin, GRIP_ROOT, l1, l2),
+        Part.LineSegment(l2, s2),
+        _gripArc(c2, GRIP_FLANK, fall, s2),
+        _gripArc(origin, GRIP_ROOT + GRIP_FLANK, rise, fall),
+        _gripArc(c1, GRIP_FLANK, s1, rise),
+        Part.LineSegment(s1, l1),
+    ]
+
+
+def gripWheelArea(grips):
+    """The area of the root disc with `grips` grips, in closed form: the outline's arcs between the
+    corners where their circles cross (Green's theorem per arc)."""
+
+    def sweptTwice(centre, radius, start, end):
+        turn = math.atan2(end.y - centre.y, end.x - centre.x) - math.atan2(
+            start.y - centre.y, start.x - centre.x
+        )
+        while turn <= 0:
+            turn += 2 * math.pi
+        return radius * radius * turn + centre.x * (end.y - start.y) - centre.y * (end.x - start.x)
+
+    origin = V(0, 0, 0)
+    twice = 0.0
+    for k in range(grips):
+        a = k * GRIP_PITCH
+        foot = _gripAt(GRIP_ROOT, a - GRIP_HALF - GRIP_REACH)
+        rise = _gripAt(GRIP_ROOT + GRIP_FLANK, a - GRIP_HALF)
+        fall = _gripAt(GRIP_ROOT + GRIP_FLANK, a + GRIP_HALF)
+        land = _gripAt(GRIP_ROOT, a + GRIP_HALF + GRIP_REACH)
+        following = (0.0 if k + 1 == grips else a + GRIP_PITCH) - GRIP_HALF - GRIP_REACH
+        twice += sweptTwice(_gripAt(GRIP_ROOT, a - GRIP_HALF), GRIP_FLANK, foot, rise)
+        twice += sweptTwice(origin, GRIP_ROOT + GRIP_FLANK, rise, fall)
+        twice += sweptTwice(_gripAt(GRIP_ROOT, a + GRIP_HALF), GRIP_FLANK, fall, land)
+        twice += sweptTwice(origin, GRIP_ROOT, land, _gripAt(GRIP_ROOT, following))
+    return twice / 2
+
+
+def wallStandOff(shape):
+    """How far the shape's vertical straight edges stand off the cylinders they bound: the widest
+    distance, and how many edge and cylinder pairs were measured."""
+    worst, measured = 0.0, 0
+    for edge in shape.Edges:
+        curve = edge.Curve
+        if curve.TypeId != "Part::GeomLine" or abs(curve.Direction.z) < 0.999:
+            continue
+        point = edge.valueAt((edge.FirstParameter + edge.LastParameter) / 2)
+        for face in shape.ancestorsOfType(edge, Part.Face):
+            surface = face.Surface
+            if surface.TypeId != "Part::GeomCylinder":
+                continue
+            measured += 1
+            off = abs(point.distanceToLine(surface.Center, surface.Axis) - surface.Radius)
+            worst = max(worst, off)
+    return worst, measured
+
+
+def SliverGap(make):
+    """A pad whose fuse meets a sliver beside each corner (ops#640, FSLC rb50/51): the Boolean
+    sliver heal's record.
+
+    Body: a disc of radius 82.345905 padded 7.55, then four grips padded 7.55 on it (`gripCell`,
+    pitch 2 pi / 229, flanks of radius 0.4, tip 0.4 beyond the root): each foot line starts 1e-3
+    inside the root circle and reaches it 1.2e-6 beside the flank circle's crossing. The fuse
+    merges the two into one vertex. Without the heal the wall edge at each foot stands 1.2e-6 off
+    the flank's cylinder (the body stays valid, and a measure along its edges comes out short by
+    half the root radius times the gap per corner); with it each wall is on its two cylinders
+    (measured 4e-14) and the body is the closed form: `gripWheelArea(4)` times 7.55. The builder
+    refuses the open state, so a build with the heal off can't record this model."""
+    grips, height, dip, gap = 4, 7.55, 1e-3, 1.2e-6
+    doc = make("SliverGap")
+    body = newBody(doc, "Body")
+    disc = attachedSketch(
+        body,
+        "DiscSketch",
+        plane(body, "XY_Plane"),
+        [Part.Circle(V(0, 0, 0), V(0, 0, 1), GRIP_ROOT)],
+    )
+    m.pad(body, disc, height, "Disc")
+    outline = []
+    for k in range(grips):
+        outline += gripCell(k, dip, gap)
+    cells = attachedSketch(body, "GripsSketch", plane(body, "XY_Plane"), outline)
+    pad = m.pad(body, cells, height, "Grips")
+    doc.recompute()
+    volume = gripWheelArea(grips) * height
+    off, measured = wallStandOff(pad.Shape)
+    if measured < 4 * grips:
+        raise AssertionError(f"Grips has {measured} wall edges on cylinders, expected 16 or more")
+    if off > 1e-8:
+        raise AssertionError(
+            f"Grips: a wall edge stands {off:.3g} off its flank's cylinder, allowed 1e-8 "
+            "(the Boolean sliver heal closes it)"
+        )
+    if abs(pad.Shape.Volume - volume) > 1e-5:
+        raise AssertionError(f"Grips volume {pad.Shape.Volume!r}, expected {volume!r} within 1e-5")
+    return {"volumes": {"Grips": volume}}
+
+
 MODELS = [
     RevolutionGroove,
     SidedVariants,
@@ -1133,4 +1276,5 @@ MODELS = [
     FacePatternCentered,
     RevolveFreeFormProfile,
     RoundUnderLeaningWall,
+    SliverGap,
 ]
