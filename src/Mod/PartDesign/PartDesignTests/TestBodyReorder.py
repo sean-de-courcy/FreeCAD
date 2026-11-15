@@ -3104,6 +3104,51 @@ class BodyReorderBase:
         self.recompute()
         self.assertRecordEndedOnNewcomer(sketch, hole, newcomer)
 
+    def roundAtTheTop(self):
+        """A 1 mm fillet on the block's vertical edge at (0, 0), moved to the top of the history
+        (after the block's sketch, so no solid comes before it): it fails, its edge set aside."""
+        block = self.block()
+        self.recompute()
+        fillet = self.body.newObject("PartDesign::Fillet", "Round")
+        fillet.Base = (block, [edgeWhere(block.Shape, lambda e: isVerticalLineAt(e, 0, 0))])
+        fillet.Radius = 1
+        self.recompute()
+        self.assertBody(BLOCK - ROUND)
+        self.body.reorderObject([fillet], block.Profile[0], True)
+        self.assertIsNone(fillet.BaseFeature)
+        self.recompute()
+        self.assertTrue(fillet.isError())
+        return block, fillet
+
+    def testDressUpMovedToTheTopAndBack(self):
+        """ops#784 (Onshape: a feature moved above what it references fails, and moved back it
+        works again): the fillet moved back after the block takes its edge again."""
+        block, fillet = self.roundAtTheTop()
+        self.body.reorderObject([fillet], block, True)
+        self.assertChain(block, fillet)
+        self.assertIs(fillet.Base[0], block)
+        self.recompute()
+        self.assertValid(block, fillet)
+        edge = fillet.Base[0].Shape.getElement(fillet.Base[1][0])
+        self.assertTrue(isVerticalLineAt(edge, 0, 0))
+        self.assertBody(BLOCK - ROUND)
+
+    def testDressUpMovedToTheTopAndBackOntoAnotherBase(self):
+        """ops#784: moved back below a hole that came after the block, the fillet's Base is the
+        hole (its base) and finds the same edge there."""
+        block, fillet = self.roundAtTheTop()
+        hole = self.hole()
+        self.recompute()
+        self.body.reorderObject([fillet], hole, True)
+        self.assertChain(block, hole, fillet)
+        self.assertIs(fillet.Base[0], hole)
+        self.recompute()
+        self.assertValid(block, hole, fillet)
+        edge = fillet.Base[0].Shape.getElement(fillet.Base[1][0])
+        self.assertTrue(isVerticalLineAt(edge, 0, 0))
+        self.assertBody(BLOCK - ROUND - HOLE)
+
+
 def isFrontFace(face):
     """A face on the block's front (y = 0), facing -y."""
     return abs(face.normalAt(0, 0).y + 1) < TOL and abs(face.CenterOfMass.y) < TOL
