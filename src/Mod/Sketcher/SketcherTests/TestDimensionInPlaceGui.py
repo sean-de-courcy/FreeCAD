@@ -1899,3 +1899,39 @@ class TestDimensionInPlaceGui(SketcherGuiTestCase):
         self.doc.recompute()
         self.assertNotAlmostEqual(self.sketch.Constraints[2].Value, INCH_MM / 8, places=6)
         self.assert_shown_value(2, shown["text"], INCH_MM)
+
+    # D59-D60: the guard is exact in any display (ops#684 review N1 N2) -----------------------
+
+    BUILDING_US = 5  # "ImperialBuilding": feet and inches, fractions (1' 2 1/8")
+
+    def test_d59_building_us_in_place_step_is_applied(self):
+        """D59 (review N1): Building US, the new Distance's field on a line of 14 in (1' 2"), Up,
+        Enter: the stepped value is applied, not the 14 in it opened with."""
+        self.use_units(self.BUILDING_US)
+        self.add_line(end=V(14 * INCH_MM, 0, 0))
+        self.start_edit()
+        record = {}
+
+        def step(popup, edit):
+            record["before"] = edit.text()
+            QTest.keyClick(edit, QtCore.Qt.Key_Up)
+            record["after"] = edit.text()
+
+        state = self.answer_fields([{"act": step, "key": QtCore.Qt.Key_Return}])
+        self.run_with_selection(["Edge1"], "Sketcher_ConstrainDistance")
+        self.wait_answered(state, 1)
+        self.assertNotEqual(record["before"], record["after"], record)
+        self.assertEqual(self.expressions(), {})
+        self.assertGreater(
+            abs(self.constraints_of("Distance")[0].Value - 14 * INCH_MM), 1.0, record
+        )
+
+    def test_d60_building_us_dialog_keeps_the_kept_text(self):
+        """D60 (review N2): Building US, the dialog on a Distance kept as (1/8) in, OK unchanged:
+        the field shows 1/8" once the dialog hides, and the kept expression stays (3.175 mm)."""
+        self.add_kept_distance(self.BUILDING_US, "(1/8) in", "(1/8) in")
+        before = self.expressions()
+        self.assertEqual(self.edit_from_list(2, None, accept=True), "(1/8) in")
+        self.doc.recompute()
+        self.assertEqual(self.expressions(), before)
+        self.assertAlmostEqual(self.sketch.Constraints[2].Value, INCH_MM / 8, places=9)
