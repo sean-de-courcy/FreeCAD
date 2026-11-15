@@ -198,7 +198,11 @@ namespace
 // Connected Name a neighbour whose name holds the element's own name as it was (a face made from
 // the split edge, a dress-up's or refine's edge named from the split face): such a mark multiplied
 // the name's full length per split. The pieces keep their other marks.
-constexpr int ForkNamingRevision = 19;
+// 20: ops#806, a face that a feature split and its refine made whole again (a flush rib reaching
+// into a plate's top face; a groove filled flush) takes its name from before the split again,
+// first, when the merged face holds every piece of that split; the pieces' names follow. The
+// elements later features generate on it are named from the whole face, as without the split.
+constexpr int ForkNamingRevision = 20;
 
 // The `.N<n>` of the element map version: the form interned names are saved in (ops#6). 2: the
 // references are indices into the file's table (NamingFormat 2).
