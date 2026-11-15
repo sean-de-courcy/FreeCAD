@@ -1005,6 +1005,19 @@ void MainWindow::cascade()
 
 void MainWindow::closeActiveWindow()
 {
+    // FreeCAD-CH (ops#802): with the typed tabs a document's views are its tabs' views; closing
+    // one (an assembly's, the studio's) left the document open on another with no question.
+    // Close closes the document, asking to save it as the document strip's X does
+    if (DocumentTabs::isOn()) {
+        MDIView* view = activeWindow();
+        Gui::Document* gdoc = view ? view->getGuiDocument() : nullptr;
+        if (gdoc && gdoc->getDocument()) {
+            if (gdoc->canClose()) {
+                App::GetApplication().closeDocument(gdoc->getDocument()->getName());
+            }
+            return;
+        }
+    }
     d->mdiArea->closeActiveSubWindow();
 }
 
