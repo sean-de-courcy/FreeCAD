@@ -915,7 +915,10 @@ std::vector<Body*> makePieces(App::DocumentObject* entry, std::string* why)
     // is left, and the recompute of what it changes. Without this, a dimension's OK in a
     // 22-feature studio computed the history three more times (twice here, once more when the
     // caller's abort of this empty step rolled the results back): 4-5 s for one edit
-    const auto quiet = [entry, doc]() {
+    // upstream: also nothing they read, however far, waits for a recompute (a value written
+    // before the entry and not computed: the entry's results are then not the ones the command
+    // would see; review r1 F1)
+    const auto quiet = [entry, doc](bool upstream) {
         std::vector<App::DocumentObject*> objs {entry};
         for (auto step : StudioList::stepsOf(entry)) {
             objs.push_back(step);
@@ -923,6 +926,19 @@ std::vector<Body*> makePieces(App::DocumentObject* entry, std::string* why)
         for (auto obj : objs) {
             if (obj->isError() || obj->isTouched() || obj->mustExecute() > 0) {
                 return false;
+            }
+        }
+        if (upstream) {
+            std::set<App::DocumentObject*> read;
+            for (auto obj : objs) {
+                for (auto out : obj->getOutListRecursive()) {
+                    read.insert(out);
+                }
+            }
+            for (auto obj : read) {
+                if (obj->isTouched() || obj->mustExecute() > 0) {
+                    return false;
+                }
             }
         }
         for (auto result : resultsOf(entry)) {
@@ -946,7 +962,7 @@ std::vector<Body*> makePieces(App::DocumentObject* entry, std::string* why)
         doc->recompute({}, /*force=*/true);
         return std::vector<Body*>();
     };
-    if (quiet()) {
+    if (quiet(/*upstream=*/true)) {
         return nothingToMake();
     }
     {
@@ -957,7 +973,7 @@ std::vector<Body*> makePieces(App::DocumentObject* entry, std::string* why)
     // The same once it is computed (a moved row, a suppression, a value changed outside a
     // dialog): the flag silenced nothing, so the second recompute of the history that would
     // make the entry loud again has nothing to say
-    if (quiet()) {
+    if (quiet(/*upstream=*/false)) {
         return nothingToMake();
     }
     // A refusal after the recompute under the guard: computed again outside it, so that entry
