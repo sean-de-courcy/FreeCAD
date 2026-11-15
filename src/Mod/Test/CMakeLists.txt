@@ -49,6 +49,7 @@ SET(Test_SRCS
     TestDocumentTabsGui.py
     TestSaveGuardGui.py
     TestPresence.py
+    TestFolderSyncOpen.py
     TestPresenceGui.py
     TestVariableStudioGui.py
 )

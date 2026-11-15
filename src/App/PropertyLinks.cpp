@@ -32,6 +32,7 @@
 
 #include <Base/Console.h>
 #include <Base/Exception.h>
+#include <Base/FileInfo.h>
 #include <Base/Reader.h>
 #include <Base/Writer.h>
 #include <Base/Tools.h>
@@ -5861,7 +5862,7 @@ public:
                            l->testFlag(PropertyLinkBase::LinkAllowPartial))
                         == 0) {
                     for (App::Document* doc : App::GetApplication().getDocuments()) {
-                        if (getFullPath(doc->getFileName()) == fullpath) {
+                        if (isFileOf(doc->getFileName(), fullpath)) {
                             info->attach(doc);
                             break;
                         }
@@ -5885,6 +5886,26 @@ public:
 
         info->links.insert(l);
         return info;
+    }
+
+    // FreeCAD-CH (folder-sync item 4): whether the open document's file is the one at fullpath,
+    // also when its path is spelled differently (`parts/A.FCStd` for `Parts/A.FCStd`): the link
+    // then attaches to that document instead of opening the file a second time
+    static bool isFileOf(const char* docFile, const QString& fullpath)
+    {
+        const QString path = getFullPath(docFile);
+        if (path == fullpath) {
+            return true;
+        }
+        if (path.isEmpty() || fullpath.isEmpty() || fullpath.startsWith(QLatin1String("https://"))) {
+            return false;
+        }
+        std::error_code ec;
+        const bool same =
+            std::filesystem::equivalent(Base::FileInfo::stringToPath(path.toUtf8().constData()),
+                                        Base::FileInfo::stringToPath(fullpath.toUtf8().constData()),
+                                        ec);
+        return same && !ec;
     }
 
     static QString getFullPath(const char* p)
@@ -5957,7 +5978,7 @@ public:
         }
         else {
             for (App::Document* doc : App::GetApplication().getDocuments()) {
-                if (getFullPath(doc->getFileName()) == fullpath) {
+                if (isFileOf(doc->getFileName(), fullpath)) {
                     if (doc->testStatus(App::Document::PartialDoc) && !doc->getObject(objName)) {
                         break;
                     }
@@ -6193,7 +6214,7 @@ public:
             return;
         }
         QString fullpath(getFullPath());
-        if (!fullpath.isEmpty() && getFullPath(doc.getFileName()) == fullpath) {
+        if (!fullpath.isEmpty() && isFileOf(doc.getFileName(), fullpath)) {
             attach(const_cast<App::Document*>(&doc));
         }
     }
