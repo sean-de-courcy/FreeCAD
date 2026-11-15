@@ -146,6 +146,7 @@ from PartDesignTests.TestNamingScenarios import *  # one class per scenario (Fre
 from PartDesignTests.TestNamingRList import TestNamingRList  # FreeCAD-CH, ops#5
 from PartDesignTests.TestNamingSolver import TestNamingSolver  # FreeCAD-CH, ops#7
 from PartDesignTests.TestNameGrowth import TestNameGrowth  # FreeCAD-CH, ops#640
+from PartDesignTests.TestRefineWholeNames import TestRefineWholeNames  # FreeCAD-CH, ops#806
 from PartDesignTests.TestNamingRewrite import TestNamingRewrite  # FreeCAD-CH, ops#504
 from PartDesignTests.TestMaplessNames import (  # FreeCAD-CH, ops#502, ops#633
     TestMaplessNames,
