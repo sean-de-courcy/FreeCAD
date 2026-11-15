@@ -70,6 +70,7 @@ set(PartDesign_TestScripts
     PartDesignTests/TestPatternRules.py
     PartDesignTests/TestDraftRules.py
     PartDesignTests/TestDraftSplitNaming.py
+    PartDesignTests/TestCapSplitNaming.py
     PartDesignTests/TestHoleDepth.py
     PartDesignTests/TestBoolean.py
     PartDesignTests/TestBaseFeature.py

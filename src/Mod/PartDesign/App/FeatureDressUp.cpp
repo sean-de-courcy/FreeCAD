@@ -850,7 +850,8 @@ Part::Feature* dressUpBaseOf(const DressUp* owner, const Body* part)
 /// Whether the element named candidate (expanded) is the pick's element: the same name, a piece
 /// of it (a split, NameAncestry::isPieceOf), the name made again by the same feature from pieces
 /// of its sources (ops#808: a face split by a feature inserted before the element's maker,
-/// NameAncestry::isMadeFromPiecesOf), or the name modified by a later feature (";:M", a
+/// NameAncestry::isMadeFromPiecesOf; ops#849: a pad's cap whose profile gained or lost an edge,
+/// the same call), or the name modified by a later feature (";:M", a
 /// merge's fuse); never by equality of a stored, possibly shortened form (skeptic 1)
 bool namesPick(const std::string& candidate, const std::string& pick)
 {

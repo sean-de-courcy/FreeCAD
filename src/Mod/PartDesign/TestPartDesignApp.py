@@ -109,6 +109,10 @@ from PartDesignTests.TestDraftSplitNaming import (  # FreeCAD-CH, ops#845
     TestDraftRimThroughSplitOwners,
     TestDraftRimThroughSplitBody,
 )
+from PartDesignTests.TestCapSplitNaming import (  # FreeCAD-CH, ops#849
+    TestCapRimThroughProfileEditOwners,
+    TestCapRimThroughProfileEditBody,
+)
 from PartDesignTests.TestHoleDepth import TestHoleDepth  # FreeCAD-CH, ops#640
 from PartDesignTests.TestBoolean import TestBoolean
 from PartDesignTests.TestBaseFeature import TestBaseFeature
