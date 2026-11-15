@@ -1644,6 +1644,14 @@ App::DocumentObjectExecReturn* Transformed::execute()
         if (isListedStep(*this) || hasParkedOriginals(this)) {
             return App::DocumentObject::StdReturn;
         }
+        // FreeCAD-CH (ops#594): out of the chain with no base (its original deleted from Python
+        // without Body::removeObject, which reroutes it), and the Body's Tip: the Body copies the
+        // Tip's shape, so it shows the solid before it, not this one's last shape with the deleted
+        // original's copies
+        if (auto body = getFeatureBody(); body && body->Tip.getValue() == this) {
+            auto prev = freecad_cast<Part::Feature*>(body->getPrevSolidFeature(this));
+            Shape.setValue(prev ? prev->Shape.getShape() : Part::TopoShape());
+        }
         return nothingToTransform(*this);
     }
 
