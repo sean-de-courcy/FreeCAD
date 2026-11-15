@@ -107,6 +107,12 @@ bool isWalked(const App::DocumentObject* owner, const App::Property* prop)
     return isInputLink(owner, prop) && !followsBase(owner, prop);
 }
 
+bool isDressUpBase(const App::DocumentObject* owner, const App::Property* prop)
+{
+    auto dressUp = freecad_cast<const PartDesign::DressUp*>(owner);
+    return dressUp && prop == &dressUp->Base;
+}
+
 bool isFeatureBase(const App::DocumentObject* obj)
 {
     return obj && obj->isDerivedFrom<PartDesign::FeatureBase>();
@@ -964,7 +970,8 @@ private:
         std::vector<App::Property*> props;
         owner->getPropertyList(props);
         for (auto prop : props) {
-            if (!isWalked(owner, prop)) {
+            const bool dressUpBase = isDressUpBase(owner, prop);
+            if (!isWalked(owner, prop) && !(dressUpBase && walksDressUpBase(owner, items))) {
                 continue;
             }
             auto state = readState(owner, prop);
@@ -980,7 +987,19 @@ private:
                 if (target && x && atOrAfter(target, x)) {
                     continue;  // still after the feature that uses it
                 }
-                if (target) {
+                if (target && dressUpBase) {
+                    // A dress-up's Base follows its base (ops#784): back onto the base it has now,
+                    // the parked names looked up on it as moved references are
+                    auto base = plannedBase(owner);
+                    if (!base) {
+                        continue;  // still the first solid: stays parked
+                    }
+                    putBack(*state, items[i], target);
+                    if (base != target) {
+                        retargetOnto(*state, target, base);
+                    }
+                }
+                else if (target) {
                     putBack(*state, items[i], target);
                 }
                 else if (items[i].extgeo) {
@@ -1055,26 +1074,7 @@ private:
             // that feature's base, or parked without one
             auto base = plannedBase(x);
             if (!unit.subs.empty() && base) {
-                std::vector<SubEntry> moved;
-                std::set<std::string> keys;
-                std::string first;
-                for (const auto& s : unit.subs) {
-                    auto record = recordFor(s, unit.obj);
-                    if (!keys.insert(recordKey(record)).second) {
-                        continue;
-                    }
-                    if (first.empty()) {
-                        first = recordKey(record);
-                    }
-                    SubEntry entry =
-                        missingForm(record.origName, record.origIndex, record.origFp, false);
-                    entry.record = record;
-                    moved.push_back(std::move(entry));
-                }
-                unit.obj = base;
-                unit.subs = std::move(moved);
-                unit.edited = state.changed = true;
-                state.solveOn.insert(base);
+                auto first = moveUnit(state, unit, base);
                 if (list && !first.empty() && !seen.insert(first).second) {
                     unit.dropped = true;
                 }
@@ -1084,6 +1084,64 @@ private:
             // geometries and their constraints stay, only the link is set aside
             park(state, unit, newLines);
         }
+    }
+
+    /// Moves unit onto base with its references missing, each carrying its re-target record (N1
+    /// 3.2); returns the first record's key
+    std::string moveUnit(PropertyState& state, Unit& unit, App::DocumentObject* base)
+    {
+        std::vector<SubEntry> moved;
+        std::set<std::string> keys;
+        std::string first;
+        for (const auto& s : unit.subs) {
+            auto record = recordFor(s, unit.obj);
+            if (!keys.insert(recordKey(record)).second) {
+                continue;
+            }
+            if (first.empty()) {
+                first = recordKey(record);
+            }
+            SubEntry entry = missingForm(record.origName, record.origIndex, record.origFp, false);
+            entry.record = record;
+            moved.push_back(std::move(entry));
+        }
+        unit.obj = base;
+        unit.subs = std::move(moved);
+        unit.edited = state.changed = true;
+        state.solveOn.insert(base);
+        return first;
+    }
+
+    /// The units just put back on target go on to base instead (ops#784: a dress-up's Base is on
+    /// its base, which needn't be the solid its edges were parked from)
+    void retargetOnto(PropertyState& state, App::DocumentObject* target, App::DocumentObject* base)
+    {
+        for (auto& unit : state.units) {
+            if (!unit.dropped && unit.obj == target && !unit.subs.empty()) {
+                moveUnit(state, unit, base);
+            }
+        }
+        state.solveOn.erase(target);
+    }
+
+    /// A dress-up's Base, which follows its base and is rerouted with it (N1 2.2), is walked by
+    /// the rule only where the reroute can't carry it (ops#784): the dress-up becomes the first
+    /// solid (no base: it is parked, as a reference with nowhere to go), or it has a parked Base
+    /// and is given a base again (put back)
+    bool walksDressUpBase(App::DocumentObject* owner, const std::vector<ParkedItem>& items) const
+    {
+        auto it = newBase.find(owner);
+        if (it == newBase.end()) {
+            return false;  // its base doesn't change
+        }
+        if (!it->second) {
+            return true;
+        }
+        auto dressUp = static_cast<PartDesign::DressUp*>(owner);
+        return !dressUp->Base.getValue()
+            && std::any_of(items.begin(), items.end(), [&](const ParkedItem& item) {
+                   return !item.expression && item.property == dressUp->Base.getName();
+               });
     }
 
     void park(PropertyState& state, Unit& unit, std::vector<std::string>& newLines)
