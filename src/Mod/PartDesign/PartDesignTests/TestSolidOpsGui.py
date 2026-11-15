@@ -46,14 +46,59 @@ class TestSolidOpsGui(unittest.TestCase):
         for cmd in ("PartDesign_Thicken", "PartDesign_ScalePart", "PartDesign_OffsetSurface"):
             self.assertIn(cmd, names)
 
-    def testCommandIconsExist(self):
-        # ops#796: the icons sit under icons/tools/ in Part.qrc; a wrong path showed text-only buttons
-        from PySide import QtCore
+    def testEveryCommandOfTheLayoutHasItsIcon(self):
+        # ops#796: Thicken, Scale and Offset surface named icon paths that don't exist and showed as
+        # text; no test looked. Every command on the PartDesign toolbars and menus whose Pixmap is set
+        # must resolve to a real icon, not BitmapFactory's placeholder, and every toolbar button needs
+        # one (a group button shows its current child's).
+        from PySide import QtWidgets
 
-        for kind in G.KINDS.values():
-            icon = Gui.Command.get(kind["command"]).getInfo()["pixmap"]
-            self.assertEqual(icon, kind["icon"])
-            self.assertTrue(QtCore.QFile(icon).exists(), icon)
+        TEXT_BUTTONS = {"PartDesign_ToggleModelTree"}  # the "Model Tree" toggle is text by design
+        previous = Gui.activeWorkbench().name()
+        Gui.activateWorkbench("PartDesignWorkbench")
+        try:
+            QtWidgets.QApplication.processEvents()
+            mw = Gui.getMainWindow()
+            placeholder = Gui.getIcon("SolidOpsGui_no_such_icon").pixmap(32, 32).toImage()
+            names = set(Gui.listCommands())
+            seen = {}
+
+            def walk(menu, where):
+                for a in menu.actions():
+                    if a.menu():
+                        walk(a.menu(), where)
+                    elif a.objectName() in names:
+                        seen.setdefault(a.objectName(), where)
+
+            for tb in mw.findChildren(QtWidgets.QToolBar):
+                if not tb.isVisible():
+                    continue
+                for a in tb.actions():
+                    if a.objectName() in names:
+                        seen[a.objectName()] = "toolbar"
+                        button = tb.widgetForAction(a)
+                        if button and not button.icon().isNull():
+                            TEXT_BUTTONS.add(a.objectName())  # a group shows its child's icon
+                for b in tb.findChildren(QtWidgets.QToolButton):
+                    if b.menu():
+                        walk(b.menu(), "menu")
+            for a in mw.menuBar().actions():
+                if a.menu():
+                    walk(a.menu(), "menu")
+            self.assertGreater(len(seen), 100)
+            bad = []
+            for name, where in sorted(seen.items()):
+                pixmap = Gui.Command.get(name).getInfo().get("pixmap", "")
+                if not pixmap:
+                    if where == "toolbar" and name not in TEXT_BUTTONS:
+                        bad.append(name + ": toolbar button without an icon")
+                elif Gui.getIcon(pixmap).pixmap(32, 32).toImage() == placeholder:
+                    bad.append("%s: icon %s not found" % (name, pixmap))
+            for kind in G.KINDS.values():
+                self.assertIn(kind["command"], seen)
+            self.assertEqual(bad, [])
+        finally:
+            Gui.activateWorkbench(previous)
 
     def testThickenFromTheSelectedFaceAddsToTheBody(self):
         self.selectTop()
