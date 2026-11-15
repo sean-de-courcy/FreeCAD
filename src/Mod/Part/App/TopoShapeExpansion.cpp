@@ -7081,21 +7081,30 @@ TopoShape& TopoShape::makeElementThickSolid(
         return maker.IsDone() && !maker.Shape().IsNull() && !unchanged(maker)
             && KernelBudget::checkValid(maker.Shape());
     };
-    auto mkThickPtr = build(intersection, join);
     // Offset faces that are not neighbours can meet: the wall around a hole reaches the shell's
     // side wall once the hole is closer to it than its radius and twice the thickness. OCCT
-    // trims each offset face only by its neighbours unless told to intersect them all, and then
-    // returns an invalid shell or none (ops#795). That mode is tried where the plain one fails;
-    // where it fails too, the plain mode's failure is the one reported.
-    const bool fallsApart = !mkThickPtr->IsDone()
-        && mkThickPtr->MakeOffset().Error() == BRepOffset_NotConnectedShell;
-    bool good = !fallsApart && built(*mkThickPtr);
-    if (!intersection && !fallsApart && !good) {
+    // trims each offset face only by its neighbours unless told to intersect them all, and
+    // without that returns an invalid shell or none (ops#795). On a part with features inside
+    // (the 73 faces of a designed studio's body) the plain mode's shell is invalid, and finding
+    // that out costs a third of the feature's time (ops#796). So the intersecting mode is built
+    // first, and the plain one only where that builds no shell. Where both build one it is the
+    // same shell (60 designed cases of 60), its edges in the intersecting mode's order. Where
+    // neither does, the plain mode's failure is the one reported.
+    std::shared_ptr<BRepOffsetAPI_MakeThickSolid> mkThickPtr;
+    bool good = false;
+    if (!intersection) {
         auto withAll = build(true, join);
         if (built(*withAll)) {
             mkThickPtr = withAll;
             good = true;
         }
+    }
+    bool fallsApart = false;
+    if (!good) {
+        mkThickPtr = build(intersection, join);
+        fallsApart = !mkThickPtr->IsDone()
+            && mkThickPtr->MakeOffset().Error() == BRepOffset_NotConnectedShell;
+        good = !fallsApart && built(*mkThickPtr);
     }
     // OCCT's Arc join gives an invalid outward shell, in both modes, where an open face has a
     // hole with sharp corners (a rectangular through pocket: ops#807). Onshape's outward shell
