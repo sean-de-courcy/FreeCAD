@@ -367,8 +367,7 @@ void refresh()
         refreshMarkersImpl();
     }
     catch (const std::exception& e) {
-        Base::Console().log("Presence: %s
-", e.what());
+        Base::Console().log("Presence: %s\n", e.what());
     }
 }
 
