@@ -70,6 +70,7 @@ public:
     static PyObject* sPresence               (PyObject *self,PyObject *args);
     static PyObject* sPresenceMessage        (PyObject *self,PyObject *args);
     static PyObject* sRefreshPresence        (PyObject *self,PyObject *args);
+    static PyObject* sTeamFolderOutside      (PyObject *self,PyObject *args);
     static PyObject* sNewDocument            (PyObject *self,PyObject *args, PyObject *kwd);
     static PyObject* sCloseDocument          (PyObject *self,PyObject *args);
     static PyObject* sActiveDocument         (PyObject *self,PyObject *args);
