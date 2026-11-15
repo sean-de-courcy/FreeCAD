@@ -39,6 +39,7 @@ FRESHMODE = os.environ.get("FUZZ_FRESHMODE", "jump")   # jump | scratch (see fre
 OWNER = os.environ.get("FUZZ_OWNER", "1") == "1"   # Pad/Pocket/Hole/Revolution/Groove as studio owners, as the GUI makes them
 OWNER_DRESS = OWNER and os.environ.get("FUZZ_OWNER_DRESS", "1") == "1"   # Fillet/Chamfer as studio owners too (StudioPickIds)
 AVOID592 = os.environ.get("FUZZ_AVOID592", "0") == "1"   # 1 on heads before lx12: steer clear of the ops#592 state
+TOPOMODE = os.environ.get("FUZZ_TOPO", "edit")   # edit (the GUI's split/delete, ids kept) | redraw (the runs before 11-15)
 STOPAT = set(x for x in os.environ.get("FUZZ_STOPAT", "").split(",") if x)   # e.g. SILENT,LOUD: end the seed at the first one
 SAVED = [0]
 LOG = open("%s/%s.jsonl" % (OUT, TAG), "w", buffering=1)
@@ -139,6 +140,54 @@ def drawSketch(sk, vals, variant):
             drawCircle(sk, tag, g("x", d[0]), g("y", d[1]), g("r", d[2]))
         else:
             drawPoint(sk, tag, g("x", d[0]), g("y", d[1]))
+
+
+def _near(a, b):
+    return (a - b).Length < 1e-7
+
+
+def topoEdit(sk, new):
+    """FUZZ_TOPO=edit (default): the variant change as a user makes it in the sketch, every other element keeping its
+    id: split the first rectangle's bottom edge with the Sketcher's split (and name the split distance), unsplit by
+    deleting the second piece and closing the corner again, add or delete the extra circle alone. A whole redraw
+    (FUZZ_TOPO=redraw) gives every element a new id, which loses every studio pick (StudioPickIds) on the part's
+    edges, as Onshape loses its references to a redrawn sketch: noise for owner dress-ups (scout 3, 11-15)"""
+    var = sketchVariant(sk)
+    cons = list(sk.Constraints)
+    byName = {c.Name: (i, c) for i, c in enumerate(cons) if c.Name}
+    if new == "extra":
+        kind, tag, x, y, r = EXTRA[sk.Name]
+        drawCircle(sk, tag, x, y, r)
+        return
+    if var == "extra":
+        sk.delGeometry(byName["Xr"][1].First)
+        return
+    tag = SPECS[sk.Name][2][0][1]
+    if new == "split":
+        f = byName[tag + "w"][1].First
+        a, b = sk.Geometry[f].StartPoint, sk.Geometry[f].EndPoint
+        w = (b - a).Length
+        sp = round(SPLIT_FRAC * w, 4)
+        n0 = len(sk.Geometry)
+        sk.split(f, V(a.x + sp, a.y, 0))
+        assert len(sk.Geometry) == n0 + 1, "split made %d pieces" % (len(sk.Geometry) - n0 + 1)
+        named(sk, Sketcher.Constraint("DistanceX", f, 1, f, 2, sp), tag + "_split")
+        return
+    # unsplit: f is the first piece; the second starts at f's end and ends at the corner
+    i, c = byName[tag + "_split"]
+    f = c.First
+    sk.delConstraint(i)
+    end = sk.Geometry[f].EndPoint
+    g2 = [g for g, x in enumerate(sk.Geometry) if g != f and isinstance(x, Part.LineSegment) and _near(x.StartPoint, end)][0]
+    corner = sk.Geometry[g2].EndPoint
+    w = byName[tag + "w"][1].Value
+    sk.delGeometry(g2)
+    if g2 < f:
+        f -= 1
+    right = [g for g, x in enumerate(sk.Geometry) if g != f and isinstance(x, Part.LineSegment) and _near(x.StartPoint, corner)][0]
+    sk.addConstraint(Sketcher.Constraint("Coincident", f, 2, right, 1))
+    if tag + "w" not in {c.Name for c in sk.Constraints if c.Name}:
+        named(sk, Sketcher.Constraint("DistanceX", f, 1, f, 2, w), tag + "w")
 
 
 def sketchVals(sk):
@@ -552,9 +601,11 @@ def jumpTo(d, st, state):
         want = {k[len(pre):]: x for k, x in state["vals"].items() if k.startswith(pre)}
         var = state["variants"].get(n, "")
         if var != sketchVariant(sk):
-            sk.deleteAllGeometry()
-            drawSketch(sk, want, var)
-            continue
+            if TOPOMODE != "edit":
+                sk.deleteAllGeometry()
+                drawSketch(sk, want, var)
+                continue
+            topoEdit(sk, var)   # the defaults' sketch is plain: one user edit to the variant, then its values
         cur = sketchVals(sk)
         for k, x in want.items():
             if k in cur and abs(cur[k] - x) > 1e-12:
@@ -666,6 +717,9 @@ def stepTopo(doc, rng):
         new = "" if var == "extra" else "extra"
     else:
         new = "" if var == "split" else "split"
+    if TOPOMODE == "edit":
+        topoEdit(sk, new)
+        return "topo %s %s -> %s" % (n, var or "plain", new or "plain")
     if new != "extra":
         vals = {k: x for k, x in vals.items() if not k.startswith("X")}
     sk.deleteAllGeometry()
