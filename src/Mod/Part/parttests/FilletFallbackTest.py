@@ -1928,6 +1928,60 @@ class LostStepTest(unittest.TestCase):
                         finally:
                             FreeCAD.closeDocument(doc.Name)
 
+    def testRibWithinTheReachAHairBeyondTheBand(self):
+        # ops#612: Pad1 40 x 40 x 10 and a rib 30 x 2 x 10 on it, its front wall d behind the band
+        # of a fillet (or chamfer) of 5 on Pad1's front top edge. OCCT dropped the rib in a valid
+        # solid (fillet 15785.40 for 16385.40), and the rib lies within the generous reach
+        # 5 (1 + sqrt 2) everywhere. Between planes the band's far side is known (5): the rib must
+        # stay, or the feature fails. Onshape keeps it (Parasolid; ops#603)
+        for kind in ("Fillet", "Chamfer"):
+            for d in (1e-9, 1e-7, 5e-7, 1e-3, 1.0):
+                with self.subTest(kind=kind, d=d):
+                    doc = FreeCAD.newDocument("RibInReach")
+                    try:
+                        body = doc.addObject("PartDesign::Body", "Body")
+                        lower = sketched_rectangle(
+                            body, (body.Origin.OriginFeatures[3], [""]), 0, 0, 40, 40, 0
+                        )
+                        pad1 = body.newObject("PartDesign::Pad", "Pad1")
+                        pad1.Profile = lower
+                        pad1.Length = 10
+                        doc.recompute()
+                        top = next(
+                            i
+                            for i, f in enumerate(pad1.Shape.Faces, 1)
+                            if abs(f.CenterOfMass.z - 10) < 1e-9
+                        )
+                        upper = sketched_rectangle(
+                            body, (pad1, ["Face%d" % top]), 5, 5 + d, 35, 7 + d, 10
+                        )
+                        rib = body.newObject("PartDesign::Pad", "Rib")
+                        rib.Profile = upper
+                        rib.Length = 10
+                        doc.recompute()
+                        base = rib.Shape
+                        name = "Edge%d" % next(
+                            i
+                            for i, e in enumerate(base.Edges, 1)
+                            if all(
+                                abs(v.Point.z - 10) < 1e-9 and abs(v.Point.y) < 1e-9
+                                for v in e.Vertexes
+                            )
+                        )
+                        dressed = body.newObject("PartDesign::" + kind, kind)
+                        dressed.Base = (rib, [name])
+                        if kind == "Fillet":
+                            dressed.Radius = 5
+                        else:
+                            dressed.Size = 5
+                        doc.recompute()
+                        block = Part.makeBox(40, 40, 10)
+                        edges = top_outer_edges(block, "one", 10.0)
+                        cut = block.makeFillet(5, edges) if kind == "Fillet" else block.makeChamfer(5, edges)
+                        self.assertKeptOrFails(dressed, base.Volume - (block.Volume - cut.Volume))
+                    finally:
+                        FreeCAD.closeDocument(doc.Name)
+
     def testPartFeaturesAHairShortOfTheStep(self):
         # Part::Fillet and Part::Chamfer on the Body's shape, with one size (the exact
         # construction's route) and with a size per edge (OCCT's maker alone)
