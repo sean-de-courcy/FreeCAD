@@ -403,7 +403,7 @@ class TestMultiTransform(unittest.TestCase):
             self.assertTrue(feature.isValid(), f"{feature.Name}: {feature.getStatusString()}")
             self.assertNotIn("Touched", feature.State)
 
-    def bossedBlock(self):
+    def bossedBlock(self, withCap=True):
         """A 20 x 20 x 10 block, a 5 x 5 x 5 boss on its top at x 3..8, y -8..-3, and a 4 x 4 x 2
         cap at x -2..2, y -2..2 after it: the Body, the boss and the cap."""
 
@@ -419,6 +419,9 @@ class TestMultiTransform(unittest.TestCase):
         body = self.Doc.addObject("PartDesign::Body", "Body")
         pad("Block", -10, -10, 10, 10, 0, 10)
         boss = pad("Boss", 3, -8, 8, -3, 10, 5)
+        if not withCap:
+            self.Doc.recompute()
+            return body, boss, None
         cap = pad("Cap", -2, -2, 2, 2, 10, 2)
         self.Doc.recompute()
         self.assertAlmostEqual(body.Shape.Volume, 4000 + 125 + 32, places=6)
@@ -575,8 +578,7 @@ class TestMultiTransform(unittest.TestCase):
 
     def testPatternOfASuppressedOriginalAtTheTip(self):
         """The same with the pattern last, the Body's Tip: the Body is the plain block."""
-        body, boss, cap = self.bossedBlock()
-        cap.Suppressed = True
+        body, boss, _ = self.bossedBlock(withCap=False)
         pattern = self.patternOfTheBoss(body, boss)
         self.Doc.recompute()
         self.assertEqual(body.Tip, pattern)
@@ -590,10 +592,9 @@ class TestMultiTransform(unittest.TestCase):
         """The boss patterned last, the Body's Tip, then its original taken away, emptied in the
         dialog or deleted as the GUI deletes it: the pattern fails, and the Body is the plain block
         (ops#594: the Body kept the pattern's old shape, the boss and its copy)."""
-        for how in ("emptied", "deleted"):
+        for how in ("emptied", "deleted", "deleted from Python"):
             with self.subTest(how=how):
-                body, boss, cap = self.bossedBlock()
-                cap.Suppressed = True
+                body, boss, _ = self.bossedBlock(withCap=False)
                 pattern = self.patternOfTheBoss(body, boss)
                 self.Doc.recompute()
                 self.assertAlmostEqual(body.Shape.Volume, 4000 + 2 * 125, places=6)
@@ -602,7 +603,10 @@ class TestMultiTransform(unittest.TestCase):
                     self.Doc.recompute()
                     expected = 4000 + 125  # the boss stays, its copy goes
                 else:
-                    self.Doc.removeObject(boss.Name)
+                    name = boss.Name
+                    if how == "deleted":  # as the GUI deletes it
+                        body.removeObject(boss)
+                    self.Doc.removeObject(name)
                     self.Doc.recompute()
                     expected = 4000
                 self.assertFalse(pattern.isValid())
@@ -614,8 +618,7 @@ class TestMultiTransform(unittest.TestCase):
         the Mirrored is converted to a MultiTransform as the command does, then the boss is made 8
         high: the sketch is on the MultiTransform's top face, z 18 (ops#595: it stayed on the
         Mirrored, a step whose shape no longer changes, at z 15, Valid)."""
-        body, boss, cap = self.bossedBlock()
-        cap.Suppressed = True
+        body, boss, _ = self.bossedBlock(withCap=False)
         body.Tip = boss
         mirrored = body.newObject("PartDesign::Mirrored", "Mirrored")
         mirrored.Originals = [boss]
