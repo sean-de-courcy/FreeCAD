@@ -10,6 +10,10 @@
 // names (requirement 1, decision 335). A result of several solids is an error until pieces
 // become parts (P6p): a Body never goes on with two solids.
 
+#include <optional>
+
+#include <Base/Placement.h>
+
 #include "FeatureAddSub.h"
 
 namespace PartDesign
@@ -32,6 +36,16 @@ public:
     /// The owner's tool in the document's frame: an owner's AddSubShape placed by its Placement,
     /// or a shape object's Shape; null when the owner has none (an error)
     static Part::TopoShape toolOf(const App::DocumentObject* owner, std::string* why = nullptr);
+
+protected:
+    void onDocumentRestored() override;
+
+private:
+    /// Where the owner is in this step's Body's frame; empty without an owner (ops#813). A
+    /// step reads its Body's frame and its owner's containers through no link, so a moved part
+    /// is noticed by comparing this with its value at the last compute
+    std::optional<Base::Placement> ownerFrame() const;
+    std::optional<Base::Placement> lastOwnerFrame;
 };
 
 }  // namespace PartDesign
