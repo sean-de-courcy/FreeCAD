@@ -40,6 +40,7 @@ its key code only, so the Shift+digit check doesn't prove a real keyboard's `!` 
 import contextlib
 import math
 import os
+import sys
 import tempfile
 import time
 import unittest
@@ -58,6 +59,8 @@ from PartDesignTests.TestCrossBodyGui import siblingEraPath  # ops#654 list on f
 
 KEYMAP = "User parameter:BaseApp/Preferences/General"  # the preference Keymap
 SHORTCUTS = "User parameter:BaseApp/Preferences/Shortcut"
+# On macOS the Mac's keys are always on (ForkKeymap::isMac()); KeymapMacKeys turns them on elsewhere
+MAC = sys.platform == "darwin"
 
 # The keys the fork's keymap sets (notes/onshape-shortcuts.md section 2, PLAN.md decision 27);
 # "" for a key it takes away. Written out here as the oracle, independently of the C++ table.
@@ -1019,7 +1022,8 @@ class TestForkKeymapGui(unittest.TestCase):
             for label in Gui.getMainWindow().findChildren(QtWidgets.QLabel)
             if label.objectName() == "comboLabel1" and label.isVisible()
         ]
-        self.assertEqual(modes, [f"Mode ({native('Ctrl+M')})"])
+        # the Mac's M is Control (Qt's Meta), since Cmd+M minimizes the window there
+        self.assertEqual(modes, [f"Mode ({native('Meta+M' if MAC else 'Ctrl+M')})"])
 
         def options():
             return (self.checked("Rounded corners"), self.checked("Frame"))
@@ -1069,7 +1073,8 @@ class TestForkKeymapGui(unittest.TestCase):
         self.assertEqual(commands, [mac[i] for i in owned])
         App.ParamGet(KEYMAP).RemBool("KeymapMacKeys")
         pump(0.1)
-        windows = [QtGui.QKeySequence(f"Shift+Alt+{c}").toString() for c in letters]
+        # on macOS the Mac's keys stay on without the preference
+        windows = mac if MAC else [QtGui.QKeySequence(f"Shift+Alt+{c}").toString() for c in letters]
         commands, actions = keys()
         self.assertEqual(actions, windows)
         self.assertEqual(commands, [windows[i] for i in owned])
