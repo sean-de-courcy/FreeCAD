@@ -8293,6 +8293,95 @@ bool finishConstruction(TopoShape& result, DressUpOutcome& outcome, const TopoSh
     return false;
 }
 
+/// OCCT's contours, each in its order, as the maker reports them after Add()
+std::vector<std::vector<TopoDS_Shape>> makerContours(BRepFilletAPI_LocalOperation& maker)
+{
+    std::vector<std::vector<TopoDS_Shape>> contours;
+    for (int i = 1; i <= maker.NbContours(); ++i) {
+        contours.emplace_back();
+        for (int j = 1; j <= maker.NbEdges(i); ++j) {
+            contours.back().push_back(maker.Edge(i, j));
+        }
+    }
+    return contours;
+}
+
+/** A dress-up over a kink in one of OCCT's contours (FilletFallback::kinkedContour(), ops#762),
+ * where OCCT's valid result leaves a tooth: the exact construction alone, below the limit too,
+ * under the feature's time limit. It rounds the selection and what OCCT's contours add to it
+ * along tangent chains proper (runs: the contours cut at their kinks), not past a kink, where
+ * Onshape's propagation does not carry on either. Named into result.
+ *
+ * @return Whether it was built and named: if not, reason says why
+ */
+bool constructOverKink(
+    TopoShape& result,
+    const TopoShape& input,
+    const std::vector<TopoShape>& inputEdges,
+    FilletFallback::Request request,
+    const std::vector<std::vector<TopoDS_Shape>>& runs,
+    const char* what,
+    const char* op,
+    std::string& reason
+)
+{
+    struct Alone
+    {
+        FilletFallback::Construction construction;
+        std::string reason;
+        bool built = false;
+    };
+    request.limitOnly = false;
+    request.contour.clear();
+    std::vector<TopoDS_Shape> edges;
+    TopTools_IndexedMapOfShape rounded;
+    for (const auto& edge : inputEdges) {
+        if (rounded.Add(edge.getShape()) > static_cast<int>(edges.size())) {
+            edges.push_back(edge.getShape());
+        }
+    }
+    const int picked = rounded.Extent();
+    for (const auto& run : runs) {
+        const bool chained = std::any_of(run.begin(), run.end(), [&](const TopoDS_Shape& edge) {
+            const int index = rounded.FindIndex(edge);
+            return index > 0 && index <= picked;
+        });
+        for (const auto& edge : run) {
+            if (chained && rounded.Add(edge) > static_cast<int>(edges.size())) {
+                edges.push_back(edge);
+            }
+        }
+    }
+    request.contour = edges;
+    auto alone = std::make_shared<Alone>();
+    KernelBudget::run(
+        what,
+        [base = input.getShape(), edges, request, alone](const Message_ProgressRange& /*range*/) {
+            alone->built = FilletFallback::construct(
+                base,
+                edges,
+                request,
+                alone->construction,
+                &alone->reason
+            );
+        }
+    );
+    if (alone->built) {
+        try {
+            FilletFallback::finish(result, alone->construction, input, op);
+            return true;
+        }
+        catch (const Standard_Failure& e) {
+            alone->reason = std::string("OCCT: ") + e.GetMessageString();
+        }
+        catch (const Base::Exception& e) {
+            alone->reason = e.what();
+        }
+    }
+    reason = alone->reason;
+    return false;
+}
+
 // FreeCAD-CH (Case Base #163 Fillet 6, rb164/rb166; ops#640): where a round's wall has a gap (a hole
 // through the wall dipping below the round's contact line), OCCT builds the stretch over the gap as
 // a rational B-spline that runs up to a few hundredths of a millimetre off the cylinder its two
@@ -9019,6 +9108,23 @@ TopoShape& TopoShape::makeElementFillet(
             contourEdges.push_back(mkFillet->Edge(i, j));
         }
     }
+    // FreeCAD-CH (ops#762): where a contour of OCCT's runs through a kink (it carries on wherever
+    // the side faces meet within 0.1 rad), its round ends in cross-sections at the vertex and a
+    // tooth is left between them, valid and wrong: the exact construction alone, or an error
+    std::string kinkAt;
+    std::vector<std::vector<TopoDS_Shape>> runs;
+    if (FilletFallback::kinkedContour(makerContours(*mkFillet), &kinkAt, &runs)) {
+        std::string reason;
+        if (constructOverKink(*this, input, inputEdges, request, runs, "The fillet", op, reason)) {
+            return *this;
+        }
+        FC_THROWM(
+            Base::CADKernelError,
+            "The fillet runs over a slight corner between its edges ("
+                << kinkAt
+                << "), where OCCT's round leaves a tooth; its exact construction refused: " << reason
+        );
+    }
     std::string notchAt;
     if (FilletFallback::contactOnPartOfAnEdge(input.getShape(), contourEdges, request, &notchAt)) {
         struct Alone
@@ -9333,6 +9439,22 @@ TopoShape& TopoShape::makeElementChamfer(
         request.flipDirection = flipDirection;
         if (setbacksDiffer) {
             request.setbacks = setbacks;
+        }
+        // FreeCAD-CH (ops#762): a contour through a kink, as the fillet's
+        std::string kinkAt;
+        std::vector<std::vector<TopoDS_Shape>> runs;
+        if (FilletFallback::kinkedContour(makerContours(mkChamfer), &kinkAt, &runs)) {
+            std::string reason;
+            if (constructOverKink(*this, input, inputEdges, request, runs, "The chamfer", op, reason)) {
+                return *this;
+            }
+            FC_THROWM(
+                Base::CADKernelError,
+                "The chamfer runs over a slight corner between its edges ("
+                    << kinkAt
+                    << "), where OCCT's chamfer leaves a tooth; its exact construction refused: "
+                    << reason
+            );
         }
         FilletFallback::takeInvalidResult();
         auto outcome = buildDressUp(mkChamferPtr, input, inputEdges, request, "The chamfer");

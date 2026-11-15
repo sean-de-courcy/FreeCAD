@@ -29,6 +29,7 @@
 #include <Geom_BSplineCurve.hxx>
 #include <BRepAdaptor_Curve.hxx>
 #include <Geom_BSplineSurface.hxx>
+#include <Geom_ElementarySurface.hxx>
 #include <Geom_BezierSurface.hxx>
 #include <Geom_RectangularTrimmedSurface.hxx>
 #include <Geom_TrimmedCurve.hxx>
@@ -1158,6 +1159,16 @@ double endDistance(const FaceEnd& end, const gp_Pnt& point, Foot& hint)
     if (!hint.ok) {
         throw Refusal {"an end face has no foot"};
     }
+    if (end.surface->IsKind(STANDARD_TYPE(Geom_ElementarySurface))
+        && (end.surface->IsUPeriodic() || end.surface->IsVPeriodic())) {
+        // A closed surface has a second foot, on its far side, where the distance has the other
+        // sign; Newton from the last foot lands on it once the points pass near the axis (ops#779:
+        // the arc inside a hole not much wider than the round). The nearer foot says which side
+        const Foot nearest = foot(end.surface, point);
+        if (nearest.ok && nearest.distance < hint.distance - 1e-9) {
+            hint = nearest;
+        }
+    }
     return end.sign * gp_Vec(hint.point, point).Dot(surfaceNormal(end.surface, hint.u, hint.v));
 }
 
@@ -1309,6 +1320,8 @@ void solveStations(const Context& context, Blend& blend, int interior)
         // to its wall says nothing: "the blend's end face does not cut the blend")
         gp_Vec out = outward[end];
         const double runOn = std::max(2.0 * spacing, 2.0 * radius);
+        const bool insideClosed = faceEnd.surface->IsKind(STANDARD_TYPE(Geom_ElementarySurface))
+            && (faceEnd.surface->IsUPeriodic() || faceEnd.surface->IsVPeriodic());
         int beyond = 0;
         double clearBefore = -Precision::Infinite();
         for (int steps = 0;; ++steps) {
@@ -1317,6 +1330,58 @@ void solveStations(const Context& context, Blend& blend, int interior)
                 ++beyond;
             }
             if (beyond >= 2 && (clear > runOn || clear - clearBefore < 0.5 * spacing)) {
+                break;
+            }
+            if (insideClosed && steps > 0 && clearBefore > 0.0 && clear < clearBefore && path.size() > 3) {
+                // The arc was clear and is getting less so, inside a closed end face: an opening
+                // not much wider than the round (ops#779: a hole of radius R gives a ball of
+                // radius r at most R - r, less than two spacings), and marching on would run into
+                // its far wall. The curve ends where the arc is clearest, found between the last
+                // three positions. (Any other end face: as before; past a plane the clearance
+                // falls only where the walls' own extensions curl)
+                const Station last = outermost();
+                if (end == 0) {
+                    path.erase(path.begin());
+                }
+                else {
+                    path.pop_back();
+                }
+                const Station peak = outermost();
+                const Station before = end == 0 ? path[1] : path[path.size() - 2];
+                Station best = peak;
+                double bestClear = clearBefore;
+                auto at = [&](double where, Station& station) {
+                    const gp_XYZ& from = (where < 1.0 ? before : peak).centre.XYZ();
+                    const gp_XYZ& to = (where < 1.0 ? peak : last).centre.XYZ();
+                    const double fraction = where < 1.0 ? where : where - 1.0;
+                    station = solveStation(gp_Pnt(from * (1.0 - fraction) + to * fraction), walls, radius, &peak);
+                    if (!station.ok || !onWall(walls[0], station.feet[0]) || !onWall(walls[1], station.feet[1])) {
+                        return -Precision::Infinite();
+                    }
+                    return clearance(station);
+                };
+                double low = 0.0;
+                double high = 2.0;
+                for (int iteration = 0; iteration < 40; ++iteration) {
+                    const double third = (high - low) / 3.0;
+                    Station left;
+                    Station right;
+                    const double clearLeft = at(low + third, left);
+                    const double clearRight = at(high - third, right);
+                    if (clearLeft > bestClear) {
+                        bestClear = clearLeft;
+                        best = left;
+                    }
+                    if (clearRight > bestClear) {
+                        bestClear = clearRight;
+                        best = right;
+                    }
+                    (clearLeft < clearRight ? low : high) = clearLeft < clearRight ? low + third : high - third;
+                }
+                // In place of the clearest of the three, unless it would crowd the one before it
+                if (best.centre.Distance(before.centre) > 0.05 * spacing) {
+                    outermost() = best;
+                }
                 break;
             }
             clearBefore = clear;
