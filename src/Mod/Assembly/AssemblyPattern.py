@@ -163,10 +163,14 @@ def axisOfShape(shape):
         curve = shape.Curve
         kind = type(curve).__name__
         if kind in ("Line", "LineSegment"):
-            points = [v.Point for v in shape.Vertexes]
-            if len(points) >= 2 and (points[-1] - points[0]).Length > TOLERANCE:
-                return points[0], (points[-1] - points[0]).normalize()
-            return App.Vector(curve.Location), App.Vector(curve.Direction).normalize()
+            # The edge's tangent (its curve's direction, the other way on a reversed edge), as
+            # Onshape's edge direction, and not its first vertex to its last: the vertex order
+            # is storage order, and a feature that only shortens the edge can rebuild it the
+            # other way round (FreeCAD-CH ops#832: the copies jumped to the seed's other side)
+            axis = App.Vector(curve.Direction).normalize()
+            if shape.Orientation == "Reversed":
+                axis = -axis
+            return App.Vector(shape.valueAt(shape.FirstParameter)), axis
         if hasattr(curve, "Axis") and hasattr(curve, "Center"):
             # The axis the edge turns about (right hand), whichever way its curve is parametrized
             axis = App.Vector(curve.Axis).normalize()
