@@ -13248,6 +13248,124 @@ bool preferConstruction(
     return false;
 }
 
+bool contactOnPartOfAnEdge(
+    const TopoDS_Shape& baseShape,
+    const std::vector<TopoDS_Shape>& edges,
+    const Request& request,
+    std::string* where
+)
+{
+    if (request.kind != Kind::Fillet || request.size1 <= 0 || request.size2 != request.size1) {
+        return false;
+    }
+    try {
+        const TopoShape base(baseShape);
+        Context ctx(base, request);
+        for (const auto& shape : edges) {
+            if (shape.IsNull() || shape.ShapeType() != TopAbs_EDGE
+                || BRep_Tool::Degenerated(TopoDS::Edge(shape))) {
+                continue;
+            }
+            EdgeData data;
+            Section section;
+            try {
+                data = analyse(ctx, TopoDS::Edge(shape));
+                if (data.ruled) {
+                    continue;
+                }
+                section = sectionAt(ctx, data, data.first);
+            }
+            catch (const Refusal&) {
+                // Not a line between planes or a circle between a plane and its cylinder: OCCT's
+                continue;
+            }
+            if (!section.fillet) {
+                continue;
+            }
+            const double span = data.closed ? 2 * pi : data.last - data.first;
+            gp_Vec along;
+            double length = 0.0;
+            if (data.line) {
+                along = gp_Vec(data.start, data.end);
+                length = along.Magnitude();
+                if (length <= linearTolerance) {
+                    continue;
+                }
+                along /= length;
+            }
+            for (int k = 0; k < 2; ++k) {
+                FarSide side;
+                if (data.line) {
+                    side.valid = true;
+                    side.lin = gp_Lin(section.ends[k], gp_Dir(along));
+                }
+                else {
+                    side = circleAbout(data.circle.Axis(), section.ends[k]);
+                }
+                if (!side.valid) {
+                    continue;
+                }
+                const double contact = data.line ? length : span * side.circ.Radius();
+                // The face's own edges on the contact line, within the selected edge's extent
+                double covered = 0.0;
+                TopTools_IndexedMapOfShape seen;
+                for (TopExp_Explorer it(data.faces[k], TopAbs_EDGE); it.More(); it.Next()) {
+                    const TopoDS_Edge& edge = TopoDS::Edge(it.Current());
+                    if (edge.IsSame(data.edge) || seen.Contains(edge) || BRep_Tool::Degenerated(edge)
+                        || !liesOn(edge, side)) {
+                        continue;
+                    }
+                    seen.Add(edge);
+                    BRepAdaptor_Curve curve(edge);
+                    const gp_Pnt middle
+                        = curve.Value((curve.FirstParameter() + curve.LastParameter()) / 2);
+                    bool within = true;
+                    if (data.line) {
+                        const double t = gp_Vec(data.start, middle).Dot(along);
+                        within = t > linearTolerance && t < length - linearTolerance;
+                    }
+                    else if (!data.closed) {
+                        double t = ElCLib::Parameter(data.circle, middle);
+                        while (t < data.first) {
+                            t += 2 * pi;
+                        }
+                        within = t < data.last;
+                    }
+                    if (within) {
+                        covered += GCPnts_AbscissaPoint::Length(curve);
+                    }
+                }
+                // A step, not a face as wide as the round (which may be shorter than the edge,
+                // as a leaning wall's top): the face carries on past the contact line elsewhere
+                bool beyond = false;
+                for (TopExp_Explorer it(data.faces[k], TopAbs_VERTEX); it.More() && !beyond; it.Next()) {
+                    const gp_Pnt point = BRep_Tool::Pnt(TopoDS::Vertex(it.Current()));
+                    const double depth = data.line ? gp_Lin(data.start, gp_Dir(along)).Distance(point)
+                                                   : data.circle.Distance(point);
+                    beyond = depth > section.length[k] + 10 * linearTolerance;
+                }
+                if (beyond && covered > 10 * linearTolerance
+                    && covered < contact - 10 * linearTolerance) {
+                    if (where) {
+                        const gp_Pnt& p = section.ends[k];
+                        std::ostringstream text;
+                        text << "the contact line through (" << p.X() << ", " << p.Y() << ", "
+                             << p.Z() << ") runs along " << covered << " mm of the face's edges, of "
+                             << contact << " mm";
+                        *where = text.str();
+                    }
+                    return true;
+                }
+            }
+        }
+    }
+    catch (const Standard_Failure&) {
+    }
+    catch (const Base::Exception&) {
+    }
+    return false;
+}
+
 void finish(TopoShape& result, const Construction& construction, const TopoShape& base, const char* op)
 {
     // A copy keeps the result's tag, hasher and history algorithm, which name the elements
