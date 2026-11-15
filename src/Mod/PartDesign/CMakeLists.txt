@@ -139,6 +139,7 @@ set(PartDesign_TestScripts
     PartDesignTests/TestStudioMerge.py
     PartDesignTests/TestStudioDressUp.py
     PartDesignTests/TestDressUpRelinkHome.py
+    PartDesignTests/TestDressUpRelinkPlace.py
     PartDesignTests/TestConfigurations.py
 )
 
