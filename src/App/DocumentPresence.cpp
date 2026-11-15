@@ -1,7 +1,12 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 // SPDX-FileNotice: Part of the FreeCAD-CH fork (ops#640, folder sync item 6, design A's B5).
 
+#include <FCConfig.h>
+
 #include <algorithm>
+#include <cctype>
+#include <cstdio>
+#include <cstdlib>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
@@ -247,7 +252,9 @@ void update(const Document& document)
 {
     auto& markers = written();
     const std::string file = document.FileName.getValue();
-    const bool exists = !file.empty() && Base::FileInfo(file).exists();
+    // A document loaded only partly, for a link into it, is not open for work (review 2)
+    const bool exists = !file.empty() && !document.testStatus(Document::PartialDoc)
+        && Base::FileInfo(file).exists();
     const std::string path = exists ? markerPathFor(file) : std::string();
     auto it = markers.find(&document);
     if (it != markers.end() && it->second != path) {
@@ -266,6 +273,8 @@ void update(const Document& document)
 }
 
 }  // namespace
+
+void refreshMarkersImpl();
 
 std::string hostName()
 {
@@ -294,17 +303,19 @@ std::vector<Marker> others(const std::string& documentPath)
     const long long pid = ownPid();
     const long long current = now();
 
+    // Collect the names first: the sync may change the folder while it is read (review 1)
+    std::vector<fs::path> names;
     std::error_code error;
-    fs::directory_iterator it(Base::FileInfo::stringToPath(folder), error);
-    if (error) {
-        return result;
-    }
-    for (const auto& entry : it) {
-        if (!entry.is_regular_file(error) || entry.path().extension() != ".json") {
-            continue;
+    for (fs::directory_iterator it(Base::FileInfo::stringToPath(folder), error), end;
+         !error && it != end;
+         it.increment(error)) {
+        if (it->path().extension() == ".json") {
+            names.push_back(it->path());
         }
+    }
+    for (const auto& name : names) {
         Marker marker;
-        if (!readMarker(entry.path(), marker)) {
+        if (!fs::is_regular_file(name, error) || !readMarker(name, marker)) {
             continue;
         }
         const bool thisHost = lowered(marker.host) == host;
@@ -316,7 +327,8 @@ std::vector<Marker> others(const std::string& documentPath)
         if (lowered(marker.file) != relative || (thisHost && marker.pid == pid)) {
             continue;
         }
-        if (current - marker.time < freshSeconds) {
+        // A clock running ahead on the other computer is allowed the same margin (review 3)
+        if (std::llabs(current - marker.time) < freshSeconds) {
             result.push_back(marker);
         }
     }
@@ -350,6 +362,17 @@ std::string describe(const std::vector<Marker>& markers)
 }
 
 void refresh()
+{
+    try {
+        refreshMarkersImpl();
+    }
+    catch (const std::exception& e) {
+        Base::Console().log("Presence: %s
+", e.what());
+    }
+}
+
+void refreshMarkersImpl()
 {
     auto& markers = written();
     std::vector<const Document*> open;
