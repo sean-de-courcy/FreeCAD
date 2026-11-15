@@ -33,6 +33,7 @@ set(Assembly_Scripts
     CommandCreateSnapshot.py
     CommandExportASMT.py
     CommandSnapMode.py
+    CommandShowMatesMode.py
     TestAssemblyWorkbench.py
     JointObject.py
     Preferences.py
