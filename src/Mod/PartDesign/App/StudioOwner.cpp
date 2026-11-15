@@ -177,12 +177,6 @@ Part::TopoShape studioPartShapeAt(
 namespace
 {
 
-/// Whether shape is a face
-bool isFace(const TopoDS_Shape& shape)
-{
-    return !shape.IsNull() && shape.ShapeType() == TopAbs_FACE;
-}
-
 /// Whether shape is a planar face
 bool isPlanarFace(const TopoDS_Shape& shape)
 {
@@ -212,12 +206,13 @@ bool faceNormal(const TopoDS_Shape& shape, gp_Dir& normal)
     return true;
 }
 
-/// The parameter range covering every piece's range. The picked face's own range when every
-/// piece lies in it (a split keeps the surface's parametrisation): it keeps the face's seam where
-/// it was, and a seam under the profile is what an extrude up to a periodic face can't cross
+/// The parameter range the pieces span, never more (the face as it is: what a feature cut away
+/// stays away). On a periodic parameter the pieces lie on a circle: the range leaves out the
+/// largest gap between them, where the built face has its seam
 std::pair<double, double> coveringRange(
-    const std::vector<std::pair<double, double>>& ranges,
-    const std::pair<double, double>* picked
+    std::vector<std::pair<double, double>> ranges,
+    bool periodic,
+    double period
 )
 {
     double low = ranges.front().first;
@@ -226,11 +221,36 @@ std::pair<double, double> coveringRange(
         low = std::min(low, a);
         high = std::max(high, b);
     }
-    constexpr double tolerance = 1e-7;
-    if (picked && picked->first - tolerance <= low && high <= picked->second + tolerance) {
-        return *picked;
+    if (!periodic || period <= 0 || high - low >= period) {
+        return {low, high};
     }
-    return {low, high};
+    for (auto& [a, b] : ranges) {
+        const double shift = std::floor((a - low) / period) * period;
+        a -= shift;
+        b -= shift;
+    }
+    std::sort(ranges.begin(), ranges.end());
+    std::vector<std::pair<double, double>> merged {ranges.front()};
+    for (const auto& r : ranges) {
+        if (r.first <= merged.back().second) {
+            merged.back().second = std::max(merged.back().second, r.second);
+        }
+        else {
+            merged.push_back(r);
+        }
+    }
+    double gap = merged.front().first + period - merged.back().second;
+    std::size_t after = 0;  // the range starts at merged[after], after the largest gap
+    for (std::size_t i = 1; i < merged.size(); ++i) {
+        if (merged[i].first - merged[i - 1].second > gap) {
+            gap = merged[i].first - merged[i - 1].second;
+            after = i;
+        }
+    }
+    if (after == 0) {
+        return {merged.front().first, merged.back().second};
+    }
+    return {merged[after].first, merged[after - 1].second + period};
 }
 
 /// Whether two faces are pieces of one face: on one underlying surface (a cylinder, cone or
@@ -301,14 +321,16 @@ Part::TopoShape studioElementAt(
     };
     // Not a face a later feature made from it on its other side (a Thickness's inner face): the
     // picked face's own normal decides, between planar faces only
-    const TopoDS_Shape pickedFace = Part::Feature::getTopoShape(
-        from,
-        Part::ShapeOption::NeedSubElement | Part::ShapeOption::ResolveLink
-            | Part::ShapeOption::Transform,
-        element.c_str()
-    ).getShape();
     gp_Dir pickedNormal;
-    const bool oriented = faceNormal(pickedFace, pickedNormal);
+    const bool oriented = faceNormal(
+        Part::Feature::getTopoShape(
+            from,
+            Part::ShapeOption::NeedSubElement | Part::ShapeOption::ResolveLink
+                | Part::ShapeOption::Transform,
+            element.c_str()
+        ).getShape(),
+        pickedNormal
+    );
     auto facesAway = [&](const Part::TopoShape& shape) {
         gp_Dir normal;
         return oriented && faceNormal(shape.getShape(), normal) && normal.Dot(pickedNormal) <= 0;
@@ -406,7 +428,8 @@ Part::TopoShape studioElementAt(
         return {};
     }
     // Pieces of one curved surface: a piece is not extended as a plane is, so one face on that
-    // surface over all the pieces' parameter ranges stands for them (Onshape UT2 keeps them all)
+    // surface over the range the pieces span stands for them (Onshape UT2 keeps them all). A
+    // profile over the gap it leaves out (a periodic face's largest) fails, as on one piece
     if (found.size() > 1 && !isPlanarFace(found.front().getShape())) {
         TopLoc_Location location;
         const TopoDS_Face first = TopoDS::Face(found.front().getShape());
@@ -419,19 +442,10 @@ Part::TopoShape studioElementAt(
             us.emplace_back(u0, u1);
             vs.emplace_back(v0, v1);
         }
-        // The picked face, when on a surface of the same kind: its range
-        std::pair<double, double> pickedU;
-        std::pair<double, double> pickedV;
-        bool samePicked = false;
-        if (isFace(pickedFace)) {
-            const TopoDS_Face face = TopoDS::Face(pickedFace);
-            if (BRepAdaptor_Surface(face).GetType() == BRepAdaptor_Surface(first).GetType()) {
-                BRepTools::UVBounds(face, pickedU.first, pickedU.second, pickedV.first, pickedV.second);
-                samePicked = true;
-            }
-        }
-        const auto [u0, u1] = coveringRange(us, samePicked ? &pickedU : nullptr);
-        const auto [v0, v1] = coveringRange(vs, samePicked ? &pickedV : nullptr);
+        const auto [u0, u1] =
+            coveringRange(us, surface->IsUPeriodic(), surface->IsUPeriodic() ? surface->UPeriod() : 0);
+        const auto [v0, v1] =
+            coveringRange(vs, surface->IsVPeriodic(), surface->IsVPeriodic() ? surface->VPeriod() : 0);
         BRepBuilderAPI_MakeFace make(surface, u0, u1, v0, v1, Precision::Confusion());
         if (make.IsDone()) {
             TopoDS_Face whole = make.Face();
