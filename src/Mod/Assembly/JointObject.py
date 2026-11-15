@@ -1993,9 +1993,13 @@ class TaskAssemblyCreateJoint(QtCore.QObject):
 
         self.createDeleteAction()
 
-        # FreeCAD-CH (ops#772): how many rejected additions still have their removeSelection to
-        # come. A flag ate only the first, and the next rejection's removal dropped a kept pick.
-        self.addition_rejected = 0
+        # FreeCAD-CH (ops#772, ops#788): the rejected additions whose removeSelection is still to
+        # come, as (component, element). A flag ate only the first, and the next rejection's
+        # removal dropped a kept pick; a count was spent by the wrong removal when a refused
+        # whole-part pick's removal also removed a kept pick under it (prefix match): each
+        # removal now takes back only its own entry, and a kept pick removed with it goes from
+        # the panel as it goes from the view
+        self.rejected_picks = []
 
     def bindFields(self):
         bind = Gui.ExpressionBinding(self.jForm.angleSpinbox).bind(self.joint, "Angle")
@@ -2707,8 +2711,8 @@ class TaskAssemblyCreateJoint(QtCore.QObject):
 
         if not acceptable:
             # This runs inside the selection's notification, so the removal's own notification
-            # is queued behind it: removeSelection takes this count back when it comes.
-            self.addition_rejected += 1
+            # is queued behind it: removeSelection takes this entry back when it comes.
+            self.rejected_picks.append((comp, new_sub))
             Gui.Selection.removeSelection(doc_name, obj_name, sub_name)
             return
 
@@ -2728,13 +2732,12 @@ class TaskAssemblyCreateJoint(QtCore.QObject):
         self.joint.ViewObject.Proxy.showConnectorPoints(None)
 
     def removeSelection(self, doc_name, obj_name, sub_name, mousePos=None):
-        if self.addition_rejected > 0:
-            self.addition_rejected -= 1
-            return
-
         rootObj = App.getDocument(doc_name).getObject(obj_name)
 
         comp, new_sub = UtilsAssembly.getComponentReference(self.assembly, rootObj, sub_name)
+        if (comp, new_sub) in self.rejected_picks:
+            self.rejected_picks.remove((comp, new_sub))
+            return
         if not comp:
             return
 
@@ -2765,6 +2768,6 @@ class TaskAssemblyCreateJoint(QtCore.QObject):
         self.presel_ref = [comp, [new_sub]]
 
     def clearSelection(self, doc_name):
-        self.addition_rejected = 0  # nothing is left to remove
+        self.rejected_picks = []  # nothing is left to remove
         self.refs.clear()
         self.updateJoint()
