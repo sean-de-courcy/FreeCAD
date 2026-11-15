@@ -156,19 +156,46 @@ class TestDressUpRelinkHome(unittest.TestCase):
         self.assertEqual(self.chamfer.getStatusString(), "Valid")
         self.assertEqual(App.getReferenceReport(self.chamfer), [])
 
-    def testAGuessedPickComesBackAsItWas(self):
-        """ops#818: a pick the solver holds provisionally (here made so by a plate-thickness
-        edit, where it is found again by geometry) is found on the boss too while the boss is
-        below the draft, and its name there is no name of the draft's shape. Back on the draft
-        it is the reference it was: the same four edges and the same volume, not three edges."""
+    def testAPlateEditKeepsTheFourEdgesByName(self):
+        """ops#818, its first part (the cause is ops#806's): a thicker plate swallows the foot of
+        the rib and the boss, so the fusion cuts their flush sides differently; refine makes
+        them one face again, which keeps its whole names, and the draft's top edge on it keeps
+        its name. The chamfer holds its four edges by name: no warning, nothing found by
+        geometry."""
         self.build()
         self.plate.Length = 11.69
         self.doc.recompute()
         self.assertAllFour()
+        self.assertEqual(self.chamfer.getStatusString(), "Valid")
+        self.assertEqual(App.getReferenceReport(self.chamfer), [])
+        before = self.body.Shape.Volume
+        self.moveBoss(1)
+        self.moveBoss(-1)
+        self.assertAllFour()
+        self.assertAlmostEqual(self.body.Shape.Volume, before, places=6)
+        self.assertEqual(self.chamfer.getStatusString(), "Valid")
+
+    def testAGuessedPickComesBackAsItWas(self):
+        """ops#818: a pick the solver holds provisionally, its original's name gone. The rib is
+        moved 0.5 in from the boss's side, so the two sides are no longer one face: the draft's
+        top edge on the boss's side has another name, and the chamfer's pick is found again by
+        geometry (tier 3, a warning). While the boss is below the draft that pick is found on
+        the boss too, by geometry again, and its name there is no name of the draft's shape.
+        Back on the draft it is the reference it was: the same four edges, the same warning
+        and the same volume, not three edges."""
+        self.build()
+        self.doc.getObject("RibSk").setDatum(9, App.Units.Quantity("-11.5 mm"))  # its y
+        self.doc.recompute()
+        self.assertAllFour()
+
+        def report():
+            return [(r["index"], r["sub"], r["guess_kind"]) for r in App.getReferenceReport(self.chamfer)]
+
         before = self.body.Shape.Volume
         held = list(self.chamfer.Base[1])
         status = self.chamfer.getStatusString()
-        report = [(r["index"], r["sub"], r["guess_kind"]) for r in App.getReferenceReport(self.chamfer)]
+        was = report()
+        self.assertEqual([kind for _, _, kind in was], ["tier3"])  # the setup: one pick is a guess
         self.moveBoss(1)
         self.assertEqual(self.chamfer.Base[0], self.boss)
         self.moveBoss(-1)
@@ -176,10 +203,7 @@ class TestDressUpRelinkHome(unittest.TestCase):
         self.assertAlmostEqual(self.body.Shape.Volume, before, places=6)
         self.assertEqual(list(self.chamfer.Base[1]), held)
         self.assertEqual(self.chamfer.getStatusString(), status)
-        self.assertEqual(
-            [(r["index"], r["sub"], r["guess_kind"]) for r in App.getReferenceReport(self.chamfer)],
-            report,
-        )
+        self.assertEqual(report(), was)
 
     def testTheBaseInBetweenIsNotBlamedOnAReorder(self):
         """While the boss is below the draft the chamfer's picks that broke on the boss say so,
