@@ -57,6 +57,7 @@ from parttests.FilletFallbackTest import (
     RoundOverASliverTest,
     RoundAlongASplineEdgeTest,
     WallOnAChamferedRimTest,
+    TangentLineStepTest,
     TightWallArcTest,
     VolumeSignTest,
 )

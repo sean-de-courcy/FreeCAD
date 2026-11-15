@@ -5033,3 +5033,108 @@ class RoundAlongASplineEdgeTest(unittest.TestCase):
                 self.assertNotIn("neither a line nor a circle", message)
                 self.assertIn("OCCT failed on a round along", message)
                 self.assertTrue("Bezier" in message or "B-spline" in message, message)
+
+
+def ribbed_slot(rib_height, sketched=True):
+    """A block 24 x 12 x 10 with a stadium slot 3 deep (centres x 20 and 32, radius 4) and a rib
+    2 wide across it (x 25 to 27) standing rib_height on the floor at z 7, and the slot's top rim.
+    sketched: the outline as a sketch gives it (line, three-point arc, line, three-point arc);
+    otherwise its arcs are half circles from their centres, whose seams differ"""
+    if sketched:
+        edges = [
+            Part.LineSegment(V(20, 4, 7), V(32, 4, 7)).toShape(),
+            Part.Arc(V(32, 4, 7), V(36, 0, 7), V(32, -4, 7)).toShape(),
+            Part.LineSegment(V(32, -4, 7), V(20, -4, 7)).toShape(),
+            Part.Arc(V(20, -4, 7), V(16, 0, 7), V(20, 4, 7)).toShape(),
+        ]
+        wire = Part.Wire(edges)
+    else:
+        edges = [
+            Part.makeCircle(4, V(20, 0, 7), V(0, 0, 1), 90, 270),
+            Part.makeLine(V(20, -4, 7), V(32, -4, 7)),
+            Part.makeCircle(4, V(32, 0, 7), V(0, 0, 1), -90, 90),
+            Part.makeLine(V(32, 4, 7), V(20, 4, 7)),
+        ]
+        wire = Part.Wire(Part.__sortEdges__(edges))
+    slot = Part.Face(wire).extrude(V(0, 0, 3))
+    body = Part.makeBox(24, 12, 10, V(14, -6, 0)).cut(slot).removeSplitter()
+    body = body.fuse(Part.makeBox(2, 10, rib_height, V(25, -5, 7))).removeSplitter()
+    body = Part.Solid(body.Shells[0])
+    rim = [
+        e
+        for e in body.Edges
+        if abs(e.BoundBox.ZMin - 10) < 1e-9
+        and abs(e.BoundBox.ZMax - 10) < 1e-9
+        and e.BoundBox.XMin > 15.9
+        and e.BoundBox.XMax < 36.1
+        and abs(e.BoundBox.YMax) < 4.1
+    ]
+    return body, rim
+
+
+def ribbed_slot_volume(rib_height):
+    """The ribbed slot's block before the round: the block, less the slot, plus the rib"""
+    return 24 * 12 * 10 - (math.pi * 16 + 8 * 12) * 3 + 2 * 8 * rib_height
+
+
+def slot_rim_removed(r):
+    """What a round of r on the slot's whole rim removes: the straight sides, and the half
+    circles by Pappus (the section lies outside the radius 4)"""
+    return fillet_section(r) * (2 * 12 + 2 * math.pi * (4 + fillet_centroid(r)))
+
+
+class TangentLineStepTest(unittest.TestCase):
+    """ops#806: a rib in a slot whose top is level with the rim round's lower tangent line. The
+    slot's wall then has an edge on the round's contact line for part of its length, where
+    OCCT 8.0.1's fillet read an edge curve that is not set and the process died (SIGSEGV in
+    BRepBlend_SurfRstConstRad::Values). Onshape rounds it, or fails with an error, never a crash.
+    The rib stays below the round, so the round is the rim's as without the rib."""
+
+    def testRoundAtTheTangentLineIsExact(self):
+        r = 1.0
+        for sketched in (True, False):
+            with self.subTest(sketched=sketched):
+                body, rim = ribbed_slot(3 - r, sketched)
+                self.assertTrue(body.isValid())
+                self.assertEqual(len(rim), 4)
+                self.assertAlmostEqual(body.Volume, ribbed_slot_volume(3 - r), delta=1e-6)
+                # Must not crash: a round, exact, or an error
+                try:
+                    shape = body.makeFillet(r, rim)
+                except Part.OCCError as e:
+                    self.fail("the round at the tangent line failed: %s" % e)
+                self.assertTrue(shape.isValid())
+                self.assertEqual(len(shape.Solids), 1)
+                self.assertAlmostEqual(
+                    body.Volume - shape.Volume, slot_rim_removed(r), delta=1e-6
+                )
+                # The rib's top keeps its edge on the wall: nothing of the rib is rounded
+                self.assertTrue(
+                    any(
+                        abs(f.BoundBox.ZMin - 9) < 1e-9
+                        and abs(f.BoundBox.ZMax - 9) < 1e-9
+                        and abs(f.Area - 16) < 1e-6
+                        for f in shape.Faces
+                    )
+                )
+
+    def testOneSideAtTheTangentLineIsRightOrLoud(self):
+        # One straight side alone: OCCT's contour would run on along the tangent chain (its
+        # error), never a crash
+        body, rim = ribbed_slot(2.0)
+        side = [e for e in rim if abs(e.BoundBox.YMin + 4) < 1e-9 and abs(e.BoundBox.YMax + 4) < 1e-9]
+        self.assertEqual(len(side), 1)
+        try:
+            shape = body.makeFillet(1.0, side)
+        except (Part.OCCError, FreeCAD.Base.CADKernelError) as e:
+            self.assertIn("tangent", str(e))
+            return
+        self.assertTrue(shape.isValid())
+        self.assertAlmostEqual(body.Volume - shape.Volume, 12 * fillet_section(1.0), delta=1e-6)
+
+    def testNearTheTangentLineIsUnchanged(self):
+        # Just below the line OCCT builds the same round; the check leaves it to OCCT
+        body, rim = ribbed_slot(2.0 - 1e-3)
+        shape = body.makeFillet(1.0, rim)
+        self.assertTrue(shape.isValid())
+        self.assertAlmostEqual(body.Volume - shape.Volume, slot_rim_removed(1.0), delta=1e-6)
