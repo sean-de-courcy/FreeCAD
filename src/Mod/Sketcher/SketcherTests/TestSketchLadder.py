@@ -7,6 +7,7 @@
 # expected positions are defined geometrically from the constraints.
 
 import math
+import time
 import unittest
 
 import FreeCAD as App
@@ -306,6 +307,111 @@ class TestSketchLadder(unittest.TestCase):
         self.assertUnchanged(ids[3], left)
         self.assertAt(self.sk.Geometry[ids[1]].StartPoint, (30, 0), SOLVED)
         self.assertAt(self.sk.Geometry[ids[1]].EndPoint, (30, 10), SOLVED)
+
+    # a large connected sketch (ops#855): the rungs' re-diagnosis once took minutes
+
+    def _chain(self, cells, infeasible=False):
+        """Cells of two tangent circles A, B on the x axis (radius 5, centres 10 apart) and the
+        line joining their centres; each A's centre DistanceX 30 from the previous B's, the first
+        A's 0 from the origin: one connected, fully defined sketch. Returns the first B and its
+        Radius constraint. With `infeasible`, the first cell's centres are also 10 apart, so
+        r_A + r_B = 10 admits no other radius of B."""
+        first = None
+        prev = None
+        for i in range(cells):
+            x = 40.0 * i
+            a = self.sk.addGeometry(Part.Circle(V(x, 0, 0), V(0, 0, 1), 5.0), False)
+            b = self.sk.addGeometry(Part.Circle(V(x + 10, 0, 0), V(0, 0, 1), 5.0), False)
+            line = self._line((x, 0), (x + 10, 0))
+            self.sk.addConstraint(Sketcher.Constraint("Radius", a, 5.0))
+            rb = self.sk.addConstraint(Sketcher.Constraint("Radius", b, 5.0))
+            self.sk.addConstraint(Sketcher.Constraint("Tangent", a, b))
+            self.sk.addConstraint(Sketcher.Constraint("PointOnObject", a, 3, -1))
+            self.sk.addConstraint(Sketcher.Constraint("PointOnObject", b, 3, -1))
+            self.sk.addConstraint(Sketcher.Constraint("Coincident", line, 1, a, 3))
+            self.sk.addConstraint(Sketcher.Constraint("Coincident", line, 2, b, 3))
+            if prev is None:
+                self.sk.addConstraint(Sketcher.Constraint("DistanceX", -1, 1, a, 3, 0.0))
+                first = (b, rb)
+                if infeasible:
+                    self.sk.addConstraint(Sketcher.Constraint("DistanceX", a, 3, b, 3, 10.0))
+            else:
+                self.sk.addConstraint(Sketcher.Constraint("DistanceX", prev, 3, a, 3, 30.0))
+            prev = b
+        self._recompute()
+        return first
+
+    def _timedRadius(self, rb, value):
+        start = time.monotonic()
+        try:
+            self.sk.setDatum(rb, App.Units.Quantity(value))
+        except Exception:  # an infeasible value may be refused at once; the recompute decides
+            pass
+        self.doc.recompute()
+        return time.monotonic() - start
+
+    def testLargeChainRadiusEditIsQuick(self):
+        # 150 entities, 400 constraints. Every rung fails (the next cell's DistanceX holds B's
+        # centre to its neighbours), so today's solve moves B's centre out by the change, and the
+        # chain after it with it. Measured 35.6 s before ops#855, about 1 s after; the bar is loose
+        # so a slow CI runner passes, and still far under the old cost
+        b, rb = self._chain(50)
+        elapsed = self._timedRadius(rb, "5.535 mm")
+        self._recompute()
+        self.assertNotIn("Warning", self.sk.State)
+        circle = self.sk.Geometry[b]
+        self.assertAlmostEqual(circle.Radius, 5.535, delta=SOLVED)
+        self.assertAt(circle.Center, (10.535, 0), SOLVED)
+        self.assertLess(elapsed, 15.0)
+
+    def testLargeChainInfeasibleRadiusEditIsQuick(self):
+        # the same chain with the first cell's centres held 10 apart: no geometry meets the new
+        # radius, so it is left out as a conflict (Warning) and the sketch keeps r 5
+        b, rb = self._chain(50, infeasible=True)
+        elapsed = self._timedRadius(rb, "5.535 mm")
+        self.assertNotIn("Invalid", self.sk.State)
+        circle = self.sk.Geometry[b]
+        self.assertAlmostEqual(circle.Radius, 5.0, delta=SOLVED)
+        self.assertAt(circle.Center, (10, 0), SOLVED)
+        self.assertLess(elapsed, 15.0)
+
+    def testVariableDrivesFittingThenUnfittingDimensions(self):
+        self._fittingAndUnfitting([True] * 16 + [False] * 16)
+
+    def testVariableDrivesUnfittingThenFittingDimensions(self):
+        self._fittingAndUnfitting([False] * 16 + [True] * 16)
+
+    def _fittingAndUnfitting(self, kinds):
+        # review pri855-r1: one variable drives the base of 16 triangles that can take the new
+        # value (sides 4 and 3: a base of 6 < 7) and 16 that cannot (sides 3 and 2.5:
+        # 6 > 5.5). The rank test at the drawn geometry sees no conflict, so solveAroundConflict
+        # finds it by putting back (pass 2), past the attempts a sketch of 192 constraints is
+        # given: the bases that fit follow the variable, the others are left out as conflicts
+        # and stay as drawn (Warning), never the whole sketch in error
+        self._variable("c", 5.0)
+        bases = []
+        for n, fits in enumerate(kinds):
+            ox = 20.0 * n
+            a, b = (4.0, 3.0) if fits else (3.0, 2.5)
+            x = (a * a - b * b + 25.0) / 10.0  # the apex over a base of 5 on the x axis
+            y = math.sqrt(a * a - x * x)
+            base = self._line((ox, 0), (ox + 5, 0))
+            s2 = self._line((ox + 5, 0), (ox + x, y))
+            s3 = self._line((ox + x, y), (ox, 0))
+            self.sk.addConstraint(Sketcher.Constraint("Coincident", base, 2, s2, 1))
+            self.sk.addConstraint(Sketcher.Constraint("Coincident", s2, 2, s3, 1))
+            self.sk.addConstraint(Sketcher.Constraint("Coincident", s3, 2, base, 1))
+            self.sk.addConstraint(Sketcher.Constraint("Distance", s3, 1, s3, 2, a))
+            self.sk.addConstraint(Sketcher.Constraint("Distance", s2, 1, s2, 2, b))
+            self._drive(self.sk.addConstraint(Sketcher.Constraint("Distance", base, 1, base, 2, 5.0)), "c")
+            bases.append((fits, base))
+        self._recompute()
+        self.vars.c = 6.0
+        self.doc.recompute()
+        self.assertNotIn("Invalid", self.sk.State)
+        self.assertIn("Warning", self.sk.State)
+        for fits, base in bases:
+            self.assertAlmostEqual(self.sk.Geometry[base].length(), 6.0 if fits else 5.0, delta=SOLVED)
 
 
 if __name__ == "__main__":
