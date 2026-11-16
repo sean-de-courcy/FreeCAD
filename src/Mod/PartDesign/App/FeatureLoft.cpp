@@ -271,6 +271,33 @@ Part::TopoShape withProfileConditions(
             start1 = surface->Value(low ? u1 : u0, v0);
             middle1 = surface->Value(low ? u1 : u0, vq);
         }
+        // an open profile edge's matched ends are the ends of one rail, the side edge joining the
+        // two profile edges: a flat side made canonical (`makeLoftCanonical`) is a plane whose frame
+        // can be oblique to its edges, so its UV box doesn't pair the ends (ops#883)
+        if (!BRep_Tool::IsClosed(edge0)) {
+            const TopoDS_Vertex first0 = TopExp::FirstVertex(edge0);
+            TopoDS_Vertex partner;
+            for (TopExp_Explorer e(face, TopAbs_EDGE); e.More() && partner.IsNull(); e.Next()) {
+                const TopoDS_Edge& rail = TopoDS::Edge(e.Current());
+                if (BRep_Tool::Degenerated(rail) || rail.IsSame(edge0) || rail.IsSame(edge1)) {
+                    continue;
+                }
+                TopoDS_Vertex a;
+                TopoDS_Vertex b;
+                TopExp::Vertices(rail, a, b);
+                if (a.IsSame(first0)) {
+                    partner = b;
+                }
+                else if (b.IsSame(first0)) {
+                    partner = a;
+                }
+            }
+            if (partner.IsNull()) {
+                throw Base::CADKernelError("Loft: a side face has no edge joining its profile edges");
+            }
+            start0 = BRep_Tool::Pnt(first0);
+            start1 = BRep_Tool::Pnt(partner);
+        }
         // both profile edges by arc length, walked from the ends nearest the face's first rows
         const std::vector<gp_Pnt> points0 = byArcLength(edge0, start0, middle0, fractions);
         const std::vector<gp_Pnt> points1 = byArcLength(edge1, start1, middle1, fractions);
