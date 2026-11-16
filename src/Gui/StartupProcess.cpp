@@ -490,6 +490,66 @@ void StartupProcess::reapplyPackColours()
     }
 }
 
+bool StartupProcess::migrateForkSettings(ParameterGrp& userRoot)
+{
+    // Version 1 (ops#882): fork builds before ops#605 showed PartDesign's four stock toolbars, and
+    // their saved state (=1 under MainWindow/Toolbars) outlives the change that hid them behind the
+    // one "Features" toolbar, so an upgraded settings folder shows 24 commands twice. Builds that
+    // tried a custom "Features" PartDesign toolbar (Tier 0) left a second copy. Both are reset once;
+    // a user who shows a stock toolbar again afterwards keeps it.
+    auto general = userRoot.GetGroup("BaseApp")->GetGroup("Preferences")->GetGroup("General");
+    if (general->GetInt("ForkSettingsVersion", 0) >= forkSettingsVersion) {
+        return false;
+    }
+    bool changed = false;
+    auto toolbars = userRoot.GetGroup("BaseApp")->GetGroup("MainWindow")->GetGroup("Toolbars");
+    for (const char* name :
+         {"Part Design Helper Features",
+          "Part Design Modeling Features",
+          "Part Design Dress-Up Features",
+          "Part Design Transformation Features"}) {
+        if (toolbars->GetBool(name, false)) {
+            toolbars->SetBool(name, false);
+            changed = true;
+        }
+    }
+    auto workbench = userRoot.GetGroup("BaseApp")->GetGroup("Workbench");
+    if (workbench->HasGroup("PartDesignWorkbench")) {
+        auto partDesign = workbench->GetGroup("PartDesignWorkbench");
+        if (partDesign->HasGroup("Toolbar")) {
+            auto custom = partDesign->GetGroup("Toolbar");
+            // A copy of the built-in toolbar: named "Features" and holding only PartDesign and
+            // Sketcher commands. A "Features" toolbar with anything else is the user's own.
+            // Names first: RemoveGrp drops the XML but keeps a handle that is still held.
+            std::vector<std::string> copies;
+            for (const auto& group : custom->GetGroups()) {
+                if (group->GetASCII("Name") != "Features") {
+                    continue;
+                }
+                bool copy = true;
+                for (const auto& [key, value] : group->GetASCIIMap()) {
+                    if (key == "Name" || key.rfind("Separator", 0) == 0) {
+                        continue;
+                    }
+                    if (key.rfind("PartDesign_", 0) != 0 && key.rfind("Sketcher_", 0) != 0) {
+                        copy = false;
+                        break;
+                    }
+                }
+                if (copy) {
+                    copies.emplace_back(group->GetGroupName());
+                }
+            }
+            for (const auto& name : copies) {
+                custom->RemoveGrp(name.c_str());
+                changed = true;
+            }
+        }
+    }
+    general->SetInt("ForkSettingsVersion", forkSettingsVersion);
+    return changed;
+}
+
 void StartupPostProcess::checkOpenGL()
 {
     QWindow window;

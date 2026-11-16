@@ -25,6 +25,7 @@
 
 #include <FCGlobal.h>
 #include <QStringList>
+#include <Base/Parameter.h>
 
 class QApplication;
 class QMessageBox;
@@ -44,6 +45,11 @@ public:
     static void applyFirstStartPack();
     /// Once per settings folder: the Onshape pack's colours over folders made before them (ops#796)
     static void reapplyPackColours();
+    // One-time fixes to settings left by earlier fork builds (ops#882), keyed by
+    // BaseApp/Preferences/General/ForkSettingsVersion. userRoot is the user parameter root.
+    // Returns true if it changed anything.
+    static bool migrateForkSettings(ParameterGrp& userRoot);
+    static constexpr long forkSettingsVersion = 1;
     void execute();
 
 private:
