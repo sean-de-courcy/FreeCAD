@@ -9,6 +9,7 @@ add_executable(Gui_tests_run
         Camera.cpp
         ColorScaleOverlayTest.cpp
         FileDialog.cpp
+        ForkSettingsMigration.cpp
         StyleParameters/StyleParametersApplicationTest.cpp
         StyleParameters/ParserTest.cpp
         StyleParameters/ParameterManagerTest.cpp
