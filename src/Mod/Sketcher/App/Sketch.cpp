@@ -5375,7 +5375,6 @@ int Sketch::solveHolding(
             system.dogLegGaussStep = saved;
         }
     } guard {GCSsys, GCSsys.dogLegGaussStep};
-    GCSsys.dogLegGaussStep = GCS::LeastNormFullPivLU;
 
     clearTemporaryConstraints();
     if (!whole || holdingNarrowed) {
@@ -5384,6 +5383,40 @@ int Sketch::solveHolding(
         GCSsys.declareUnknowns(unknowns);
         GCSsys.declareDrivenParams(DrivenParameters);
         holdingNarrowed = !whole;
+    }
+    // The diagnosis a narrowed system needs is made here, before the weak holds exist (ops#855).
+    // Its trial solve (identifyConflictingRedundantConstraints) keeps every driving constraint
+    // it does not skip, temporary ones included: with the holds there, a changed dimension the
+    // held parameters cannot meet made it inconsistent, and it ran all its iterations, each a
+    // dense factorisation of (constraints + holds) x unknowns, minutes on a connected sketch of a
+    // few hundred entities. The holds keep the diagnosis (negative tags), so the initSolution()
+    // after them only partitions the system again. The trial is also bounded by the size of the
+    // system: the solver's own count up to 150 unknowns (100 by default), then 100 x (150 / n)^3,
+    // at least 5. A trial cut short names no redundant constraint, and the rung
+    // then fails at its own solve or at the check of every constraint below: today's solve
+    // follows. Deterministic, so a result never depends on the machine's speed.
+    {
+        struct TrialGuard
+        {
+            GCS::System& system;
+            int maxIter;
+            bool multiplier;
+            ~TrialGuard()
+            {
+                system.maxIterRedundant = maxIter;
+                system.sketchSizeMultiplierRedundant = multiplier;
+            }
+        } trialGuard {GCSsys, GCSsys.maxIterRedundant, GCSsys.sketchSizeMultiplierRedundant};
+        const double size = static_cast<double>(unknowns.size());
+        const int effective = GCSsys.sketchSizeMultiplierRedundant
+            ? GCSsys.maxIterRedundant * static_cast<int>(unknowns.size())
+            : GCSsys.maxIterRedundant;
+        const int bySize = size <= 150.0
+            ? effective
+            : std::max(5, static_cast<int>(100.0 * std::pow(150.0 / size, 3)));
+        GCSsys.sketchSizeMultiplierRedundant = false;
+        GCSsys.maxIterRedundant = std::min(effective, bySize);
+        GCSsys.initSolution(defaultSolverRedundant);
     }
     // Least motion, exactly: every free parameter of geometry is held weakly where it is drawn, and
     // the constraints are solved as the hard part of one problem (planegcs's SQP, as a drag's is).
@@ -5395,7 +5428,11 @@ int Sketch::solveHolding(
         InitParameters[i] = *geometry[i];
         GCSsys.addConstraintEqual(geometry[i], &InitParameters[i], GCS::DefaultTemporaryConstraint);
     }
+    // the diagnosis above keeps the solver's own step: the least-norm step factors a dense
+    // constraints x constraints matrix per iteration (ops#855); only the solve below moves by
+    // least motion
     GCSsys.initSolution(defaultSolverRedundant);
+    GCSsys.dogLegGaussStep = GCS::LeastNormFullPivLU;
     const int ret = GCSsys.solve(isFine, GCS::DogLeg);
 
     bool holds = ret == GCS::Success;
