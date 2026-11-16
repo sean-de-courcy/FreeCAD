@@ -9,8 +9,6 @@ issue: ops#763
 
 reason: under a forced ID collision the split-piece mark rule keeps a mark it drops otherwise ("expanded names after a recompute" differ)
 cli  PartDesignTests.TestNamingLoad.TestNamingLoadCollision.testLinearPatternAll
-cli  PartDesignTests.TestNamingLoad.TestNamingLoadCollision.testLinearPatternOne
 cli  PartDesignTests.TestNamingLoad.TestNamingLoadCollision.testPatternStepsAll
-# testPatternStepsOne and testLinearPatternOne depend on the test order (each passes alone): on lx8 the first
-# failed and the second passed (fork PR 447). Both stay listed.
-cli  PartDesignTests.TestNamingLoad.TestNamingLoadCollision.testPatternStepsOne
+# testPatternStepsOne and testLinearPatternOne (order-dependent, fork PR 447) pass on both platforms since
+# fork-1.0.0 (scout 1116, fork PR 465's CI): unlisted by ops#863.

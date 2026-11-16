@@ -606,6 +606,9 @@ class TestStudioOwner(unittest.TestCase):
         added = []
         for make in between:
             last = make(a, last)
+            profile = getattr(last, "Profile", None)
+            if profile and profile[0] in a.Group:
+                added.append(profile[0])  # its sketch goes first (ops#863)
             added.append(last)
             self.doc.recompute()
         side = next(
