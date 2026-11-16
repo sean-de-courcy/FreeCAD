@@ -38,5 +38,10 @@ FreeCAD.__unit_test__ += [
     "TestVariablesOnshape",
     "TestVariablesCopies",
     "TestExpressionUnits",
+    "TestLiteralFractions",
     "TestNotificationArea",
+    "TestDocumentTabs",
+    "TestPresence",
+    "TestFolderSyncOpen",
+    "TestFolderSyncSettings",
 ]

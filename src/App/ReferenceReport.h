@@ -154,6 +154,16 @@ public:
      */
     static bool describe(const DocumentObject* obj, Outcome& outcome);
 
+    /** Marks \a prop as one whose owner keeps a frozen copy of every reference's geometry and
+     * computes on it when the reference is missing: a sketch's external geometry, as Onshape's
+     * Use (facts GB33 (b), GB22: the sketch goes WARNING, the used entity stays where it was, and
+     * the features after it build). describe() then words its missing references as a warning
+     * even when none of them resolves (FreeCAD-CH ops#656, D4 row 2). The owner sets it when the
+     * property is made and clears it when it goes, since another property may take its address.
+     */
+    static void setKeepsFrozenCopies(const PropertyLinkBase* prop, bool on);
+    static bool keepsFrozenCopies(const PropertyLinkBase* prop);
+
     /** The level of \a obj's warning (ops#391, decision 97 D): true for the quieter one, a
      * warning that names only references found again in the same place (Outcome::samePlace).
      * Kept by object beside the document's warning: Document::setWarning() and clearWarning()

@@ -220,7 +220,12 @@ class TestCore(AssemblyTestBase):
         # Step 2 : box with placement. Edge + Vertex
         ref = [self.assembly, [box.Name + ".Edge8", box.Name + ".Vertex8"]]
         plc = joint.Proxy.findPlacement(joint, ref)
-        targetPlc = App.Placement(App.Vector(L, W, 0), App.Rotation(0, -90, 270))
+        # FreeCAD-CH (ops#683, C2): Onshape's frame for an edge, Z along it and X the first of the
+        # part's +x, +y, +z not along it: Edge8 runs along the box's +y, so X +x, Y -z, Z +y
+        targetPlc = App.Placement(
+            App.Vector(L, W, 0),
+            App.Rotation(App.Matrix(1, 0, 0, 0, 0, 0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1)),
+        )
         self.assertTrue(plc.isSame(targetPlc, 1e-6), "'{}' failed - Step 2".format(operation))
 
         # Step 3 : box with placement. Vertex
@@ -234,7 +239,11 @@ class TestCore(AssemblyTestBase):
         # Step 4 : box with placement. Face
         ref = [self.assembly, [box.Name + ".Face2", box.Name + ".Face2"]]
         plc = joint.Proxy.findPlacement(joint, ref)
-        targetPlc = App.Placement(App.Vector(L, W / 2, H / 2), App.Rotation(0, -90, 180))
+        # FreeCAD-CH (ops#683, C2): Onshape's frame on the +x face: X +y, Y +z, Z +x (out of it)
+        targetPlc = App.Placement(
+            App.Vector(L, W / 2, H / 2),
+            App.Rotation(App.Matrix(0, 0, 1, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1)),
+        )
         _msg("  plc '{}'".format(plc))
         _msg("  targetPlc '{}'".format(targetPlc))
         self.assertTrue(plc.isSame(targetPlc, 1e-6), "'{}' failed - Step 4".format(operation))
@@ -270,3 +279,30 @@ class TestCore(AssemblyTestBase):
         joint.Proxy.setJointConnectors(joint, refs)
 
         self.assertTrue(box.Placement.isSame(box2.Placement, 1e-6), "'{}'".format(operation))
+
+    def test_grounded_part_deleted_and_undone(self):
+        """ops#787: box A grounded, deleted in a transaction, undone: A reads grounded again,
+        before and after a solve, the grounding joint is kept and A's placement is locked again
+        (before, the undo left it unlocked and the solve deleted the joint)."""
+        self.doc.UndoMode = 1
+        a = self.assembly.newObject("Part::Box", "A")
+        b = self.assembly.newObject("Part::Box", "B")
+        b.Placement.Base = App.Vector(30, 0, 0)
+        ground = self.jointgroup.newObject("App::FeaturePython", "GroundedA")
+        JointObject.GroundedJoint(ground, a)
+        self.doc.recompute()
+        self.assembly.solve()
+        self.assertTrue(self.assembly.isPartGrounded(a))
+        self.doc.openTransaction("delete A")
+        self.doc.removeObject("A")
+        self.doc.commitTransaction()
+        self.doc.undo()
+        a = self.doc.getObject("A")
+        self.assertIsNotNone(a)
+        self.assertIs(ground.ObjectToGround, a)
+        self.assertTrue(self.assembly.isPartGrounded(a), "grounded before a solve")
+        self.doc.recompute()
+        self.assembly.solve()
+        self.assertIn(ground, self.jointgroup.Group, "the grounding joint is kept")
+        self.assertTrue(self.assembly.isPartGrounded(a), "grounded after a solve")
+        self.assertIn("ReadOnly", a.getPropertyStatus("Placement"))

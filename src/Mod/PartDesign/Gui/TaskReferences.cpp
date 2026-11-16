@@ -525,6 +525,13 @@ void TaskReferences::highlight(const QTreeWidgetItem* item)
             ? item->data(ReferenceColumn, CandidateRole).toString().toStdString()
             : ReferenceActions::heldElement(rows[r]);
     }
+    // FreeCAD-CH (selection parity 8): nothing to show and nothing of the panel's shown, so the
+    // selection isn't the panel's to take. A refresh on a field's show (setCoveredProperties) came
+    // here with no rows left and disarmed the field the dialog had armed on open
+    if (!target && !highlighted.getObject()) {
+        display.restore();
+        return;
+    }
     changeSelection([&]() {
         Gui::Selection().clearSelection();
         highlighted = App::SubObjectT();

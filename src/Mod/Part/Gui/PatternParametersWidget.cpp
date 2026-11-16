@@ -42,6 +42,7 @@
 #include <Gui/SpinBox.h>
 #include <Gui/BitmapFactory.h>
 #include <Base/Console.h>
+#include <Base/Exception.h>
 
 using namespace PartGui;
 
@@ -224,6 +225,9 @@ void PatternParametersWidget::updateUI()
             dirLinks.addLink(*m_directionProp, refStr);
             dirLinks.setCurrentLink(*m_directionProp);
         }
+        else {
+            showEmptyDirection();
+        }
     }
 
     // Update other controls directly from properties
@@ -235,6 +239,7 @@ void PatternParametersWidget::updateUI()
     rebuildDynamicSpacingUI();
 
     adaptVisibilityToMode();
+    updateDirectionOutline();
 }
 
 void PatternParametersWidget::onGroupBoxToggled(bool checked)
@@ -245,8 +250,10 @@ void PatternParametersWidget::onGroupBoxToggled(bool checked)
 
     if (!checked) {
         // When unchecked, the pattern in this direction is disabled.
-        // Set occurrences to 1, which effectively removes the pattern effect.
+        // Set occurrences to 1, which effectively removes the pattern effect; the count is kept
+        // for a new tick (FreeCAD-CH ops#655)
         if (m_occurrencesProp->getValue() != 1) {
+            lastOccurrences = m_occurrencesProp->getValue();
             ui->spinOccurrences->setValue(1);
         }
 
@@ -267,9 +274,13 @@ void PatternParametersWidget::onEnableCheckBoxToggled(bool checked)
         ui->groupBox->setVisible(true);
         ui->enableCheckbox->setVisible(false);
 
-        if (m_occurrencesProp->getValue() < 2) {
-            ui->spinOccurrences->setValue(2);
+        // Onshape's Second direction box (oracle 9j, Q-D2): a first tick shows count 1 and an
+        // empty Direction, not direction 1's values; a new tick gives back the count it had
+        // (FreeCAD-CH ops#655)
+        if (m_occurrencesProp->getValue() < 2 && lastOccurrences > 1) {
+            ui->spinOccurrences->setValue(static_cast<unsigned>(lastOccurrences));
         }
+        updateDirectionOutline();
     }
 }
 
@@ -301,6 +312,48 @@ bool PatternParametersWidget::isSelectReferenceMode() const
 void PatternParametersWidget::setTitle(const QString& title)
 {
     ui->groupBox->setTitle(title);
+    ui->enableCheckbox->setText(title);
+}
+
+void PatternParametersWidget::addRow(QWidget* widget)
+{
+    ui->formLayout->addRow(widget);
+}
+
+bool PatternParametersWidget::isDirectionMissing() const
+{
+    return m_directionProp && m_occurrencesProp && !m_directionProp->getValue()
+        && m_occurrencesProp->getValue() > 1;
+}
+
+void PatternParametersWidget::updateDirectionOutline()
+{
+    // Onshape outlines the empty Direction field red while its direction is in use, and the
+    // feature fails with "Select a pattern direction." (oracle 9j, Q-D3); count 1 needs none
+    const bool missing = isDirectionMissing();
+    ui->comboDirection->setProperty("missing", missing);
+    ui->comboDirection->setStyleSheet(
+        missing ? QStringLiteral("QComboBox#comboDirection { border: 2px solid #d32f2f; }")
+                : QString()
+    );
+    ui->comboDirection->setToolTip(missing ? tr("Select a pattern direction.") : QString());
+}
+
+void PatternParametersWidget::showEmptyDirection()
+{
+    for (int i = 0; i < dirLinks.count(); ++i) {
+        try {
+            if (dirLinks.getLink(i).getValue()) {
+                continue;
+            }
+        }
+        catch (const Base::Exception&) {
+            continue;  // an entry whose object was deleted
+        }
+        QSignalBlocker blocker(ui->comboDirection);
+        ui->comboDirection->setCurrentIndex(i);
+        return;
+    }
 }
 
 void PatternParametersWidget::setCheckable(bool on)
@@ -328,7 +381,8 @@ void PatternParametersWidget::onDirectionChanged(int /*index*/)
     }
     else {
         m_directionProp->Paste(dirLinks.getCurrentLink());  // Update the property
-        parametersChanged();                                // Notify change
+        updateDirectionOutline();
+        parametersChanged();  // Notify change
     }
 }
 
@@ -392,6 +446,7 @@ void PatternParametersWidget::onOccurrencesChanged(unsigned int value)
     }
 
     m_occurrencesProp->setValue(value);
+    updateDirectionOutline();
     parametersChanged();  // Still emit signal even if bound
 }
 

@@ -41,6 +41,8 @@ public:
     ~ViewProviderBase() override;
 
     bool doubleClicked() override;
+    /// A Derived feature's row: what the feature made goes with it (FreeCAD-CH ops#640 round 6)
+    bool onDelete(const std::vector<std::string>& subNames) override;
     void setupContextMenu(QMenu* menu, QObject* receiver, const char* member) override;
 
     Gui::ViewProvider* startEditing(int ModNum) override;

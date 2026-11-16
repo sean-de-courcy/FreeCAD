@@ -72,6 +72,9 @@ class AssemblyWorkbench(Workbench):
         import CommandCreateSimulation
         import CommandCreateSnapshot
         import CommandCreateBom
+        import CommandSnapMode  # FreeCAD-CH (ops#640, design C9)
+        import CommandShowMatesMode  # FreeCAD-CH (ops#640, gaps3 row 8: Onshape's h)
+        import AssemblyPattern  # FreeCAD-CH (asm-patterns): instance patterns
         import Preferences
 
         FreeCADGui.addLanguagePath(":/translations")
@@ -85,11 +88,15 @@ class AssemblyWorkbench(Workbench):
         cmdList = [
             "Assembly_CreateAssembly",
             "Assembly_Insert",
+            "Assembly_ToggleSnapMode",  # FreeCAD-CH (ops#640, design C9)
+            "Assembly_ToggleShowMatesMode",  # FreeCAD-CH (gaps3 row 8)
             "Assembly_SolveAssembly",
             "Assembly_CreateView",
             "Assembly_CreateSnapshot",
             "Assembly_CreateSimulation",
             "Assembly_CreateBom",
+            "Assembly_CreatePatternLinear",  # FreeCAD-CH (asm-patterns)
+            "Assembly_CreatePatternCircular",
         ]
 
         cmdListMenuOnly = [
@@ -107,6 +114,7 @@ class AssemblyWorkbench(Workbench):
             "Assembly_CreateJointCylindrical",
             "Assembly_CreateJointSlider",
             "Assembly_CreateJointBall",
+            "Assembly_CreateJointPlanar",  # FreeCAD-CH: Onshape's Planar mate (ops#640)
             "Separator",
             "Assembly_CreateJointDistance",
             "Assembly_CreateJointParallel",
@@ -125,6 +133,18 @@ class AssemblyWorkbench(Workbench):
             [QT_TRANSLATE_NOOP("Workbench", "&Assembly")],
             cmdList + cmdListMenuOnly + ["Separator"] + cmdListJoints,
         )
+
+        # FreeCAD-CH (ops#640 round 10, gap A27): under the Onshape keymap an Assembly tab's list
+        # (PartDesign's Features panel) takes the Model tree's place; View > Model Tree brings the
+        # tree back, as in PartDesign
+        general = FreeCAD.ParamGet("User parameter:BaseApp/Preferences/General")
+        if general.GetString("Keymap", "Onshape") != "FreeCAD":
+            try:
+                import PartDesignGui  # the list follows the tabs from its load on
+            except ImportError:
+                pass
+            else:
+                self.appendMenu("&View", ["Separator", "PartDesign_ToggleModelTree"])
 
     def Activated(self):
         # update the translation engine
@@ -246,6 +266,7 @@ class AssemblyWorkbench(Workbench):
                     "Assembly_CreateJointCylindrical",
                     "Assembly_CreateJointSlider",
                     "Assembly_CreateJointBall",
+                    "Assembly_CreateJointPlanar",
                     "Separator",
                     "Assembly_CreateJointDistance",
                     "Assembly_CreateJointParallel",
@@ -295,7 +316,7 @@ class AssemblyWorkbench(Workbench):
             AssemblyCreateWatcher(),
             AssemblyActivateWatcher(),
             AssemblyInsertWatcher(),
-            AssemblyGroundWatcher(),
+            # FreeCAD-CH (ops#640, rank 60): no grounding step; Onshape asks for no fixed part
             AssemblyJointsWatcher(),
             AssemblyToolsWatcher(),
             AssemblySimulationWatcher(),
@@ -304,3 +325,6 @@ class AssemblyWorkbench(Workbench):
 
 
 Gui.addWorkbench(AssemblyWorkbench())
+
+# FreeCAD-CH (ops#640): the GUI tests
+FreeCAD.__unit_test__ += ["TestAssemblyWorkbenchGui"]

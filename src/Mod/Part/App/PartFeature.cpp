@@ -25,10 +25,12 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdlib>
 #include <limits>
 #include <map>
 #include <mutex>
 #include <sstream>
+#include <unordered_map>
 #include <QDir>
 #include <QFileInfo>
 #include <Bnd_Box.hxx>
@@ -104,6 +106,7 @@
 #include <Mod/Material/App/MaterialManager.h>
 
 #include "Geometry.h"
+#include "KernelBudget.h"
 #include "MassProperties.h"
 #include "PartFeature.h"
 #include "PartFeaturePy.h"
@@ -137,7 +140,17 @@ short Feature::mustExecute() const
 App::DocumentObjectExecReturn* Feature::recompute()
 {
     try {
+        // The feature's long geometry calls on a worker, with Esc (FreeCAD-CH, kernel safety S1).
+        // No time limit here: it is PartDesign features' (PartDesign::Feature::recompute opens
+        // the outer, limited Scope), not other workbenches' objects' (the ruling of 11-11)
+        KernelBudget::Scope budget(false);
         auto ret = App::GeoFeature::recompute();
+        // A call the limit or Esc stopped fails the feature, whatever its code made of it: a
+        // script's feature that catches the error would pass a partial result (kernel-4)
+        if (const std::string fired = budget.fired(); !fired.empty()) {
+            delete ret;
+            ret = new App::DocumentObjectExecReturn(fired, this);
+        }
         if (!ret) {
             // A shape restored from another version that the recompute didn't rebuild (a plain
             // Part::Feature: execute() only touches it) keeps its names, so it is current: its
@@ -241,6 +254,35 @@ bool sameName(const Data::MappedName& a, const Data::MappedName& b)
     return Data::NameTable::instance().compareExpanded(a.toString(), b.toString()) == 0;
 }
 
+// The kept answers of Feature::doNamesMatch() for pairs of references, while a
+// matchSimilarNames() scan runs on this thread (MatchMemoScope)
+thread_local int matchMemoDepth = 0;
+thread_local bool matchMemoBypass = false;
+thread_local std::unordered_map<std::string, bool> matchMemo;
+
+struct MatchMemoScope
+{
+    MatchMemoScope()
+    {
+        ++matchMemoDepth;
+    }
+    ~MatchMemoScope()
+    {
+        if (--matchMemoDepth == 0) {
+            matchMemo.clear();
+        }
+    }
+    MatchMemoScope(const MatchMemoScope&) = delete;
+    MatchMemoScope& operator=(const MatchMemoScope&) = delete;
+};
+
+// A name that is one reference `~<ID>` into the name table, nothing else
+bool isBareReference(const Data::MappedName& name)
+{
+    return name.size() == static_cast<int>(Data::NameTable::RefLength)
+        && name[0] == Data::NameTable::Marker;
+}
+
 // The pattern instances a V2 name is in (ops#55): the tag and the instance number of each of its
 // TRF sections, in order.
 std::vector<std::pair<std::string, std::string>> patternInstances(
@@ -297,6 +339,28 @@ bool Feature::doNamesMatch(
 
     if (!name1 || !name2) {
         return false;
+    }
+
+    // Inside one matchSimilarNames() scan, the answers for pairs of references are kept: the
+    // pairing below compares linked and connected names pairwise, and names that share their
+    // history (a chamfer's face made from an edge made from two faces...) bring the same pair
+    // up again under every pair above it, exponentially in the history's depth (ops#640: 31 % of
+    // an edit's re-solve on the replica's Case Lid). The table's entries never change during a scan.
+    if (matchMemoBypass) {
+        matchMemoBypass = false;  // this is the kept pair's own computation; deeper pairs are kept
+    }
+    else if (matchMemoDepth > 0 && !logMatchedElements && isBareReference(name1)
+             && isBareReference(name2)) {
+        std::string key = name1.toString();
+        key += name2.toString();
+        key += strict ? '1' : '0';
+        if (const auto it = matchMemo.find(key); it != matchMemo.end()) {
+            return it->second;
+        }
+        matchMemoBypass = true;
+        const bool match = doNamesMatch(name1, name2, false, strict);
+        matchMemo.emplace(std::move(key), match);
+        return match;
     }
 
     Data::DecodedMappedName decodedName1 = name1.getDecodedMappedName();
@@ -512,6 +576,7 @@ std::vector<Data::MappedElement> Feature::matchSimilarNames(
     ZoneScoped;
     std::vector<Data::MappedElement> ret {};
     ambiguous = false;
+    MatchMemoScope memoScope;  // pairs of references are compared once per scan (ops#640)
 
     // Strict pass: every match counts.
     for (const Data::MappedElement& element : elements) {
@@ -745,6 +810,26 @@ void outlineFingerprint(const TopoDS_Face& face, Data::ElementFingerprint& fp)
     );
 }
 
+// FREECAD_CH_FINGERPRINT_SHORTCUTS (perf profile 2, ops#640): "off" takes insideFingerprint()'s
+// scan of every centre, "verify" both ways, with an error where they differ (a classification that
+// throws, among those the ranked pick skips, is the one way they can: none is known)
+std::string fingerprintShortcutsMode()
+{
+#ifdef _MSC_VER
+    char* value = nullptr;
+    std::size_t size = 0;
+    if (_dupenv_s(&value, &size, "FREECAD_CH_FINGERPRINT_SHORTCUTS") != 0 || !value) {
+        return {};
+    }
+    std::string text(value);
+    std::free(value);
+    return text;
+#else
+    const char* value = std::getenv("FREECAD_CH_FINGERPRINT_SHORTCUTS");
+    return value ? std::string(value) : std::string();
+#endif
+}
+
 // A point inside a face whose area falls short of its outline's (fingerprint version 5's twelfth
 // field, PR 366 round 6): an L's or a ring's centre may lie outside it. Of the centres of a 9 x 9
 // grid over the face's parameters, the one inside the face farthest from its boundary's points
@@ -783,7 +868,8 @@ void insideFingerprint(const TopoDS_Face& face, Data::ElementFingerprint& fp)
     BRepTools::UVBounds(face, u0, u1, v0, v1);
     BRepAdaptor_Surface surface(face);
     BRepClass_FaceClassifier classifier;
-    for (const int cells : {9, 27, 81}) {
+    // The grid's scan: of the centres inside the face, the first farthest from the boundary's points
+    auto scan = [&](int cells) {
         double farthest = -1.0;
         for (int i = 0; i < cells; ++i) {
             for (int j = 0; j < cells; ++j) {
@@ -801,6 +887,74 @@ void insideFingerprint(const TopoDS_Face& face, Data::ElementFingerprint& fp)
                 if (nearest > farthest) {
                     farthest = nearest;
                     fp.inside = toVector(point.XYZ());
+                }
+            }
+        }
+    };
+    // The same pick with fewer classifications (perf profile 2, ops#640: on a face with tens of
+    // holes each costs about 0.2 ms): the centres by their distance from the boundary's points,
+    // farthest first and equals in the grid's order, are classified until one is inside. Where a
+    // centre's point can't be had (a surface failing off the face), the scan above.
+    struct Centre
+    {
+        double nearest;
+        double u;
+        double v;
+        gp_Pnt point;
+    };
+    std::vector<Centre> centres;
+    const std::string mode = fingerprintShortcutsMode();
+    for (const int cells : {9, 27, 81}) {
+        if (mode == "off") {
+            scan(cells);
+            if (fp.inside) {
+                return;
+            }
+            continue;
+        }
+        centres.clear();
+        bool measured = true;
+        for (int i = 0; i < cells && measured; ++i) {
+            for (int j = 0; j < cells; ++j) {
+                const double u = u0 + (u1 - u0) * (i + 0.5) / cells;
+                const double v = v0 + (v1 - v0) * (j + 0.5) / cells;
+                gp_Pnt point;
+                try {
+                    point = surface.Value(u, v);
+                }
+                catch (const Standard_Failure&) {
+                    measured = false;
+                    break;
+                }
+                double nearest = std::numeric_limits<double>::infinity();
+                for (const auto& other : boundary) {
+                    nearest = std::min(nearest, point.Distance(other));
+                }
+                centres.push_back({nearest, u, v, point});
+            }
+        }
+        if (!measured) {
+            scan(cells);
+        }
+        else {
+            std::stable_sort(centres.begin(), centres.end(), [](const Centre& a, const Centre& b) {
+                return a.nearest > b.nearest;
+            });
+            for (const auto& centre : centres) {
+                classifier.Perform(face, gp_Pnt2d(centre.u, centre.v), Precision::Confusion());
+                if (classifier.State() == TopAbs_IN) {
+                    fp.inside = toVector(centre.point.XYZ());
+                    break;
+                }
+            }
+            if (mode == "verify") {
+                const auto ranked = fp.inside;
+                fp.inside.reset();
+                scan(cells);
+                if (ranked.has_value() != fp.inside.has_value()
+                    || (ranked && (ranked->x != fp.inside->x || ranked->y != fp.inside->y
+                                   || ranked->z != fp.inside->z))) {
+                    FC_ERR("fingerprint shortcuts: the inside point differs from the scan's");
                 }
             }
         }

@@ -138,7 +138,7 @@ std::vector<ReferenceRow> referenceRows(const DocumentObject* obj)
     for (const auto& slot : slots) {
         auto entry = ReferenceReport::find(slot.prop, slot.localIndex);
         if (!entry && !Data::hasMissingElement(slot.sub.c_str())
-            && (slot.guess.empty() || coveredGuess(slot))) {
+            && (slot.guess.empty() || coveredGuess(slot) || slot.guess.kind == "equivalent")) {
             continue;
         }
         ReferenceRow row;
@@ -229,6 +229,9 @@ void acceptReference(PropertyLinkBase* prop, int localIndex)
         resolution.index = i;
         resolution.sub = reference.subs[i];
         resolution.shadow = reference.shadows[i];
+        // The element held is the reference now: a re-target record's original isn't put back
+        // over it (N1 3.2; ops#818)
+        resolution.clearRetarget = true;
         list.push_back(std::move(resolution));
     }
     if (list.empty()) {

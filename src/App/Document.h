@@ -339,6 +339,44 @@ public:
      */
     bool saveCopy(const char* file) const;
 
+    /// FreeCAD-CH (ops#640, slice A2): what the save guard sees of the document's file
+    struct FileChange
+    {
+        /// The file is no longer the one this document read or last saved (another computer's
+        /// save carried by the sync, or any other program's): save() refuses to overwrite it
+        bool changed = false;
+        /// Who saved the file on disk, and when (its LastModifiedBy, its LastModifiedDate, UTC)
+        std::string by;
+        std::string when;
+        /// False when this document has no sure record of its file: its read failed, the file
+        /// changed during the read, or it was read from a recovery copy. The save asks all the same
+        bool known = true;
+    };
+    /// Compares the document's file with the one it read or last saved (size and time)
+    FileChange fileChangeOnDisk() const;
+    /**
+     * @brief The ways out when the document's file changed on disk; none loses a version.
+     *
+     * @param[in] choice: "KeepMineAsCopy" saves this document beside the other as a document of
+     * its own; "TakeTheirs" keeps this version as a copy and reads the other; "SaveMineOver" keeps
+     * the other as a copy and saves this one under the name.
+     * @return the copy's file name, `<name> (<who> <date> <time>).FCStd`.
+     */
+    std::string resolveFileChange(const std::string& choice);
+    /// The siblings a sync tool made of this document's file in a conflict (Syncthing's
+    /// `.sync-conflict-` names, the "conflicted copy" names of Dropbox and Nextcloud)
+    std::vector<std::string> conflictCopies() const;
+    /**
+     * @brief Settles a conflict copy; neither version is lost.
+     *
+     * @param[in] path: one of conflictCopies().
+     * @param[in] choice: "KeepThis" gives the other its author's name and time; "KeepOther" keeps
+     * this version as the document holds it (a copy with a new id, `<name> (<who> <date> <time>)`),
+     * puts the other under the document's name and reads it.
+     * @return the renamed or kept file's name.
+     */
+    std::string resolveConflictCopy(const std::string& path, const std::string& choice);
+
     /**
      * @brief Return whether App-side document state allows a recovery write.
      *
@@ -943,6 +981,40 @@ public:
 
     bool transacting() const;
 
+    /** @name The step lock (FreeCAD-CH, ops#640)
+     *
+     * While a feature dialog is open its transaction is one step in progress, which only the
+     * dialog's own commit or abort ends (Onshape: Ctrl+Z with a dialog open does nothing). While
+     * step-locked, undo() and redo() refuse (false), and so do setActiveTransaction() for an id
+     * other than the booked one, openTransaction() and _openTransaction() for a transaction other
+     * than the booked one (0): nothing commits the step behind the dialog or opens a transaction
+     * beside it. The explicit closes pass: commitTransaction(), abortTransaction() and
+     * Application::closeActiveTransaction(). Unlike lockTransaction() (TransactionLocker), which
+     * refuses those closes too. A counter; not saved.
+     * @{
+     */
+    void lockStep();
+    void unlockStep();
+    bool isStepLocked() const;
+    /// @}
+
+    /** @name Regeneration on commit (FreeCAD-CH, ops#640)
+     *
+     * When on, the document regenerates (recompute() of what is touched and its dependants,
+     * synchronously, opening no transaction, so the Redo stack is kept) when a transaction it
+     * takes part in is closed explicitly (Application::closeActiveTransaction(), commit or
+     * abort) and at the end of undo() and redo(), where the objects the step changed and their
+     * dependants are enforced first. Off by default (FreeCADCmd scripts recompute themselves);
+     * Gui::Document turns it on. Not saved.
+     * @{
+     */
+    void setRegenerateOnCommit(bool on);
+    bool regeneratesOnCommit() const;
+    /// Recompute now if regeneration on commit is on, the document needs it and it may run (not
+    /// recomputing, restoring, transacting or partial). Returns whether it recomputed.
+    bool regenerateAfterTransaction();
+    /// @}
+
     int getBookedTransactionID() const;
 
     /**
@@ -1539,6 +1611,11 @@ private:
     void changePropertyOfObject(TransactionalObject* obj, const Property* prop,
                                 const std::function<void()>& changeFunc);
     [[nodiscard]] Base::ScopeGuard setDefiningTransaction();
+    /// FreeCAD-CH (ops#640): enforce the recompute of @a changed (those still in the document)
+    /// and their in-lists, after an undo or redo (Transaction::inputChangedObjects())
+    void enforceChangedForRegeneration(const std::vector<DocumentObject*>& changed);
+    /// FreeCAD-CH (ops#640): whether another document holds a transaction with this id
+    bool transactionSharedElsewhere(int id) const;
 
 private:
     // # Data Member of the document

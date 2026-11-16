@@ -21,6 +21,7 @@ endif(BUILD_GUI)
 
 set(Assembly_Scripts
     Init.py
+    AssemblyPattern.py
     CommandCreateAssembly.py
     CommandCreateBom.py
     CommandInsertLink.py
@@ -31,6 +32,8 @@ set(Assembly_Scripts
     CommandCreateSimulation.py
     CommandCreateSnapshot.py
     CommandExportASMT.py
+    CommandSnapMode.py
+    CommandShowMatesMode.py
     TestAssemblyWorkbench.py
     JointObject.py
     Preferences.py
@@ -40,7 +43,7 @@ set(Assembly_Scripts
 )
 
 if(BUILD_GUI)
-    list (APPEND Assembly_Scripts InitGui.py)
+    list (APPEND Assembly_Scripts InitGui.py TestAssemblyWorkbenchGui.py)
 endif(BUILD_GUI)
 
 INSTALL(
@@ -60,9 +63,28 @@ SET(AssemblyTests_SRCS
     AssemblyTests/TestCore.py
     AssemblyTests/TestCommandCreateView.py
     AssemblyTests/TestCommandInsertLink.py
+    AssemblyTests/TestFloatingSolve.py
+    AssemblyTests/TestGroundedUndo.py
     AssemblyTests/TestJointRecords.py
+    AssemblyTests/TestRigidCachePointers.py
+    AssemblyTests/TestOnshapeJointsGui.py
+    AssemblyTests/TestMateOffsetsGui.py
+    AssemblyTests/TestConnectorPointsGui.py
+    AssemblyTests/TestSnapModeGui.py
+    AssemblyTests/TestFastenedPickOrderGui.py
+    AssemblyTests/TestJointDialogWrappersGui.py
     AssemblyTests/TestSimulationExport.py
     AssemblyTests/TestVariantLinks.py
+    AssemblyTests/TestOnshapeAssemblies.py
+    AssemblyTests/TestOnshapeAssembliesGui.py
+    AssemblyTests/TestAssemblyPatterns.py
+    AssemblyTests/TestOnshapeConnectors.py
+    AssemblyTests/TestAssemblyPatternsGui.py
+    AssemblyTests/TestUndoRegenerateGui.py
+    AssemblyTests/TestTriadGui.py
+    AssemblyTests/TestFreeInstances.py
+    AssemblyTests/TestFreeInstancesGui.py
+    AssemblyTests/TestMateAfterEdits.py
     AssemblyTests/mocks/__init__.py
     AssemblyTests/mocks/MockGui.py
 )

@@ -29,19 +29,36 @@
 #include <Standard_Failure.hxx>
 
 #include <algorithm>
+#include <cmath>
 
+#include <BRepBndLib.hxx>
+#include <BRepClass3d_SolidClassifier.hxx>
+#include <BRepExtrema_DistShapeShape.hxx>
+#include <BRepGProp.hxx>
+#include <BRep_Builder.hxx>
+#include <BRep_Tool.hxx>
+#include <Bnd_Box.hxx>
+#include <GProp_GProps.hxx>
 #include <Precision.hxx>
+#include <TopExp_Explorer.hxx>
+#include <TopoDS.hxx>
+#include <TopoDS_Compound.hxx>
+#include <gp_Pnt.hxx>
 
 #include <App/Application.h>
 #include <App/Document.h>
 #include <App/DocumentObject.h>
 #include <App/PropertyLinks.h>
+#include <App/SuppressibleExtension.h>
 #include <Base/Tools.h>
 #include <Mod/Part/App/modelRefine.h>
 #include <Mod/Part/App/TopoShapeOpCode.h>
 
 #include "FeatureBoolean.h"
 #include "Body.h"
+#include "FeatureSketchBased.h"
+#include "StudioList.h"
+#include "StudioOwner.h"
 
 FC_LOG_LEVEL_INIT("PartDesign", true, true);
 
@@ -66,6 +83,28 @@ Boolean::Boolean()
         App::Prop_Hidden,
         "Use legacy PartDesign Boolean body placement handling"
     );
+    // The last Keep tools the dialog accepted (FreeCAD-CH ops#640 rank 28, hands-on A-5); a
+    // restored Boolean reads its own, and one saved without it reads false
+    const bool keepTools = !App::GetApplication().isRestoring()
+        && App::GetApplication()
+               .GetParameterGroupByPath("User parameter:BaseApp/Preferences/Mod/PartDesign")
+               ->GetBool("BooleanKeepTools", false);
+    ADD_PROPERTY_TYPE(
+        KeepTools,
+        (keepTools),
+        "Boolean",
+        App::Prop_None,
+        "Keep the tool parts: off, the Boolean consumes them (Onshape's Keep tools)"
+    );
+    ADD_PROPERTY_TYPE(
+        SeparateTools,
+        (nullptr),
+        "Boolean",
+        static_cast<App::PropertyType>(App::Prop_Output | App::Prop_Hidden),
+        "The tools a Union left as they were: they touch nothing it fuses, and stay parts"
+    );
+    // FreeCAD-CH ops#654 (P5)
+    ADD_PROPERTY_TYPE(StudioTools, (), "Studio", App::Prop_Hidden, "The tool parts, by part id");
 
     App::GeoFeatureGroupExtension::initExtension(this);
     // Boolean tools are references, not owned coordinate-system children.
@@ -76,11 +115,67 @@ namespace
 {
 // A Merge's saved toolFrames() from its last compute (FreeCAD-CH ops#325, PR 305 round 1)
 constexpr const char* mergeFrames = "MergeFrames";
+
+// Whether two shapes share a point: in contact, or one inside the other (FreeCAD-CH ops#640
+// rank 3b: a Union fuses what touches)
+bool shapesTouch(const TopoShape& one, const TopoShape& other)
+{
+    Bnd_Box oneBox;
+    Bnd_Box otherBox;
+    BRepBndLib::Add(one.getShape(), oneBox, /*useTriangulation=*/false);
+    BRepBndLib::Add(other.getShape(), otherBox, /*useTriangulation=*/false);
+    oneBox.Enlarge(Precision::Confusion());
+    if (oneBox.IsOut(otherBox)) {
+        return false;
+    }
+    BRepExtrema_DistShapeShape distance(one.getShape(), other.getShape());
+    if (distance.IsDone() && distance.Value() <= Precision::Confusion()) {
+        return true;
+    }
+    // Surfaces apart: one solid may still hold the other whole
+    auto inside = [](const TopoShape& inner, const TopoShape& outer) {
+        TopExp_Explorer vertex(inner.getShape(), TopAbs_VERTEX);
+        if (!vertex.More()) {
+            return false;
+        }
+        const gp_Pnt point = BRep_Tool::Pnt(TopoDS::Vertex(vertex.Current()));
+        for (TopExp_Explorer solid(outer.getShape(), TopAbs_SOLID); solid.More(); solid.Next()) {
+            BRepClass3d_SolidClassifier classifier(solid.Current(), point, Precision::Confusion());
+            if (classifier.State() == TopAbs_IN) {
+                return true;
+            }
+        }
+        return false;
+    };
+    return inside(one, other) || inside(other, one);
+}
+
+double volumeOf(const TopoShape& shape)
+{
+    GProp_GProps props;
+    BRepGProp::VolumeProperties(shape.getShape(), props);
+    return props.Mass();
+}
+
+// Whether the tools left the base's volume as it was: judged by volume, as an Extrude's Remove
+// that misses (FeatureExtrude's cutMissed), so a tool that only shares a face with the base
+// counts. The tolerance scales with the tools plus the base's own rounding
+bool unchangedBy(const TopoShape& base, const std::vector<TopoShape>& tools, const TopoShape& result)
+{
+    double toolVolume = 0.0;
+    for (const auto& tool : tools) {
+        toolVolume += std::fabs(volumeOf(tool));
+    }
+    const double baseVolume = volumeOf(base);
+    const double tolerance = 1e-6 * toolVolume + 1e-9 * std::fabs(baseVolume);
+    return std::fabs(volumeOf(result) - baseVolume) <= tolerance;
+}
 }  // namespace
 
 short Boolean::mustExecute() const
 {
-    if (Group.isTouched() || UseLegacyBodyPlacement.isTouched()) {
+    if (Group.isTouched() || UseLegacyBodyPlacement.isTouched() || KeepTools.isTouched()
+        || StudioTools.isTouched()) {
         return 1;
     }
     // A merged part moved: nothing it links changed, and the Body isn't linked (FreeCAD-CH
@@ -180,8 +275,154 @@ bool Boolean::hasObject(const App::DocumentObject* /*object*/, bool /*recursive*
     return false;
 }
 
+// StudioList.cpp and StudioOwner.cpp (FreeCAD-CH ops#654 P5; declared where used)
+PartDesignExport void studioBooleanParts(const App::DocumentObject* owner,
+                                         std::vector<Body*>& steps,
+                                         std::vector<Body*>& tools,
+                                         std::vector<Body*>& both);
+PartDesignExport Part::TopoShape studioBooleanTool(const App::DocumentObject* owner, std::string* why);
+
+namespace
+{
+std::string quotedLabel(const App::DocumentObject* obj)
+{
+    return std::string("'") + (obj ? obj->Label.getValue() : "?") + "'";
+}
+
+/** A Boolean studio feature (FreeCAD-CH ops#654 P5, Onshape O3): outside every Body, its targets
+ * are its StudioScope and its tools its StudioTools (part ids). It computes nothing of its own:
+ * its steps (one in each target of a Subtract, one in the first part of a Union) apply its tool,
+ * the tool parts' shapes at its place (FeatureApply::toolOf). Here it checks what it would act on
+ * and fails loudly, its own shape empty:
+ * - Intersect between parts makes a new part in Onshape, which waits for pieces (P6p);
+ * - no target or no tool part left at its place ("Need at least one solid": a pick of a part
+ *   consumed or merged away resolves to nothing, O9b / F2);
+ * - a part that is a target and a tool.
+ */
+App::DocumentObjectExecReturn* executeStudioBoolean(Boolean& boolean)
+{
+    boolean.Shape.setValue(Part::TopoShape());
+    if (!boolean.SeparateTools.getValues().empty()) {
+        boolean.SeparateTools.setValues(std::vector<App::DocumentObject*>());
+    }
+    const std::string type = boolean.Type.getValueAsString();
+    if (type == "Common") {
+        return new App::DocumentObjectExecReturn(
+            "An Intersect between parts makes a new part, which is not done yet: use Subtract "
+            "or Union, or an Intersect inside one part",
+            &boolean
+        );
+    }
+    // A Union's tool parts that touch none of the parts it merges stay parts (P6p, Onshape A-2'
+    // b): decided here, from every tool listed, and read by the projection after the recompute
+    // (StudioApartTools, as the part mirror's StudioConsumesSource)
+    auto apart = freecad_cast<App::PropertyStringList*>(boolean.getPropertyByName("StudioApartTools"));
+    if (!apart) {
+        apart = static_cast<App::PropertyStringList*>(boolean.addDynamicProperty(
+            "App::PropertyStringList",
+            "StudioApartTools",
+            "Studio",
+            "The Union's tool parts that touch none of the parts it merges (ops#654 P6p)",
+            App::Prop_Hidden | App::Prop_Output | App::Prop_NoRecompute
+        ));
+    }
+    if (!apart->getValues().empty()) {
+        apart->setValues(std::vector<std::string>());
+    }
+    std::vector<Body*> steps;
+    std::vector<Body*> tools;
+    std::vector<Body*> both;
+    studioBooleanParts(&boolean, steps, tools, both);
+    if (type == "Fuse" && !steps.empty() && !tools.empty()) {
+        std::vector<Part::TopoShape> merged;
+        if (Part::TopoShape first = studioBaseAt(&boolean, steps.front()); !first.isNull()) {
+            merged.push_back(first);
+        }
+        std::vector<std::pair<Body*, Part::TopoShape>> rest;
+        for (auto tool : tools) {
+            rest.emplace_back(tool, studioBaseAt(&boolean, tool));
+        }
+        auto touchesMerged = [&merged](const Part::TopoShape& shape) {
+            return std::ranges::any_of(merged, [&shape](const Part::TopoShape& other) {
+                BRepExtrema_DistShapeShape distance(shape.getShape(), other.getShape());
+                return distance.IsDone() && distance.Value() <= Precision::Confusion();
+            });
+        };
+        for (bool grew = !merged.empty(); grew;) {
+            grew = false;
+            for (auto it = rest.begin(); it != rest.end();) {
+                if (!it->second.isNull() && touchesMerged(it->second)) {
+                    merged.push_back(it->second);
+                    it = rest.erase(it);
+                    grew = true;
+                }
+                else {
+                    ++it;
+                }
+            }
+        }
+        std::vector<std::string> ids;
+        for (const auto& [tool, shape] : rest) {
+            if (!shape.isNull()) {
+                ids.push_back(studioPartId(tool));
+            }
+        }
+        if (!ids.empty() && ids.size() == tools.size()) {
+            apart->setValues(ids);  // none consumed (unverified on Onshape: loud)
+            return new App::DocumentObjectExecReturn(
+                "No tool part touches " + quotedLabel(steps.front())
+                    + ": a Union merges parts that touch",
+                &boolean
+            );
+        }
+        if (!ids.empty()) {
+            apart->setValues(ids);
+            studioBooleanParts(&boolean, steps, tools, both);
+        }
+    }
+    if (!both.empty()) {
+        return new App::DocumentObjectExecReturn(
+            quotedLabel(both.front()) + " is a target and a tool of this Boolean",
+            &boolean
+        );
+    }
+    if (type == "Fuse") {
+        if (steps.size() + tools.size() < 2) {
+            return new App::DocumentObjectExecReturn(
+                "Need at least two parts to merge: the Union's parts are gone, merged or consumed "
+                "at its place",
+                &boolean
+            );
+        }
+    }
+    else if (steps.empty()) {
+        return new App::DocumentObjectExecReturn(
+            "Need at least one target part: the Subtract's targets are gone, merged or consumed "
+            "at its place",
+            &boolean
+        );
+    }
+    else if (tools.empty()) {
+        return new App::DocumentObjectExecReturn(
+            "Need at least one tool part: the Subtract's tools are gone, merged or consumed at "
+            "its place",
+            &boolean
+        );
+    }
+    std::string why;
+    if (studioBooleanTool(&boolean, &why).isNull()) {
+        return new App::DocumentObjectExecReturn(why, &boolean);
+    }
+    return App::DocumentObject::StdReturn;
+}
+}  // namespace
+
 App::DocumentObjectExecReturn* Boolean::execute()
 {
+    if (runsAsStudioOwner(this)) {
+        return executeStudioBoolean(*this);
+    }
+
     // Get the operation type
     std::string type = Type.getValueAsString();
 
@@ -265,9 +506,63 @@ App::DocumentObjectExecReturn* Boolean::execute()
         }
         shapes.push_back(shape);
     }
+
+    // Onshape's Union, Subtract and Intersect (FreeCAD-CH ops#640 rank 3b): a Merge keeps its own
+    // rules (ops#325)
+    const bool plain = !isMerge();
+    const bool hadTools = !tools.empty();
+    std::vector<App::DocumentObject*> separate;
+    if (plain && type == "Fuse" && hadTools) {
+        // A Union fuses what touches the base, directly or through another tool it fuses; a tool
+        // apart from all of it stays a part of its own (hands-on A-2' b)
+        std::vector<bool> joined(tools.size(), false);
+        {
+            std::vector<const TopoShape*> fused {&shapes.front()};
+            for (bool grew = true; grew;) {
+                grew = false;
+                for (std::size_t i = 0; i < tools.size(); ++i) {
+                    const TopoShape& tool = shapes[i + 1];
+                    if (!joined[i] && std::ranges::any_of(fused, [&tool](const TopoShape* shape) {
+                            return shapesTouch(tool, *shape);
+                        })) {
+                        joined[i] = true;
+                        fused.push_back(&tool);
+                        grew = true;
+                    }
+                }
+            }
+        }
+        std::vector<TopoShape> joinedShapes {shapes.front()};
+        std::vector<App::DocumentObject*> joinedTools;
+        for (std::size_t i = 0; i < tools.size(); ++i) {
+            if (joined[i]) {
+                joinedShapes.push_back(shapes[i + 1]);
+                joinedTools.push_back(tools[i]);
+            }
+            else {
+                separate.push_back(tools[i]);
+            }
+        }
+        shapes = std::move(joinedShapes);
+        tools = std::move(joinedTools);
+    }
+    if (SeparateTools.getValues() != separate) {
+        SeparateTools.setValues(separate);
+    }
+    // A Subtract or an Intersect whose tools are all apart from the base changes nothing; the
+    // boolean isn't run (B3-3a, A-2' c)
+    bool apart = false;
+    if (plain && hadTools && (type == "Cut" || type == "Common")) {
+        auto touchesBase = [&shapes](const TopoShape& tool) {
+            return shapesTouch(tool, shapes.front());
+        };
+        apart = type == "Cut" ? std::none_of(shapes.begin() + 1, shapes.end(), touchesBase)
+                              : !std::all_of(shapes.begin() + 1, shapes.end(), touchesBase);
+    }
+
     TopoShape result(baseTopShape);
 
-    if (!tools.empty()) {
+    if (!tools.empty() && !apart) {
         const char* op = nullptr;
 
         if (type == "Fuse") {
@@ -313,6 +608,33 @@ App::DocumentObjectExecReturn* Boolean::execute()
         }
     }
 
+    // What Onshape says, or leaves, when a Boolean changes nothing (ops#640 rank 3b)
+    std::string note;
+    if (plain && hadTools) {
+        std::vector<TopoShape> toolShapes(shapes.begin() + 1, shapes.end());
+        if (type == "Common" && (apart || result.countSubShapes(TopAbs_SOLID) == 0)) {
+            // An Intersect that misses leaves nothing, with no message (hands-on A-2' c); with Keep
+            // tools, the part as it was
+            if (!KeepTools.getValue()) {
+                TopoDS_Compound empty;
+                BRep_Builder builder;
+                builder.MakeCompound(empty);
+                this->Shape.setValue(makeTopoShape(empty));
+                return StdReturn;
+            }
+            result = baseTopShape;
+        }
+        else if (type == "Cut" && (apart || unchangedBy(baseTopShape, toolShapes, result))) {
+            // The target as it was, the tools consumed: an info, the row healthy (B3-3a)
+            note = "Selected tools and targets do not intersect.";
+        }
+        else if (type == "Fuse" && (tools.empty() || unchangedBy(baseTopShape, toolShapes, result))) {
+            // Nothing touched, or every tool inside the base (A-2' b)
+            note = "Boolean resulted in no geometry change. The parts either do not intersect or "
+                   "are totally contained.";
+        }
+    }
+
     result = refineShapeIfActive(result);
 
     if (!isSingleSolidRuleSatisfied(result.getShape())) {
@@ -324,12 +646,23 @@ App::DocumentObjectExecReturn* Boolean::execute()
 
     this->Shape.setValue(getSolid(result));
     warnMerged();
+    if (!note.empty()) {
+        if (App::Document* doc = getDocument()) {
+            const char* previous = doc->getWarningDescription(this);
+            doc->setWarning(this, previous && *previous ? std::string(previous) + "\n" + note : note);
+        }
+    }
 
     return StdReturn;
 }
 
 void Boolean::updatePreviewShape()
 {
+    // A studio feature (ops#654 P5) has no base: its steps show what it does
+    if (runsAsStudioOwner(this)) {
+        PreviewShape.setValue(Part::TopoShape());
+        return;
+    }
     if (strcmp(Type.getValueAsString(), "Cut") == 0) {
         TopoShape base;
         if (UseLegacyBodyPlacement.getValue()) {
@@ -468,28 +801,19 @@ std::vector<App::DocumentObject*> Boolean::mergedBodies() const
     return bodies;
 }
 
-Boolean* Boolean::makeMerge(App::DocumentObject* at, const std::vector<App::DocumentObject*>& bodies)
+namespace
 {
-    auto survivor = freecad_cast<Body*>(at);
-    App::DocumentObject* after = nullptr;
-    if (survivor) {
-        after = lastSolid(survivor);
-    }
-    else if ((survivor = Body::findBodyOf(at)) && Body::isSolidFeature(at)) {
-        after = at;
-    }
-    if (!survivor || !after) {
-        throw Base::ValueError(
-            "Merge: " + label(at) + " is neither a solid feature in a part nor a part with a solid"
-        );
-    }
-    if (Boolean* merge = mergeOf(survivor)) {
-        throw Base::ValueError(
-            "Merge: " + label(survivor) + " is merged into " + label(Body::findBodyOf(merge))
-            + "; merge into that part"
-        );
-    }
-    std::vector<Body*> absorbed;
+// The merged features for a Merge of `bodies` in `survivor`, right after `after`: each Body's last
+// solid feature, in `absorbed` the Bodies. Refused, with the reason, before anything changes; a
+// Body that `self` merges already may stay (setMergeScope)
+std::vector<App::DocumentObject*> mergeTools(
+    Body* survivor,
+    App::DocumentObject* after,
+    const std::vector<App::DocumentObject*>& bodies,
+    std::vector<Body*>& absorbed,
+    const Boolean* self
+)
+{
     std::vector<App::DocumentObject*> tools;
     for (auto obj : bodies) {
         auto body = freecad_cast<Body*>(obj);
@@ -508,17 +832,30 @@ Boolean* Boolean::makeMerge(App::DocumentObject* at, const std::vector<App::Docu
                 + "'s studio (one container, placed alike)"
             );
         }
-        if (Boolean* merge = mergeOf(body)) {
+        if (Boolean* merge = Boolean::mergeOf(body); merge && merge != self) {
             throw Base::ValueError(
                 "Merge: " + label(body) + " is merged into "
                 + label(Body::findBodyOf(merge)) + " already"
             );
         }
+        // A part merged here already keeps its merged feature: one added to it later is locked
+        // (mergeLock), not merged
+        App::DocumentObject* merged = nullptr;
+        if (self && Boolean::mergeOf(body) == self) {
+            for (auto tool : self->Group.getValues()) {
+                if (Body::findBodyOf(tool) == body) {
+                    merged = tool;
+                    break;
+                }
+            }
+        }
         // A held feature would merge a frozen shape (design 2.6)
-        if (body->isRolledBack()) {
+        if (!merged && body->isRolledBack()) {
             throw Base::ValueError("Merge: Roll " + label(body) + " to the end first");
         }
-        App::DocumentObject* merged = lastSolid(body);
+        if (!merged) {
+            merged = lastSolid(body);
+        }
         if (!merged) {
             throw Base::ValueError("Merge: " + label(body) + " has no solid to merge");
         }
@@ -550,6 +887,34 @@ Boolean* Boolean::makeMerge(App::DocumentObject* at, const std::vector<App::Docu
             + label(dependency) + ", or change " + label(merged)
         );
     }
+
+    return tools;
+}
+}  // namespace
+
+Boolean* Boolean::makeMerge(App::DocumentObject* at, const std::vector<App::DocumentObject*>& bodies)
+{
+    auto survivor = freecad_cast<Body*>(at);
+    App::DocumentObject* after = nullptr;
+    if (survivor) {
+        after = lastSolid(survivor);
+    }
+    else if ((survivor = Body::findBodyOf(at)) && Body::isSolidFeature(at)) {
+        after = at;
+    }
+    if (!survivor || !after) {
+        throw Base::ValueError(
+            "Merge: " + label(at) + " is neither a solid feature in a part nor a part with a solid"
+        );
+    }
+    if (Boolean* merge = mergeOf(survivor)) {
+        throw Base::ValueError(
+            "Merge: " + label(survivor) + " is merged into " + label(Body::findBodyOf(merge))
+            + "; merge into that part"
+        );
+    }
+    std::vector<Body*> absorbed;
+    std::vector<App::DocumentObject*> tools = mergeTools(survivor, after, bodies, absorbed, nullptr);
 
     App::Document* doc = survivor->getDocument();
     const bool atTip = survivor->Tip.getValue() == after;
@@ -589,6 +954,90 @@ Boolean* Boolean::makeMerge(App::DocumentObject* at, const std::vector<App::Docu
         }
         link->setValue(merge);
         body->Visibility.setValue(false);
+    }
+    return merge;
+}
+
+Boolean* Boolean::mergeAfter(const App::DocumentObject* feature)
+{
+    Body* body = Body::findBodyOf(feature);
+    if (!body || !Body::isSolidFeature(feature)) {
+        return nullptr;
+    }
+    auto next = freecad_cast<Boolean*>(
+        body->getNextSolidFeature(const_cast<App::DocumentObject*>(feature))
+    );
+    return next && next->isMerge() && next->BaseFeature.getValue() == feature ? next : nullptr;
+}
+
+Boolean* Boolean::scopeMerge(const App::DocumentObject* feature)
+{
+    auto profileBased = freecad_cast<const ProfileBased*>(feature);
+    if (!profileBased
+        || const_cast<ProfileBased*>(profileBased)->getAddSubType() != FeatureAddSub::Type::Additive) {
+        return nullptr;
+    }
+    Boolean* merge = mergeAfter(feature);
+    auto accepted = merge ? freecad_cast<App::PropertyBool*>(merge->getPropertyByName(mergeAccepted))
+                          : nullptr;
+    return accepted && accepted->getValue() ? merge : nullptr;
+}
+
+Boolean* Boolean::setMergeScope(App::DocumentObject* feature, const std::vector<App::DocumentObject*>& bodies)
+{
+    Body* survivor = Body::findBodyOf(feature);
+    if (!survivor || !Body::isSolidFeature(feature)) {
+        throw Base::ValueError("Merge scope: " + label(feature) + " isn't a solid feature in a part");
+    }
+    Boolean* merge = mergeAfter(feature);
+    if (bodies.empty()) {
+        // Every part unticked: the Merge goes, and its parts are parts again (Body::onChanged
+        // shows them when their MergedInto link breaks)
+        if (merge) {
+            App::Document* doc = merge->getDocument();
+            const std::string name = merge->getNameInDocument();
+            survivor->removeObject(merge);
+            doc->removeObject(name.c_str());
+        }
+        return nullptr;
+    }
+    if (!merge) {
+        merge = makeMerge(feature, bodies);
+    }
+    else {
+        // In place, so what reads the Merge (the next feature, a sketch on its faces) keeps it
+        std::vector<Body*> absorbed;
+        std::vector<App::DocumentObject*> tools = mergeTools(survivor, feature, bodies, absorbed, merge);
+        for (auto obj : merge->mergedBodies()) {
+            if (std::ranges::find(absorbed, obj) == absorbed.end()) {
+                if (auto link = freecad_cast<App::PropertyLinkHidden*>(obj->getPropertyByName(mergedInto))) {
+                    link->setValue(nullptr);
+                }
+            }
+        }
+        merge->setObjects(tools);
+        for (Body* body : absorbed) {
+            auto link = freecad_cast<App::PropertyLinkHidden*>(body->getPropertyByName(mergedInto));
+            if (!link) {
+                link = static_cast<App::PropertyLinkHidden*>(body->addDynamicProperty(
+                    "App::PropertyLinkHidden",
+                    mergedInto,
+                    "Merge",
+                    "The Merge this part is merged into",
+                    App::Prop_Hidden
+                ));
+            }
+            if (link->getValue() != merge) {
+                link->setValue(merge);
+                body->Visibility.setValue(false);
+            }
+        }
+    }
+    // A merge picked in the feature's own dialog is a plain feature: no Warning (P50)
+    if (auto accepted = freecad_cast<App::PropertyBool*>(merge->getPropertyByName(mergeAccepted))) {
+        if (!accepted->getValue()) {
+            accepted->setValue(true);
+        }
     }
     return merge;
 }
@@ -673,6 +1122,41 @@ std::string Boolean::mergeLock(const App::DocumentObject* feature)
         }
     }
     return {};
+}
+
+Boolean* Boolean::consumerOf(const App::DocumentObject* body)
+{
+    auto part = freecad_cast<const Body*>(body);
+    App::Document* doc = part ? part->getDocument() : nullptr;
+    if (!doc) {
+        return nullptr;
+    }
+    for (auto obj : doc->getObjectsOfType(Boolean::getClassTypeId())) {
+        auto boolean = static_cast<Boolean*>(obj);
+        if (boolean->isMerge() || boolean->KeepTools.getValue() || boolean->isError()) {
+            continue;
+        }
+        auto suppressible = boolean->getExtensionByType<App::SuppressibleExtension>(true);
+        if (suppressible && suppressible->Suppressed.getValue()) {
+            continue;
+        }
+        // Rolled back past it, the history doesn't reach it yet: its tools are parts
+        Body* own = Body::findBodyOf(boolean);
+        if (!own || own == part || own->holds(boolean)) {
+            continue;
+        }
+        const std::vector<App::DocumentObject*> separate = boolean->SeparateTools.getValues();
+        for (auto tool : boolean->Group.getValues()) {
+            const Body* toolBody = freecad_cast<const Body*>(tool);
+            if (!toolBody) {
+                toolBody = Body::findBodyOf(tool);
+            }
+            if (toolBody == part && std::ranges::find(separate, tool) == separate.end()) {
+                return boolean;
+            }
+        }
+    }
+    return nullptr;
 }
 
 }  // namespace PartDesign

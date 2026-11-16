@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 
-"""A sketch whose external geometry lost its element (ops#72).
+"""A sketch whose external geometry lost its element (ops#72, ops#656 D4 row 2).
 
-The sketch fails, names the source and the missing element, and keeps the link in
+The sketch computes on the frozen geometry with a warning that names the source and the missing
+element, as Onshape's Use does (facts GB33 (b), GB22: "Some external references are missing.",
+the used entity stays where it was, the features after it build). It keeps the link in
 `ExternalGeometry` (so it still depends on the source) and the frozen geometry (so it still
-shows, and the constraints on it still solve). Before, it stayed valid on the frozen geometry and
-dropped the link. Every model is designed geometry; results are judged geometrically."""
+shows, and the constraints on it still solve). Before ops#656 it failed; before ops#72 it stayed
+valid on the frozen geometry and dropped the link. Every model is designed geometry; results are
+judged geometrically."""
 
 import math
 import os
@@ -51,6 +54,17 @@ def face_at_x(shape, x):
         if abs(box.XMin - x) < TOL and abs(box.XMax - x) < TOL:
             return f"Face{i}"
     raise AssertionError(f"no face at x = {x}")
+
+
+def broken_reference(sketch):
+    """True if the sketch computes on the frozen copy of a missing external reference: valid, with
+    a warning naming it (ops#656 D4 row 2)."""
+    status = sketch.getStatusString()
+    return (
+        sketch.isValid()
+        and "Warning" in sketch.State
+        and ("issing" in status or "no longer gives" in status)
+    )
 
 
 def external_lines(sketch):
@@ -133,9 +147,9 @@ class TestSketchMissingExternal(unittest.TestCase):
         )
         self.assertTrue(self.sketch.Geometry[0].Center.isEqual(V(20, 10, 0), TOL))
 
-    def testMissingReferenceFailsAndNamesIt(self):
+    def testMissingReferenceWarnsAndNamesIt(self):
         self.replaceRightSide()
-        self.assertFalse(self.sketch.isValid())
+        self.assertTrue(broken_reference(self.sketch), self.sketch.getStatusString())
         self.assertIn(
             f"Missing external geometry reference: Pad.{self.topEdge} (ExternalEdge1)",
             self.sketch.getStatusString(),
@@ -147,12 +161,29 @@ class TestSketchMissingExternal(unittest.TestCase):
         self.assertIn(self.sketch, self.pad.InList)  # still depends on the pad
         self.assertFrozenAtX20()
 
-    def testStaysFailedOnTheNextRecompute(self):
+    def testStaysWarnedOnTheNextRecompute(self):
         self.replaceRightSide()
         self.sketch.touch()
         self.doc.recompute()
-        self.assertFalse(self.sketch.isValid())
+        self.assertTrue(broken_reference(self.sketch), self.sketch.getStatusString())
         self.assertEqual(self.sketch.ExternalGeometry, [(self.pad, ("?" + self.topEdge,))])
+        self.assertFrozenAtX20()
+
+    def testFeaturesAfterItBuild(self):
+        """A pocket of the circle, made before the edit, builds on the frozen geometry after it,
+        as Onshape's extrude of a sketch whose Use lost its source does (GB22: "From use stays
+        OK and unchanged"): through all, both ways, it takes a cylinder r 2 x 10 from the edited
+        pad (20 x 20 plus the V's triangle 5 x 20 / 2, 10 thick)."""
+        pocket = self.body.newObject("PartDesign::Pocket", "Pocket")
+        pocket.Profile = self.sketch
+        pocket.Type = "ThroughAll"
+        pocket.Midplane = True
+        self.doc.recompute()
+        self.assertTrue(pocket.isValid(), pocket.getStatusString())
+        self.replaceRightSide()
+        self.assertTrue(broken_reference(self.sketch), self.sketch.getStatusString())
+        self.assertTrue(pocket.isValid(), pocket.getStatusString())
+        self.assertAlmostEqual(pocket.Shape.Volume, 4500 - 40 * math.pi, delta=1e-6)
         self.assertFrozenAtX20()
 
     def addFrontEdge(self):
@@ -176,7 +207,7 @@ class TestSketchMissingExternal(unittest.TestCase):
         """Adding another external edge rebuilds the external geometry outside a recompute: the
         missing link and its frozen geometry stay (it was erased there too)."""
         self.addFrontEdge()
-        self.assertFalse(self.sketch.isValid())
+        self.assertTrue(broken_reference(self.sketch), self.sketch.getStatusString())
         self.assertBothLinesKept()
 
     def testDeletingAnotherSourceKeepsTheMissingLink(self):
@@ -219,7 +250,7 @@ class TestSketchMissingExternal(unittest.TestCase):
         self.assertEqual(len(sketch.ExternalGeo), 6)
 
         self.replaceRightSide()
-        self.assertFalse(sketch.isValid())
+        self.assertTrue(broken_reference(sketch), sketch.getStatusString())
         self.assertIn(
             f"Pad.{face} (ExternalEdge1, ExternalEdge2, ExternalEdge3, ExternalEdge4)",
             sketch.getStatusString(),
@@ -229,14 +260,14 @@ class TestSketchMissingExternal(unittest.TestCase):
 
 class TestSketchMissingExternalSolver(TestSketchMissingExternal):
     """The same in a document with the reference solver on (ops#7). There the solver breaks
-    the reference (its One policy) and the recompute check fails the sketch first, naming the
+    the reference (its One policy) and the recompute check words the warning, naming the
     candidates; the sketch must keep the broken link, as it does in other documents."""
 
     solver = True
 
-    def testMissingReferenceFailsAndNamesIt(self):
+    def testMissingReferenceWarnsAndNamesIt(self):
         self.replaceRightSide()
-        self.assertFalse(self.sketch.isValid())
+        self.assertTrue(broken_reference(self.sketch), self.sketch.getStatusString())
         self.assertIn("ExternalGeometry[0]", self.sketch.getStatusString())
 
     def testFaceLinkNamesEachGeometry(self):
@@ -308,7 +339,7 @@ class TestSketchMissingExternalReturns(unittest.TestCase):
     def testElementBackRelinks(self):
         self.setCut([(15, -1), (25, -1), (25, 21), (15, 21), (15, -1)])
         self.doc.recompute()
-        self.assertFalse(self.sketch.isValid())
+        self.assertTrue(broken_reference(self.sketch), self.sketch.getStatusString())
         self.assertTrue(self.sketch.ExternalGeometry[0][1][0].startswith("?"))
 
         self.setCut([(-1, -1), (2, -1), (2, 2), (-1, 2), (-1, -1)])
@@ -325,6 +356,75 @@ class TestSketchMissingExternalReturns(unittest.TestCase):
 class TestSketchMissingExternalReturnsSolver(TestSketchMissingExternalReturns):
     """The same with the reference solver on: the solver, not the sketch, resolves the returned
     element (exactly, by its old name)."""
+
+    solver = True
+
+
+class TestSketchMissingExternalSourceDeleted(unittest.TestCase):
+    """The source object of a sketch's external edge deleted (review rows656-r1 T1). Deleting it
+    takes the link with it, so no link is left to report or repair the reference: the sketch keeps
+    its error (decision 150), unlike a link whose element is missing, which warns (ops#656 D4 row 2).
+    A 20 x 20 x 10 box; a free sketch projects its top edge on y = 0 and holds a circle r 1 on it."""
+
+    solver = False
+
+    def setUp(self):
+        self.doc = App.newDocument("SourceDeleted")
+        if self.solver:
+            self.doc.HistoryAlgorithm = "V2"
+            self.doc.ReferenceSolver = True
+        box = self.doc.addObject("Part::Box", "Src")
+        box.Length, box.Width, box.Height = 20, 20, 10
+        self.sketch = self.doc.addObject("Sketcher::SketchObject", "Sk")
+        self.doc.recompute()
+        names = [
+            f"Edge{i + 1}"
+            for i, e in enumerate(box.Shape.Edges)
+            if abs(e.BoundBox.ZMin - 10) < TOL
+            and abs(e.BoundBox.ZMax - 10) < TOL
+            and abs(e.BoundBox.YMax) < TOL
+        ]
+        self.assertEqual(len(names), 1)
+        self.sketch.addExternal("Src", names[0])
+        circle = self.sketch.addGeometry(Part.Circle(V(5, 0, 0), V(0, 0, 1), 1))
+        self.sketch.addConstraint(Sketcher.Constraint("PointOnObject", circle, 3, -3))
+        self.doc.recompute()
+        self.assertTrue(self.sketch.isValid(), self.sketch.getStatusString())
+
+    def tearDown(self):
+        App.closeDocument(self.doc.Name)
+
+    def testDeletedSourceFails(self):
+        self.doc.removeObject("Src")
+        self.doc.recompute()
+        self.assertEqual(self.sketch.ExternalGeometry, [])
+        self.assertFalse(self.sketch.isValid())
+        self.assertIn("Src", self.sketch.getStatusString())
+        # the frozen line stays, flagged missing, with the circle on it
+        self.assertEqual(len(self.sketch.ExternalGeo), 3)
+        facade = Sketcher.ExternalGeometryFacade(self.sketch.ExternalGeo[2])
+        self.assertTrue(facade.testFlag("Missing"))
+        centre = self.sketch.Geometry[0].Center
+        self.assertLess(abs(centre.y), TOL)
+
+
+    def testSourceNameReused(self):
+        """Another box takes the deleted one's name and the sketch links an edge of it (review
+        rows656-r1 r2 F1): the old line's source is still gone, so the sketch still fails."""
+        self.doc.removeObject("Src")
+        self.doc.recompute()
+        self.assertFalse(self.sketch.isValid())
+        box = self.doc.addObject("Part::Box", "Src")
+        self.assertEqual(box.Name, "Src")
+        box.Length, box.Width, box.Height = 30, 30, 5
+        self.doc.recompute()
+        self.sketch.addExternal("Src", "Edge1")
+        self.doc.recompute()
+        self.assertFalse(self.sketch.isValid())
+
+
+class TestSketchMissingExternalSourceDeletedSolver(TestSketchMissingExternalSourceDeleted):
+    """The same in a reference solver document."""
 
     solver = True
 
@@ -469,8 +569,10 @@ class TestSketchFaceLinkPairing(unittest.TestCase):
         self.assertAlmostEqual(getattr(centre, axis), value, delta=TOL)
 
     def assertBreaks(self):
-        """The sketch fails naming the projected line that lost its source edge; the constraint
-        stays on that line, at its old place and flagged missing: never on another line."""
+        """The sketch fails naming the projected line that lost its source edge while the link
+        still gives the face's other edges (ops#264 e2: not row 2's every-reference-missing warning,
+        ops#656); the constraint stays on that line, at its old place and flagged missing: never on
+        another line."""
         self.assertFalse(self.sketch.isValid())
         message = self.sketch.getStatusString()
         geoId = self.constrainedGeoId()
@@ -610,7 +712,7 @@ class TestSketchFaceLinkPairing(unittest.TestCase):
         self.constrainCircle("x", 0)
         self.redraw([(25, 20), (25, 0), (0, 0), (0, 20)])
         self.doc.recompute()
-        self.assertFalse(self.sketch.isValid())
+        self.assertTrue(broken_reference(self.sketch), self.sketch.getStatusString())
         self.assertIn("ExternalGeometry[0]", self.sketch.getStatusString())
         geoId = self.constrainedGeoId()
         self.assertTrue(self.onLine(self.lines()[geoId], "x", 0))
@@ -1279,7 +1381,7 @@ class TestSketchFaceLinkPairing(unittest.TestCase):
         # C2 (ops#502): the face is named by a verified match; edited in place it matches only by
         # overlap, and no other face anchors it (decision 174), so it gets a fresh id and the link
         # breaks with the face as its candidate (right -> loud); picked again, the pairing runs
-        self.assertFalse(self.sketch.isValid())
+        self.assertTrue(broken_reference(self.sketch), self.sketch.getStatusString())
         self.assertIn("Missing", self.sketch.getStatusString())  # (the solver says the id is gone)
         App.repairReference(self.sketch, "ExternalGeometry", 0, "Face1", True)
         self.doc.recompute()

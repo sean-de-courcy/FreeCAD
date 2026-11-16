@@ -106,10 +106,10 @@
          <string>Enables async document recomputation</string>
         </property>
         <property name="checked">
-         <bool>true</bool>
+         <bool>false</bool>
         </property>
         <property name="prefEntry" stdset="0">
-         <cstring>EnableAsyncRecompute</cstring>
+         <cstring>AsyncRecomputeWorker</cstring>
         </property>
         <property name="prefPath" stdset="0">
          <cstring>Document</cstring>
@@ -196,7 +196,7 @@ This feature may slightly increase recomputation time.</string>
            <string>Compression level for FCStd files</string>
           </property>
           <property name="value">
-           <number>7</number>
+           <number>3</number>
           </property>
           <property name="prefEntry" stdset="0">
            <cstring>CompressionLevel</cstring>
@@ -565,6 +565,29 @@ get date suffix according to the specified format</string>
         </item>
        </layout>
       </item>
+      <item row="11" column="0">
+       <widget class="QLabel" name="teamFolderLabel">
+        <property name="text">
+         <string>Team folder (synced between the computers):</string>
+        </property>
+       </widget>
+      </item>
+      <item row="12" column="0">
+       <widget class="Gui::PrefFileChooser" name="prefTeamFolder">
+        <property name="toolTip">
+         <string>The folder Syncthing keeps the same on every computer. Setting it writes its ignore list (.stglobalignore, included from .stignore), so backups and temporary save files stay local; documents inside it keep at least five local backups.</string>
+        </property>
+        <property name="mode">
+         <enum>Gui::FileChooser::Directory</enum>
+        </property>
+        <property name="prefEntry" stdset="0">
+         <cstring>TeamFolder</cstring>
+        </property>
+        <property name="prefPath" stdset="0">
+         <cstring>Document</cstring>
+        </property>
+       </widget>
+      </item>
       <item row="10" column="0">
        <widget class="Gui::PrefCheckBox" name="prefDisableVersionCheckOnSave">
         <property name="toolTip">
@@ -648,8 +671,8 @@ icon in the tree view to fully reload it.</string>
       <item row="0" column="1">
        <widget class="Gui::PrefLineEdit" name="prefAuthor">
         <property name="toolTip">
-         <string>All documents that will be created will get the specified author name.
-Keep blank for anonymous.
+         <string>New documents get this author name, and every save writes it as 'Last modified by'.
+Kept blank, new documents get no author and saves write the system's user name.
 You can also use the form: John Doe &lt;john@doe.com&gt;</string>
         </property>
         <property name="prefEntry" stdset="0">
@@ -768,6 +791,16 @@ You can also use the form: John Doe &lt;john@doe.com&gt;</string>
  </widget>
  <layoutdefault spacing="6" margin="11"/>
  <customwidgets>
+  <customwidget>
+   <class>Gui::FileChooser</class>
+   <extends>QWidget</extends>
+   <header>Gui/FileDialog.h</header>
+  </customwidget>
+  <customwidget>
+   <class>Gui::PrefFileChooser</class>
+   <extends>Gui::FileChooser</extends>
+   <header>Gui/PrefWidgets.h</header>
+  </customwidget>
   <customwidget>
    <class>Gui::PrefSpinBox</class>
    <extends>QSpinBox</extends>

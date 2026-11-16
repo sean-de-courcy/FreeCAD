@@ -120,3 +120,45 @@ def studioBarAfter(studio: Document | DocumentObject, *hint: DocumentObject | No
     datums lie between it and the first held feature.
     """
     ...
+
+# FreeCAD-CH (ops#640 round 6): Onshape's Derived inside one document (Derived.h)
+
+def derivedStudios(doc: Document, /) -> list[Document | DocumentObject]:
+    """Return the studios of doc that hold a part to derive: doc (its top level) first."""
+    ...
+
+def studioLabel(studio: Document | DocumentObject, /) -> str:
+    """Return a studio's name: an App::Part's Label, the implicit studio's label for a document
+    ("Part Studio 1" by default)."""
+    ...
+
+def derivableParts(studio: Document | DocumentObject, /) -> list[DocumentObject]:
+    """Return the studio's Bodies with a shape that no Delete part deleted."""
+    ...
+
+def makeDerived(studio: Document | DocumentObject, bodies: list[DocumentObject], /) -> DocumentObject:
+    """Make a Derived feature of bodies (parts of one other studio) in studio; return its lead.
+
+    No transaction, no recompute.
+    """
+    ...
+
+def editDerived(lead: DocumentObject, bodies: list[DocumentObject], /) -> DocumentObject:
+    """Make the Derived feature bring in bodies instead; return its lead after the edit."""
+    ...
+
+def deleteDerivedParts(lead: DocumentObject, /) -> None:
+    """Remove what the Derived feature made besides lead (lead is left for the caller)."""
+    ...
+
+def derivedLead(obj: DocumentObject, /) -> DocumentObject | None:
+    """Return the lead of obj's Derived feature, or None."""
+    ...
+
+def derivedMembers(lead: DocumentObject, /) -> list[DocumentObject]:
+    """Return the members of the Derived feature, lead last."""
+    ...
+
+def derivedSource(member: DocumentObject, /) -> DocumentObject | None:
+    """Return the part a Derived member copies, or None when it is missing."""
+    ...

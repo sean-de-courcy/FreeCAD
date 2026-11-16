@@ -89,6 +89,12 @@ public:
     {
         return SelPoses;
     }
+    /// FreeCAD-CH (ops#673): whether sub-element i's point is a pick (a 3D pick, or Python given
+    /// the point); a tree or Python selection without one has (0,0,0) there, which is no point
+    inline bool hasPickedPoint(std::size_t i) const
+    {
+        return i < SelPicked.size() && SelPicked[i];
+    }
 
     /// returns the selected DocumentObject or NULL if the object is already deleted
     const App::DocumentObject* getObject() const;
@@ -121,6 +127,7 @@ protected:
     std::string FeatName;
     std::string TypeName;
     std::vector<Base::Vector3d> SelPoses;
+    std::vector<bool> SelPicked;
 
 private:
     /// to make sure no duplicates of subnames

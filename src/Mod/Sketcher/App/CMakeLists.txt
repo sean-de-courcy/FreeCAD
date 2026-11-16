@@ -72,6 +72,7 @@ SET(Features_SRCS
     SketchObjectExternal.cpp
     SketchObjectConstraints.cpp
     SketchObjectOperations.cpp
+    SketchObjectPattern.cpp
     SketchAnalysis.h
     SketchAnalysis.cpp
     Analyse.h
@@ -79,6 +80,10 @@ SET(Features_SRCS
     PythonConverter.h
     ParkedReference.cpp
     ParkedReference.h
+    SketchPattern.cpp
+    SketchPattern.h
+    SketchImprint.cpp
+    SketchImprint.h
 )
 SOURCE_GROUP("Features" FILES ${Features_SRCS})
 

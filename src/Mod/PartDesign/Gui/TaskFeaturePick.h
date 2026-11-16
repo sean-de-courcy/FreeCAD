@@ -90,6 +90,16 @@ public:
         QString* refusal = nullptr
     );
 
+    /// FreeCAD-CH (ops#640, the hub's decision: Onshape reads any sketch of the studio): an
+    /// independent copy of `sketch`, a sketch outside any Body, added to `body` (a
+    /// PartDesign::Body) and attached where the original is, as the pick dialog's Make
+    /// independent copy did. Null when it can't be copied; `refusal`, when given, then tells why.
+    static App::DocumentObject* copySketchIntoBody(
+        App::DocumentObject* sketch,
+        App::DocumentObject* body,
+        QString* refusal = nullptr
+    );
+
     /// The name on `copy` (made by makeCopy from `original`) of the element `sub` of the
     /// original: the same index on a copy of the original's own type (a sketch or primitive,
     /// which has the original's elements, recomputed or not), once `sameElement` shows it's the

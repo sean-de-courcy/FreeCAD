@@ -99,6 +99,7 @@ Py::Object wrapFromWidgetFactory(
     wrap.loadWidgetsModule();
 
     const char* typeName = wrap.getWrapperName(widget);
+    Gui::PythonWrapper::dropStaleWrappers(widget);  // just made (ops#790, ops#825)
     return wrap.fromQWidget(widget, typeName);
 }
 
@@ -514,13 +515,99 @@ std::unique_ptr<UiLoader> UiLoader::newInstance(QObject* parent)
 
 UiLoader::~UiLoader() = default;
 
+// FreeCAD-CH (ops#825): a stale wrapper (PythonWrapper::dropStaleWrapper, ops#790) at a new object's
+// address is dropped as the object is made, on every load path that runs through UiLoader
+// (UiLoader.load, PySideUic.loadUi, a task dialog's `ui`, a preference page's .ui, PyResource):
+// the create functions below drop it at each widget, layout and action, and load() at what they
+// didn't make. No Python runs during a C++ load, so wrappers held from before the load are the
+// only ones touched. Not covered: what Qt makes lazily after the load (a combo box's popup view),
+// and, without HAVE_QT_UI_TOOLS, everything but createCustomWidget (Python's loader does the load).
+namespace
+{
+// the loader whose load() runs (GUI thread only; a C++ load runs no Python, so loads don't nest)
+const UiLoader* loading = nullptr;
+}  // namespace
+
+void UiLoader::dropMade(QObject* object)
+{
+    if (!object) {
+        return;
+    }
+    PythonWrapper::dropStaleWrappers(object);
+    if (loading != this) {
+        return;  // createWidget() called from Python: nothing for load() to skip
+    }
+    made.insert(object);
+    // its children so far are the ones its constructor made
+    const auto children = object->findChildren<QObject*>();
+    for (QObject* child : children) {
+        made.insert(child);
+    }
+}
+
+QWidget* UiLoader::load(QIODevice* device, QWidget* parentWidget)
+{
+    made.clear();
+    loading = this;
+    QWidget* form = QUiLoader::load(device, parentWidget);
+    loading = nullptr;
+#if defined(HAVE_QT_UI_TOOLS)
+    if (form) {
+        if (!made.contains(form)) {
+            PythonWrapper::dropStaleWrapper(form);
+        }
+        const auto objects = form->findChildren<QObject*>();
+        for (QObject* object : objects) {
+            if (!made.contains(object)) {
+                PythonWrapper::dropStaleWrapper(object);  // a button group, a splitter handle
+            }
+        }
+    }
+#endif
+    made.clear();
+    return form;
+}
+
 QWidget* UiLoader::createWidget(const QString& className, QWidget* parent, const QString& name)
 {
     if (this->cw.contains(className)) {
-        return QUiLoader::createWidget(className, parent, name);
+        QWidget* widget = QUiLoader::createWidget(className, parent, name);
+#if defined(HAVE_QT_UI_TOOLS)
+        dropMade(widget);
+#endif  // otherwise Python's loader made it, and its wrapper is live
+        return widget;
     }
 
-    return createFromWidgetFactory(className, parent, name);
+    QWidget* widget = createFromWidgetFactory(className, parent, name);
+    dropMade(widget);
+    return widget;
+}
+
+QLayout* UiLoader::createLayout(const QString& className, QObject* parent, const QString& name)
+{
+    QLayout* layout = QUiLoader::createLayout(className, parent, name);
+#if defined(HAVE_QT_UI_TOOLS)
+    dropMade(layout);
+#endif
+    return layout;
+}
+
+QAction* UiLoader::createAction(QObject* parent, const QString& name)
+{
+    QAction* action = QUiLoader::createAction(parent, name);
+#if defined(HAVE_QT_UI_TOOLS)
+    dropMade(action);
+#endif
+    return action;
+}
+
+QActionGroup* UiLoader::createActionGroup(QObject* parent, const QString& name)
+{
+    QActionGroup* group = QUiLoader::createActionGroup(parent, name);
+#if defined(HAVE_QT_UI_TOOLS)
+    dropMade(group);
+#endif
+    return group;
 }
 
 // ----------------------------------------------------

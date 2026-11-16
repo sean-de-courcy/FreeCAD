@@ -35,8 +35,13 @@
 #include <App/GroupExtension.h>
 #include <App/Link.h>
 #include <App/Part.h>
+#include <App/DocumentTabs.h>
+#include <Base/Tools.h>
 #include <Gui/Application.h>
 #include <Gui/CommandT.h>
+#include <Gui/Document.h>
+#include <Gui/DocumentTabBar.h>
+#include <Gui/ForkKeymap.h>
 #include <Gui/MainWindow.h>
 #include <Gui/MDIView.h>
 #include <Gui/Selection/Selection.h>
@@ -45,6 +50,7 @@
 #include <Mod/PartDesign/App/FeatureBoolean.h>
 #include <Mod/PartDesign/App/FeatureSketchBased.h>
 #include <Mod/PartDesign/App/PartDesignParameter.h>
+#include <Mod/PartDesign/App/StudioList.h>
 #include <Mod/Sketcher/App/SketchObject.h>
 
 #include "Utils.h"
@@ -88,6 +94,15 @@ bool setEdit(App::DocumentObject* obj, PartDesign::Body* body)
     }
     if (!body) {
         body = getBodyFor(obj, false);
+        // FreeCAD-CH (ops#654 S4): a studio feature (an owner) belongs to no Body; its dialog
+        // opens on it in the studio
+        if (!body && PartDesign::isStudioOwner(obj)) {
+            Gui::cmdGuiDocument(
+                obj,
+                std::ostringstream() << "setEdit(" << Gui::Command::getObjectCmd(obj) << ", 0)"
+            );
+            return true;
+        }
         if (!body) {
             FC_ERR("no body found");
             return false;
@@ -148,6 +163,35 @@ QString mergedBodyRefusal(const PartDesign::Body* body)
 }
 }  // namespace
 
+// FreeCAD-CH (ops#640 round 6, R6T-1): the Bodies a command may take as its part. Under the
+// typed tabs only those of the tab @p view shows (the document's active view when null), as a
+// command in an Onshape Part Studio sees only that studio's parts; else all of the document's.
+// Declared where it is used (no header names it)
+std::vector<App::DocumentObject*> tabBodies(App::Document* doc, Gui::MDIView* view);
+std::vector<App::DocumentObject*> tabBodies(App::Document* doc, Gui::MDIView* view)
+{
+    std::vector<App::DocumentObject*> bodies;
+    if (!doc) {
+        return bodies;
+    }
+    bodies = doc->getObjectsOfType(PartDesign::Body::getClassTypeId());
+    if (!Gui::DocumentTabs::isOn()) {
+        return bodies;
+    }
+    if (!view) {
+        auto gdoc = Gui::Application::Instance->getDocument(doc);
+        view = gdoc ? gdoc->getActiveView() : nullptr;
+    }
+    const std::string tab = view ? Gui::DocumentTabs::tabOfView(view) : std::string();
+    if (tab.empty()) {
+        return bodies;
+    }
+    std::erase_if(bodies, [&tab](const App::DocumentObject* body) {
+        return App::DocumentTabs::tabNameOf(body) != tab;
+    });
+    return bodies;
+}
+
 /*!
  * \brief Return active body or show a warning message.
  * If \a autoActivate is true (the default) then if there is
@@ -169,12 +213,13 @@ PartDesign::Body* getBody(
 
     if (activeView) {
         auto doc = activeView->getAppDocument();
-        bool singleBodyDocument = doc->countObjectsOfType<PartDesign::Body>() == 1;
+        // FreeCAD-CH (R6T-1): under the typed tabs, the single Body of the view's tab
+        const auto bodies = tabBodies(doc, activeView);
+        bool singleBodyDocument = bodies.size() == 1;
         if (assertModern) {
             activeBody = activeView->getActiveObject<PartDesign::Body*>(PDBODYKEY, topParent, subname);
 
             if (!activeBody && singleBodyDocument && autoActivate) {
-                auto bodies = doc->getObjectsOfType(PartDesign::Body::getClassTypeId());
                 App::DocumentObject* body = nullptr;
                 if (bodies.size() == 1) {
                     body = bodies[0];
@@ -260,8 +305,82 @@ void needActiveBodyError()
     );
 }
 
+// FreeCAD-CH (ops#640 round 6, J22): under the Onshape keymap a new part is "Part N", the lowest
+// N free in its studio, as Onshape names parts. Labels are unique in a document unless the
+// preference allows duplicates, so then N is also free in the document. Declared where it is used
+// (no header names it)
+void nameNewPart(PartDesign::Body* body, App::Part* studioHint);
+void nameNewPart(PartDesign::Body* body, App::Part* studioHint)
+{
+    if (!body || !body->isAttachedToDocument() || !Gui::ForkKeymap::isOnshape()) {
+        return;
+    }
+    App::Document* doc = body->getDocument();
+    App::Part* studio = App::Part::getPartOfObject(body, /*recursive=*/true);
+    if (!studio) {
+        studio = studioHint;
+    }
+    const bool unique = !App::GetApplication()
+                             .GetParameterGroupByPath("User parameter:BaseApp/Preferences/Document")
+                             ->GetBool("DuplicateLabels", false);
+    std::set<std::string> taken;
+    for (App::DocumentObject* obj : doc->getObjects()) {
+        if (obj == body) {
+            continue;
+        }
+        if (unique
+            || (obj->isDerivedFrom<PartDesign::Body>()
+                && App::Part::getPartOfObject(obj, /*recursive=*/true) == studio)) {
+            taken.insert(obj->Label.getValue());
+        }
+    }
+    std::string label;
+    for (int n = 1;; ++n) {
+        label = QObject::tr("Part %1").arg(n).toUtf8().toStdString();
+        if (!taken.contains(label)) {
+            break;
+        }
+    }
+    if (label == body->Label.getValue()) {
+        return;
+    }
+    label = Base::Tools::escapeEncodeString(label);
+    Gui::cmdAppObjectArgs(body, "Label = '%s'", label.c_str());
+}
+
+// FreeCAD-CH (ops#640, r7 fixes): under the typed tabs a new part is made only in a Part Studio
+// tab: with an Assembly tab active, New Sketch or a primitive made a top-level Body (a new implicit
+// studio's tab, the assembly out of edit). True (refused, the status bar says why) when the
+// active view of @p doc shows another kind of tab, as Derived refuses (activeStudio()). Declared
+// where it is used (no header names it)
+bool refuseNewPartOutsideStudio(App::Document* doc);
+bool refuseNewPartOutsideStudio(App::Document* doc)
+{
+    if (!doc || !Gui::DocumentTabs::isOn()) {
+        return false;
+    }
+    auto gdoc = Gui::Application::Instance->getDocument(doc);
+    Gui::MDIView* view = gdoc ? gdoc->getActiveView() : nullptr;
+    const std::string tab = view ? Gui::DocumentTabs::tabOfView(view) : std::string();
+    if (tab.empty() || tab == App::DocumentTabs::implicitName()) {
+        return false;
+    }
+    App::DocumentTabs::Kind kind {};
+    if (App::DocumentTabs::isTabObject(doc->getObject(tab.c_str()), &kind)
+        && kind == App::DocumentTabs::Kind::PartStudio) {
+        return false;
+    }
+    Gui::getMainWindow()->showMessage(QObject::tr("Open a Part Studio tab to sketch"), 5000);
+    return true;
+}
+
 PartDesign::Body* makeBody(App::Document* doc)
 {
+    // FreeCAD-CH: not outside a Part Studio tab (each caller handles a null part)
+    if (refuseNewPartOutsideStudio(doc)) {
+        return nullptr;
+    }
+
     bool allowCompound = PartDesign::PartDesignParameter::instance()->getAllowCompoundDefault();
 
     // This is intended as a convenience when starting a new document.
@@ -283,6 +402,21 @@ PartDesign::Body* makeBody(App::Document* doc)
 
     auto body = dynamic_cast<PartDesign::Body*>(doc->getObject(bodyName.c_str()));
     if (body) {
+        // FreeCAD-CH (R6T-1): under the typed tabs a new part is made in the tab's studio (the
+        // view's active App::Part, set by the tab), whatever the caller; else the callers put it
+        // in the active studio
+        if (Gui::DocumentTabs::isOn()) {
+            Gui::MDIView* view = Gui::Application::Instance->activeView();
+            auto studio = view ? view->getActiveObject<App::Part*>(PARTKEY) : nullptr;
+            if (studio && studio->getDocument() == doc && !studio->hasObject(body)) {
+                Gui::cmdAppObjectArgs(
+                    studio,
+                    "addObject(%s)",
+                    Gui::Command::getObjectCmd(body).c_str()
+                );
+            }
+        }
+        nameNewPart(body, getActivePart());
         makeBodyActive(body, doc);
     }
     return body;

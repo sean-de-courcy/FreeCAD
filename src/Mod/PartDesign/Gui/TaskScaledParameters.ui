@@ -45,7 +45,7 @@
      <item>
       <widget class="QLabel" name="label">
        <property name="text">
-        <string>Occurrences</string>
+        <string>Instance count</string>
        </property>
       </widget>
      </item>

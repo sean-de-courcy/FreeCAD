@@ -99,6 +99,7 @@ FreeCAD.__unit_test__ += [
     "Menu.MenuCreateCases",
     "GuiDocument",
     "TestVariablesPanelGui",
+    "TestOnshapeNavigationGui",
     "TestGraphicsViewWrapping",
     "TestMDIView",
     "TestRubberbandSelection",
@@ -108,4 +109,10 @@ FreeCAD.__unit_test__ += [
     "TestViewProviderLink",
     "TestPropertyEditorGui",
     "TestVariablesGui",
+    "TestVariableFieldsGui",
+    "TestDocumentTabsGui",
+    "TestSaveGuardGui",
+    "TestPresenceGui",
+    "TestVariableStudioGui",
+    "TestUiLoaderWrappersGui",
 ]

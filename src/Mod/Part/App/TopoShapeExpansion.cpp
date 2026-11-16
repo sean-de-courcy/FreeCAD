@@ -22,11 +22,33 @@
  *                                                                          *
  ***************************************************************************/
 
+#include <BRepBuilderAPI_ModifyShape.hxx>
+#include <BRepTools_Modification.hxx>
+#include <GeomLib_IsPlanarSurface.hxx>
+#include <GeomProjLib.hxx>
+#include <Geom_BSplineCurve.hxx>
+#include <Geom_BSplineSurface.hxx>
+#include <Geom_BezierCurve.hxx>
+#include <Geom_BezierSurface.hxx>
+#include <Geom_Line.hxx>
+#include <Geom_CylindricalSurface.hxx>
+#include <GeomAPI_IntSS.hxx>
+#include <GeomConvert_CompCurveToBSplineCurve.hxx>
+#include <Geom_BoundedCurve.hxx>
+#include <gp_Cylinder.hxx>
+#include <gp_Pnt2d.hxx>
+#include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
+#include <gp_Lin.hxx>
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <charconv>
+#include <cstdlib>
+#include <string>
 #include <cctype>
 #include <cstring>
+#include <map>
+#include <set>
 #include <exception>
 #include <limits>
 #include <memory>
@@ -97,9 +119,14 @@
 #include <BRepPrimAPI_MakePrism.hxx>
 #include <BRepProj_Projection.hxx>
 #include <BRepTools_WireExplorer.hxx>
+#include <GCPnts_QuasiUniformDeflection.hxx>
 #include <Geom2d_Curve.hxx>
 #include <Geom2dAdaptor_Curve.hxx>
 #include <BndLib_Add2dCurve.hxx>
+#include <BRepAlgoAPI_Common.hxx>
+#include <BRepAlgoAPI_Cut.hxx>
+#include <BRepPrimAPI_MakeBox.hxx>
+#include <Bnd_Box.hxx>
 #include <Bnd_Box2d.hxx>
 #include <GeomConvert.hxx>
 #include <GeomFill_BezierCurves.hxx>
@@ -119,9 +146,13 @@
 #include <ShapeBuild_ReShape.hxx>
 #include <ShapeConstruct_Curve.hxx>
 #include <ShapeUpgrade_ShellSewing.hxx>
+#include <ShapeUpgrade_UnifySameDomain.hxx>
+#include <TopTools_MapOfShape.hxx>
 #include <StdFail_NotDone.hxx>
 #include <TopTools_HSequenceOfShape.hxx>
+#include <ShapeFix_Face.hxx>
 #include <ShapeFix_Shape.hxx>
+#include <ShapeFix_Solid.hxx>
 #include <ShapeFix_ShapeTolerance.hxx>
 #include <gp.hxx>
 #include <gp_Ax3.hxx>
@@ -140,9 +171,11 @@
 #include "modelRefine.h"
 #include "CrossSection.h"
 #include "FilletFallback.h"
+#include "RollingBallBlend.h"
 #include "MassProperties.h"
 #include "TopoShape.h"
 #include "TopoShapeOpCode.h"
+#include "TopoShapeRepair.h"
 #include "TopoShapeCache.h"
 #include "TopoShapeMapper.h"
 #include "NamingHash.h"
@@ -151,6 +184,7 @@
 #include "Geometry.h"
 #include "BRepOffsetAPI_MakeOffsetFix.h"
 #include "PipeShellApproximation.h"
+#include "KernelBudget.h"
 #include "ProgressIndicator.h"
 #include "ShapeAnalysis_FreeBoundsFix.h"
 #include "SweepFrenet.h"
@@ -159,6 +193,7 @@
 #include <App/Document.h>
 #include <App/ElementMap.h>
 #include <App/ElementNamingUtils.h>
+#include <App/ElementSolver.h>
 #include <App/NameTable.h>
 #include <Base/BoundBox.h>
 #include <Base/Exception.h>
@@ -1780,11 +1815,19 @@ std::string placeAmong(std::size_t k, std::size_t n)
 /// Twins in the maker's order (twinOrder's `makerOrder`, decision 158 Q1) go without ORD
 /// (decision 173 (2)): that order follows the profile and the spine through a rigid motion, so a
 /// moved exact hit on one of them is the same twin, as on `integration`. Twins placed on a closed
-/// first-source edge (twinOrder's `closedSource`) carry the closed edge's flag too.
-std::vector<TwinPlace> twinPlaces(std::size_t count, bool ordered = true, bool closed = false)
+/// first-source edge (twinOrder's `closedSource`) carry the closed edge's flag too. `counted`
+/// gives a lone member the count too (`0of1`): it is the one left of a group whose other members
+/// Connected Names told apart, so its lone `0` would be the name of the group's member when it is
+/// alone (a helix's turn 1 in one turn, the last turn in two: batch 4's T1, ops#640).
+std::vector<TwinPlace> twinPlaces(
+    std::size_t count,
+    bool ordered = true,
+    bool closed = false,
+    bool counted = false
+)
 {
     std::vector<TwinPlace> places(count);
-    if (count > 1) {
+    if (count > 1 || (counted && count == 1)) {
         for (std::size_t k = 0; k < count; ++k) {
             places[k].duplicateCount = placeAmong(k, count);
             places[k].ordered = ordered;
@@ -2558,6 +2601,213 @@ void sortNameSet(std::vector<std::string>& names)
     names = std::move(sorted);
 }
 
+namespace
+{
+/** The names that are an element's own history, for the marks of its pieces (ops#640).
+ *
+ * A piece's name is its element's name before, plus a section whose Connected Names are the
+ * neighbours that tell the pieces apart. A neighbour named from the element itself (the edge a
+ * dress-up or a refine leaves on a face is named from that face) holds the element's name as it
+ * was then: an earlier state, a prefix of the name now. Taken as a mark it writes that history
+ * out again, so the full form of the name multiplies with every split (x2.6 per split with one
+ * such neighbour each; a face split seven times reached 0.5 GB). Such a mark says nothing the
+ * name's own prefix doesn't say, so it is no mark: holds() is true for it.
+ *
+ * Every earlier state of an element starts with the element's first name, its root: the name
+ * before any section was added. So a name holds an earlier state exactly if it refers, at any
+ * depth, to the root. The test walks the names' references in the name table (interned form),
+ * each node once, and never writes a name out. A node no deeper than the shallowest root can't
+ * refer to one, so the walk stops there: it goes through the part of a neighbour's history
+ * that is younger than the element, not through all of it.
+ *
+ * The table is the process's for a shape that interns its names. A shape that doesn't gets a
+ * table of its own (\a table), so that its names aren't added to the process's: the IDs are
+ * those of the contents, the same in every table. A name kept inline after an ID collision
+ * (NameTable.h) has no reference to follow: the rule then doesn't see it, as before this rule.
+ */
+class OwnHistory
+{
+public:
+    explicit OwnHistory(Data::NameTable& table)
+        : table(table)
+    {}
+
+    /// Adds the element's name \a name: its root is the name without the sections added to it.
+    /// Every name is added before the first holds().
+    void add(std::string_view name)
+    {
+        std::string text = table.toInterned(name);
+        for (;;) {
+            const std::size_t bar = Data::NameTable::lastTopLevelBar(text);
+            if (bar == std::string::npos) {
+                break;
+            }
+            const auto prefix = Data::NameTable::parseRef(std::string_view(text).substr(0, bar));
+            if (!prefix) {
+                return;  // a prefix kept inline (an ID collision): no root to look for
+            }
+            auto content = table.lookup(*prefix);
+            if (!content) {
+                addRoot(*prefix, 0);  // an unknown node: its depth isn't known
+                return;
+            }
+            text = std::move(*content);
+        }
+        if (const auto bare = Data::NameTable::parseRef(text)) {
+            addRoot(*bare, table.depth(*bare));
+            return;
+        }
+        int depth = 1;
+        for (const Data::NameId& ref : refsOf(text)) {
+            const int below = table.depth(ref);
+            if (below == 0) {
+                depth = 0;
+                break;
+            }
+            depth = std::max(depth, below + 1);
+        }
+        addRoot(table.idOf(text), depth);
+    }
+
+    /// True if \a name holds one of the added names as it was at some time
+    bool holds(std::string_view name)
+    {
+        if (roots.empty()) {
+            return false;
+        }
+        const std::vector<Data::NameId> refs = refsOf(table.toInterned(name));
+        return std::ranges::any_of(refs, [this](const Data::NameId& id) {
+            return reaches(id);
+        });
+    }
+
+private:
+    struct IdHash
+    {
+        std::size_t operator()(const Data::NameId& id) const
+        {
+            std::size_t value = 0;
+            std::memcpy(&value, id.bytes().data(), sizeof(value));
+            return value;
+        }
+    };
+    struct Frame
+    {
+        Data::NameId id;
+        std::vector<Data::NameId> refs;
+        std::size_t next = 0;
+    };
+
+    static std::vector<Data::NameId> refsOf(std::string_view text)
+    {
+        // Every `~` starts a reference: it occurs nowhere else in a name
+        std::vector<Data::NameId> refs;
+        for (std::size_t pos = text.find(Data::NameTable::Marker); pos != std::string_view::npos;
+             pos = text.find(Data::NameTable::Marker, pos + 1)) {
+            if (auto id = Data::NameTable::parseRef(text.substr(pos, Data::NameTable::RefLength))) {
+                refs.push_back(*id);
+            }
+        }
+        return refs;
+    }
+
+    std::vector<Data::NameId> refsOfNode(const Data::NameId& id) const
+    {
+        auto content = table.lookup(id);
+        return content ? refsOf(*content) : std::vector<Data::NameId> {};
+    }
+
+    // \a depth: the root's depth in the table (NameTable::depth()), 0 if it isn't known
+    void addRoot(const Data::NameId& id, int depth)
+    {
+        if (depth == 0) {
+            depthsKnown = false;
+        }
+        else if (roots.empty() || depth < shallowestRoot) {
+            shallowestRoot = depth;
+        }
+        roots.insert(id);
+    }
+
+    // True if the node \a id is too shallow to refer to a root: a node is deeper than every
+    // node it refers to
+    bool tooShallow(const Data::NameId& id) const
+    {
+        if (!depthsKnown) {
+            return false;
+        }
+        const int depth = table.depth(id);
+        return depth != 0 && depth <= shallowestRoot;
+    }
+
+    // True if the node \a start is a root or refers to one at any depth. Without recursion:
+    // histories can be deep.
+    bool reaches(const Data::NameId& start)
+    {
+        if (roots.count(start) != 0) {
+            return true;
+        }
+        if (auto known = reached.find(start); known != reached.end()) {
+            return known->second;
+        }
+        if (tooShallow(start)) {
+            return false;
+        }
+        std::vector<Frame> stack;
+        stack.push_back({start, refsOfNode(start)});
+        while (!stack.empty()) {
+            Frame& frame = stack.back();
+            bool found = false;
+            bool deeper = false;
+            while (frame.next < frame.refs.size()) {
+                const Data::NameId ref = frame.refs[frame.next];
+                if (roots.count(ref) != 0) {
+                    found = true;
+                    break;
+                }
+                if (auto known = reached.find(ref); known != reached.end()) {
+                    if (known->second) {
+                        found = true;
+                        break;
+                    }
+                    ++frame.next;
+                    continue;
+                }
+                if (tooShallow(ref)) {
+                    ++frame.next;
+                    continue;
+                }
+                stack.push_back({ref, refsOfNode(ref)});  // `frame` is no longer valid
+                deeper = true;
+                break;
+            }
+            if (deeper) {
+                continue;
+            }
+            if (found) {
+                // every node on the way down refers to it too
+                for (const Frame& above : stack) {
+                    reached[above.id] = true;
+                }
+                return true;
+            }
+            reached[frame.id] = false;
+            stack.pop_back();
+            if (!stack.empty()) {
+                ++stack.back().next;
+            }
+        }
+        return false;
+    }
+
+    Data::NameTable& table;
+    std::unordered_set<Data::NameId, IdHash> roots;
+    std::unordered_map<Data::NameId, bool, IdHash> reached;
+    int shallowestRoot = 0;
+    bool depthsKnown = true;
+};
+}  // namespace
+
 const std::string& modPostfix()
 {
     static std::string postfix(Data::POSTFIX_MOD);
@@ -2655,6 +2905,7 @@ TopoShape& TopoShape::makeShapeWithElementMap(
 )
 {
     ZoneScoped;
+    KernelBudget::PhaseTimer phase(KernelBudget::Phase::ElementMap);
 
     setShape(shape);
     if (shape.IsNull()) {
@@ -3652,6 +3903,8 @@ TopoShape& TopoShape::makeShapeWithElementMap(
         // which tells no piece apart (ops#431). Only looked up, never iterated.
         std::unordered_map<Data::MappedName, unsigned int, Data::MappedNameHasher>
             allModifiedConnectedElementNames;
+        // For OwnHistory, in a shape that doesn't intern its names: made at the first split
+        std::unique_ptr<Data::NameTable> plainHistoryTable;
 
         // NamingMap::Group: pair<std::vector<NamingMapKey>, std::vector<NamingMapValue>>
         for (const auto& modifiedShapeEntry : modifiedNamingMap.getGroups()) {
@@ -3672,6 +3925,22 @@ TopoShape& TopoShape::makeShapeWithElementMap(
 
             if (lowerMapTypeEntry != lowerMapTypes.end() && upperMapTypeEntry != upperMapTypes.end()) {
                 ShapeInfo* upperMap = infoMap[upperMapTypeEntry->second];
+
+                // A neighbour named from this element as it was (a dress-up's edge on the
+                // face) is no mark: it would write the element's history out once more in
+                // every piece's name, which then multiplies per split (ops#640, OwnHistory)
+                if (!getInternNames() && !plainHistoryTable) {
+                    plainHistoryTable = std::make_unique<Data::NameTable>();
+                }
+                OwnHistory ownHistory(
+                    plainHistoryTable ? *plainHistoryTable : Data::NameTable::instance()
+                );
+                for (size_t incomingMappedNameIdx = 0;
+                     (incomingMappedNameIdx < incomingElementMappedNames.size()
+                      && incomingMappedNameIdx < MAXIMUM_REMAPPED_INCOMING_NAMES);
+                     incomingMappedNameIdx++) {
+                    ownHistory.add(incomingElementMappedNames[incomingMappedNameIdx].first.toString());
+                }
 
                 for (const Part::NamingMapKey& elementKey : modifiedShapeEntry.first) {
                     TopTools_IndexedMapOfShape lowerMap;
@@ -3729,7 +3998,8 @@ TopoShape& TopoShape::makeShapeWithElementMap(
                         }
 
                         for (const Data::MappedName* foundName : foundNames) {
-                            if (foundName != nullptr && connectedElementsSet.count(*foundName) == 0) {
+                            if (foundName != nullptr && connectedElementsSet.count(*foundName) == 0
+                                && !ownHistory.holds(foundName->toString())) {
                                 connectedElementsSet.insert(*foundName);
                                 connectedElements.push_back(foundName);
 
@@ -4055,9 +4325,15 @@ TopoShape& TopoShape::makeShapeWithElementMap(
             // twice) are named by their side of the face, `in` and `out` (ops#468), lone ones
             // included: when an edit changes how many there are (the hole's seam leaving the
             // edge or reaching it), a name never passes to the other crossing.
+            // A member left alone without Connected Names while others of its type have them
+            // keeps the count (`0of1`, twinPlaces' `counted`): its lone `0` is the name the
+            // group's member has when the edit leaves it alone (a helix of one turn, a pipe
+            // along one edge), so a reference would pass between them silently (batch 4's T1).
             const std::vector<NamingMapKey>& members = delayedGeneratedEntry.first;
             std::map<char, std::vector<std::size_t>> placedMembers;
+            std::map<char, std::size_t> membersOfType;
             for (std::size_t i = 0; i < members.size(); ++i) {
+                ++membersOfType[*members[i].newElementName.getType()];
                 auto it = generatedConnectedElementMap.find(members[i].newElementShape);
                 if (it == generatedConnectedElementMap.end() || it->second.empty()) {
                     placedMembers[*members[i].newElementName.getType()].push_back(i);
@@ -4078,9 +4354,21 @@ TopoShape& TopoShape::makeShapeWithElementMap(
                 for (std::size_t k : order) {
                     ordered.push_back(shapes[k]);
                 }
+                const bool counted = membersOfType[type] > indexes.size();
+                if (counted && indexes.size() == 1) {
+                    // A lone member's order says nothing: its flags (ORD, the closed edge's) are
+                    // those of its group's members of its type, as twins of more turns have them
+                    std::vector<TopoDS_Shape> all;
+                    for (const NamingMapKey& member : members) {
+                        if (*member.newElementName.getType() == type) {
+                            all.push_back(member.newElementShape);
+                        }
+                    }
+                    twinOrder(all, delayedSources[entryIndex], frame, &makerOrder, &closed);
+                }
                 const std::vector<TwinPlace> typePlaces = type == 'V' && !crossedEdge.IsNull()
                     ? crossingPlaces(ordered, crossedEdge, crossingFace, closed)
-                    : twinPlaces(ordered.size(), !makerOrder, closed);
+                    : twinPlaces(ordered.size(), !makerOrder, closed, counted);
                 for (std::size_t k = 0; k < order.size(); ++k) {
                     places[indexes[order[k]]] = typePlaces[k];
                 }
@@ -6060,6 +6348,637 @@ TopoShape& TopoShape::makeElementOffset2D(
     return makeElementCompound(shapesToReturn, op, outputPolicy);
 }
 
+namespace
+{
+// The fallback for a shell OCCT refuses because the faces it keeps fall apart once the removed
+// face is gone (BRepOffset_NotConnectedShell; ops#640, F46): a box shelled from a top face with a
+// blind pocket, whose walls and floor reach the box's other faces only through that face. Each
+// group of kept faces bounds a solid together with the removed face's wires it ends on: the
+// outer wire (with the wires of through holes, whose walls join the box's group) closes the box
+// with its pockets filled, an inner wire closes the pocket's hollow (or a boss standing on the
+// face). Each of those is shelled by OCCT from its closing face, connected
+// now (a hollow the other way round, since its material is outside it), and the shell is their
+// union, clipped to the solid inward (bands of neighbouring groups may overlap or reach into a
+// hollow) and kept off it outward. Only one planar removed face is handled; anything else
+// returns a null shape and OCCT's own failure stands.
+
+// The kept faces, grouped by shared edges once <removed> is gone.
+std::vector<std::vector<TopoDS_Face>> keptFaceGroups(const TopoDS_Shape& shape, const TopoDS_Face& removed)
+{
+    TopTools_IndexedMapOfShape faces;
+    TopExp::MapShapes(shape, TopAbs_FACE, faces);
+    TopTools_IndexedDataMapOfShapeListOfShape edgeFaces;
+    TopExp::MapShapesAndAncestors(shape, TopAbs_EDGE, TopAbs_FACE, edgeFaces);
+    std::vector<int> group(faces.Extent() + 1, -1);
+    std::vector<std::vector<TopoDS_Face>> groups;
+    for (int start = 1; start <= faces.Extent(); ++start) {
+        if (group[start] >= 0 || faces(start).IsSame(removed)) {
+            continue;
+        }
+        const int id = static_cast<int>(groups.size());
+        groups.emplace_back();
+        std::vector<int> stack {start};
+        group[start] = id;
+        while (!stack.empty()) {
+            const TopoDS_Face face = TopoDS::Face(faces(stack.back()));
+            stack.pop_back();
+            groups.back().push_back(face);
+            for (TopExp_Explorer xp(face, TopAbs_EDGE); xp.More(); xp.Next()) {
+                const TopTools_ListOfShape* neighbours = edgeFaces.Seek(xp.Current());
+                if (!neighbours) {
+                    continue;
+                }
+                for (TopTools_ListIteratorOfListOfShape it(*neighbours); it.More(); it.Next()) {
+                    const int index = faces.FindIndex(it.Value());
+                    if (index && group[index] < 0 && !it.Value().IsSame(removed)) {
+                        group[index] = id;
+                        stack.push_back(index);
+                    }
+                }
+            }
+        }
+    }
+    return groups;
+}
+
+// The face in <shape> that is the same as <face>, oriented as <shape> has it.
+TopoDS_Face sameFaceIn(const TopoDS_Shape& shape, const TopoDS_Shape& face)
+{
+    for (TopExp_Explorer xp(shape, TopAbs_FACE); xp.More(); xp.Next()) {
+        if (xp.Current().IsSame(face)) {
+            return TopoDS::Face(xp.Current());
+        }
+    }
+    return {};
+}
+
+TopoShape makeThickSolidByGroups(
+    const TopoShape& self,
+    const TopoShape& shape,
+    const TopTools_ListOfShape& remFace,
+    double offset,
+    double tol,
+    bool intersection,
+    bool selfInter,
+    short offsetMode,
+    JoinType join,
+    const char* op
+)
+{
+    try {
+        if (remFace.Extent() != 1) {
+            return {};
+        }
+        const TopoDS_Face removed = TopoDS::Face(remFace.First());
+        if (BRepAdaptor_Surface(removed).GetType() != GeomAbs_Plane) {
+            return {};
+        }
+        // the wires as the face's surface has them: the outer one counterclockwise
+        std::vector<TopoDS_Wire> wires;
+        for (TopExp_Explorer xp(removed.Oriented(TopAbs_FORWARD), TopAbs_WIRE); xp.More(); xp.Next()) {
+            wires.push_back(TopoDS::Wire(xp.Current()));
+        }
+        const auto groups = keptFaceGroups(shape.getShape(), removed);
+        if (wires.size() < 2 || groups.size() < 2 || groups.size() > wires.size()) {
+            return {};
+        }
+        const TopoDS_Wire outer = BRepTools::OuterWire(removed);
+        Handle(Geom_Surface) surface = BRep_Tool::Surface(removed);
+        // Each wire borders one group; a group may own several (a through hole's walls join the
+        // box's group through the bottom, so the hole's wire is the box's too).
+        std::vector<std::vector<TopoDS_Wire>> owned(groups.size());
+        for (const auto& wire : wires) {
+            TopTools_IndexedMapOfShape wireEdges;
+            TopExp::MapShapes(wire, TopAbs_EDGE, wireEdges);
+            int found = -1;
+            for (std::size_t g = 0; g < groups.size(); ++g) {
+                bool touches = false;
+                for (const auto& face : groups[g]) {
+                    for (TopExp_Explorer xp(face, TopAbs_EDGE); xp.More() && !touches; xp.Next()) {
+                        touches = wireEdges.Contains(xp.Current());
+                    }
+                    if (touches) {
+                        break;
+                    }
+                }
+                if (touches) {
+                    if (found >= 0) {
+                        return {};  // a wire bordering two groups
+                    }
+                    found = static_cast<int>(g);
+                }
+            }
+            if (found < 0) {
+                return {};
+            }
+            owned[found].push_back(wire);
+        }
+        // A closing face as the removed face has it, or the other way round
+        auto asRemoved = [&](const TopoDS_Face& face, bool same) {
+            return same == (removed.Orientation() == TopAbs_FORWARD) ? face
+                                                                      : TopoDS::Face(face.Reversed());
+        };
+        std::vector<TopoShape> pieces;
+        for (std::size_t found = 0; found < groups.size(); ++found) {
+            if (owned[found].empty()) {
+                return {};
+            }
+            // The closing faces, on the removed face's plane: for the group of the outer wire,
+            // one bounded by it with the group's other wires as holes; for any other group, one
+            // per wire, bounded by it alone.
+            std::vector<TopoDS_Face> closings;
+            bool ownsOuter = false;
+            for (const auto& wire : owned[found]) {
+                ownsOuter = ownsOuter || wire.IsSame(outer);
+            }
+            if (ownsOuter) {
+                BRepBuilderAPI_MakeFace mkFace(surface, outer, true);
+                for (const auto& wire : owned[found]) {
+                    if (!wire.IsSame(outer)) {
+                        mkFace.Add(wire);
+                    }
+                }
+                if (!mkFace.IsDone()) {
+                    return {};
+                }
+                ShapeFix_Face fixFace(mkFace.Face());
+                fixFace.FixOrientation();
+                closings.push_back(asRemoved(fixFace.Face(), true));
+            }
+            else {
+                for (const auto& wire : owned[found]) {
+                    BRepBuilderAPI_MakeFace mkFace(surface, TopoDS::Wire(wire.Reversed()), true);
+                    if (!mkFace.IsDone()) {
+                        return {};
+                    }
+                    ShapeFix_Face fixFace(mkFace.Face());
+                    fixFace.FixOrientation();
+                    closings.push_back(asRemoved(fixFace.Face(), false));
+                }
+            }
+            BRep_Builder builder;
+            TopoDS_Shell shell;
+            builder.MakeShell(shell);
+            for (const auto& face : groups[found]) {
+                builder.Add(shell, face);
+            }
+            for (const auto& closing : closings) {
+                builder.Add(shell, closing);
+            }
+            ShapeFix_Solid fixSolid;
+            TopoDS_Solid solid = fixSolid.SolidFromShell(shell);
+            if (solid.IsNull() || !BRepCheck_Analyzer(solid).IsValid()) {
+                return {};
+            }
+            // a hollow when the group's faces face into the piece, as they faced out of the solid
+            const TopoDS_Face sample = sameFaceIn(solid, groups[found].front());
+            const TopoDS_Face sampleInShape = sameFaceIn(shape.getShape(), groups[found].front());
+            if (sample.IsNull() || sampleInShape.IsNull()) {
+                return {};
+            }
+            const bool hollow = sample.Orientation() != sampleInShape.Orientation();
+            TopTools_ListOfShape openings;
+            for (const auto& closing : closings) {
+                const TopoDS_Face opening = sameFaceIn(solid, closing);
+                if (opening.IsNull()) {
+                    return {};
+                }
+                openings.Append(opening);
+            }
+            BRepOffsetAPI_MakeThickSolid mkThick;
+            mkThick.MakeThickSolidByJoin(
+                solid,
+                openings,
+                hollow ? -offset : offset,
+                tol,
+                BRepOffset_Mode(offsetMode),
+                intersection,
+                selfInter,
+                GeomAbs_JoinType(join)
+            );
+            if (!mkThick.IsDone() || mkThick.Shape().IsNull()) {
+                return {};
+            }
+            // OCCT can hand the piece back as it was (an open face beside a step, ops#811):
+            // that is no band, and the shell it would give is the solid unshelled. Only an
+            // inward band is told from its piece by volume (it is a part of it); an outward
+            // one may well have its piece's volume (a 6 x 6 x 8 hollow, walls of 1: 288 each).
+            if ((hollow ? -offset : offset) < 0) {
+                GProp_GProps before;
+                GProp_GProps after;
+                BRepGProp::VolumeProperties(solid, before);
+                BRepGProp::VolumeProperties(mkThick.Shape(), after);
+                if (after.Mass() - before.Mass() >= -1e-7 * std::fabs(before.Mass())) {
+                    return {};
+                }
+            }
+            TopoShape piece(self.Tag, self.Hasher, self.getHistoryAlgorithm());
+            piece.setShape(solid);
+            piece.mapSubElement(shape);
+            TopoShape band(self.Tag, self.Hasher, self.getHistoryAlgorithm());
+            MapperMaker mapper(mkThick);
+            band.makeShapeWithElementMap(mkThick.Shape(), mapper, {piece}, op);
+            if (!band.hasSubShape(TopAbs_SOLID) || !band.isValid()) {
+                return {};
+            }
+            pieces.push_back(band);
+        }
+        TopoShape bands(self.Tag, self.Hasher, self.getHistoryAlgorithm());
+        bands.makeElementFuse(pieces, op);
+        TopoShape result(self.Tag, self.Hasher, self.getHistoryAlgorithm());
+        if (offset < 0) {
+            result.makeElementBoolean(Part::OpCodes::Common, {bands, shape}, op);
+        }
+        else {
+            result.makeElementCut({bands, shape}, op);
+        }
+        // The shell may fall apart as the kept faces do: a pocket's cup stands free in the
+        // open box unless its walls reach the box's.
+        if (result.isNull() || !result.hasSubShape(TopAbs_SOLID) || !result.isValid()) {
+            return {};
+        }
+        return result;
+    }
+    catch (Standard_Failure& e) {
+        FC_WARN("thick solid by groups failed: " << e.GetMessageString());
+    }
+    catch (Base::Exception& e) {
+        FC_WARN("thick solid by groups failed: " << e.what());
+    }
+    return {};
+}
+// The fallback for an inward shell OCCT's thick-solid builder does not build (ops#811): the
+// solid handed back as it was given, valid and without a cavity, or the kept faces falling
+// apart where makeThickSolidByGroups() has no answer. The builder offsets the kept faces and
+// closes the cavity with what is left of each removed face, so it has no answer where the
+// cavity needs more of that face's surface than the face covers: beside a step the cavity runs
+// on under the step's wall, and its ceiling there lies on the removed face's own plane,
+// continued into the solid.
+// The cavity is built as a solid of its own instead: the whole solid offset inward (all offset
+// faces intersected, corners sharp, as Onshape's are) with the removed faces held at offset 0,
+// so that OCCT extends and trims them like any other offset face. The shell is the solid
+// without it. That covers leaning walls, chamfers at the open face, removed faces that touch,
+// pockets and bosses on the open face, each beside a step or not.
+// The result is taken only where the kept faces keep their walls: no face of the cavity closer
+// to a kept face than the thickness. (A step lower than the thickness loses its wall's offset
+// face, and the cavity runs on under its top, leaving a roof thinner than asked; a round on the
+// open face's edge smaller than the thickness loses the wall beside it.) Around an open face
+// that distance is no measure: beside a step the cavity runs under the wall within the
+// thickness of its foot, in Onshape's shell too, and under a step exactly as high as the
+// thickness it passes the wall's foot altogether. So a face touching a removed face is held
+// only where it lies farther than the thickness from that face's edges, measured along the
+// removed face's normal and across it. And the cavity must open through each removed face
+// (OCCT's offset can come back as a fragment of it), and each of its faces must lie by the
+// kept face it is the offset of (OCCT can leave one untrimmed across the cavity). A kept face
+// meeting a removed face at a vertex only is refused before anything is built. Anything else
+// returns a null shape.
+
+// BRepOffsetAPI_MakeOffsetShape's join algorithm with an offset of their own for some faces
+class OffsetShapeWithFaceOffsets: public BRepOffsetAPI_MakeOffsetShape
+{
+public:
+    void perform(
+        const TopoDS_Shape& shape,
+        double offset,
+        double tol,
+        bool selfInter,
+        const TopTools_ListOfShape& faces,
+        double faceOffset
+    )
+    {
+        NotDone();
+        myLastUsedAlgo = OffsetAlgo_JOIN;
+        myOffsetShape.Initialize(
+            shape,
+            offset,
+            tol,
+            BRepOffset_Skin,
+            Standard_True,
+            selfInter ? Standard_True : Standard_False,
+            GeomAbs_Intersection,
+            Standard_False
+        );
+        for (TopTools_ListIteratorOfListOfShape it(faces); it.More(); it.Next()) {
+            myOffsetShape.SetOffsetOnFace(TopoDS::Face(it.Value()), faceOffset);
+        }
+        myOffsetShape.MakeOffsetShape();
+        if (!myOffsetShape.IsDone()) {
+            return;
+        }
+        myShape = myOffsetShape.Shape();
+        Done();
+    }
+};
+
+TopoShape makeThickSolidByFaceOffsets(
+    const TopoShape& self,
+    const TopoShape& shape,
+    const TopTools_ListOfShape& remFace,
+    double offset,
+    double tol,
+    bool selfInter,
+    short offsetMode,
+    const char* op
+)
+{
+    try {
+        if (offset >= 0 || BRepOffset_Mode(offsetMode) != BRepOffset_Skin) {
+            return {};
+        }
+        const double thickness = -offset;
+        TopTools_IndexedDataMapOfShapeListOfShape vertexFaces;
+        TopExp::MapShapesAndAncestors(shape.getShape(), TopAbs_VERTEX, TopAbs_FACE, vertexFaces);
+        TopTools_MapOfShape removed;
+        TopTools_MapOfShape besideRemoved;  // the faces touching a removed face
+        for (TopTools_ListIteratorOfListOfShape it(remFace); it.More(); it.Next()) {
+            removed.Add(it.Value());
+            for (TopExp_Explorer xp(it.Value(), TopAbs_VERTEX); xp.More(); xp.Next()) {
+                const TopTools_ListOfShape* touching = vertexFaces.Seek(xp.Current());
+                if (!touching) {
+                    return {};
+                }
+                for (TopTools_ListIteratorOfListOfShape face(*touching); face.More(); face.Next()) {
+                    besideRemoved.Add(face.Value());
+                }
+            }
+        }
+        // A kept face that meets a removed face at a vertex and along no edge (the tilted top
+        // of a step that comes down to the open face's level at one corner, or at the wall
+        // behind a half-round step) is where OCCT's offset comes back as a fragment or leaves
+        // that face's offset untrimmed across the cavity, a wedge of material under the open
+        // face. The checks below catch the large cases only, so this is refused outright.
+        {
+            TopTools_IndexedDataMapOfShapeListOfShape edgeFaces;
+            TopExp::MapShapesAndAncestors(shape.getShape(), TopAbs_EDGE, TopAbs_FACE, edgeFaces);
+            TopTools_MapOfShape byEdge;
+            for (TopTools_ListIteratorOfListOfShape it(remFace); it.More(); it.Next()) {
+                for (TopExp_Explorer xp(it.Value(), TopAbs_EDGE); xp.More(); xp.Next()) {
+                    const TopTools_ListOfShape* sharing = edgeFaces.Seek(xp.Current());
+                    if (!sharing) {
+                        continue;
+                    }
+                    for (TopTools_ListIteratorOfListOfShape face(*sharing); face.More(); face.Next()) {
+                        byEdge.Add(face.Value());
+                    }
+                }
+            }
+            for (TopTools_MapIteratorOfMapOfShape it(besideRemoved); it.More(); it.Next()) {
+                if (!byEdge.Contains(it.Key())) {
+                    return {};
+                }
+            }
+        }
+        // Not on KernelBudget's worker: where this offset crashes inside OCCT, the main thread
+        // gets an exception and the worker would end the process.
+        OffsetShapeWithFaceOffsets mkOffset;
+        mkOffset.perform(shape.getShape(), offset, tol, selfInter, remFace, 0.0);
+        if (!mkOffset.IsDone() || mkOffset.Shape().IsNull()) {
+            return {};
+        }
+        TopoShape cavity(self.Tag, self.Hasher, self.getHistoryAlgorithm());
+        MapperMaker mapper(mkOffset);
+        cavity.makeShapeWithElementMap(mkOffset.Shape(), mapper, {shape}, op);
+        if (!cavity.hasSubShape(TopAbs_SOLID)) {
+            cavity = cavity.makeElementSolid();
+        }
+        if (!cavity.hasSubShape(TopAbs_SOLID) || !cavity.isValid()) {
+            return {};
+        }
+        {
+            GProp_GProps props;
+            BRepGProp::VolumeProperties(cavity.getShape(), props);
+            if (props.Mass() <= 0) {
+                return {};
+            }
+        }
+        // what the removed faces became: where the cavity opens
+        TopTools_MapOfShape images;
+        for (TopTools_ListIteratorOfListOfShape it(remFace); it.More(); it.Next()) {
+            int found = 0;
+            for (bool generated : {true, false}) {
+                // a copy: the maker hands out one list for both
+                const TopTools_ListOfShape list = generated ? mkOffset.Generated(it.Value())
+                                                            : mkOffset.Modified(it.Value());
+                for (TopTools_ListIteratorOfListOfShape gen(list); gen.More(); gen.Next()) {
+                    if (gen.Value().ShapeType() == TopAbs_FACE
+                        && cavity.findShape(gen.Value())) {
+                        images.Add(gen.Value());
+                        ++found;
+                    }
+                }
+            }
+            if (!found) {
+                return {};  // the face's image is gone: the cavity would not open there
+            }
+        }
+        // The cavity opens through every removed face: OCCT's offset can come back as a
+        // fragment, a closed pocket somewhere under the removed face's plane.
+        for (TopTools_ListIteratorOfListOfShape it(remFace); it.More(); it.Next()) {
+            BRepAlgoAPI_Common opening(it.Value(), cavity.getShape());
+            if (!opening.IsDone() || opening.HasErrors()) {
+                return {};
+            }
+            GProp_GProps whole;
+            GProp_GProps open;
+            BRepGProp::SurfaceProperties(it.Value(), whole);
+            BRepGProp::SurfaceProperties(opening.Shape(), open);
+            if (!TopExp_Explorer(opening.Shape(), TopAbs_FACE).More()
+                || open.Mass() <= 1e-9 * whole.Mass()) {
+                return {};
+            }
+        }
+        // Each face of the cavity lies by the kept face it is the offset of: OCCT's offset can
+        // leave one untrimmed, running on across the cavity as a slab of material (the tilted
+        // top of a small half-round step). Where offset faces meet in a sharp corner they run
+        // on past their own face, by the thickness at a right angle, so three times that is
+        // allowed.
+        for (TopExp_Explorer xp(shape.getShape(), TopAbs_FACE); xp.More(); xp.Next()) {
+            if (removed.Contains(xp.Current())) {
+                continue;
+            }
+            Bnd_Box own;
+            const TopTools_ListOfShape offsets = mkOffset.Generated(xp.Current());
+            for (TopTools_ListIteratorOfListOfShape gen(offsets); gen.More(); gen.Next()) {
+                if (gen.Value().ShapeType() != TopAbs_FACE || !cavity.findShape(gen.Value())) {
+                    continue;
+                }
+                if (own.IsVoid()) {
+                    BRepBndLib::AddOptimal(xp.Current(), own, Standard_False, Standard_False);
+                    own.Enlarge(3 * thickness);
+                }
+                Bnd_Box offsetBox;
+                BRepBndLib::AddOptimal(gen.Value(), offsetBox, Standard_False, Standard_False);
+                if (offsetBox.IsVoid() || own.IsOut(offsetBox.CornerMin())
+                    || own.IsOut(offsetBox.CornerMax())) {
+                    return {};
+                }
+            }
+        }
+        // Every kept face keeps its wall. A face touching a removed face is held only where it
+        // is farther than the thickness from that face's edges: outside boxes along each edge
+        // (along its chords, where it is curved), as wide as twice the thickness across the
+        // removed face and along its normal. Along the normal that is the measure: the removed
+        // face's surface runs on under a wall rising from it, and the wall is nearer to it
+        // than the thickness only where it is nearer to that surface.
+        struct Around
+        {
+            TopoDS_Shape solid;
+            Bnd_Box box;
+        };
+        std::vector<Around> aroundOpenings;
+        for (TopTools_ListIteratorOfListOfShape it(remFace); it.More(); it.Next()) {
+            const TopoDS_Face face = TopoDS::Face(it.Value());
+            const BRepAdaptor_Surface surface(face);
+            for (TopExp_Explorer xp(face, TopAbs_EDGE); xp.More(); xp.Next()) {
+                const TopoDS_Edge edge = TopoDS::Edge(xp.Current());
+                if (BRep_Tool::Degenerated(edge)) {
+                    continue;
+                }
+                const BRepAdaptor_Curve curve(edge);
+                const bool straight = curve.GetType() == GeomAbs_Line;
+                const double sag = straight ? 0.0 : 0.1 * thickness;
+                std::vector<double> at {curve.FirstParameter(), curve.LastParameter()};
+                if (!straight) {
+                    GCPnts_QuasiUniformDeflection chords(curve, sag);
+                    if (!chords.IsDone() || chords.NbPoints() < 2) {
+                        return {};
+                    }
+                    at.clear();
+                    for (int i = 1; i <= chords.NbPoints(); ++i) {
+                        at.push_back(chords.Parameter(i));
+                    }
+                }
+                double first = 0.0;
+                double last = 0.0;
+                Handle(Geom2d_Curve) onFace = BRep_Tool::CurveOnSurface(edge, face, first, last);
+                if (onFace.IsNull()) {
+                    return {};
+                }
+                const double half = thickness + sag;
+                for (std::size_t i = 0; i + 1 < at.size(); ++i) {
+                    const gp_Pnt from = curve.Value(at[i]);
+                    const gp_Pnt to = curve.Value(at[i + 1]);
+                    if (from.Distance(to) <= Precision::Confusion()) {
+                        continue;
+                    }
+                    const gp_Dir along(gp_Vec(from, to));
+                    // the removed face's normal at the chord's middle
+                    const gp_Pnt2d uv = onFace->Value((at[i] + at[i + 1]) / 2);
+                    gp_Pnt point;
+                    gp_Vec du;
+                    gp_Vec dv;
+                    surface.D1(uv.X(), uv.Y(), point, du, dv);
+                    const gp_Vec normal = du.Crossed(dv);
+                    if (normal.Magnitude() <= gp::Resolution()
+                        || normal.IsParallel(gp_Vec(along), Precision::Angular())) {
+                        return {};
+                    }
+                    const gp_Ax2 axes(from, along, gp_Dir(normal));
+                    const gp_Pnt corner = from.Translated(
+                        -half
+                        * (gp_Vec(axes.Direction()) + gp_Vec(axes.XDirection())
+                           + gp_Vec(axes.YDirection()))
+                    );
+                    Around around;
+                    around.solid = BRepPrimAPI_MakeBox(
+                                       gp_Ax2(corner, axes.Direction(), axes.XDirection()),
+                                       2 * half,
+                                       2 * half,
+                                       from.Distance(to) + 2 * half
+                    ).Shape();
+                    BRepBndLib::Add(around.solid, around.box, Standard_False);
+                    aroundOpenings.push_back(around);
+                }
+            }
+        }
+        struct CavityFace
+        {
+            TopoDS_Shape face;
+            Bnd_Box box;
+        };
+        std::vector<CavityFace> cavityFaces;
+        for (TopExp_Explorer xp(cavity.getShape(), TopAbs_FACE); xp.More(); xp.Next()) {
+            CavityFace entry {xp.Current(), Bnd_Box()};
+            BRepBndLib::Add(entry.face, entry.box, Standard_False);
+            cavityFaces.push_back(entry);
+        }
+        const double least = thickness - std::max(1e-6, 1e-5 * thickness);
+        for (TopExp_Explorer xp(shape.getShape(), TopAbs_FACE); xp.More(); xp.Next()) {
+            if (removed.Contains(xp.Current())) {
+                continue;
+            }
+            // the cavity's faces nearer to <held> than the thickness
+            auto tooNear = [&cavityFaces, thickness, least](const TopoDS_Shape& held) {
+                Bnd_Box reach;
+                BRepBndLib::Add(held, reach, Standard_False);
+                reach.Enlarge(thickness);
+                for (const auto& entry : cavityFaces) {
+                    if (reach.IsOut(entry.box)) {
+                        continue;
+                    }
+                    BRepExtrema_DistShapeShape distance(entry.face, held);
+                    if (!distance.IsDone() || distance.Value() < least) {
+                        return true;
+                    }
+                }
+                return false;
+            };
+            if (!tooNear(xp.Current())) {
+                continue;
+            }
+            if (!besideRemoved.Contains(xp.Current())) {
+                return {};
+            }
+            // by an open face: only the part away from its edges is held
+            Bnd_Box own;
+            BRepBndLib::Add(xp.Current(), own, Standard_False);
+            TopTools_ListOfShape tools;
+            for (const auto& around : aroundOpenings) {
+                if (!own.IsOut(around.box)) {
+                    tools.Append(around.solid);
+                }
+            }
+            if (tools.IsEmpty()) {
+                return {};
+            }
+            TopTools_ListOfShape faces;
+            faces.Append(xp.Current());
+            BRepAlgoAPI_Cut away;
+            away.SetArguments(faces);
+            away.SetTools(tools);
+            away.Build();
+            if (!away.IsDone() || away.HasErrors()) {
+                return {};
+            }
+            if (TopExp_Explorer(away.Shape(), TopAbs_FACE).More() && tooNear(away.Shape())) {
+                return {};
+            }
+        }
+        TopoShape result(self.Tag, self.Hasher, self.getHistoryAlgorithm());
+        result.makeElementCut({shape, cavity}, op);
+        if (result.isNull() || !result.hasSubShape(TopAbs_SOLID) || !result.isValid()) {
+            return {};
+        }
+        // the solid itself, as OCCT's shell is one, where the cut leaves a single one
+        if (result.countSubShapes(TopAbs_SOLID) == 1 && result.shapeType() != TopAbs_SOLID) {
+            result = result.getSubTopoShape(TopAbs_SOLID, 1);
+        }
+        return result;
+    }
+    catch (Standard_Failure& e) {
+        FC_WARN("thick solid by face offsets failed: " << e.GetMessageString());
+    }
+    catch (Base::Exception& e) {
+        FC_WARN("thick solid by face offsets failed: " << e.what());
+    }
+    return {};
+}
+}  // namespace
+
+// Set where makeElementThickSolid built the Intersection join for an outward Arc shell OCCT left
+// invalid (ops#807); read and cleared by Part::Thickness, which warns of it.
+thread_local bool thickSolidJoinFallback = false;
+
 TopoShape& TopoShape::makeElementThickSolid(
     const TopoShape& shape,
     const std::vector<TopoShape>& faces,
@@ -6075,6 +6994,7 @@ TopoShape& TopoShape::makeElementThickSolid(
     if (!op) {
         op = Part::OpCodes::Thicken;
     }
+    Part::thickSolidJoinFallback = false;
 
     // we do not offer tangent join type
     switch (join) {
@@ -6108,17 +7028,156 @@ TopoShape& TopoShape::makeElementThickSolid(
         }
         remFace.Append(face.getShape());
     }
-    BRepOffsetAPI_MakeThickSolid mkThick;
-    mkThick.MakeThickSolidByJoin(
-        shape.getShape(),
-        remFace,
-        offset,
-        tol,
-        BRepOffset_Mode(offsetMode),
-        intersection ? Standard_True : Standard_False,
-        selfInter ? Standard_True : Standard_False,
-        GeomAbs_JoinType(join)
-    );
+    // On a worker under the feature's time limit (kernel safety S1)
+    auto build = [&shape, &remFace, offset, tol, offsetMode, selfInter](
+                     bool withIntersection,
+                     JoinType joinType
+                 ) {
+        auto maker = std::make_shared<BRepOffsetAPI_MakeThickSolid>();
+        KernelBudget::run(
+            "The thickness",
+            [maker, base = shape.getShape(), remFace, offset, tol, offsetMode, withIntersection, selfInter, joinType](
+                const Message_ProgressRange& range
+            ) {
+                maker->MakeThickSolidByJoin(
+                    base,
+                    remFace,
+                    offset,
+                    tol,
+                    BRepOffset_Mode(offsetMode),
+                    withIntersection ? Standard_True : Standard_False,
+                    selfInter ? Standard_True : Standard_False,
+                    GeomAbs_JoinType(joinType),
+                    Standard_False,
+                    range
+                );
+            },
+            KernelBudget::Inputs::Shared
+        );
+        return maker;
+    };
+    // OCCT can hand back the solid as it was, valid and without a cavity (the Intersection join
+    // with a hole near a side wall; the intersecting mode with a hole's wall tangent to one; an
+    // open face that is a piece of a plane beside a step). From the intersecting mode that is
+    // never taken for the shell, and from the plain one it is a reason to try the other
+    // (ops#795); where both give it, the shell is composed, or refused (ops#811, below).
+    auto volumeOf = [](const TopoDS_Shape& solid) {
+        GProp_GProps props;
+        BRepGProp::VolumeProperties(solid, props);
+        return props.Mass();
+    };
+    const double volumeBefore = volumeOf(shape.getShape());
+    // An inward shell is a part of the solid: one that is no smaller has no cavity either (a
+    // round on the open face's outer edge beside a step comes back larger, ops#811).
+    auto unchanged = [&volumeOf, volumeBefore, offset](BRepOffsetAPI_MakeThickSolid& maker) {
+        if (!maker.IsDone() || maker.Shape().IsNull()) {
+            return false;
+        }
+        const double change = volumeOf(maker.Shape()) - volumeBefore;
+        const double least = 1e-7 * std::fabs(volumeBefore);
+        return offset < 0 ? change >= -least : std::fabs(change) <= least;
+    };
+    auto built = [&unchanged](BRepOffsetAPI_MakeThickSolid& maker) {
+        return maker.IsDone() && !maker.Shape().IsNull() && !unchanged(maker)
+            && KernelBudget::checkValid(maker.Shape());
+    };
+    auto mkThickPtr = build(intersection, join);
+    // Offset faces that are not neighbours can meet: the wall around a hole reaches the shell's
+    // side wall once the hole is closer to it than its radius and twice the thickness. OCCT
+    // trims each offset face only by its neighbours unless told to intersect them all, and then
+    // returns an invalid shell or none (ops#795). That mode is tried where the plain one fails;
+    // where it fails too, the plain mode's failure is the one reported.
+    const bool fallsApart = !mkThickPtr->IsDone()
+        && mkThickPtr->MakeOffset().Error() == BRepOffset_NotConnectedShell;
+    bool good = !fallsApart && built(*mkThickPtr);
+    if (!intersection && !fallsApart && !good) {
+        auto withAll = build(true, join);
+        if (built(*withAll)) {
+            mkThickPtr = withAll;
+            good = true;
+        }
+    }
+    // OCCT's Arc join gives an invalid outward shell, in both modes, where an open face has a
+    // hole with sharp corners (a rectangular through pocket: ops#807). Onshape's outward shell
+    // keeps sharp corners anyway (oracle 25, SL1), so there the Intersection join is built
+    // instead. Inward, or where that fails too, the Arc join's failure is the one reported.
+    if (offset > 0 && join == JoinType::arc && !fallsApart && !good) {
+        // The Intersection join extends curved neighbours instead of rounding them: its result is
+        // taken only where it stays within the solid's box grown by the thickness.
+        // Both boxes from the geometry alone (no display mesh, no tolerances), the margin the
+        // thickness and a relative slack.
+        auto boxOf = [](const TopoDS_Shape& solid) {
+            Bnd_Box box;
+            BRepBndLib::AddOptimal(solid, box, Standard_False, Standard_False);
+            return box;
+        };
+        const Bnd_Box before = boxOf(shape.getShape());
+        const double margin = offset + std::max(1e-4 * offset, 10 * tol);
+        auto within = [&boxOf, &before, margin](const TopoDS_Shape& solid) {
+            const Bnd_Box box = boxOf(solid);
+            if (box.IsVoid() || before.IsVoid()) {
+                return false;
+            }
+            double x0, y0, z0, x1, y1, z1, X0, Y0, Z0, X1, Y1, Z1;
+            box.Get(x0, y0, z0, x1, y1, z1);
+            before.Get(X0, Y0, Z0, X1, Y1, Z1);
+            return x0 >= X0 - margin && y0 >= Y0 - margin && z0 >= Z0 - margin
+                && x1 <= X1 + margin && y1 <= Y1 + margin && z1 <= Z1 + margin;
+        };
+        for (bool withIntersection : {intersection, !intersection}) {
+            auto sharp = build(withIntersection, JoinType::intersection);
+            if (built(*sharp) && within(sharp->Shape())) {
+                mkThickPtr = sharp;
+                good = true;
+                Part::thickSolidJoinFallback = true;
+                FC_WARN("thickness: the Arc join gives no valid outward shell here; built with the "
+                        "Intersection join (sharp corners)");
+                break;
+            }
+        }
+    }
+    BRepOffsetAPI_MakeThickSolid& mkThick = *mkThickPtr;
+    // Only where OCCT refuses for the kept faces falling apart: every shell OCCT builds stays
+    // its own (ops#640, F46).
+    if (!mkThick.IsDone() && mkThick.MakeOffset().Error() == BRepOffset_NotConnectedShell) {
+        TopoShape byGroups = makeThickSolidByGroups(
+            *this,
+            shape,
+            remFace,
+            offset,
+            tol,
+            intersection,
+            selfInter,
+            offsetMode,
+            join,
+            op
+        );
+        if (!byGroups.isNull()) {
+            *this = byGroups;
+            return *this;
+        }
+    }
+    // Inward, where OCCT builds no shell (it fails, its result is invalid, or it hands the
+    // solid back as its own shell), the cavity is built with the removed faces held in place
+    // and cut from the solid (ops#811): Onshape shells an L-block from its step's top whole.
+    // Where that has no answer either, OCCT's own failure is the one reported, and the solid
+    // handed back is never the result: the feature fails rather than show the solid as
+    // shelled. Outward the volume tells nothing (a 6 x 6 x 8 box's band of 1 has the box's
+    // 288), so that result stands as before.
+    if (offset < 0 && !good) {
+        TopoShape composed
+            = makeThickSolidByFaceOffsets(*this, shape, remFace, offset, tol, selfInter, offsetMode, op);
+        if (!composed.isNull()
+            && volumeOf(composed.getShape()) - volumeBefore < -1e-7 * std::fabs(volumeBefore)) {
+            *this = composed;
+            return *this;
+        }
+        if (unchanged(mkThick)) {
+            throw Standard_Failure(
+                "thick solid: the walls run into each other and no shell was built"
+            );
+        }
+    }
     MapperMaker mapper(mkThick);
     return makeShapeWithElementMap(
         canonicalFaceOrder(mkThick.Shape(), mapper, shape),
@@ -6530,6 +7589,45 @@ TopoShape& TopoShape::makeElementTransform(
     return *this;
 }
 
+// A plane under a general transform is a plane. BRepBuilderAPI_GTransform turns every surface into
+// a B-spline, a plane into a bilinear patch (degree 1 x 1, 2 x 2 poles): the same points, but a
+// face that is no plane to anything that reads its type (a profile or cap face picked by its
+// plane, a refine's merge with a coplanar plane face, a comparison by surface type: FMCVW Case
+// Base's Under-Acrylic Carveout, whose profile is the flat cap of a tool scaled per axis and cut
+// from the part, ops#640). Each such patch that is a parallelogram gets its plane again, in
+// place: the plane has the patch's own normal (u x v), so the face's orientation stands, and a
+// plane's 2D curves are computed where they are read.
+// Also called by TopoShape::transformGShape() (TopoShape.cpp), the transform the Python shape and
+// the Scale feature use.
+void planesAfterGTransform(const TopoDS_Shape& shape)
+{
+    BRep_Builder builder;
+    for (TopExp_Explorer it(shape, TopAbs_FACE); it.More(); it.Next()) {
+        const TopoDS_Face& face = TopoDS::Face(it.Current());
+        TopLoc_Location location;
+        const Handle(Geom_BSplineSurface) patch
+            = Handle(Geom_BSplineSurface)::DownCast(BRep_Tool::Surface(face, location));
+        if (patch.IsNull() || patch->UDegree() != 1 || patch->VDegree() != 1
+            || patch->NbUPoles() != 2 || patch->NbVPoles() != 2 || patch->IsURational()
+            || patch->IsVRational()) {
+            continue;
+        }
+        const gp_Pnt origin = patch->Pole(1, 1);
+        const gp_Vec alongU(origin, patch->Pole(2, 1));
+        const gp_Vec alongV(origin, patch->Pole(1, 2));
+        const gp_Vec normal = alongU.Crossed(alongV);
+        const double size = std::max(alongU.Magnitude(), alongV.Magnitude());
+        // a parallelogram: the fourth pole where the other three put it
+        const gp_Pnt fourth = origin.Translated(alongU + alongV);
+        if (size <= Precision::Confusion() || normal.Magnitude() <= 1e-12 * size * size
+            || fourth.Distance(patch->Pole(2, 2)) > 1e-12 * std::max(1.0, size)) {
+            continue;
+        }
+        const Handle(Geom_Plane) plane = new Geom_Plane(gp_Ax3(origin, gp_Dir(normal), gp_Dir(alongU)));
+        builder.UpdateFace(face, plane, location, BRep_Tool::Tolerance(face));
+    }
+}
+
 TopoShape& TopoShape::makeElementGTransform(
     const TopoShape& shape,
     const Base::Matrix4D& mat,
@@ -6559,7 +7657,9 @@ TopoShape& TopoShape::makeElementGTransform(
     // geometric transformation
     TopoShape tmp(shape);
     BRepBuilderAPI_GTransform mkTrf(shape.getShape(), matrix, copy == CopyType::copy);
-    tmp.setShape(mkTrf.Shape(), false);
+    const TopoDS_Shape transformed = mkTrf.Shape();
+    planesAfterGTransform(transformed);
+    tmp.setShape(transformed, false);
     if (op || (shape.Tag && shape.Tag != Tag)) {
         setShape(tmp._Shape);
         initCache();
@@ -6692,8 +7792,12 @@ struct MapperPrism: MapperMaker
     std::unordered_map<TopoDS_Shape, TopoDS_Shape, NamingHasher<ShapeHasher>, ShapeHasher>
         generatedElements;
 
+    // `maker` is a BRepFeat maker, or in V2 any maker whose result holds the sources' edges and
+    // vertices as they are (a plain prism of a profile face: makeElementPrismUntil()'s closed
+    // form, ops#640): the V2 mapper names from the result's shape. Of the maker's history only
+    // MapperMaker::modified() is asked, and a plain prism modifies nothing
     MapperPrism(
-        BRepFeat_Form& maker,
+        BRepBuilderAPI_MakeShape& maker,
         const TopoShape& upTo,
         const std::vector<TopoShape>& sourceTopoShapes,
         const App::HistoryAlgorithm& historyVersion
@@ -6706,8 +7810,10 @@ struct MapperPrism: MapperMaker
 
         if (historyAlgorithm == App::HistoryAlgorithm::V1) {
             std::vector<TopoShape> shapes;
-            for (TopTools_ListIteratorOfListOfShape it(maker.FirstShape()); it.More(); it.Next()) {
-                shapes.push_back(it.Value());
+            if (auto* form = dynamic_cast<BRepFeat_Form*>(&maker)) {
+                for (TopTools_ListIteratorOfListOfShape it(form->FirstShape()); it.More(); it.Next()) {
+                    shapes.push_back(it.Value());
+                }
             }
 
             if (shapes.size()) {
@@ -7379,12 +8485,15 @@ bool buildDressUpFailed(
 }
 
 /** Whether OCCT built the dress-up invalid without an error (ops#297), which the exact construction
- * may build instead. If it doesn't, the invalid result is returned as before, and the feature's
- * check (Part::checkDressUp()) repairs it or fails.
+ * may build instead. If it doesn't, the invalid result is returned as before, noted with the
+ * construction's reason (FilletFallback::noteInvalidResult()): the feature's check
+ * (Part::checkDressUp()) repairs it or fails, and the Python API raises (decision 418, ops#640).
+ * Checked where the maker changed its input \a base (KernelBudget::checkValidChanged(): the faces
+ * it made or changed and their neighbours, its shells and solids whole; perf profile 3, ops#640).
  */
-bool builtInvalid(BRepFilletAPI_LocalOperation& maker)
+bool builtInvalid(BRepFilletAPI_LocalOperation& maker, const TopoDS_Shape& base)
 {
-    return !BRepCheck_Analyzer(maker.Shape()).IsValid();
+    return !KernelBudget::checkValidChanged(maker.Shape(), base);
 }
 
 /** Raises OCCT's error for a maker that failed, as before the exact construction: what it threw,
@@ -7419,13 +8528,47 @@ bool builtInvalid(BRepFilletAPI_LocalOperation& maker)
     throw StdFail_NotDone(message.c_str());
 }
 
-/** Whether OCCT built the dress-up with a face of zero width (ops#298): the face it consumes whole,
- * kept with area 0, or a sliver narrower than its tolerance. The exact construction builds the
- * dress-up at the limit instead; if it can't, the dress-up fails with a clear error.
- */
-bool builtThinFace(BRepFilletAPI_LocalOperation& maker, const TopoShape& base)
+/** The chamfer's error where an edge ends in a cusp and the exact construction refused: names the
+ * selected edges that end in one by their names in \a shape ("Edge5, Edge7"). */
+[[noreturn]] void raiseCuspError(
+    const TopoShape& shape,
+    const std::vector<TopoShape>& edges,
+    const TopoShape& input,
+    const std::vector<TopoShape>& inputEdges,
+    const std::string& reason
+)
 {
-    return !FilletFallback::thinFace(maker.Shape(), base.getShape()).IsNull();
+    std::vector<TopoDS_Shape> picked;
+    picked.reserve(inputEdges.size());
+    for (const auto& edge : inputEdges) {
+        picked.push_back(edge.getShape());
+    }
+    std::vector<std::size_t> which;
+    FilletFallback::endsInCusp(input.getShape(), picked, &which);
+    std::string names;
+    for (const std::size_t i : which) {
+        if (i >= edges.size()) {
+            continue;
+        }
+        names += (names.empty() ? "" : ", ") + TopoShape::shapeName(TopAbs_EDGE)
+            + std::to_string(shape.findShape(edges[i].getShape()));
+    }
+    FC_THROWM(
+        Base::CADKernelError,
+        "The chamfer of " << (names.empty() ? std::string("an edge") : names)
+                          << " ends in a cusp, where OCCT's chamfer differs from Onshape's; its exact "
+                             "construction refused: "
+                          << reason
+    );
+}
+
+/// The error for OCCT's valid result that changes the volume the wrong way (ops#762)
+[[noreturn]] void raiseWrongWayError(const char* what, const std::string& how, const std::string& reason)
+{
+    FC_THROWM(
+        Base::CADKernelError,
+        what << " as OCCT builds it " << how << "; its exact construction refused: " << reason
+    );
 }
 
 [[noreturn]] void raiseThinFaceError(const char* what, const std::string& reason)
@@ -7436,6 +8579,892 @@ bool builtThinFace(BRepFilletAPI_LocalOperation& maker, const TopoShape& base)
                 "narrower than its tolerance), and its exact construction refused: "
              << reason
     );
+}
+
+/// What the worker made of a dress-up (kernel safety S1)
+struct DressUpOutcome
+{
+    bool failed {false};
+    bool thin {false};
+    bool invalid {false};
+    /// A chamfer whose edge ends in a cusp (FilletFallback::endsInCusp()), whether OCCT's result
+    /// is valid or not: the exact construction, or an error that names the edge (kernel layer
+    /// step 1, ops#640)
+    bool cusp {false};
+    /// A fillet with a concave arc ending where its tangent chain turns convex at a vertex of 4
+    /// edges (FilletFallback::endsInOverflow()): the exact construction, or an error
+    bool turns {false};
+    /// OCCT's valid result changes the volume the wrong way (FilletFallback::wrongWay(), ops#762):
+    /// the exact construction, or an error with this text
+    std::string wrongWay;
+    std::exception_ptr occtError;
+    bool constructed {false};
+    /// Constructed before OCCT ran (FilletFallback::preferConstruction()): the maker wasn't built
+    bool preferred {false};
+    /// The preferred construction refused, its rim rounds because another part of the body lies
+    /// within their reach (Construction::rimBlocked): OCCT's round would run through that part,
+    /// so the maker wasn't built and the caller raises an error
+    bool blocked {false};
+    /// OCCT built a result, but the selection has a reflex corner with a circle
+    /// (FilletFallback::reflexCircleCorner()), where its rounds don't meet in Onshape's mitre:
+    /// the exact construction, or an error
+    bool reflexFirst {false};
+    FilletFallback::Construction construction;
+    std::string reason;
+};
+
+/** Builds a fillet or chamfer maker under the feature's time limit, on a worker thread
+ * (KernelBudget::run()): OCCT's build, the checks of its result, and where OCCT failed or built
+ * an unusable result, the exact construction. All of it on plain shapes; the caller names the
+ * result. On a timeout or Esc it throws, and the maker is left to the abandoned worker.
+ */
+std::shared_ptr<DressUpOutcome> buildDressUp(
+    const std::shared_ptr<BRepFilletAPI_LocalOperation>& maker,
+    const TopoShape& input,
+    const std::vector<TopoShape>& inputEdges,
+    const FilletFallback::Request& request,
+    const char* what,
+    bool prefer = false,
+    bool reflex = false
+)
+{
+    auto outcome = std::make_shared<DressUpOutcome>();
+    std::vector<TopoDS_Shape> edges;
+    edges.reserve(inputEdges.size());
+    for (const auto& edge : inputEdges) {
+        edges.push_back(edge.getShape());
+    }
+    KernelBudget::run(
+        what,
+        [maker,
+         base = input.getShape(),
+         edges,
+         request = FilletFallback::Request(request),
+         outcome,
+         prefer,
+         reflex](const Message_ProgressRange& /*range*/) mutable {
+            DressUpOutcome& out = *outcome;
+            if (prefer) {
+                // OCCT's result would be valid but wrong (a tight wall arc): the construction
+                // first, OCCT only if it refuses
+                for (int i = 1; i <= maker->NbContours(); ++i) {
+                    for (int j = 1; j <= maker->NbEdges(i); ++j) {
+                        request.contour.push_back(maker->Edge(i, j));
+                    }
+                }
+                out.preferred
+                    = FilletFallback::construct(base, edges, request, out.construction, &out.reason);
+                if (out.preferred) {
+                    out.constructed = true;
+                    return;
+                }
+                if (out.construction.rimBlocked) {
+                    out.blocked = true;
+                    return;
+                }
+                request.contour.clear();
+            }
+            out.failed = buildDressUpFailed(*maker, out.occtError, request.contour);
+            // A face of zero width (ops#298): the exact construction builds it at the limit
+            out.thin = !out.failed && !FilletFallback::thinFace(maker->Shape(), base).IsNull();
+            out.invalid = !out.failed && !out.thin && builtInvalid(*maker, base);
+            // Case Base #76: at a cusp OCCT's chamfer can be valid and wrong (oracle 17 Q-CUSP:
+            // removing ten times Onshape's volume, a face running out of the body)
+            out.cusp = !out.failed && !out.thin && request.kind == FilletFallback::Kind::Chamfer
+                && FilletFallback::endsInCusp(base, edges);
+            out.turns = !out.failed && !out.thin && !out.invalid
+                && FilletFallback::endsInOverflow(base, edges, request);
+            // At a reflex corner with a circle OCCT's valid result is wrong (fillet-tight-arc 8: a
+            // patch, or a misplaced mitre): the construction builds it, below the limit too. (Where
+            // the preferred construction above refused, its reason stands)
+            out.reflexFirst = reflex && !out.failed && !out.thin && !out.invalid && !out.turns;
+            if (!out.failed && !out.thin && !out.invalid && !out.cusp && !out.turns) {
+                out.wrongWay = FilletFallback::wrongWay(maker->Shape(), base, edges, request);
+            }
+            if ((out.failed || out.thin || out.invalid || out.cusp || out.turns || out.reflexFirst
+                 || !out.wrongWay.empty())
+                && !prefer) {
+                if (reflex) {
+                    request.limitOnly = false;
+                }
+                out.constructed
+                    = FilletFallback::construct(base, edges, request, out.construction, &out.reason);
+            }
+        }
+    );
+    return outcome;
+}
+
+/// Names the exact construction into result: false, with the reason, if that fails
+bool finishConstruction(TopoShape& result, DressUpOutcome& outcome, const TopoShape& input, const char* op)
+{
+    if (!outcome.constructed) {
+        return false;
+    }
+    try {
+        FilletFallback::finish(result, outcome.construction, input, op);
+        return true;
+    }
+    catch (const Standard_Failure& e) {
+        outcome.reason = std::string("OCCT: ") + e.GetMessageString();
+    }
+    catch (const Base::Exception& e) {
+        outcome.reason = e.what();
+    }
+    return false;
+}
+
+/// OCCT's contours, each in its order, as the maker reports them after Add()
+std::vector<std::vector<TopoDS_Shape>> makerContours(BRepFilletAPI_LocalOperation& maker)
+{
+    std::vector<std::vector<TopoDS_Shape>> contours;
+    for (int i = 1; i <= maker.NbContours(); ++i) {
+        contours.emplace_back();
+        for (int j = 1; j <= maker.NbEdges(i); ++j) {
+            contours.back().push_back(maker.Edge(i, j));
+        }
+    }
+    return contours;
+}
+
+/** A dress-up over a kink in one of OCCT's contours (FilletFallback::kinkedContour(), ops#762),
+ * where OCCT's valid result leaves a tooth: the exact construction alone, below the limit too,
+ * under the feature's time limit. It rounds the selection and what OCCT's contours add to it
+ * along tangent chains proper (runs: the contours cut at their kinks), not past a kink, where
+ * Onshape's propagation does not carry on either. Named into result.
+ *
+ * @return Whether it was built and named: if not, reason says why
+ */
+bool constructOverKink(
+    TopoShape& result,
+    const TopoShape& input,
+    const std::vector<TopoShape>& inputEdges,
+    FilletFallback::Request request,
+    const std::vector<std::vector<TopoDS_Shape>>& runs,
+    const char* what,
+    const char* op,
+    std::string& reason
+)
+{
+    struct Alone
+    {
+        FilletFallback::Construction construction;
+        std::string reason;
+        bool built = false;
+    };
+    request.limitOnly = false;
+    request.contour.clear();
+    std::vector<TopoDS_Shape> edges;
+    TopTools_IndexedMapOfShape rounded;
+    for (const auto& edge : inputEdges) {
+        if (rounded.Add(edge.getShape()) > static_cast<int>(edges.size())) {
+            edges.push_back(edge.getShape());
+        }
+    }
+    const int picked = rounded.Extent();
+    for (const auto& run : runs) {
+        const bool chained = std::any_of(run.begin(), run.end(), [&](const TopoDS_Shape& edge) {
+            const int index = rounded.FindIndex(edge);
+            return index > 0 && index <= picked;
+        });
+        for (const auto& edge : run) {
+            if (chained && rounded.Add(edge) > static_cast<int>(edges.size())) {
+                edges.push_back(edge);
+            }
+        }
+    }
+    request.contour = edges;
+    auto alone = std::make_shared<Alone>();
+    KernelBudget::run(
+        what,
+        [base = input.getShape(), edges, request, alone](const Message_ProgressRange& /*range*/) {
+            alone->built = FilletFallback::construct(
+                base,
+                edges,
+                request,
+                alone->construction,
+                &alone->reason
+            );
+        }
+    );
+    if (alone->built) {
+        try {
+            FilletFallback::finish(result, alone->construction, input, op);
+            return true;
+        }
+        catch (const Standard_Failure& e) {
+            alone->reason = std::string("OCCT: ") + e.GetMessageString();
+        }
+        catch (const Base::Exception& e) {
+            alone->reason = e.what();
+        }
+    }
+    reason = alone->reason;
+    return false;
+}
+
+// FreeCAD-CH (Case Base #163 Fillet 6, rb164/rb166; ops#640): where a round's wall has a gap (a hole
+// through the wall dipping below the round's contact line), OCCT builds the stretch over the gap as
+// a rational B-spline that runs up to a few hundredths of a millimetre off the cylinder its two
+// neighbouring stripes lie on. Onshape keeps the one exact cylinder, trimmed by the gap's faces.
+// Recognised: a new B-spline face of the round between exactly two new stripes on one cylinder of
+// the round's radius, meeting each in a cross-section, and within a tenth of the radius of that
+// cylinder. It takes the cylinder; its other edges become the cylinder's exact intersections with
+// their other faces (a plane tangent along the axis: the contact line). The topology and its order
+// stay OCCT's, so the names stay. Unrecognised: OCCT's result, as before. Recognised and failing a
+// check: the fillet refuses (decision 418), since OCCT's result there is valid and wrong.
+class RoundCanonicalModification: public BRepTools_Modification
+{
+public:
+    RoundCanonicalModification(const TopoDS_Shape& result, const TopoDS_Shape& base, double radius)
+        : radius(radius)
+    {
+        TopTools_IndexedMapOfShape baseFaces;
+        TopExp::MapShapes(base, TopAbs_FACE, baseFaces);
+        TopTools_IndexedDataMapOfShapeListOfShape edgeFaces;
+        TopExp::MapShapesAndAncestors(result, TopAbs_EDGE, TopAbs_FACE, edgeFaces);
+        for (TopExp_Explorer it(result, TopAbs_FACE); it.More(); it.Next()) {
+            const TopoDS_Face& face = TopoDS::Face(it.Current());
+            if (baseFaces.Contains(face)) {
+                continue;
+            }
+            const BRepAdaptor_Surface old(face, Standard_False);
+            if (old.GetType() != GeomAbs_BSplineSurface && old.GetType() != GeomAbs_BezierSurface) {
+                continue;
+            }
+            recognise(face, old, baseFaces, edgeFaces);
+        }
+    }
+
+    bool isEmpty() const
+    {
+        return surfaces.empty();
+    }
+
+    /// Why a recognised face could not be made exact (empty if every one was)
+    const std::string& failure() const
+    {
+        return why;
+    }
+
+    /// The largest distance of a recognised face from its cylinder, as OCCT built it
+    double deviation() const
+    {
+        return worst;
+    }
+
+    Standard_Boolean NewSurface(const TopoDS_Face& face,
+                                Handle(Geom_Surface)& surface,
+                                TopLoc_Location& location,
+                                Standard_Real& tolerance,
+                                Standard_Boolean& reverseWires,
+                                Standard_Boolean& reverseFace) override
+    {
+        const auto found = surfaces.find(face.TShape().get());
+        if (found == surfaces.end()) {
+            return Standard_False;
+        }
+        BRep_Tool::Surface(face, location);
+        surface = Handle(Geom_Surface)::DownCast(
+            found->second->Transformed(location.Inverted().Transformation()));
+        tolerance = BRep_Tool::Tolerance(face);
+        reverseWires = Standard_False;
+        reverseFace = Standard_False;
+        return Standard_True;
+    }
+
+    Standard_Boolean NewCurve(const TopoDS_Edge& edge,
+                              Handle(Geom_Curve)& curve,
+                              TopLoc_Location& location,
+                              Standard_Real& tolerance) override
+    {
+        const auto found = curves.find(edge.TShape().get());
+        if (found == curves.end()) {
+            return Standard_False;
+        }
+        double first {}, last {};
+        BRep_Tool::Curve(edge, location, first, last);
+        curve = Handle(Geom_Curve)::DownCast(
+            found->second.curve->Transformed(location.Inverted().Transformation()));
+        tolerance = BRep_Tool::Tolerance(edge);
+        return Standard_True;
+    }
+
+    Standard_Boolean NewPoint(const TopoDS_Vertex&, gp_Pnt&, Standard_Real&) override
+    {
+        return Standard_False;
+    }
+
+    Standard_Boolean NewCurve2d(const TopoDS_Edge& edge,
+                                const TopoDS_Face& face,
+                                const TopoDS_Edge&,
+                                const TopoDS_Face&,
+                                Handle(Geom2d_Curve)& curve2d,
+                                Standard_Real& tolerance) override
+    {
+        const auto surface = surfaces.find(face.TShape().get());
+        const auto curve = curves.find(edge.TShape().get());
+        if (surface == surfaces.end() && curve == curves.end()) {
+            return Standard_False;
+        }
+        // Both in global coordinates: a pcurve doesn't depend on the frame they share
+        Handle(Geom_Surface) onSurface;
+        if (surface != surfaces.end()) {
+            onSurface = surface->second;
+        }
+        else {
+            TopLoc_Location location;
+            onSurface = BRep_Tool::Surface(face, location);
+            if (onSurface.IsNull()) {
+                return Standard_False;
+            }
+            if (!location.IsIdentity()) {
+                onSurface = Handle(Geom_Surface)::DownCast(
+                    onSurface->Transformed(location.Transformation()));
+            }
+        }
+        Handle(Geom_Curve) along;
+        double first {}, last {};
+        if (curve != curves.end()) {
+            along = curve->second.curve;
+            first = curve->second.first;
+            last = curve->second.last;
+        }
+        else {
+            TopLoc_Location location;
+            along = BRep_Tool::Curve(edge, location, first, last);
+            if (along.IsNull()) {
+                return Standard_False;
+            }
+            if (!location.IsIdentity()) {
+                along = Handle(Geom_Curve)::DownCast(along->Transformed(location.Transformation()));
+            }
+        }
+        curve2d = GeomProjLib::Curve2d(along, first, last, onSurface);
+        if (curve2d.IsNull()) {
+            return Standard_False;
+        }
+        // Into the period the face's other pcurves are in: the old pcurve's on an old surface, the
+        // middle's on the new cylinder
+        gp_Pnt2d reference;
+        bool hasReference = false;
+        if (surface != surfaces.end()) {
+            reference = gp_Pnt2d(references.at(face.TShape().get()), 0);
+            hasReference = true;
+        }
+        else {
+            double f {}, l {};
+            const Handle(Geom2d_Curve) was = BRep_Tool::CurveOnSurface(edge, face, f, l);
+            if (!was.IsNull()) {
+                reference = was->Value((f + l) / 2);
+                hasReference = true;
+            }
+        }
+        if (hasReference) {
+            const gp_Pnt2d at = curve2d->Value((first + last) / 2);
+            gp_Vec2d shift(0, 0);
+            if (onSurface->IsUPeriodic()) {
+                const double period = onSurface->UPeriod();
+                shift.SetX(std::round((reference.X() - at.X()) / period) * period);
+            }
+            if (surface == surfaces.end() && onSurface->IsVPeriodic()) {
+                const double period = onSurface->VPeriod();
+                shift.SetY(std::round((reference.Y() - at.Y()) / period) * period);
+            }
+            if (shift.Magnitude() > 0.0) {
+                curve2d->Translate(shift);
+            }
+        }
+        tolerance = BRep_Tool::Tolerance(edge);
+        return Standard_True;
+    }
+
+    Standard_Boolean NewParameter(const TopoDS_Vertex& vertex,
+                                  const TopoDS_Edge& edge,
+                                  Standard_Real& parameter,
+                                  Standard_Real& tolerance) override
+    {
+        const auto found = curves.find(edge.TShape().get());
+        if (found == curves.end()) {
+            return Standard_False;
+        }
+        TopoDS_Vertex first, last;
+        TopExp::Vertices(edge, first, last);
+        parameter = vertex.IsSame(first) ? found->second.first : found->second.last;
+        tolerance = BRep_Tool::Tolerance(vertex);
+        return Standard_True;
+    }
+
+    GeomAbs_Shape Continuity(const TopoDS_Edge& edge,
+                             const TopoDS_Face& face1,
+                             const TopoDS_Face& face2,
+                             const TopoDS_Edge&,
+                             const TopoDS_Face&,
+                             const TopoDS_Face&) override
+    {
+        return BRep_Tool::Continuity(edge, face1, face2);
+    }
+
+private:
+    struct NewEdge
+    {
+        Handle(Geom_Curve) curve;  // global
+        double first {};
+        double last {};
+    };
+
+    /// The distance of a point from the cylinder's surface
+    double offCylinder(const gp_Cylinder& cylinder, const gp_Pnt& point) const
+    {
+        return std::abs(gp_Lin(cylinder.Axis()).Distance(point) - cylinder.Radius());
+    }
+
+    /// The edge's 3D curve in global coordinates, and its range
+    static Handle(Geom_Curve) globalCurve(const TopoDS_Edge& edge, double& first, double& last)
+    {
+        TopLoc_Location location;
+        Handle(Geom_Curve) curve = BRep_Tool::Curve(edge, location, first, last);
+        if (!curve.IsNull() && !location.IsIdentity()) {
+            curve = Handle(Geom_Curve)::DownCast(curve->Transformed(location.Transformation()));
+        }
+        return curve;
+    }
+
+    void recognise(const TopoDS_Face& face,
+                   const BRepAdaptor_Surface& old,
+                   const TopTools_IndexedMapOfShape& baseFaces,
+                   const TopTools_IndexedDataMapOfShapeListOfShape& edgeFaces)
+    {
+        // The neighbouring stripes: new faces on one cylinder of the radius
+        std::set<const TopoDS_TShape*> stripes;
+        std::optional<gp_Cylinder> cylinder;
+        std::vector<TopoDS_Edge> others;
+        for (TopExp_Explorer e(face, TopAbs_EDGE); e.More(); e.Next()) {
+            const TopoDS_Edge& edge = TopoDS::Edge(e.Current());
+            if (BRep_Tool::Degenerated(edge) || !edgeFaces.Contains(edge)) {
+                return;
+            }
+            bool onStripe = false;
+            for (const TopoDS_Shape& other : edgeFaces.FindFromKey(edge)) {
+                if (other.IsSame(face) || baseFaces.Contains(other)) {
+                    continue;
+                }
+                const BRepAdaptor_Surface surface(TopoDS::Face(other), Standard_False);
+                if (surface.GetType() != GeomAbs_Cylinder
+                    || std::abs(surface.Cylinder().Radius() - radius) > Precision::Confusion()) {
+                    continue;
+                }
+                const gp_Cylinder found = surface.Cylinder();
+                if (!cylinder) {
+                    cylinder = found;
+                }
+                else if (!cylinder->Axis().IsParallel(found.Axis(), Precision::Angular())
+                         || gp_Lin(cylinder->Axis()).Distance(found.Location())
+                             > Precision::Confusion()) {
+                    return;  // stripes of another round
+                }
+                stripes.insert(other.TShape().get());
+                onStripe = true;
+                // A cross-section of the cylinder: every point at one place along the axis
+                double first {}, last {};
+                const Handle(Geom_Curve) curve = globalCurve(edge, first, last);
+                if (curve.IsNull()) {
+                    return;
+                }
+                const gp_Ax1 axis = cylinder->Axis();
+                const double at = gp_Vec(axis.Location(), curve->Value(first)).Dot(gp_Vec(axis.Direction()));
+                for (int k = 0; k <= 8; ++k) {
+                    const gp_Pnt point = curve->Value(first + (last - first) * k / 8);
+                    if (std::abs(gp_Vec(axis.Location(), point).Dot(gp_Vec(axis.Direction())) - at)
+                            > Precision::Confusion()
+                        || offCylinder(*cylinder, point) > Precision::Confusion()) {
+                        return;
+                    }
+                }
+            }
+            if (!onStripe) {
+                others.push_back(edge);
+            }
+        }
+        if (!cylinder || stripes.size() != 2) {
+            return;
+        }
+        // Near the cylinder all over: the round, approximated
+        double u1 {}, u2 {}, v1 {}, v2 {};
+        BRepTools::UVBounds(face, u1, u2, v1, v2);
+        double off = 0.0;
+        for (int i = 0; i <= 20; ++i) {
+            for (int j = 0; j <= 20; ++j) {
+                off = std::max(
+                    off,
+                    offCylinder(*cylinder, old.Value(u1 + (u2 - u1) * i / 20, v1 + (v2 - v1) * j / 20)));
+            }
+        }
+        if (off > 0.1 * radius) {
+            return;
+        }
+        // Recognised from here: a failure is the fillet's refusal
+        worst = std::max(worst, off);
+        gp_Pnt middle;
+        gp_Vec du, dv;
+        old.D1((u1 + u2) / 2, (v1 + v2) / 2, middle, du, dv);
+        Handle(Geom_CylindricalSurface) exact = new Geom_CylindricalSurface(*cylinder);
+        double u {}, v {};
+        GeomAPI_ProjectPointOnSurf onExact(middle, exact);
+        if (!onExact.IsDone() || onExact.NbPoints() == 0) {
+            why = "the round's face has no point on its cylinder";
+            return;
+        }
+        onExact.LowerDistanceParameters(u, v);
+        gp_Pnt point;
+        gp_Vec eu, ev;
+        exact->D1(u, v, point, eu, ev);
+        if (du.Crossed(dv).Dot(eu.Crossed(ev)) < 0) {
+            exact->UReverse();  // the face keeps its side
+            GeomAPI_ProjectPointOnSurf again(middle, exact);
+            again.LowerDistanceParameters(u, v);
+        }
+        for (const TopoDS_Edge& edge : others) {
+            if (!exactEdge(edge, face, *cylinder, exact, edgeFaces)) {
+                return;
+            }
+        }
+        surfaces[face.TShape().get()] = exact;
+        references[face.TShape().get()] = u;
+    }
+
+    /// The edge's curve on the cylinder: kept if it lies on it, else the exact intersection
+    bool exactEdge(const TopoDS_Edge& edge,
+                   const TopoDS_Face& face,
+                   const gp_Cylinder& cylinder,
+                   const Handle(Geom_CylindricalSurface)& exact,
+                   const TopTools_IndexedDataMapOfShapeListOfShape& edgeFaces)
+    {
+        double first {}, last {};
+        const Handle(Geom_Curve) curve = globalCurve(edge, first, last);
+        if (curve.IsNull()) {
+            why = "an edge of the round has no 3D curve";
+            return false;
+        }
+        bool on = true;
+        for (int k = 0; k <= 16 && on; ++k) {
+            on = offCylinder(cylinder, curve->Value(first + (last - first) * k / 16))
+                <= Precision::Confusion();
+        }
+        if (on) {
+            return true;  // only its pcurve on the new surface changes
+        }
+        TopoDS_Face other;
+        for (const TopoDS_Shape& candidate : edgeFaces.FindFromKey(edge)) {
+            if (!candidate.IsSame(face)) {
+                other = TopoDS::Face(candidate);
+            }
+        }
+        if (other.IsNull()) {
+            why = "an edge of the round has one face";
+            return false;
+        }
+        TopoDS_Vertex start, end;
+        TopExp::Vertices(edge, start, end);
+        const gp_Pnt from = BRep_Tool::Pnt(start);
+        const gp_Pnt to = BRep_Tool::Pnt(end);
+        const gp_Pnt middle = curve->Value((first + last) / 2);
+        Handle(Geom_Curve) best;
+        const BRepAdaptor_Surface surface(other);  // global
+        if (surface.GetType() == GeomAbs_Plane) {
+            // A plane tangent to the cylinder along the axis: the contact line
+            const gp_Pln plane = surface.Plane();
+            const gp_Dir axis = cylinder.Axis().Direction();
+            const gp_Pnt centre = cylinder.Location();
+            const double distance = plane.Distance(centre);
+            if (std::abs(plane.Axis().Direction().Dot(axis)) < Precision::Angular()
+                && std::abs(distance - cylinder.Radius()) < Precision::Confusion()) {
+                const gp_Vec normal(plane.Axis().Direction());
+                const double side = gp_Vec(plane.Location(), centre).Dot(normal);
+                best = new Geom_Line(centre.Translated(normal * -side), axis);
+            }
+        }
+        if (best.IsNull()) {
+            TopLoc_Location location;
+            Handle(Geom_Surface) otherSurface = BRep_Tool::Surface(other, location);
+            if (!location.IsIdentity()) {
+                otherSurface = Handle(Geom_Surface)::DownCast(
+                    otherSurface->Transformed(location.Transformation()));
+            }
+            GeomAPI_IntSS intersection(exact, otherSurface, Precision::Confusion());
+            if (!intersection.IsDone()) {
+                why = "the round's cylinder doesn't intersect a face beside it";
+                return false;
+            }
+            best = chain(intersection, from, to, curve, first, last);
+        }
+        if (best.IsNull()) {
+            why = "the round's cylinder doesn't meet a face beside it";
+            return false;
+        }
+        // The vertices stay: they are on the exact stripes
+        double a {}, b {};
+        if (!parameterOn(best, from, a) || !parameterOn(best, to, b)) {
+            why = "a vertex of the round is off its exact edge";
+            return false;
+        }
+        if (b < a) {
+            if (best->IsPeriodic()) {
+                b += best->Period();
+            }
+            else {
+                best = best->Reversed();
+                if (!parameterOn(best, from, a) || !parameterOn(best, to, b)) {
+                    why = "a vertex of the round is off its exact edge";
+                    return false;
+                }
+            }
+        }
+        // The same stretch as OCCT's edge: the old middle is near the new one
+        if (best->Value((a + b) / 2).Distance(middle) > 0.1 * radius + worst) {
+            why = "the round's exact edge runs elsewhere than OCCT's";
+            return false;
+        }
+        curves[edge.TShape().get()] = NewEdge {best, a, b};
+        return true;
+    }
+
+    /** The intersection's branches that run along OCCT's edge, joined from one vertex to the other:
+     * the intersection of two cylinders comes in branches split where it turns (Case Base #163's
+     * hole: two, at the hole's lowest line). Null if they don't make one curve between the vertices.
+     */
+    Handle(Geom_Curve) chain(const GeomAPI_IntSS& intersection,
+                             const gp_Pnt& from,
+                             const gp_Pnt& to,
+                             const Handle(Geom_Curve)& old,
+                             double first,
+                             double last) const
+    {
+        const double reach = 0.1 * radius + worst;
+        const double joint = 10 * Precision::Confusion();
+        // The branches along the old edge: their middles close to it
+        std::vector<Handle(Geom_BoundedCurve)> along;
+        for (int i = 1; i <= intersection.NbLines(); ++i) {
+            const Handle(Geom_Curve) line = intersection.Line(i);
+            const Handle(Geom_BoundedCurve) bounded = Handle(Geom_BoundedCurve)::DownCast(line);
+            if (bounded.IsNull()) {
+                continue;
+            }
+            const gp_Pnt middle
+                = line->Value((line->FirstParameter() + line->LastParameter()) / 2);
+            GeomAPI_ProjectPointOnCurve onOld(middle, old, first, last);
+            if (onOld.NbPoints() > 0 && onOld.LowerDistance() < reach) {
+                along.push_back(bounded);
+            }
+        }
+        // One branch through both vertices (a closed one, or one running past them): the nearest
+        Handle(Geom_Curve) single;
+        double nearest = std::numeric_limits<double>::max();
+        for (int i = 1; i <= intersection.NbLines(); ++i) {
+            const Handle(Geom_Curve) branch = intersection.Line(i);
+            double a {}, b {};
+            if (!parameterOn(branch, from, a) || !parameterOn(branch, to, b)) {
+                continue;
+            }
+            const gp_Pnt middle = old->Value((first + last) / 2);
+            GeomAPI_ProjectPointOnCurve onBranch(middle, branch);
+            if (onBranch.NbPoints() > 0 && onBranch.LowerDistance() < nearest) {
+                nearest = onBranch.LowerDistance();
+                single = branch;
+            }
+        }
+        if (!single.IsNull()) {
+            return single;
+        }
+        // Else from the start vertex, branch by branch, to the end vertex
+        gp_Pnt at = from;
+        Handle(Geom_BSplineCurve) joined;
+        std::vector<bool> used(along.size(), false);
+        for (std::size_t step = 0; step < along.size() && at.Distance(to) > joint; ++step) {
+            bool found = false;
+            for (std::size_t i = 0; i < along.size() && !found; ++i) {
+                if (used[i]) {
+                    continue;
+                }
+                Handle(Geom_BoundedCurve) branch = along[i];
+                if (branch->EndPoint().Distance(at) < joint) {
+                    branch = Handle(Geom_BoundedCurve)::DownCast(branch->Reversed());
+                }
+                if (branch->StartPoint().Distance(at) >= joint) {
+                    continue;
+                }
+                used[i] = true;
+                found = true;
+                at = branch->EndPoint();
+                if (joined.IsNull()) {
+                    joined = GeomConvert::CurveToBSplineCurve(branch);
+                }
+                else {
+                    GeomConvert_CompCurveToBSplineCurve join(joined);
+                    if (!join.Add(branch, joint)) {
+                        return {};
+                    }
+                    joined = join.BSplineCurve();
+                }
+            }
+            if (!found) {
+                return {};
+            }
+        }
+        if (joined.IsNull() || at.Distance(to) > joint) {
+            return {};
+        }
+        return joined;
+    }
+
+    /// The point's parameter on the curve, if it is on it
+    static bool parameterOn(const Handle(Geom_Curve)& curve, const gp_Pnt& point, double& parameter)
+    {
+        GeomAPI_ProjectPointOnCurve projection(point, curve);
+        if (projection.NbPoints() == 0 || projection.LowerDistance() > 10 * Precision::Confusion()) {
+            return false;
+        }
+        parameter = projection.LowerDistanceParameter();
+        return true;
+    }
+
+    double radius;
+    double worst {0.0};
+    std::string why;
+    std::map<const TopoDS_TShape*, Handle(Geom_Surface)> surfaces;  // global
+    std::map<const TopoDS_TShape*, double> references;              // a u of the face's period
+    std::map<const TopoDS_TShape*, NewEdge> curves;
+};
+
+class RoundCanonicalMaker: public BRepBuilderAPI_ModifyShape
+{
+public:
+    RoundCanonicalMaker(const TopoDS_Shape& shape, const Handle(BRepTools_Modification)& modification)
+    {
+        myModification = modification;
+        DoModif(shape);
+    }
+};
+
+/// The round's stretches over a gap in its wall as its exact cylinder (above): the result is
+/// unchanged where nothing is recognised; refused (CADKernelError) where a recognised stretch
+/// can't be made exact with the same topology
+void makeRoundCanonical(TopoShape& round, const TopoShape& base, double radius)
+{
+    const TopoDS_Shape shape = round.getShape();
+    if (shape.IsNull() || radius <= 0) {
+        return;
+    }
+    Handle(RoundCanonicalModification) modification
+        = new RoundCanonicalModification(shape, base.getShape(), radius);
+    std::string why = modification->failure();
+    if (modification->isEmpty() && why.empty()) {
+        return;
+    }
+    if (why.empty()) {
+        try {
+            RoundCanonicalMaker maker(shape, modification);
+            const TopoDS_Shape result = maker.IsDone() ? maker.Shape() : TopoDS_Shape();
+            if (result.IsNull()) {
+                why = "OCCT couldn't rebuild it";
+            }
+            else if (!BRepCheck_Analyzer(result).IsValid()) {
+                why = "the rebuilt shape is invalid";
+            }
+            for (const TopAbs_ShapeEnum kind : {TopAbs_FACE, TopAbs_EDGE, TopAbs_VERTEX}) {
+                if (!why.empty()) {
+                    break;
+                }
+                TopTools_IndexedMapOfShape before;
+                TopTools_IndexedMapOfShape after;
+                TopExp::MapShapes(shape, kind, before);
+                TopExp::MapShapes(result, kind, after);
+                if (before.Extent() != after.Extent()) {
+                    why = "the rebuilt shape has another topology";
+                    break;
+                }
+                for (int i = 1; i <= before.Extent(); ++i) {
+                    if (!maker.ModifiedShape(before(i)).IsSame(after(i))) {
+                        why = "the rebuilt shape has another order";
+                        break;
+                    }
+                }
+            }
+            if (why.empty()) {
+                // The volume moves by about the gap's stretch times its deviation, not more
+                GProp_GProps was, now;
+                BRepGProp::VolumeProperties(shape, was);
+                BRepGProp::VolumeProperties(result, now);
+                double area = 0.0;
+                for (TopExp_Explorer it(shape, TopAbs_FACE); it.More(); it.Next()) {
+                    GProp_GProps face;
+                    BRepGProp::SurfaceProperties(it.Current(), face);
+                    area = std::max(area, face.Mass());
+                }
+                const double bound
+                    = 2 * modification->deviation() * area + 1e-6 * std::abs(was.Mass());
+                if (std::abs(now.Mass() - was.Mass()) > bound) {
+                    why = "the exact stretch moves the volume more than its deviation explains";
+                }
+            }
+            if (why.empty()) {
+                round.setShape(result, false);
+                return;
+            }
+        }
+        catch (const Standard_Failure& e) {
+            why = std::string("OCCT: ") + e.GetMessageString();
+        }
+    }
+    FC_THROWM(
+        Base::CADKernelError,
+        "The fillet's round runs across a gap in its wall, where OCCT builds it up to "
+            << modification->deviation()
+            << " mm off its cylinder; making that stretch exact, as Onshape's, failed: " << why
+    );
+}
+
+// FreeCAD-CH (ops#640, decision 425): a constant-radius blend is the surface a ball of that radius
+// sweeps while it touches both walls. OCCT's fillet is that only where the walls' normals lie in
+// the plane normal to the edge; on a twisted wall its surface is off by 1e-3 mm and more, and each
+// seam between two blend faces lands elsewhere (Case Base #103 against Onshape). After OCCT's
+// fillet is named, the blend faces of every chain RollingBallBlend recognises get the ball's
+// geometry. The topology and its order stay, so the element map (the names) is kept as it is. A
+// recognised chain that cannot be corrected fails the fillet: never OCCT's faces handed back
+// silently (the kernel contract, decision 418).
+void makeFilletRollingBall(
+    TopoShape& fillet,
+    BRepFilletAPI_MakeFillet& maker,
+    const std::vector<TopoShape>& edges,
+    double radius
+)
+{
+    std::vector<TopoDS_Face> blends;
+    for (const auto& edge : edges) {
+        for (TopTools_ListIteratorOfListOfShape it(maker.Generated(edge.getShape())); it.More();
+             it.Next()) {
+            if (it.Value().ShapeType() == TopAbs_FACE) {
+                blends.push_back(TopoDS::Face(it.Value()));
+            }
+        }
+    }
+    const RollingBallBlend::Report report
+        = RollingBallBlend::correct(fillet.getShape(), blends, radius);
+    if (report.outcome == RollingBallBlend::Outcome::Corrected) {
+        fillet.setShape(report.shape, false);
+        FC_LOG(
+            "The fillet's blend is corrected to a rolling ball: " << report.faces << " faces, ball residual "
+                << report.residualBefore << " -> " << report.residualAfter << " mm, a seam moved by "
+                << report.seamMove << " mm"
+        );
+    }
+    else if (report.outcome == RollingBallBlend::Outcome::Refused) {
+        FC_THROWM(
+            Base::CADKernelError,
+            "The fillet's blend is not the surface of a rolling ball (off by "
+                << report.residualBefore << " mm), and its correction refused: " << report.reason
+        );
+    }
 }
 }  // namespace
 
@@ -7467,34 +9496,272 @@ TopoShape& TopoShape::makeElementFillet(
     }
     // The maker raises its input's tolerances in place: it runs on a copy (ops#345)
     std::vector<TopoShape> inputEdges = edges;
-    const TopoShape input = FilletFallback::makerInput(shape, inputEdges);
-    BRepFilletAPI_MakeFillet mkFillet(input.getShape());
+    TopoShape input = FilletFallback::makerInput(shape, inputEdges);
+    auto mkFillet = std::make_shared<BRepFilletAPI_MakeFillet>(input.getShape());
     for (auto& e : inputEdges) {
-        mkFillet.Add(radius1, radius2, TopoDS::Edge(e.getShape()));
+        mkFillet->Add(radius1, radius2, TopoDS::Edge(e.getShape()));
     }
-    std::exception_ptr occtError;
     FilletFallback::Request request;
     // Before the maker raises the copy's tolerances in place
     request.faceTolerances = FilletFallback::faceTolerances(input.getShape());
-    const bool failed = buildDressUpFailed(mkFillet, occtError, request.contour);
-    const bool thin = !failed && builtThinFace(mkFillet, input);
-    if (failed || thin || builtInvalid(mkFillet)) {
-        Part::SignalException sig;
-        request.kind = FilletFallback::Kind::Fillet;
-        request.size1 = radius1;
-        request.size2 = radius2;
-        std::string reason;
-        if (FilletFallback::build(*this, input, inputEdges, request, op, &reason)) {
-            return *this;
-        }
-        if (failed) {
-            raiseDressUpError(mkFillet, occtError, reason);
-        }
-        if (thin) {
-            raiseThinFaceError("The fillet", reason);
+    request.kind = FilletFallback::Kind::Fillet;
+    request.size1 = radius1;
+    request.size2 = radius2;
+    Part::SignalException sig;
+    FilletFallback::takeInvalidResult();
+    std::vector<TopoDS_Shape> edgeShapes;
+    for (const auto& e : inputEdges) {
+        edgeShapes.push_back(e.getShape());
+    }
+    FilletFallback::takeInvalidResult();
+    bool prefer = FilletFallback::preferConstruction(input.getShape(), edgeShapes, request);
+    gp_Pnt reflexAt;
+    const bool reflex = FilletFallback::reflexCircleCorner(input.getShape(), edgeShapes, &reflexAt);
+    // FreeCAD-CH (ops#806): a contact line running along part of a face's boundary crashes OCCT's
+    // fillet (SIGSEGV, no error to catch): the exact construction alone, or an error
+    // OCCT's contours (the selection carried on along its tangent chains, as Onshape's) are what
+    // its fillet would walk: they are read, and the construction must round no less
+    FilletFallback::Request alongContours = request;
+    std::vector<TopoDS_Shape> contourEdges;
+    for (int i = 1; i <= mkFillet->NbContours(); ++i) {
+        for (int j = 1; j <= mkFillet->NbEdges(i); ++j) {
+            alongContours.contour.push_back(mkFillet->Edge(i, j));
+            contourEdges.push_back(mkFillet->Edge(i, j));
         }
     }
-    return makeElementShape(mkFillet, input, op);
+    // FreeCAD-CH (ops#762): where a contour of OCCT's runs through a kink (it carries on wherever
+    // the side faces meet within 0.1 rad), its round ends in cross-sections at the vertex and a
+    // tooth is left between them, valid and wrong: the exact construction alone, or an error
+    std::string kinkAt;
+    std::vector<std::vector<TopoDS_Shape>> runs;
+    if (FilletFallback::kinkedContour(makerContours(*mkFillet), &kinkAt, &runs)) {
+        std::string reason;
+        if (constructOverKink(*this, input, inputEdges, request, runs, "The fillet", op, reason)) {
+            return *this;
+        }
+        FC_THROWM(
+            Base::CADKernelError,
+            "The fillet runs over a slight corner between its edges ("
+                << kinkAt
+                << "), where OCCT's round leaves a tooth; its exact construction refused: " << reason
+        );
+    }
+    std::string notchAt;
+    if (FilletFallback::contactOnPartOfAnEdge(input.getShape(), contourEdges, request, &notchAt)) {
+        struct Alone
+        {
+            FilletFallback::Construction construction;
+            std::string reason;
+            bool built = false;
+        };
+        auto alone = std::make_shared<Alone>();
+        KernelBudget::run(
+            "The fillet",
+            [base = input.getShape(), edgeShapes, request = alongContours, alone](
+                const Message_ProgressRange& /*range*/
+            ) {
+                alone->built = FilletFallback::construct(
+                    base,
+                    edgeShapes,
+                    request,
+                    alone->construction,
+                    &alone->reason
+                );
+            }
+        );
+        if (alone->built) {
+            try {
+                FilletFallback::finish(*this, alone->construction, input, op);
+                return *this;
+            }
+            catch (const Standard_Failure& e) {
+                alone->reason = std::string("OCCT: ") + e.GetMessageString();
+            }
+            catch (const Base::Exception& e) {
+                alone->reason = e.what();
+            }
+        }
+        FC_THROWM(
+            Base::CADKernelError,
+            "The fillet's tangent line runs along part of an edge of the face next to it ("
+                << notchAt
+                << "), where OCCT's fillet crashes; its exact construction refused: " << alone->reason
+        );
+    }
+    if (reflex && !prefer && radius1 == radius2) {
+        // The whole rim loops in the direct builder's scope are built by it, and the rest of the
+        // selection is rounded on the result: one loop out of its scope does not send the others
+        // to the construction by Booleans (FSLC #50: 458 corners). As the construction below,
+        // which a reflex corner asks for below the limit too
+        FilletFallback::Request direct = request;
+        direct.limitOnly = false;
+        struct Split
+        {
+            FilletFallback::Construction construction;
+            std::vector<TopoDS_Shape> rest;
+            bool built = false;
+        };
+        auto split = std::make_shared<Split>();
+        KernelBudget::run(
+            "The fillet",
+            [base = input.getShape(),
+             edgeShapes,
+             request = direct,
+             split](const Message_ProgressRange& /*range*/) {
+                split->built = FilletFallback::constructRims(
+                    base,
+                    edgeShapes,
+                    request,
+                    split->construction,
+                    split->rest
+                );
+            }
+        );
+        if (split->built) {
+            TopoShape stage(Tag, Hasher, getHistoryAlgorithm());
+            bool named = false;
+            try {
+                FilletFallback::finish(stage, split->construction, input, op);
+                named = true;
+            }
+            catch (const Standard_Failure&) {
+            }
+            catch (const Base::Exception&) {
+            }
+            FC_LOG("fillet split: the rims built, named " << named << ", rest "
+                                                        << split->rest.size() << " edges");
+            if (named && split->rest.empty()) {
+                *this = stage;
+                return *this;
+            }
+            std::vector<TopoShape> rest;
+            for (const auto& edge : split->rest) {
+                const int index = named ? stage.findShape(edge) : 0;
+                if (index <= 0) {
+                    break;
+                }
+                rest.push_back(stage.getSubTopoShape(TopAbs_EDGE, index));
+            }
+            if (named && rest.size() == split->rest.size()) {
+                try {
+                    makeElementFillet(stage, rest, radius1, radius2, op);
+                    // (OCCT's invalid result for the rest, which its construction refused, is
+                    // not an error there: it is noted)
+                    if (FilletFallback::takeInvalidResult().empty()) {
+                        return *this;
+                    }
+                    FC_LOG("fillet split: the rest's result on the stage is invalid");
+                }
+                catch (const Base::CADKernelError& e) {
+                    FC_LOG("fillet split: the rest failed on the stage: " << e.what());
+                    // The rest is not rounded on that body: the whole selection, as without
+                    // the split (its error stands). Never after the feature's time is up
+                    if (KernelBudget::pastDeadline()) {
+                        throw;
+                    }
+                }
+                catch (const Standard_Failure& e) {
+                    FC_LOG("fillet split: the rest failed on the stage (OCCT): " << e.GetMessageString());
+                }
+            }
+            else {
+                FC_LOG("fillet split: " << rest.size() << " of the rest's edges found on the stage");
+            }
+        }
+    }
+    auto outcome = buildDressUp(mkFillet, input, inputEdges, request, "The fillet", prefer, reflex);
+    if (outcome->blocked) {
+        // Neither construction builds it, and OCCT's own round is valid and wrong there: never
+        // returned silently (decision 150)
+        FC_THROWM(
+            Base::CADKernelError,
+            "The fillet's round would meet a part of the body under its rim (a cavity or a hole "
+            "nearer to the rounded edges than the radius), where OCCT's round runs through that "
+            "part; its exact construction refused: "
+                << outcome->reason
+        );
+    }
+    if (outcome->failed && !outcome->constructed && inputEdges.size() > 1) {
+        // FreeCAD-CH (Case Base #165): OCCT's walker can fail on a tangent chain by the edge its
+        // contour is seeded from (a chain's first listed edge): an ellipse seed then a line whose
+        // curve runs against the chain fails, the same chain seeded from the line builds. The
+        // selection is a set: once more with the edges in reverse order, on a fresh copy (the
+        // maker raised the first copy's tolerances), kept only if OCCT builds a usable result
+        std::vector<TopoShape> againEdges(edges.rbegin(), edges.rend());
+        TopoShape againInput = FilletFallback::makerInput(shape, againEdges);
+        auto again = std::make_shared<BRepFilletAPI_MakeFillet>(againInput.getShape());
+        for (auto& e : againEdges) {
+            again->Add(radius1, radius2, TopoDS::Edge(e.getShape()));
+        }
+        FilletFallback::Request againRequest = request;
+        againRequest.faceTolerances = FilletFallback::faceTolerances(againInput.getShape());
+        auto second
+            = buildDressUp(again, againInput, againEdges, againRequest, "The fillet", false, reflex);
+        if (!second->failed && !second->thin && !second->invalid && !second->turns
+            && !second->reflexFirst && second->wrongWay.empty() && !second->constructed) {
+            mkFillet = again;
+            input = againInput;
+            inputEdges = againEdges;
+            outcome = second;
+        }
+    }
+    if (outcome->preferred) {
+        if (finishConstruction(*this, *outcome, input, op)) {
+            return *this;
+        }
+        // Naming it failed: OCCT, as without the preference
+        outcome = buildDressUp(mkFillet, input, inputEdges, request, "The fillet", false, reflex);
+    }
+    if (outcome->failed || outcome->thin || outcome->invalid || outcome->turns
+        || outcome->reflexFirst || !outcome->wrongWay.empty()) {
+        if (finishConstruction(*this, *outcome, input, op)) {
+            return *this;
+        }
+        if (outcome->failed) {
+            raiseDressUpError(*mkFillet, outcome->occtError, outcome->reason);
+        }
+        if (outcome->thin) {
+            raiseThinFaceError("The fillet", outcome->reason);
+        }
+        if (!outcome->wrongWay.empty()) {
+            raiseWrongWayError("The fillet", outcome->wrongWay, outcome->reason);
+        }
+        if (outcome->turns) {
+            // OCCT's ends there aren't Onshape's: never returned silently (decision 150)
+            FC_THROWM(
+                Base::CADKernelError,
+                "The fillet's tangent chain turns from concave to convex at a vertex of 4 edges, "
+                "where OCCT's ends differ from Onshape's; its exact construction refused: "
+                    << outcome->reason
+            );
+        }
+        if (outcome->reflexFirst) {
+            // OCCT's rounds there are valid and not Onshape's: never returned silently (the
+            // user's ruling, 2026-11-13: build like Onshape, or refuse loudly)
+            FC_THROWM(
+                Base::CADKernelError,
+                "The fillet has a reflex corner with a circle, at ("
+                    << reflexAt.X() << ", " << reflexAt.Y() << ", " << reflexAt.Z()
+                    << "), where Onshape's rounds meet in a mitre and OCCT's do not; its exact "
+                       "construction refused: "
+                    << outcome->reason
+            );
+        }
+        if (outcome->invalid) {
+            FilletFallback::noteInvalidResult(outcome->reason);
+        }
+    }
+    makeElementShape(*mkFillet, input, op);
+    if (radius1 == radius2 && !outcome->invalid) {
+        // The rolling ball first: it reads the maker's generated faces, which are those of the
+        // result as OCCT built it
+        makeFilletRollingBall(*this, *mkFillet, inputEdges, radius1);
+    }
+    if (radius2 == radius1) {
+        // FreeCAD-CH (Case Base #163): a stretch over a gap in the round's wall, exact
+        makeRoundCanonical(*this, input, radius1);
+    }
+    return *this;
 }
 
 TopoShape& TopoShape::makeElementChamfer(
@@ -7525,67 +9792,127 @@ TopoShape& TopoShape::makeElementChamfer(
         }
     }
     // The maker raises its input's tolerances in place: it runs on a copy (ops#345)
-    std::vector<TopoShape> inputEdges = edges;
-    const TopoShape input = FilletFallback::makerInput(shape, inputEdges);
-    BRepFilletAPI_MakeChamfer mkChamfer(input.getShape());
-    for (auto& e : inputEdges) {
-        const auto& edge = e.getShape();
-        if (BRep_Tool::Degenerated(TopoDS::Edge(edge))) {
-            FC_THROWM(Base::CADKernelError, "chamfer edge is degenerated");
+    // By equal distances, a chain of edges at different angles gets Onshape's setbacks
+    // (FilletFallback::chainSetbacks(), notes/chamfer-chain-setbacks.md). Where neither OCCT nor
+    // the construction builds them, the chamfer is built again with w on every edge, today's
+    // result: a chamfer that built with w never starts failing (ruling A, section 7), except at a
+    // cusp, where OCCT's result with w is no longer kept either (kernel layer step 1)
+    for (bool uniform : {false, true}) {
+        std::vector<TopoShape> inputEdges = edges;
+        const TopoShape input = FilletFallback::makerInput(shape, inputEdges);
+        auto mkChamferPtr = std::make_shared<BRepFilletAPI_MakeChamfer>(input.getShape());
+        BRepFilletAPI_MakeChamfer& mkChamfer = *mkChamferPtr;
+        std::vector<double> setbacks;
+        if (chamferType == ChamferType::equalDistance) {
+            setbacks = uniform ? std::vector<double>(inputEdges.size(), radius1)
+                               : FilletFallback::chainSetbacks(input, inputEdges, radius1);
         }
-        // Add edge to fillet algorithm
-        TopoDS_Shape face;
-        if (flipDirection == Flip::flip) {
-            const auto faces = input.findAncestorsShapes(edge, TopAbs_FACE);
-            if (faces.empty()) {
+        const bool setbacksDiffer
+            = std::any_of(setbacks.begin(), setbacks.end(), [&](double setback) {
+                  return setback != radius1;
+              });
+        for (std::size_t i = 0; i < inputEdges.size(); ++i) {
+            const auto& edge = inputEdges[i].getShape();
+            if (BRep_Tool::Degenerated(TopoDS::Edge(edge))) {
+                FC_THROWM(Base::CADKernelError, "chamfer edge is degenerated");
+            }
+            // Add edge to fillet algorithm
+            TopoDS_Shape face;
+            if (flipDirection == Flip::flip) {
+                const auto faces = input.findAncestorsShapes(edge, TopAbs_FACE);
+                if (faces.empty()) {
+                    FC_THROWM(Base::CADKernelError, "chamfer edge has no adjacent face");
+                }
+                face = faces.back();
+            }
+            else {
+                face = input.findAncestorShape(edge, TopAbs_FACE);
+            }
+            if (face.IsNull()) {
                 FC_THROWM(Base::CADKernelError, "chamfer edge has no adjacent face");
             }
-            face = faces.back();
+            switch (chamferType) {
+                case ChamferType::equalDistance:  // The edge's setback on both faces
+                    mkChamfer
+                        .Add(setbacks[i], setbacks[i], TopoDS::Edge(edge), TopoDS::Face(face));
+                    break;
+                case ChamferType::twoDistances:  // Two distances
+                    mkChamfer.Add(radius1, radius2, TopoDS::Edge(edge), TopoDS::Face(face));
+                    break;
+                case ChamferType::distanceAngle:  // Distance and angle
+                    mkChamfer.AddDA(
+                        radius1,
+                        Base::toRadians(radius2),
+                        TopoDS::Edge(edge),
+                        TopoDS::Face(face)
+                    );
+                    break;
+            }
         }
-        else {
-            face = input.findAncestorShape(edge, TopAbs_FACE);
-        }
-        if (face.IsNull()) {
-            FC_THROWM(Base::CADKernelError, "chamfer edge has no adjacent face");
-        }
-        switch (chamferType) {
-            case ChamferType::equalDistance:  // Equal distance
-                mkChamfer.Add(radius1, radius1, TopoDS::Edge(edge), TopoDS::Face(face));
-                break;
-            case ChamferType::twoDistances:  // Two distances
-                mkChamfer.Add(radius1, radius2, TopoDS::Edge(edge), TopoDS::Face(face));
-                break;
-            case ChamferType::distanceAngle:  // Distance and angle
-                mkChamfer
-                    .AddDA(radius1, Base::toRadians(radius2), TopoDS::Edge(edge), TopoDS::Face(face));
-                break;
-        }
-    }
-    Part::SignalException sig;
-    std::exception_ptr occtError;
-    FilletFallback::Request request;
-    // Before the maker raises the copy's tolerances in place
-    request.faceTolerances = FilletFallback::faceTolerances(input.getShape());
-    const bool failed = buildDressUpFailed(mkChamfer, occtError, request.contour);
-    const bool thin = !failed && builtThinFace(mkChamfer, input);
-    if (failed || thin || builtInvalid(mkChamfer)) {
+        Part::SignalException sig;
+        FilletFallback::Request request;
+        // Before the maker raises the copy's tolerances in place
+        request.faceTolerances = FilletFallback::faceTolerances(input.getShape());
         request.kind = FilletFallback::Kind::Chamfer;
         request.size1 = radius1;
         request.size2 = radius2;
         request.chamferType = chamferType;
         request.flipDirection = flipDirection;
-        std::string reason;
-        if (FilletFallback::build(*this, input, inputEdges, request, op, &reason)) {
-            return *this;
+        if (setbacksDiffer) {
+            request.setbacks = setbacks;
         }
-        if (failed) {
-            raiseDressUpError(mkChamfer, occtError, reason);
+        // FreeCAD-CH (ops#762): a contour through a kink, as the fillet's
+        std::string kinkAt;
+        std::vector<std::vector<TopoDS_Shape>> runs;
+        if (FilletFallback::kinkedContour(makerContours(mkChamfer), &kinkAt, &runs)) {
+            if (setbacksDiffer && !uniform) {
+                // The construction builds one width: the pass with the width on every edge
+                continue;
+            }
+            std::string reason;
+            if (constructOverKink(*this, input, inputEdges, request, runs, "The chamfer", op, reason)) {
+                return *this;
+            }
+            FC_THROWM(
+                Base::CADKernelError,
+                "The chamfer runs over a slight corner between its edges ("
+                    << kinkAt
+                    << "), where OCCT's chamfer leaves a tooth; its exact construction refused: "
+                    << reason
+            );
         }
-        if (thin) {
-            raiseThinFaceError("The chamfer", reason);
+        FilletFallback::takeInvalidResult();
+        auto outcome = buildDressUp(mkChamferPtr, input, inputEdges, request, "The chamfer");
+        if (outcome->failed || outcome->thin || outcome->invalid || outcome->cusp
+            || !outcome->wrongWay.empty()) {
+            if (finishConstruction(*this, *outcome, input, op)) {
+                return *this;
+            }
+            if (setbacksDiffer) {
+                continue;  // w on every edge
+            }
+            if (outcome->failed) {
+                raiseDressUpError(mkChamfer, outcome->occtError, outcome->reason);
+            }
+            if (outcome->thin) {
+                raiseThinFaceError("The chamfer", outcome->reason);
+            }
+            if (!outcome->wrongWay.empty()) {
+                raiseWrongWayError("The chamfer", outcome->wrongWay, outcome->reason);
+            }
+            if (outcome->cusp) {
+                // OCCT's chamfer there can be valid and wrong (Case Base #76, oracle 17 Q-CUSP): never
+                // returned where the construction refuses, valid or not (Sean's ruling of 11-13:
+                // build like Onshape, else refuse loudly; notes/kernel-layer.md P5)
+                raiseCuspError(shape, edges, input, inputEdges, outcome->reason);
+            }
+            if (outcome->invalid) {
+                FilletFallback::noteInvalidResult(outcome->reason);
+            }
         }
+        return makeElementShape(mkChamfer, input, op);
     }
-    return makeElementShape(mkChamfer, input, op);
+    return *this;  // not reached: the second pass has no setbacks that differ
 }
 
 TopoShape& TopoShape::makeElementDefeaturing(
@@ -7674,6 +10001,8 @@ TopoShape& TopoShape::makeElementGeneralFuse(
         FCBRepAlgoAPIHelper::setAutoFuzzy(&mkGFA);
     }
     mkGFA.SetNonDestructive(Standard_True);
+    // OCCT's intersection would not end on it (ops#773)
+    FCBRepAlgoAPIHelper::refuseFacesWithoutWidth(GFAArguments);
 #if OCC_VERSION_HEX >= 0x070600
     mkGFA.Build(std::make_unique<Part::ProgressIndicator>()->Start());
 #else
@@ -7872,13 +10201,292 @@ TopoShape& TopoShape::makeElementShape(
 }
 
 
+namespace
+{
+// FreeCAD-CH (replica PS164C rb39): Onshape's loft has a plane wherever a side is flat and a line
+// wherever an edge is straight; OCCT's ThruSections leaves both as B-splines, so a chamfer or fillet
+// that picks such an edge as a line (or a sketch on such a face) finds nothing. After the loft, the
+// B-spline faces that are planar become planes, and the straight B-spline edges whose every face is a
+// plane become lines. The topology and its order stay as they were, so the element map (the names)
+// is kept as it is.
+class LoftCanonicalModification: public BRepTools_Modification
+{
+public:
+    explicit LoftCanonicalModification(const TopoDS_Shape& shape)
+    {
+        for (TopExp_Explorer it(shape, TopAbs_FACE); it.More(); it.Next()) {
+            const TopoDS_Face& face = TopoDS::Face(it.Current());
+            TopLoc_Location location;
+            const Handle(Geom_Surface) surface = BRep_Tool::Surface(face, location);
+            if (surface.IsNull()
+                || !(surface->IsKind(STANDARD_TYPE(Geom_BSplineSurface))
+                     || surface->IsKind(STANDARD_TYPE(Geom_BezierSurface)))) {
+                continue;
+            }
+            // A degenerate edge (a loft to a point) has no 3D curve to project a new pcurve from
+            bool degenerate = false;
+            for (TopExp_Explorer e(face, TopAbs_EDGE); e.More() && !degenerate; e.Next()) {
+                degenerate = BRep_Tool::Degenerated(TopoDS::Edge(e.Current()));
+            }
+            if (degenerate) {
+                continue;
+            }
+            GeomLib_IsPlanarSurface check(surface, Precision::Confusion());
+            if (!check.IsPlanar()) {
+                continue;
+            }
+            // The plane's normal points as the surface's did, so the face keeps its side
+            gp_Ax3 axes = check.Plan().Position();
+            double u1 {}, u2 {}, v1 {}, v2 {};
+            surface->Bounds(u1, u2, v1, v2);
+            gp_Pnt point;
+            gp_Vec du;
+            gp_Vec dv;
+            surface->D1((u1 + u2) / 2, (v1 + v2) / 2, point, du, dv);
+            const gp_Vec normal = du.Crossed(dv);
+            if (normal.Magnitude() < Precision::Confusion()) {
+                continue;
+            }
+            if (gp_Vec(axes.Direction()).Dot(normal) < 0) {
+                axes.ZReverse();
+            }
+            planes[face.TShape().get()] = new Geom_Plane(axes);
+        }
+        TopTools_IndexedDataMapOfShapeListOfShape edgeFaces;
+        TopExp::MapShapesAndAncestors(shape, TopAbs_EDGE, TopAbs_FACE, edgeFaces);
+        for (int i = 1; i <= edgeFaces.Extent(); ++i) {
+            const TopoDS_Edge& edge = TopoDS::Edge(edgeFaces.FindKey(i));
+            TopLoc_Location location;
+            double first {}, last {};
+            const Handle(Geom_Curve) curve = BRep_Tool::Curve(edge, location, first, last);
+            if (curve.IsNull()
+                || !(curve->IsKind(STANDARD_TYPE(Geom_BSplineCurve))
+                     || curve->IsKind(STANDARD_TYPE(Geom_BezierCurve)))) {
+                continue;
+            }
+            bool allPlanes = !edgeFaces(i).IsEmpty();
+            for (const TopoDS_Shape& face : edgeFaces(i)) {
+                TopLoc_Location faceLocation;
+                const Handle(Geom_Surface) surface =
+                    BRep_Tool::Surface(TopoDS::Face(face), faceLocation);
+                if (!planes.count(face.TShape().get())
+                    && (surface.IsNull() || !surface->IsKind(STANDARD_TYPE(Geom_Plane)))) {
+                    allPlanes = false;
+                }
+            }
+            const gp_Pnt start = curve->Value(first);
+            const gp_Pnt end = curve->Value(last);
+            if (!allPlanes || start.Distance(end) < Precision::Confusion()) {
+                continue;
+            }
+            const gp_Dir direction(gp_Vec(start, end));
+            const gp_Lin line(start, direction);
+            bool straight = true;
+            double previous = 0;
+            for (int k = 1; k < 16 && straight; ++k) {
+                const gp_Pnt point = curve->Value(first + (last - first) * k / 16);
+                const double along = gp_Vec(start, point).Dot(gp_Vec(direction));
+                straight = line.Distance(point) < Precision::Confusion() && along > previous;
+                previous = along;
+            }
+            if (straight) {
+                lines[edge.TShape().get()] = new Geom_Line(line);
+            }
+        }
+    }
+
+    bool isEmpty() const
+    {
+        return planes.empty() && lines.empty();
+    }
+
+    Standard_Boolean NewSurface(const TopoDS_Face& face,
+                                Handle(Geom_Surface)& surface,
+                                TopLoc_Location& location,
+                                Standard_Real& tolerance,
+                                Standard_Boolean& reverseWires,
+                                Standard_Boolean& reverseFace) override
+    {
+        const auto plane = planes.find(face.TShape().get());
+        if (plane == planes.end()) {
+            return Standard_False;
+        }
+        BRep_Tool::Surface(face, location);
+        surface = plane->second;
+        tolerance = BRep_Tool::Tolerance(face);
+        reverseWires = Standard_False;
+        reverseFace = Standard_False;
+        return Standard_True;
+    }
+
+    Standard_Boolean NewCurve(const TopoDS_Edge& edge,
+                              Handle(Geom_Curve)& curve,
+                              TopLoc_Location& location,
+                              Standard_Real& tolerance) override
+    {
+        const auto line = lines.find(edge.TShape().get());
+        if (line == lines.end()) {
+            return Standard_False;
+        }
+        double first {}, last {};
+        BRep_Tool::Curve(edge, location, first, last);
+        curve = line->second;
+        tolerance = BRep_Tool::Tolerance(edge);
+        return Standard_True;
+    }
+
+    Standard_Boolean NewPoint(const TopoDS_Vertex&, gp_Pnt&, Standard_Real&) override
+    {
+        return Standard_False;
+    }
+
+    Standard_Boolean NewCurve2d(const TopoDS_Edge& edge,
+                                const TopoDS_Face& face,
+                                const TopoDS_Edge&,
+                                const TopoDS_Face&,
+                                Handle(Geom2d_Curve)& curve2d,
+                                Standard_Real& tolerance) override
+    {
+        const auto plane = planes.find(face.TShape().get());
+        const auto line = lines.find(edge.TShape().get());
+        if (plane == planes.end() && line == lines.end()) {
+            return Standard_False;
+        }
+        // The plane and the curve each in its own frame: the curve is brought into the plane's
+        TopLoc_Location surfaceLocation;
+        const Handle(Geom_Surface) oldSurface = BRep_Tool::Surface(face, surfaceLocation);
+        Handle(Geom_Plane) surface;
+        if (plane != planes.end()) {
+            surface = plane->second;
+        }
+        else {
+            surface = Handle(Geom_Plane)::DownCast(oldSurface);
+            if (surface.IsNull()) {
+                return Standard_False;
+            }
+        }
+        TopLoc_Location curveLocation;
+        double first {}, last {};
+        Handle(Geom_Curve) curve = BRep_Tool::Curve(edge, curveLocation, first, last);
+        if (curve.IsNull()) {
+            return Standard_False;
+        }
+        if (line != lines.end()) {
+            first = parameterOn(line->second, curve->Value(first));
+            last = parameterOn(line->second, curve->Value(last));
+            curve = line->second;
+        }
+        if (!curveLocation.IsEqual(surfaceLocation)) {
+            curve = Handle(Geom_Curve)::DownCast(
+                curve->Transformed((surfaceLocation.Inverted() * curveLocation).Transformation()));
+        }
+        curve2d = GeomProjLib::Curve2d(curve, first, last, surface);
+        tolerance = BRep_Tool::Tolerance(edge);
+        return !curve2d.IsNull();
+    }
+
+    Standard_Boolean NewParameter(const TopoDS_Vertex& vertex,
+                                  const TopoDS_Edge& edge,
+                                  Standard_Real& parameter,
+                                  Standard_Real& tolerance) override
+    {
+        const auto line = lines.find(edge.TShape().get());
+        if (line == lines.end()) {
+            return Standard_False;
+        }
+        // Through the old curve, so the point is in the line's frame
+        TopLoc_Location location;
+        double first {}, last {};
+        const Handle(Geom_Curve) curve = BRep_Tool::Curve(edge, location, first, last);
+        if (curve.IsNull()) {
+            return Standard_False;
+        }
+        parameter = parameterOn(line->second, curve->Value(BRep_Tool::Parameter(vertex, edge)));
+        tolerance = BRep_Tool::Tolerance(vertex);
+        return Standard_True;
+    }
+
+    GeomAbs_Shape Continuity(const TopoDS_Edge& edge,
+                             const TopoDS_Face& face1,
+                             const TopoDS_Face& face2,
+                             const TopoDS_Edge&,
+                             const TopoDS_Face&,
+                             const TopoDS_Face&) override
+    {
+        return BRep_Tool::Continuity(edge, face1, face2);
+    }
+
+private:
+    static double parameterOn(const Handle(Geom_Line)& line, const gp_Pnt& point)
+    {
+        return gp_Vec(line->Lin().Location(), point).Dot(gp_Vec(line->Lin().Direction()));
+    }
+
+    std::map<const TopoDS_TShape*, Handle(Geom_Plane)> planes;
+    std::map<const TopoDS_TShape*, Handle(Geom_Line)> lines;
+};
+
+class LoftCanonicalMaker: public BRepBuilderAPI_ModifyShape
+{
+public:
+    LoftCanonicalMaker(const TopoDS_Shape& shape, const Handle(BRepTools_Modification)& modification)
+    {
+        myModification = modification;
+        DoModif(shape);
+    }
+};
+
+// The same shape with its flat faces as planes and its straight edges as lines, when the result is
+// valid, has the same topology in the same order (so the names stay), and the same vertices
+void makeLoftCanonical(TopoShape& loft)
+{
+    const TopoDS_Shape& shape = loft.getShape();
+    if (shape.IsNull()) {
+        return;
+    }
+    Handle(LoftCanonicalModification) modification = new LoftCanonicalModification(shape);
+    if (modification->isEmpty()) {
+        return;
+    }
+    try {
+        LoftCanonicalMaker maker(shape, modification);
+        if (!maker.IsDone()) {
+            return;
+        }
+        const TopoDS_Shape result = maker.Shape();
+        if (result.IsNull() || !BRepCheck_Analyzer(result).IsValid()) {
+            return;
+        }
+        for (const TopAbs_ShapeEnum kind : {TopAbs_FACE, TopAbs_EDGE, TopAbs_VERTEX}) {
+            TopTools_IndexedMapOfShape before;
+            TopTools_IndexedMapOfShape after;
+            TopExp::MapShapes(shape, kind, before);
+            TopExp::MapShapes(result, kind, after);
+            if (before.Extent() != after.Extent()) {
+                return;
+            }
+            for (int i = 1; i <= before.Extent(); ++i) {
+                if (!maker.ModifiedShape(before(i)).IsSame(after(i))) {
+                    return;  // another order: the names would point elsewhere
+                }
+            }
+        }
+        loft.setShape(result, false);
+    }
+    catch (const Standard_Failure&) {
+        // The loft as OCCT made it
+    }
+}
+}  // namespace
+
 TopoShape& TopoShape::makeElementLoft(
     const std::vector<TopoShape>& shapes,
     IsSolid isSolid,
     IsRuled isRuled,
     IsClosed isClosed,
     Standard_Integer maxDegree,
-    const char* op
+    const char* op,
+    bool checkCompatibility
 )
 {
     auto checkProfiles = [](const TopoShape& sh1, const TopoShape& sh2) {
@@ -7981,7 +10589,8 @@ TopoShape& TopoShape::makeElementLoft(
         }
     }
 
-    Standard_Boolean anIsCheck = Standard_True;
+    // FreeCAD-CH (loft connections, ops#640): off when the caller matched the wires itself
+    Standard_Boolean anIsCheck = checkCompatibility ? Standard_True : Standard_False;
     aGenerator.CheckCompatibility(anIsCheck);  // use BRepFill_CompatibleWires on profiles. force
                                                // #edges, orientation, "origin" to match.
 
@@ -7990,12 +10599,14 @@ TopoShape& TopoShape::makeElementLoft(
 #else
     aGenerator.Build();
 #endif
-    return makeShapeWithElementMap(
+    makeShapeWithElementMap(
         aGenerator.Shape(),
         MapperThruSections(aGenerator, profiles),
         shapes,
         op
     );
+    makeLoftCanonical(*this);  // FreeCAD-CH (replica PS164C rb39): planes and lines, as Onshape's
+    return *this;
 }
 
 TopoShape& TopoShape::makeElementPrism(const TopoShape& base, const gp_Vec& vec, const char* op)
@@ -8480,6 +11091,128 @@ TopoShape prismUpToBySplit(
     named.makeShapeWithElementMap(result, mapper, {sweep, upTo}, op);
     return named;
 }
+
+// FreeCAD-CH (ops#640, FSLC #49): how far `profile` goes along `direction` to reach `upTo` when
+// that is a face on a plane parallel to the profile's own plane, ahead of it: the prism up to
+// such a face is the blind prism of this length, whatever the face's limits (a profile larger
+// than the face goes up to its plane, as BRepFeat makes it once the limits are removed). Nothing
+// when `upTo` is no single planar face, the profile has no faces or one that is not flat, not
+// parallel to the plane or at another height, the direction runs along the plane, or the plane
+// lies at or behind the profile: those stay with BRepFeat, as before.
+std::optional<double> flatUpToLength(
+    const TopoShape& profile,
+    const TopoShape& upTo,
+    const gp_Dir& direction
+)
+{
+    if (upTo.isNull() || upTo.shapeType(true) != TopAbs_FACE || !profile.hasSubShape(TopAbs_FACE)) {
+        return std::nullopt;
+    }
+    const BRepAdaptor_Surface target(TopoDS::Face(upTo.getShape()));
+    if (target.GetType() != GeomAbs_Plane) {
+        return std::nullopt;
+    }
+    const gp_Pln plane = target.Plane();
+    const gp_Dir normal = plane.Axis().Direction();
+    const double cosine = gp_Vec(direction).Dot(gp_Vec(normal));
+    if (std::fabs(cosine) < 1e-3) {
+        return std::nullopt;
+    }
+    constexpr double parallel = 1e-10;
+    std::optional<double> length;
+    for (TopExp_Explorer faces(profile.getShape(), TopAbs_FACE); faces.More(); faces.Next()) {
+        const BRepAdaptor_Surface surface(TopoDS::Face(faces.Current()));
+        if (surface.GetType() != GeomAbs_Plane) {
+            return std::nullopt;
+        }
+        const gp_Pln own = surface.Plane();
+        if (!own.Axis().Direction().IsParallel(normal, parallel)) {
+            return std::nullopt;
+        }
+        const double reach = gp_Vec(own.Location(), plane.Location()).Dot(gp_Vec(normal)) / cosine;
+        if (reach <= Precision::Confusion()
+            || (length && std::fabs(reach - *length) > Precision::Confusion())) {
+            return std::nullopt;
+        }
+        if (!length) {
+            length = reach;
+        }
+    }
+    return length;
+}
+
+// The prisms of a profile's faces as one shape, for makeElementPrismUntil()'s closed form: the
+// fuse of `pieces`, made without a boolean for every piece whose bounding box is apart from all
+// the others' (FSLC #49: 229 slots apart from each other spent 20 s in one fuse that changed
+// nothing). Pieces whose boxes touch are fused group by group, as the one fuse joined them.
+TopoShape joinPrisms(const TopoShape& blank, const std::vector<TopoShape>& pieces, const char* op)
+{
+    const std::size_t count = pieces.size();
+    std::vector<Bnd_Box> boxes(count);
+    for (std::size_t i = 0; i < count; ++i) {
+        BRepBndLib::Add(pieces[i].getShape(), boxes[i], Standard_False);
+        boxes[i].Enlarge(Precision::Confusion());
+    }
+    // groups of pieces whose boxes meet, directly or through others
+    std::vector<std::size_t> group(count);
+    std::iota(group.begin(), group.end(), std::size_t(0));
+    auto root = [&group](std::size_t i) {
+        while (group[i] != i) {
+            group[i] = group[group[i]];
+            i = group[i];
+        }
+        return i;
+    };
+    bool anyMeet = false;
+    for (std::size_t i = 0; i < count; ++i) {
+        for (std::size_t j = i + 1; j < count; ++j) {
+            if (boxes[i].IsVoid() || boxes[j].IsVoid() || !boxes[i].IsOut(boxes[j])) {
+                // the later piece joins the earlier one's group: a group's root is its first piece
+                const std::size_t a = root(i);
+                const std::size_t b = root(j);
+                if (a != b) {
+                    group[std::max(a, b)] = std::min(a, b);
+                }
+                anyMeet = true;
+            }
+        }
+    }
+    std::vector<TopoShape> parts;
+    if (!anyMeet) {
+        parts = pieces;
+    }
+    else {
+        // in the order of each group's first piece
+        std::vector<std::vector<TopoShape>> groups(count);
+        for (std::size_t i = 0; i < count; ++i) {
+            groups[root(i)].push_back(pieces[i]);
+        }
+        for (const auto& members : groups) {
+            if (members.size() == 1) {
+                parts.push_back(members.front());
+            }
+            else if (members.size() > 1) {
+                TopoShape fused(blank);
+                fused.makeElementFuse(members, op);
+                // flat, as the one fuse's result was: its solids, not a compound in the compound
+                if (fused.shapeType(true) == TopAbs_COMPOUND) {
+                    for (const auto& solid : fused.getSubTopoShapes(TopAbs_SOLID)) {
+                        parts.push_back(solid);
+                    }
+                }
+                else {
+                    parts.push_back(fused);
+                }
+            }
+        }
+    }
+    if (parts.size() == 1) {
+        return parts.front();
+    }
+    TopoShape joined(blank);
+    joined.makeElementCompound(parts);
+    return joined;
+}
 }  // namespace
 
 TopoShape& TopoShape::makeElementPrismUntil(
@@ -8514,7 +11247,16 @@ TopoShape& TopoShape::makeElementPrismUntil(
         }
     }
 
-    BRepFeat_MakePrism PrismMaker;
+    // FreeCAD-CH (ops#640, FSLC #49): up to a plane parallel to the profile, each face's prism is
+    // the blind one of the plane's distance, made directly: no BRepFeat pass against the base per
+    // face, none of the checks of what BRepFeat built (a blind prism neither passes the plane nor
+    // fills behind the profile), and no boolean between prisms that are apart. The names are the
+    // same mapper's (MapperPrism reads the result's shape alone). V2 only, and only where the
+    // face's limits may be removed (`checkLimits`): with its limits kept, BRepFeat decides
+    const std::optional<double> flatLength =
+        checkLimits && historyAlgorithm == App::HistoryAlgorithm::V2
+            ? flatUpToLength(profile, __uptoface, direction)
+            : std::nullopt;
 
     // don't remove limits of concave face. The default centre of a long curved B-spline profile is
     // millimetres off, enough to take the wrong side of a curved face (ops#428)
@@ -8654,28 +11396,40 @@ TopoShape& TopoShape::makeElementPrismUntil(
             }
         }
     };
-    const bool bySplit = !brepFeatReaches(profile.getShape(), _uptoface.getShape(), direction);
+    const bool bySplit = !flatLength
+        && !brepFeatReaches(profile.getShape(), _uptoface.getShape(), direction);
     if (bySplit) {
         result = prismBySplit();
     }
     while (!bySplit) {
         try {
-            result = base;
-
             // We do not rely on BRepFeat_MakePrism to perform fuse or cut for
             // us because of its poor support of shape history.
-            auto mode = PrismMode::None;
+            //
+            // Each face's prism is made on its own against the same base, and one fuse joins
+            // them (sweep G5, ops#640). Chained, face k's prism was fused by BRepFeat into the
+            // prisms of faces 1..k-1 and the growing result renamed each time: the work grew with
+            // the square of the faces (229 regions of an up-to pad took minutes and passed the
+            // feature's limit). With no base of its own (the profile, or an infinite shape),
+            // each face is its own base: the whole profile as every face's base would be
+            // quadratic again. Not `_base.isNull()`: the retry gives a Pocket a base of its own
+            std::vector<TopoShape> pieces;
+            const bool ownBase = base.isSame(profile) || base.isInfinite();
 
             for (auto& face : profile.getSubTopoShapes(
                      profile.hasSubShape(TopAbs_FACE) ? TopAbs_FACE : TopAbs_WIRE
                  )) {
+                // A step the result needs, on this thread: past the feature's limit it stops
+                // here, not minutes later in the boolean's input check
+                KernelBudget::stopIfPastDeadline("The extrusion up to the face");
+                const TopoShape& on = ownBase ? face : base;
                 srcShapes.clear();
                 if (!profile.isNull()
-                    && (!result.findShape(profile.getShape())
+                    && (!on.findShape(profile.getShape())
                         || historyAlgorithm == App::HistoryAlgorithm::V2)) {
                     srcShapes.push_back(profile);
                 }
-                if (!supportFace.isNull() && !result.findShape(supportFace.getShape())) {
+                if (!supportFace.isNull() && !on.findShape(supportFace.getShape())) {
                     srcShapes.push_back(supportFace);
                 }
 
@@ -8690,24 +11444,36 @@ TopoShape& TopoShape::makeElementPrismUntil(
                 //     srcShapes.push_back(uptoface);
 
                 // the MapperPrism used in coordination with the V2 topological naming algorithm
-                // does not want `result` as an input, so omit it.
+                // does not want the base as an input, so omit it.
                 if (historyAlgorithm == App::HistoryAlgorithm::V1) {
-                    srcShapes.push_back(result);
+                    srcShapes.push_back(on);
                 }
 
-                if (result.isInfinite()) {
-                    result = face;
+                if (flatLength) {
+                    BRepPrimAPI_MakePrism flatMaker(
+                        face.getShape(),
+                        gp_Vec(direction) * *flatLength
+                    );
+                    if (!flatMaker.IsDone() || flatMaker.Shape().IsNull()) {
+                        FC_THROWM(Base::CADKernelError, "The extrusion up to the plane failed");
+                    }
+                    const MapperPrism mapper(flatMaker, uptoface, srcShapes, historyAlgorithm);
+                    TopoShape piece(Tag, Hasher, historyAlgorithm);
+                    piece.makeShapeWithElementMap(flatMaker.Shape(), mapper, srcShapes, op);
+                    pieces.push_back(piece);
+                    continue;
                 }
 
+                // One maker per face: its history names that face's prism
+                BRepFeat_MakePrism PrismMaker;
                 PrismMaker.Init(
-                    result.getShape(),
+                    on.getShape(),
                     face.getShape(),
                     TopoDS::Face(supportFace.getShape()),
                     direction,
-                    mode,
+                    PrismMode::None,
                     Standard_False
                 );
-                mode = PrismMode::FuseWithBase;
 
                 PrismMaker.Perform(uptoface.getShape());
 
@@ -8720,28 +11486,43 @@ TopoShape& TopoShape::makeElementPrismUntil(
                     FC_THROWM(Base::CADKernelError, "BRepFeat_MakePrism: extrusion failed");
                 }
 
-                if (historyAlgorithm == App::HistoryAlgorithm::V2) {
-                    result.Tag = Tag;
-                }
-
-                result.makeElementShape(PrismMaker, srcShapes, uptoface, op);
+                TopoShape piece(Tag, Hasher, historyAlgorithm);
+                piece.makeElementShape(PrismMaker, srcShapes, uptoface, op);
+                pieces.push_back(piece);
+            }
+            // One fuse joins them: regions that touch become one solid, as the chained fuses
+            // made them. It runs under the feature's limit, with Esc (makeElementBoolean). A
+            // profile with nothing to extrude fails (chained, it gave the base back as the prism)
+            if (pieces.empty()) {
+                FC_THROWM(Base::CADKernelError, "BRepFeat_MakePrism: nothing to extrude");
+            }
+            if (pieces.size() == 1) {
+                result = pieces.front();
+            }
+            else if (flatLength) {
+                result = joinPrisms(TopoShape(Tag, Hasher, historyAlgorithm), pieces, op);
+            }
+            else {
+                result = TopoShape(Tag, Hasher, historyAlgorithm);
+                result.makeElementFuse(pieces, op);
             }
             break;
         }
+        // Past the feature's limit, a retry would only spend more: the stop stands
         catch (Base::Exception&) {
-            if (!retry()) {
+            if (flatLength || KernelBudget::pastDeadline() || !retry()) {
                 throw;
             }
         }
         catch (Standard_Failure&) {
-            if (!retry()) {
+            if (flatLength || KernelBudget::pastDeadline() || !retry()) {
                 throw;
             }
         }
     }
-    // As the split refuses it (ops#356). `result` is the profile's prisms alone here: the first
+    // As the split refuses it (ops#356). `result` is the profile's prisms alone here: each
     // face's prism is made with mode None
-    if (!bySplit
+    if (!bySplit && !flatLength
         && reachesPast(result.getShape(), profile.getShape(), uptoface.getShape(), direction)) {
         throw Base::RuntimeError(QT_TRANSLATE_NOOP(
             "Exception",
@@ -8749,7 +11530,7 @@ TopoShape& TopoShape::makeElementPrismUntil(
         ));
     }
     // By the split, which builds the first contact or refuses it, saying why (ops#361)
-    if (!bySplit && fillsBehind(result.getShape(), profile.getShape(), direction)) {
+    if (!bySplit && !flatLength && fillsBehind(result.getShape(), profile.getShape(), direction)) {
         result = prismBySplit();
     }
 
@@ -8877,6 +11658,38 @@ TopoShape& TopoShape::makeElementRevolution(
     return *this;
 }
 
+// A draft's history for naming (FreeCAD-CH ops#845). BRepOffsetAPI_DraftAngle::Modified() answers
+// for faces only, so the edges and vertices the draft moves had no source, and were named after
+// the faces around them: a rim edge between a drafted side and the untouched top took the top
+// face's name, which changes whenever the profile sketch gains or loses an edge (a Sketcher
+// split), and every reference to the rim broke. The modifier knows each edge's and vertex's
+// image (a draft keeps the topology), so they are named after the base's own edge or vertex.
+struct MapperDraft: MapperMaker
+{
+    BRepOffsetAPI_DraftAngle& draft;
+    explicit MapperDraft(BRepOffsetAPI_DraftAngle& maker)
+        : MapperMaker(maker)
+        , draft(maker)
+    {}
+    const std::vector<TopoDS_Shape>& modified(const TopoDS_Shape& s) const override
+    {
+        MapperMaker::modified(s);
+        if (!_res.empty() || (s.ShapeType() != TopAbs_EDGE && s.ShapeType() != TopAbs_VERTEX)) {
+            return _res;
+        }
+        try {
+            const TopoDS_Shape image = draft.ModifiedShape(s);
+            if (!image.IsNull() && !image.IsSame(s)) {
+                _res.push_back(image);
+            }
+        }
+        catch (const Standard_Failure&) {
+            // not a sub-shape of the drafted shape: no image
+        }
+        return _res;
+    }
+};
+
 TopoShape& TopoShape::makeElementDraft(
     const TopoShape& shape,
     const std::vector<TopoShape>& _faces,
@@ -8897,18 +11710,18 @@ TopoShape& TopoShape::makeElementDraft(
 
     std::vector<TopoShape> faces(_faces);
     bool done = true;
-    BRepOffsetAPI_DraftAngle mkDraft;
+    auto mkDraft = std::make_shared<BRepOffsetAPI_DraftAngle>();
     do {
         if (faces.empty()) {
             FC_THROWM(Base::CADKernelError, "no faces can be used");
         }
 
-        mkDraft.Init(shape.getShape());
+        mkDraft->Init(shape.getShape());
         done = true;
         for (auto it = faces.begin(); it != faces.end(); ++it) {
             // TODO: What is the flag for?
-            mkDraft.Add(TopoDS::Face(it->getShape()), pullDirection, angle, neutralPlane);
-            if (!mkDraft.AddDone()) {
+            mkDraft->Add(TopoDS::Face(it->getShape()), pullDirection, angle, neutralPlane);
+            if (!mkDraft->AddDone()) {
                 // Note: the function ProblematicShape returns the face on which the error occurred
                 // Note: mkDraft.Remove() stumbles on a bug in Draft_Modification::Remove() and is
                 //       therefore unusable. See
@@ -8923,12 +11736,13 @@ TopoShape& TopoShape::makeElementDraft(
         }
     } while (retry && !done);
 
-#if OCC_VERSION_HEX >= 0x070600
-    mkDraft.Build(std::make_unique<Part::ProgressIndicator>()->Start());
-#else
-    mkDraft.Build();
-#endif
-    return makeElementShape(mkDraft, shape, op);
+    // On a worker under the feature's time limit (kernel safety S1)
+    KernelBudget::run(
+        "The draft",
+        [mkDraft](const Message_ProgressRange& range) { mkDraft->Build(range); },
+        KernelBudget::Inputs::Shared
+    );
+    return makeShapeWithElementMap(mkDraft->Shape(), MapperDraft(*mkDraft), {shape}, op);
 }
 
 TopoShape& TopoShape::makeElementFace(
@@ -9027,6 +11841,293 @@ TopoShape& TopoShape::makeElementFace(
     return *this;
 }
 
+namespace
+{
+
+/// The fields of a name's section: they end at each `;` that no `^` escapes
+std::vector<std::string_view> sectionFields(std::string_view section)
+{
+    std::vector<std::string_view> fields;
+    std::size_t start = 0;
+    for (std::size_t i = 0; i <= section.size(); ++i) {
+        if (i == section.size() || (section[i] == ';' && (i == 0 || section[i - 1] != '^'))) {
+            fields.push_back(section.substr(start, i - start));
+            start = i + 1;
+        }
+    }
+    return fields;
+}
+
+/// The tag and op code of a name's section if it is a split's (the MOD flag), as "<tag>;<op>";
+/// empty otherwise. A link copy's section (`CPY`, ops#523) carries MOD too, but tells the copy
+/// from its source: it is no split.
+std::string splitEventOf(std::string_view section)
+{
+    const auto fields = sectionFields(section);
+    if (fields.size() != static_cast<std::size_t>(Data::SECTION_SIZE)
+        || fields[Data::SECTION_OPCODE_INDEX] == Part::OpCodes::Copy) {
+        return {};
+    }
+    const std::string_view flags = fields[Data::SECTION_MAPPER_FLAGS_INDEX];
+    bool split = false;
+    for (std::size_t from = 0; from <= flags.size();) {
+        std::size_t to = flags.find(',', from);
+        if (to == std::string_view::npos) {
+            to = flags.size();
+        }
+        if (flags.substr(from, to - from) == Data::MAPPER_FLAG_MODIFIED) {
+            split = true;
+            break;
+        }
+        from = to + 1;
+    }
+    if (!split) {
+        return {};
+    }
+    std::string event(fields[Data::SECTION_ITERATION_TAG_INDEX]);
+    event += ';';
+    event += fields[Data::SECTION_OPCODE_INDEX];
+    return event;
+}
+
+/// The tag of a name's first section (the feature the element comes from: a split or a later
+/// feature's section doesn't change it), 0 if unreadable. An interned piece's first section is
+/// behind a reference, so the name is read in full form.
+long firstTagOf(const std::string& name)
+{
+    const std::string plain = Data::NameTable::instance().toPlain(name);
+    const auto sections = Data::NameAncestry::splitSections(plain);
+    if (sections.empty()) {
+        return 0;
+    }
+    const auto fields = sectionFields(sections.front());
+    if (fields.size() != static_cast<std::size_t>(Data::SECTION_SIZE)) {
+        return 0;
+    }
+    long tag = 0;
+    const std::string_view text = fields[Data::SECTION_ITERATION_TAG_INDEX];
+    std::from_chars(text.data(), text.data() + text.size(), tag);
+    return std::labs(tag);
+}
+
+/** A face split by a feature and made whole again by the refine after it gets its name back
+ * (ops#806). A flush rib that reaches into a plate is fused in two steps: the fusion cuts the
+ * plate's top face along the rib's outline, so the top's piece is named
+ * `<top>|...;FUS;...;MOD;...` (a face only trimmed keeps its name; a cut into pieces adds the
+ * section); the refine merges the pieces and the rib's top into one face, which kept only the
+ * pieces' names. Every element a later feature generated on that face was then named from the
+ * piece, not from `<top>`, and a reference to it broke though it is far from the rib and
+ * unchanged (a boss's junction edge under a fillet).
+ *
+ * The rule: a face of \a result merged from several faces of \a input (\a mapper's modified
+ * lists) that holds a piece `X|<split>` takes the name X again when no face outside the merge
+ * holds a piece of the same split of X: the merged face then contains all of X the split left.
+ * A piece of a piece comes back level by level. The whole names come first, each piece's
+ * deepest whole name before the levels above it, then the one that comes from the older feature
+ * (the smaller tag of its first section; a feature inserted earlier in the history is the newer
+ * one, so the names of what was there stay first, also where a newer feature cut them), then in
+ * the input's order. The pieces' own names stay on the face
+ * after them, for references made to them.
+ */
+void restoreWholeFaceNames(TopoShape& result, const TopoShape& input, const TopoShape::Mapper& mapper)
+{
+    if (result.getHistoryAlgorithm() != App::HistoryAlgorithm::V2) {
+        return;
+    }
+    const int inputCount = static_cast<int>(input.countSubShapes(TopAbs_FACE));
+    // The faces of the input merged into each face of the result
+    std::map<int, std::vector<int>> merged;
+    for (int i = 1; i <= inputCount; ++i) {
+        const std::vector<TopoDS_Shape> images = mapper.modified(input.findShape(TopAbs_FACE, i));
+        if (images.size() != 1 || images.front().IsNull()
+            || images.front().ShapeType() != TopAbs_FACE) {
+            continue;
+        }
+        if (const int index = result.findShape(images.front()); index > 0) {
+            merged[index].push_back(i);
+        }
+    }
+    std::erase_if(merged, [](const auto& entry) { return entry.second.size() < 2; });
+    if (merged.empty()) {
+        return;
+    }
+
+    using NameList = std::vector<std::pair<Data::MappedName, Data::ElementIDRefs>>;
+    using Level = std::pair<std::string, std::string>;
+    auto& table = Data::NameTable::instance();
+    const bool interned = input.getInternNames();
+    // The splits a name went through, outermost first: the name each split cut (in the map's
+    // form) and the split ("<tag>;<op>"). An interned piece of a piece is `~<ID>|<split>`,
+    // whose prefix is a bare reference: its entry's content is the name one level down.
+    auto splitsOf = [&](std::string name) {
+        std::vector<Level> levels;
+        while (true) {
+            const auto sections = Data::NameAncestry::splitSections(name);
+            if (sections.size() < 2) {
+                break;
+            }
+            std::string event = splitEventOf(sections.back());
+            if (event.empty()) {
+                break;
+            }
+            const auto length = static_cast<std::size_t>(sections.back().data() - name.data()) - 1;
+            std::string prefix = name.substr(0, length);
+            if (interned) {
+                prefix = table.toInterned(prefix);
+            }
+            levels.emplace_back(prefix, std::move(event));
+            name = std::move(prefix);
+        }
+        return levels;
+    };
+    auto key = [](const Level& level) {
+        return level.first + '\n' + level.second;
+    };
+
+    // The merged faces' own pieces first: most refines merge none, and end here
+    struct Piece
+    {
+        int face;                   // of the input
+        Data::ElementIDRefs sids;
+        std::vector<Level> levels;  // outermost first
+    };
+    std::map<int, std::vector<Piece>> pieces;  // by face of the result
+    std::map<std::string, std::set<int>> holders;  // per split of a name, the input faces with a piece
+    std::set<int> members;
+    for (const auto& [index, faces] : merged) {
+        for (int face : faces) {
+            members.insert(face);
+            for (const auto& entry :
+                 input.getElementMappedNames(Data::IndexedName::fromConst("Face", face))) {
+                auto levels = splitsOf(entry.first.toString());
+                if (levels.empty()) {
+                    continue;
+                }
+                for (const Level& level : levels) {
+                    holders[key(level)].insert(face);
+                }
+                pieces[index].push_back({face, entry.second, std::move(levels)});
+            }
+        }
+    }
+    if (pieces.empty()) {
+        return;
+    }
+    // The pieces of the same splits on the other faces. A plain name's prefix is written out,
+    // so only a name that starts with a split name can be its piece; an interned one hides its
+    // deeper levels behind a reference, and is short.
+    std::set<std::string_view> prefixes;
+    for (const auto& [text, faces] : holders) {
+        prefixes.insert(std::string_view(text).substr(0, text.find('\n')));
+    }
+    for (int face = 1; face <= inputCount; ++face) {
+        if (members.contains(face)) {
+            continue;
+        }
+        for (const auto& entry :
+             input.getElementMappedNames(Data::IndexedName::fromConst("Face", face))) {
+            const std::string name = entry.first.toString();
+            if (!interned
+                && std::ranges::none_of(prefixes, [&](std::string_view prefix) {
+                       return name.size() > prefix.size() && name[prefix.size()] == '|'
+                           && name.starts_with(prefix);
+                   })) {
+                continue;
+            }
+            for (const Level& level : splitsOf(name)) {
+                if (auto found = holders.find(key(level)); found != holders.end()) {
+                    found->second.insert(face);
+                }
+            }
+        }
+    }
+
+    for (const auto& [index, list] : pieces) {
+        const auto& faces = merged.at(index);
+        const std::set<int> inside(faces.begin(), faces.end());
+        struct Whole
+        {
+            std::size_t rank;
+            long tag;
+            Data::MappedName name;
+            Data::ElementIDRefs sids;
+        };
+        std::vector<Whole> whole;
+        std::set<std::string> seen;
+        for (const Piece& piece : list) {
+            // Level by level: a split with a piece left outside ends it
+            std::size_t undone = 0;
+            while (undone < piece.levels.size()
+                   && std::ranges::includes(inside, holders.at(key(piece.levels[undone])))) {
+                ++undone;
+            }
+            for (std::size_t k = 0; k < undone; ++k) {
+                const std::string& name = piece.levels[k].first;
+                if (seen.insert(name).second) {
+                    // The splits undone below it in its own chain: each chain's deepest whole
+                    // name ranks first, whatever splits it still carries that can't be undone
+                    // (a plate's top cut by an earlier groove, `<top>|...CUT`, is the face
+                    // later features knew: it comes before the rib's top; review r2)
+                    whole.push_back(
+                        {undone - 1 - k, firstTagOf(name), Data::MappedName(name), piece.sids}
+                    );
+                }
+            }
+        }
+        const Data::IndexedName element = Data::IndexedName::fromConst("Face", index);
+        // A name another element holds stays there (setElementName would count a duplicate)
+        std::erase_if(whole, [&](const Whole& entry) {
+            const Data::IndexedName holder = result.getIndexedName(entry.name);
+            return holder && holder != element;
+        });
+        if (whole.empty()) {
+            continue;
+        }
+        std::ranges::stable_sort(whole, [](const Whole& a, const Whole& b) {
+            return std::tie(a.rank, a.tag) < std::tie(b.rank, b.tag);
+        });
+        NameList names;
+        for (Whole& entry : whole) {
+            names.emplace_back(std::move(entry.name), std::move(entry.sids));
+        }
+        for (auto& entry : result.getElementMappedNames(element)) {
+            if (std::ranges::none_of(names, [&](const auto& held) {
+                    return held.first == entry.first;
+                })) {
+                names.push_back(std::move(entry));
+            }
+        }
+        for (std::size_t i = 0; i < names.size(); ++i) {
+            // The first one replaces the face's names; the rest follow in order
+            result.setElementName(element, names[i].first, result.Tag, &names[i].second, i == 0);
+        }
+    }
+}
+
+/// restoreWholeFaceNames(), which never fails the refine: a failure is a warning, and the face
+/// it stopped at keeps the names set so far
+void restoreWholeFaceNamesSafely(
+    TopoShape& result,
+    const TopoShape& input,
+    const TopoShape::Mapper& mapper
+)
+{
+    try {
+        restoreWholeFaceNames(result, input, mapper);
+    }
+    catch (const Base::Exception& e) {
+        FC_WARN("refine: whole face names not restored: " << e.what());
+    }
+    catch (const Standard_Failure& e) {
+        FC_WARN("refine: whole face names not restored: " << e.GetMessageString());
+    }
+    catch (const std::exception& e) {
+        FC_WARN("refine: whole face names not restored: " << e.what());
+    }
+}
+
+}  // namespace
+
 class MyRefineMaker: public BRepBuilderAPI_RefineModel
 {
 public:
@@ -9048,6 +12149,7 @@ public:
 
 TopoShape& TopoShape::makeElementRefine(const TopoShape& shape, const char* op, RefineFail no_fail)
 {
+    KernelBudget::PhaseTimer phase(KernelBudget::Phase::Refine);
     if (shape.isNull()) {
         if (no_fail == RefineFail::throwException) {
             FC_THROWM(NullShapeException, "Null shape");
@@ -9059,31 +12161,132 @@ TopoShape& TopoShape::makeElementRefine(const TopoShape& shape, const char* op, 
         op = Part::OpCodes::Refine;
     }
     bool closed = shape.isClosed();
+    // Refine runs on a topology-only copy, with the shape's element map and Tag (ops#354).
+    // Merging faces of a B-spline surface, ShapeFix_Face adds a curve on surface to their
+    // boundary edges for the merged face's surface, a new copy at every run (ops#316), and
+    // keeps it when the merge is then dropped. The input shares its TShapes with the shapes it
+    // was made from (a cut's untouched edges are its base's), which kept one more curve per
+    // edge at every recompute. The copy's sub-shapes come in the same order, so the result
+    // is named as from the shape.
+    TopoShape input(shape);
+    bool failed = false;
+    TopoShape partial;  // the uniter's result when it kept a compound's shell unrefined
     try {
-        // Refine runs on a topology-only copy, with the shape's element map and Tag (ops#354).
-        // Merging faces of a B-spline surface, ShapeFix_Face adds a curve on surface to their
-        // boundary edges for the merged face's surface, a new copy at every run (ops#316), and
-        // keeps it when the merge is then dropped. The input shares its TShapes with the shapes it
-        // was made from (a cut's untouched edges are its base's), which kept one more curve per
-        // edge at every recompute. The copy's sub-shapes come in the same order, so the result
-        // is named as from the shape.
-        TopoShape input(shape);
         input.setShape(BRepBuilderAPI_Copy(shape.getShape(), false).Shape(), false);
         MyRefineMaker mkRefine(input.getShape());
         GenericShapeMapper mapper;
         mkRefine.populate(mapper);
         mapper.init(input, mkRefine.Shape());
         makeShapeWithElementMap(mkRefine.Shape(), mapper, {input}, op);
+        restoreWholeFaceNamesSafely(*this, input, mapper);
         // For some reason, refine operation may reverse the solid
         fixSolidOrientation();
         if (isClosed() == closed) {
-            return *this;
+            if (!mkRefine.skippedShells()) {
+                return *this;
+            }
+            partial = *this;  // the fallback below, else this
         }
     }
     catch (Standard_Failure&) {
-        if (no_fail == RefineFail::throwException) {
-            throw;
+        failed = true;  // the fallback below, then the policy
+    }
+    // The face uniter re-sews the whole shell after it merges a group; a shell holding a
+    // helix's loose edges (FeatureHelix widens them to about 2e-4 mm so its fusion succeeds)
+    // came back open, or the uniter failed, and every later feature of the body kept split
+    // coplanar faces, silently: Onshape merges them (rehearsal 5, rb43). In a compound (most
+    // features' shapes) the uniter's failure kept that shell unrefined without an error, so the
+    // fallback runs then too (review replc r2), and the partial result stands when it is refused.
+    // OCCT's UnifySameDomain merges in place, without sewing. It merges only the face uniter's
+    // kinds (planes, cylinders, B-splines): the edges of every other face are kept, since
+    // KeepShapes honours only edges and vertices (review replc r2, T-A: two torus halves merged),
+    // so a helix earlier in the body never decides whether cones or tori merge (review replc r1,
+    // T3); it runs on a fresh copy, as the uniter may have changed its own (T2); and its result
+    // counts only when it is valid, as
+    // closed as the shape, with as many solids, and the same area and volume (T1: a frustum's
+    // fillet once came out 7 % larger). Elsewhere the face uniter alone decides, as before.
+    // It unifies edges too, as the uniter's BRepLib_FuseEdges does (faces only broke a fillet's
+    // reference in V2 as well as V2s: review replc r1, ThreadFrustumFillet).
+    // FREECAD_CH_REFINE_FALLBACK=off turns it off, to compare a build with itself.
+    static const bool fallbackOff = [] {
+#ifdef _MSC_VER
+        // MSVC's CRT deprecates getenv (as App/ElementSolverBatch.cpp's environmentValue())
+        char* value = nullptr;
+        std::size_t size = 0;
+        if (_dupenv_s(&value, &size, "FREECAD_CH_REFINE_FALLBACK") != 0 || !value) {
+            return false;
         }
+        const bool off = std::string(value) == "off";
+        std::free(value);
+        return off;
+#else
+        const char* value = std::getenv("FREECAD_CH_REFINE_FALLBACK");
+        return value && std::string(value) == "off";
+#endif
+    }();
+    try {
+        if (fallbackOff) {
+            throw Standard_Failure("refine fallback off");
+        }
+        TopoShape fresh(shape);
+        fresh.setShape(BRepBuilderAPI_Copy(shape.getShape(), false).Shape(), false);
+        ShapeUpgrade_UnifySameDomain unify(fresh.getShape(), true, true, false);
+        TopTools_MapOfShape keep;
+        for (TopExp_Explorer xp(fresh.getShape(), TopAbs_FACE); xp.More(); xp.Next()) {
+            const GeomAbs_SurfaceType kind = BRepAdaptor_Surface(TopoDS::Face(xp.Current())).GetType();
+            if (kind != GeomAbs_Plane && kind != GeomAbs_Cylinder && kind != GeomAbs_BSplineSurface) {
+                for (TopExp_Explorer xe(xp.Current(), TopAbs_EDGE); xe.More(); xe.Next()) {
+                    keep.Add(xe.Current());
+                }
+            }
+        }
+        unify.KeepShapes(keep);
+        unify.Build();
+        const TopoDS_Shape& unified = unify.Shape();
+        auto props = [](const TopoDS_Shape& s, bool volume) {
+            GProp_GProps gprops;
+            if (volume) {
+                BRepGProp::VolumeProperties(s, gprops);
+            }
+            else {
+                BRepGProp::SurfaceProperties(s, gprops);
+            }
+            return gprops.Mass();
+        };
+        auto same = [](double a, double b) {
+            return std::fabs(a - b) <= 1e-7 * std::fabs(b) + Precision::Confusion();
+        };
+        auto count = [](const TopoDS_Shape& s, TopAbs_ShapeEnum type) {
+            int n = 0;
+            for (TopExp_Explorer xp(s, type); xp.More(); xp.Next()) {
+                ++n;
+            }
+            return n;
+        };
+        if (!unified.IsNull() && count(unified, TopAbs_FACE) < count(shape.getShape(), TopAbs_FACE)
+            && count(unified, TopAbs_SOLID) == count(shape.getShape(), TopAbs_SOLID)
+            && same(props(unified, false), props(shape.getShape(), false))
+            && (!closed
+                || same(std::fabs(props(unified, true)), std::fabs(props(shape.getShape(), true))))
+            && BRepCheck_Analyzer(unified).IsValid()) {
+            const MapperHistory history(unify.History());
+            makeShapeWithElementMap(unified, history, {fresh}, op);
+            restoreWholeFaceNamesSafely(*this, fresh, history);
+            fixSolidOrientation();
+            if (isClosed() == closed) {
+                return *this;
+            }
+        }
+    }
+    catch (Standard_Failure&) {
+        // keep the shape as it was, below
+    }
+    if (!partial.isNull()) {
+        *this = partial;
+        return *this;
+    }
+    if (failed && no_fail == RefineFail::throwException) {
+        throw Standard_Failure("Removing splitter failed");
     }
     *this = shape;
     return *this;
@@ -10271,7 +13474,8 @@ TopoShape& TopoShape::makeElementBoolean(
         return *this;
     }
 
-    std::unique_ptr<BRepAlgoAPI_BooleanOperation> mk;
+    // Shared with the worker that builds it, which may outlive this call (kernel safety S1)
+    std::shared_ptr<BRepAlgoAPI_BooleanOperation> mk;
     if (strcmp(maker, Part::OpCodes::Fuse) == 0) {
         mk.reset(new FCBRepAlgoAPI_Fuse);
     }
@@ -10293,21 +13497,45 @@ TopoShape& TopoShape::makeElementBoolean(
 
     std::vector<TopoShape> fixedInputs = inputs;
 
-    bool allValid = true;
-    int i = -1;
-    for (auto& shape : fixedInputs) {
-        if (shape.isNull()) {
+    // The inputs' check runs on a worker under the feature's time limit (kernel safety S1)
+    std::vector<TopoDS_Shape> toCheck;
+    std::vector<std::size_t> checked;
+    for (std::size_t k = 0; k < fixedInputs.size(); ++k) {
+        if (fixedInputs[k].isNull()) {
             FC_THROWM(NullShapeException, "Null input shape");
         }
-
         // A first argument the caller vouches for isn't checked (ops#310): the check is a full
         // BRepCheck_Analyzer, and a PartDesign feature's base can be the output of its own boolean
-        const bool vouchedFor = inputCheck == BooleanInputCheck::Tools && i + 1 < firstArgumentInputs;
-        if (!vouchedFor && !shape.isValid()) {
-            allValid = false;
-            shape.fix();
+        const bool vouchedFor = inputCheck == BooleanInputCheck::Tools
+            && static_cast<int>(k) < firstArgumentInputs;
+        if (!vouchedFor) {
+            // An exact copy: an abandoned check reads nothing the document changes, and a valid
+            // input checks valid (BRepBuilderAPI_Copy's copy of a valid face can fail, kernel-4)
+            toCheck.push_back(KernelBudget::exactCopy(fixedInputs[k].getShape()));
+            checked.push_back(k);
         }
+    }
+    auto validity = std::make_shared<std::vector<char>>(toCheck.size(), 1);
+    if (!toCheck.empty()) {
+        KernelBudget::run(
+            "The check of the boolean's inputs",
+            [toCheck, validity](const Message_ProgressRange& /*range*/) {
+                for (std::size_t k = 0; k < toCheck.size(); ++k) {
+                    (*validity)[k] = KernelBudget::checkValid(toCheck[k]) ? 1 : 0;
+                }
+            }
+        );
+    }
+    bool allValid = true;
+    for (std::size_t k = 0; k < checked.size(); ++k) {
+        if (!(*validity)[k]) {
+            allValid = false;
+            fixedInputs[checked[k]].fix();
+        }
+    }
 
+    int i = -1;
+    for (auto& shape : fixedInputs) {
         if (++i == 0) {
             shapeArguments.Append(shape.getShape());
         }
@@ -10327,15 +13555,42 @@ TopoShape& TopoShape::makeElementBoolean(
     else if (tolerance < 0.0) {
         FCBRepAlgoAPIHelper::setAutoFuzzy(mk.get());
     }
-#if OCC_VERSION_HEX >= 0x070600
-    mk->Build(std::make_unique<Part::ProgressIndicator>()->Start());
-#else
-    mk->Build();
-#endif
+    // On a worker under the feature's time limit, with Esc (kernel safety S1): the range carries
+    // the cancel, which OCCT reads at its few checks
+    const char* what = strcmp(maker, Part::OpCodes::Cut) == 0 ? "The cut"
+        : strcmp(maker, Part::OpCodes::Common) == 0           ? "The intersection"
+        : strcmp(maker, Part::OpCodes::Section) == 0          ? "The section"
+                                                              : "The fuse";
+    // It reads its inputs in place: after a timeout it is waited for until OCCT reads the cancel
+    KernelBudget::run(
+        what,
+        [mk](const Message_ProgressRange& range) { mk->Build(range); },
+        KernelBudget::Inputs::Shared
+    );
     if (Base::Sequencer().wasCanceled()) {
         FC_THROWM(Base::CADKernelError, "User aborted");
     }
     FCBRepAlgoAPIHelper::checkLostTools(mk.get());
+    if (mk->Shape().IsNull()) {
+        // Say why: OCCT's own report, not the "Null shape" of the element map below
+        std::ostringstream report;
+        if (mk->HasErrors()) {
+            mk->DumpErrors(report);
+        }
+        std::string reason = report.str();
+        while (!reason.empty() && std::isspace(static_cast<unsigned char>(reason.back()))) {
+            reason.pop_back();
+        }
+        FC_THROWM(
+            Base::CADKernelError,
+            what << " failed" << (reason.empty() ? std::string() : ": " + reason)
+        );
+    }
+    if (buildShell && healSliverCornersEnabled()) {
+        // The corners the Boolean left open beside a sliver (ops#640, on by default). In place,
+        // on its new sub-shapes: the maker's history still names the same shapes
+        healSliverCorners(mk->Shape(), fixedInputs);
+    }
     makeElementShape(*mk, fixedInputs, op, elementMapPolicy);
 
     if (buildShell) {

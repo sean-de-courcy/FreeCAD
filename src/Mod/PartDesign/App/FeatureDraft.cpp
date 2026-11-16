@@ -137,6 +137,15 @@ App::DocumentObjectExecReturn* Draft::execute()
         return App::DocumentObject::StdReturn;
     }
 
+    // The neutral plane is picked, never guessed: with none the draft fails, as Onshape's does
+    // ("Select a neutral plane."), and the dialog's field shows red (FreeCAD-CH ops#640, rank 17)
+    App::DocumentObject* refPlane = NeutralPlane.getValue();
+    if (!refPlane) {
+        return new App::DocumentObjectExecReturn(
+            QT_TRANSLATE_NOOP("Exception", "Select a neutral plane.")
+        );
+    }
+
     // Draft angle
     double angle = Base::toRadians(Angle.getValue());
 
@@ -192,59 +201,7 @@ App::DocumentObjectExecReturn* Draft::execute()
 
     // Neutral plane
     gp_Pln neutralPlane;
-    App::DocumentObject* refPlane = NeutralPlane.getValue();
-    if (!refPlane) {
-        // Try to guess a neutral plane from the first selected face
-        // Get edges of first selected face
-        TopoDS_Shape face = TopShape.getSubShape(SubVals[0].c_str());
-        TopTools_IndexedMapOfShape mapOfEdges;
-        TopExp::MapShapes(face, TopAbs_EDGE, mapOfEdges);
-        bool found = false;
-
-        for (int i = 1; i <= mapOfEdges.Extent(); i++) {
-            // Note: What happens if mapOfEdges(i) is the degenerated edge of a cone?
-            // But in that case the draft is not possible anyway!
-            BRepAdaptor_Curve c(TopoDS::Edge(mapOfEdges(i)));
-            gp_Pnt p1 = c.Value(c.FirstParameter());
-            gp_Pnt p2 = c.Value(c.LastParameter());
-
-            if (c.IsClosed()) {
-                // Edge is a circle or a circular arc (other types are not allowed for drafting)
-                if (c.GetType() == GeomAbs_Circle) {
-                    neutralPlane = gp_Pln(p1, c.Circle().Axis().Direction());
-                    found = true;
-                    break;
-                }
-            }
-            else {
-                // Edge is linear
-                // Find midpoint of edge and create auxiliary plane through midpoint normal to edge
-                gp_Pnt pm = c.Value((c.FirstParameter() + c.LastParameter()) / 2.0);
-                Handle(Geom_Plane) aux
-                    = new Geom_Plane(pm, gp_Dir(p2.X() - p1.X(), p2.Y() - p1.Y(), p2.Z() - p1.Z()));
-                // Intersect plane with face. Is there no easier way?
-                BRepAdaptor_Surface adapt(TopoDS::Face(face), Standard_False);
-                Handle(Geom_Surface) sf = adapt.Surface().Surface();
-                GeomAPI_IntSS intersector(aux, sf, Precision::Confusion());
-                if (!intersector.IsDone() || intersector.NbLines() < 1) {
-                    continue;
-                }
-                const Handle(Geom_Curve) & icurve = intersector.Line(1);
-                if (!icurve->IsKind(STANDARD_TYPE(Geom_Line))) {
-                    continue;
-                }
-                Handle(Geom_Line) line = Handle(Geom_Line)::DownCast(icurve);
-                neutralPlane = gp_Pln(pm, line->Lin().Direction());
-                found = true;
-                break;
-            }
-        }
-
-        if (!found) {
-            throw Base::RuntimeError("No neutral plane specified and none can be guessed");
-        }
-    }
-    else {
+    {
         if (refPlane->isDerivedFrom<PartDesign::Plane>()) {
             PartDesign::Plane* plane = static_cast<PartDesign::Plane*>(refPlane);
             Base::Vector3d b = plane->getBasePoint();

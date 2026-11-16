@@ -38,6 +38,7 @@
 #include <App/GeoFeatureGroupExtension.h>
 #include <Mod/Part/App/PropertyTopoShape.h>
 #include "Body.h"
+#include "Derived.h"
 #include "FeatureBase.h"
 #include "FeaturePy.h"
 
@@ -134,6 +135,21 @@ FeatureBase::FeatureBase()
         (App::PropertyType)(App::Prop_Output | App::Prop_ReadOnly | App::Prop_Hidden),
         "The source's frame when the copy was last computed (FreeCAD-CH ops#322)"
     );
+    ADD_PROPERTY_TYPE(
+        DerivedFrom,
+        (""),
+        "Derived",
+        (App::PropertyType)(App::Prop_Output | App::Prop_ReadOnly),
+        "The part a Derived feature copies (FreeCAD-CH ops#640)"
+    );
+    ADD_PROPERTY_TYPE(
+        DerivedParts,
+        (),
+        "Derived",
+        (App::PropertyType)(App::Prop_ReadOnly | App::Prop_Hidden),
+        "A Derived feature's other parts (FreeCAD-CH ops#640)"
+    );
+    DerivedParts.setScope(App::LinkScope::Global);
 }
 
 bool FeatureBase::sourceSides(Base::Placement& source, Base::Placement& owner) const
@@ -205,6 +221,45 @@ short int FeatureBase::mustExecute() const
 
 App::DocumentObjectExecReturn* FeatureBase::execute()
 {
+    // A Derived feature's member whose source part is gone (deleted, or left with no solid) fails
+    // naming it, as Onshape's Derived turns red "Missing": its binder keeps the last shape it had,
+    // which would leave the copy as it was without a word (FreeCAD-CH ops#640 round 6)
+    if (!DerivedFrom.getStrValue().empty()) {
+        App::DocumentObject* source = derivedSource(this);
+        // A derived copy of another document's part (Derived.h) is placed in this studio's frame:
+        // neither its description nor the studios' placements are to follow
+        const bool copied = isDerivedCopy(source);
+        if (source && !copied) {
+            const std::string from = derivedDescription(source);
+            if (from != DerivedFrom.getStrValue()) {
+                DerivedFrom.setValue(from);
+            }
+        }
+        if (source) {
+            if (Part::Feature::getTopoShape(
+                    source,
+                    Part::ShapeOption::ResolveLink | Part::ShapeOption::Transform
+                )
+                    .isNull()) {
+                source = nullptr;
+            }
+        }
+        if (!source) {
+            return new App::DocumentObjectExecReturn("Missing source part: " + DerivedFrom.getStrValue());
+        }
+        // A studio moved since: the copy keeps the source's place in the document, not in its
+        // studio as Onshape's does, so it fails naming both rather than shift silently (review
+        // R6-2)
+        App::Part* from = nullptr;
+        App::Part* to = nullptr;
+        Part::BodyBase::studioOf(Part::BodyBase::bodyOfObject(source), from);
+        Part::BodyBase::studioOf(getFeatureBody(), to);
+        const std::string problem = copied ? std::string()
+                                           : derivedPlacementProblem(getDocument(), from, to);
+        if (!problem.empty()) {
+            return new App::DocumentObjectExecReturn(problem);
+        }
+    }
 
     if (!BaseFeature.getValue()) {
         return new App::DocumentObjectExecReturn(

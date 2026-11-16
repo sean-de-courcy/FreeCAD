@@ -108,6 +108,12 @@ public:
         ToFirst,
         ToFace,
         ToShape,
+        // The other class's end type, appended to Type's list (ops#640): Through all on a Pad,
+        // To last on a Pocket. UI index 5, Type index 6 (the UI skips "?TwoLengths").
+        Appended,
+        // Up to vertex (ops#640 rank 22): Type index 7, appended. The end type box lists the
+        // modes in Onshape's order, each row's data its mode (getMode()).
+        ToVertex,
     };
 
     enum class StartMode
@@ -159,6 +165,8 @@ protected:
         ReferenceField* faceField = nullptr;
         ReferenceField* shapeField = nullptr;
         ReferenceField* shapeFacesField = nullptr;
+        /// Up to vertex: a vertex or a point, in UpToFace too (ops#640 rank 22).
+        ReferenceField* vertexField = nullptr;
         QCheckBox* checkBoxAllFaces = nullptr;
         QWidget* upToShapeList = nullptr;
         QWidget* upToShapeFaces = nullptr;
@@ -226,8 +234,14 @@ protected:
     double getYDirection() const;
     double getZDirection() const;
     bool getReversed() const;
+    /// The side's end type: the Mode of the end type box's row (not the row, ops#640 rank 22).
     int getMode() const;
     int getMode2() const;
+    /// The end type box's row of  mode (-1: none).
+    static int rowOfMode(const QComboBox* box, Mode mode);
+    /// Up to face and Up to vertex share UpToFace: a switch between them drops a link of the
+    /// other kind (a face for a vertex) (ops#640 rank 22).
+    void dropUpToFaceOfOtherKind(Side side, Mode mode);
     int getSidesMode() const;
     void onSelectionChanged(const Gui::SelectionChanges& msg) override;
     void translateSidesList(int index);
@@ -245,6 +259,21 @@ private:
 
     void createSideControllers();
     void updateStartUI();
+
+    /// FreeCAD-CH (ops#640, rank 22): Onshape's fields. Symmetric and Second end position as
+    /// checkboxes for the Sides box (hidden, still what is written), Starting offset as a checkbox
+    /// for the Start box (shown only for a start reference), a Draft checkbox for the taper, and
+    /// Onshape's words; no Recompute on change.
+    void createOnshapeFields();
+    /// The checkboxes follow the boxes they stand for; the taper shows only with Draft ticked.
+    void updateOnshapeUI();
+    /// Onshape's words on the labels (again after a retranslation).
+    void setOnshapeWords();
+    void setSides(SidesMode mode);
+    QCheckBox* symmetric = nullptr;
+    QCheckBox* secondEnd = nullptr;
+    QCheckBox* startingOffset = nullptr;
+    QCheckBox* draft = nullptr;
 
     /// The reference fields, in place of the `.ui` placeholders (ops#150).
     void createFields();

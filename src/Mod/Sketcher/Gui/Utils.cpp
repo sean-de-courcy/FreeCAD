@@ -30,6 +30,7 @@
 #include <QFileInfo>
 
 #include <App/Application.h>
+#include <App/ReferenceRepair.h>
 #include <App/Transactions.h>
 #include <Base/Quantity.h>
 #include <Base/UnitsApi.h>
@@ -39,7 +40,10 @@
 #include <Mod/Sketcher/App/GeometryFacade.h>
 #include <Mod/Sketcher/App/SketchObject.h>
 
+#include <Mod/Sketcher/App/SketchPattern.h>
+
 #include "DrawSketchHandler.h"
+#include "TaskDlgEditSketch.h"
 #include "Utils.h"
 #include "ViewProviderSketch.h"
 
@@ -193,6 +197,17 @@ std::string SketcherGui::getStrippedPythonExceptionString(const Base::Exception&
     else {
         return msg;
     }
+}
+
+std::vector<App::ReferenceRow> SketcherGui::referencesToMatch(const Sketcher::SketchObject* obj)
+{
+    std::vector<App::ReferenceRow> rows;
+    for (App::ReferenceRow& row : App::referenceRows(obj)) {
+        if (row.status == "guessed" || (row.status == "broken" && !row.candidates.empty())) {
+            rows.push_back(std::move(row));
+        }
+    }
+    return rows;
 }
 
 bool SketcherGui::ReleaseHandler(Gui::Document* doc)
@@ -530,10 +545,25 @@ bool SketcherGui::isSketchInEdit(Gui::Document* doc)
     return false;
 }
 
+namespace
+{
+// FreeCAD-CH (ops#640, hands-on C-1): the sketch's dialog greys its tools until it has a plane
+bool areSketchToolsBlocked(const SketcherGui::ViewProviderSketch* vp)
+{
+    const SketcherGui::TaskDlgEditSketch* dlg = SketcherGui::TaskDlgEditSketch::ofSketchView(vp);
+    return dlg && dlg->areToolsBlocked();
+}
+}  // namespace
+
 bool SketcherGui::isCommandActive(Gui::Document* doc)
 {
     if (isSketchInEdit(doc)) {
-        auto mode = static_cast<SketcherGui::ViewProviderSketch*>(doc->getInEdit())->getSketchMode();
+        auto* vp = static_cast<SketcherGui::ViewProviderSketch*>(doc->getInEdit());
+        // FreeCAD-CH (ops#640, hands-on C-1): greyed while the sketch waits for its plane
+        if (areSketchToolsBlocked(vp)) {
+            return false;
+        }
+        auto mode = vp->getSketchMode();
 
         if (mode == ViewProviderSketch::STATUS_NONE
             || mode == ViewProviderSketch::STATUS_SKETCH_UseHandler) {
@@ -1055,4 +1085,65 @@ QMap<QString, QString> SketcherGui::findAvailableFontFiles()
         }
     }
     return fontMap;
+}
+
+// FreeCAD-CH (sketch patterns)
+int SketcherGui::patternOfGeometry(const Sketcher::SketchObject* obj, int geoId, bool copyOnly)
+{
+    if (geoId < 0) {
+        return -1;
+    }
+    const auto& constraints = obj->Constraints.getValues();
+    for (int i = 0; i < static_cast<int>(constraints.size()); ++i) {
+        const auto record = Sketcher::PatternRecord::read(*constraints[i]);
+        if (!record) {
+            continue;
+        }
+        for (const auto& [slot, copy] : record->instances) {
+            if (copy == geoId) {
+                return i;
+            }
+        }
+        if (!copyOnly
+            && (std::ranges::find(record->seeds, geoId) != record->seeds.end()
+                || record->pivot == geoId || record->direction1 == geoId
+                || record->direction2 == geoId)) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+// FreeCAD-CH (sketch patterns)
+int SketcherGui::patternOfSelection(const Sketcher::SketchObject* obj)
+{
+    const auto selection
+        = Gui::Selection().getSelectionEx(nullptr, Sketcher::SketchObject::getClassTypeId());
+    if (selection.size() != 1 || selection[0].getObject() != obj) {
+        return -1;
+    }
+    const auto& constraints = obj->Constraints.getValues();
+    for (const std::string& name : selection[0].getSubNames()) {
+        int geoId = Sketcher::GeoEnum::GeoUndef;
+        if (name.starts_with("Edge")) {
+            geoId = std::atoi(name.substr(4).c_str()) - 1;
+        }
+        else if (name.starts_with("Vertex")) {
+            Sketcher::PointPos pos {};
+            obj->getGeoVertexIndex(std::atoi(name.substr(6).c_str()) - 1, geoId, pos);
+        }
+        else if (name.starts_with("Constraint")) {
+            const int index = Sketcher::PropertyConstraintList::getIndexFromConstraintName(name);
+            if (index >= 0 && index < static_cast<int>(constraints.size())
+                && constraints[index]->Type == Sketcher::Pattern) {
+                return index;
+            }
+            continue;
+        }
+        const int index = patternOfGeometry(obj, geoId);
+        if (index >= 0) {
+            return index;
+        }
+    }
+    return -1;
 }

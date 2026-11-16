@@ -51,6 +51,18 @@ public:
      * in restored documents. New Boolean features use Body-local linked geometry.
      */
     App::PropertyBool UseLegacyBodyPlacement;
+    /** Onshape's Keep tools (FreeCAD-CH ops#640 rank 28): on, the tool parts stay parts; off, the
+     * Boolean consumes them, and they leave the Parts list (consumerOf). A new Boolean takes the
+     * value its dialog last accepted (the user parameter BooleanKeepTools); old files read false.
+     * An Intersect that misses keeps its part as it was with Keep tools on (hands-on A-2' c)
+     */
+    App::PropertyBool KeepTools;
+    /** The tools a Union left as they were (ops#640 rank 3b, hands-on A-2' b): they touch nothing
+     * it fuses, so it doesn't fuse them, and they stay parts. Set at each compute
+     */
+    App::PropertyLinkListHidden SeparateTools;
+    /// A studio Boolean's tool parts, by part id (FreeCAD-CH ops#654, P5)
+    App::PropertyStringList StudioTools;
 
     /** @name methods override feature */
     //@{
@@ -98,7 +110,32 @@ public:
     std::vector<App::DocumentObject*> mergedBodies() const;
     /// Why @p feature fails: a solid after its merged Body's merged feature, or empty
     static std::string mergeLock(const App::DocumentObject* feature);
+    /// The Merge right after @p feature in its Body, based on it (makeMerge's place), or null
+    static Boolean* mergeAfter(const App::DocumentObject* feature);
+    /** The Merge that is @p feature's merge scope (ops#640 rank 1): mergeAfter, accepted, after an
+     * additive profile feature (an Extrude's Add), or null. It is part of the feature: it has no
+     * row of its own in the Features list, and it goes when the feature is deleted
+     * (Body::removeObject). A Merge Parts made and not accepted, or one after a cut, is its own.
+     */
+    static Boolean* scopeMerge(const App::DocumentObject* feature);
+    /** The merge scope of @p feature, a solid feature in a part (FreeCAD-CH ops#640 rank 1): the
+     * parts in @p bodies are merged right after it, the others it merged no more. Changes the Merge
+     * after it in place, makes one (makeMerge) or, with no bodies, deletes it; the Merge is
+     * accepted (no Warning: Onshape's merge is a plain feature). Refused, with the reason, before
+     * anything changes. Returns the Merge, or null; no recompute.
+     */
+    static Boolean* setMergeScope(
+        App::DocumentObject* feature,
+        const std::vector<App::DocumentObject*>& bodies
+    );
     //@}
+
+    /** The Boolean that consumes @p body, a part one of its tools is in, or null (FreeCAD-CH
+     * ops#640 rank 28, B3-3a): a Boolean in effect (not a Merge, not suppressed or failed, not
+     * after its part's bar) with Keep tools off, the tool not one a Union left separate. A
+     * consumed part isn't a part any more: Onshape's Boolean deletes its tools
+     */
+    static Boolean* consumerOf(const App::DocumentObject* body);
 
 protected:
     void handleChangedPropertyName(

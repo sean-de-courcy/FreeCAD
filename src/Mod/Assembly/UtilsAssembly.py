@@ -33,6 +33,23 @@ if App.GuiUp:
 
 translate = App.Qt.translate
 
+
+def isMacKeys():
+    """FreeCAD-CH (ops#640 polish, the Mac keys): whether the Mac's keys apply, as
+    Gui::ForkKeymap::isMac(): on macOS, and where the hidden preference General/KeymapMacKeys is
+    set (the GUI tests on Windows)."""
+    import sys
+
+    general = App.ParamGet("User parameter:BaseApp/Preferences/General")
+    return sys.platform == "darwin" or general.GetBool("KeymapMacKeys", False)
+
+
+def isDeleteKey(event):
+    """FreeCAD-CH: whether the key event is the Delete key: Delete, and on the Mac also
+    Backspace, the Mac keyboard's Delete key (Gui::ForkKeymap::isDeleteKey())."""
+    key = event.key()
+    return key == QtCore.Qt.Key_Delete or (key == QtCore.Qt.Key_Backspace and isMacKeys())
+
 __title__ = "Assembly utilitary functions"
 __author__ = "Ondsel"
 __url__ = "https://www.freecad.org"
@@ -131,6 +148,10 @@ def isLinkGroup(obj):
     return obj.TypeId == "App::Link" and obj.ElementCount > 0
 
 
+# FreeCAD-CH (ops#640 round 7, gap A16): the implicit Part Studio's tab name (App::DocumentTabs)
+IMPLICIT_STUDIO = "*"
+
+
 def isMergedPart(obj):
     """FreeCAD-CH (ops#325, design 2.6): whether obj is a part merged into another, a Body whose
     MergedInto names a Merge in a part (as PartDesign's Boolean.mergeOf). A link counts as the
@@ -148,6 +169,23 @@ def isMergedPart(obj):
     return any(
         user.isDerivedFrom("PartDesign::Body") and merge in user.Group for user in merge.InList
     )
+
+
+def isConsumedPart(obj):
+    """FreeCAD-CH (ops#654 P6a): whether obj is a part a Boolean consumed (Keep tools off), which
+    isn't a part any more, as Onshape deletes it: in a studio with a history list, at its bar
+    (PartDesign.studioConsumerOf); else by an in-Body Boolean (PartDesign.consumerOf). A link
+    counts as the part it links."""
+    if hasattr(obj, "getLinkedObject"):
+        obj = obj.getLinkedObject(True)
+    if obj is None or obj.TypeId != "PartDesign::Body":
+        return False
+    import PartDesign
+
+    try:
+        return PartDesign.studioConsumerOf(obj) is not None or PartDesign.consumerOf(obj) is not None
+    except Exception:
+        return False
 
 
 def getObject(ref):
@@ -474,10 +512,16 @@ def extract_type_and_number(element_name):
         return None, None
 
 
-def findElementClosestVertex(ref, mousePos):
+def findElementClosestVertex(ref, mousePos, view=None):
     element_name = getElementName(ref[1][0])
     if element_name == "":
         return ""
+
+    if view is not None:
+        # FreeCAD-CH (ops#640, design C3): the point under the cursor, else the centre
+        candidates = connectorCandidates(ref)
+        index = chooseConnector(ref, candidates, mousePos, view)
+        return candidates[index][1] if index is not None else element_name
 
     obj = getObject(ref)
 
@@ -595,6 +639,174 @@ def findElementClosestVertex(ref, mousePos):
         return vertex_name
 
     return ""
+
+
+# FreeCAD-CH (ops#640, design C3; notes/assemblies-design.md section 3): Onshape's mate connector
+# points. While a face or an edge is hovered every point it offers is drawn; the one under the
+# cursor is taken, and a click anywhere else takes the element's centre (oracle 8, "Mates").
+# Before, the point nearest the cursor always won, so a click near a corner took the corner, and a
+# face's straight edges offered no midpoint.
+
+CONNECTOR_PICK_PIXELS = 12  # a point this close to the cursor on screen is "under" it
+
+
+def connectorCandidates(ref):
+    """The connector points of the reference's element, as a list of (point, name, kind):
+    point in the object's shape coordinates (as findElementClosestVertex's mousePos), name for the
+    reference's point slot, kind "centre", "corner", "midpoint" or "circle". The element's own
+    centre comes first when it has one (its name is the element's own: findPlacement reads it as
+    the centre). A face's edge midpoints and circle centres are named by the edge's index within
+    the face, as the circle centres were before (findPlacement's Face branch)."""
+    element_name = getElementName(ref[1][0])
+    if element_name == "":
+        return []
+    obj = getObject(ref)
+    if obj is None:
+        return []
+    elt_type, elt_index = extract_type_and_number(element_name)
+    shape = obj.Shape
+
+    if elt_type == "Vertex":
+        vertex = get_element(shape, element_name)
+        return [(vertex.Point, element_name, "corner")] if vertex is not None else []
+
+    if elt_type == "Edge":
+        edge = get_element(shape, element_name)
+        if edge is None:
+            return []
+        curve = edge.Curve
+        out = []
+        if curve.TypeId == "Part::GeomCircle":
+            out.append((curve.Location, element_name, "centre"))
+        elif curve.TypeId == "Part::GeomLine":
+            pts = getPointsFromVertexes(edge.Vertexes)
+            out.append(((pts[0] + pts[1]) * 0.5, element_name, "centre"))
+        if curve.TypeId != "Part::GeomCircle" or not edge.isClosed():
+            for vtx in edge.Vertexes:
+                name = findVertexNameInObject(vtx, obj)
+                if name and all(n != name for _p, n, _k in out):
+                    out.append((vtx.Point, name, "corner"))
+        if curve.TypeId == "Part::GeomCircle" and not edge.isClosed():
+            # ops#683: an arc's midpoint (Onshape's MID_POINT)
+            out.append((arcMidpoint(edge), MIDPOINT_PREFIX + element_name, "midpoint"))
+        return out
+
+    if elt_type != "Face":
+        return []
+    face = get_element(shape, element_name)
+    if face is None:
+        return []
+    surface = face.Surface
+    _type = surface.TypeId
+    if _type in ("Part::GeomSphere", "Part::GeomTorus"):
+        return [(surface.Center, element_name, "centre")]
+
+    out = []
+    if _type in ("Part::GeomCylinder", "Part::GeomCone"):
+        centerOfG = face.CenterOfGravity - surface.Center
+        centerPoint = surface.Center + centerOfG
+        centerPoint = centerPoint + App.Vector().projectToLine(centerOfG, surface.Axis)
+        out.append((centerPoint, element_name, "centre"))
+    else:
+        out.append((face.CenterOfGravity, element_name, "centre"))
+        for vtx in face.Vertexes:
+            # a full circle's seam vertex is no corner
+            touching = [e for e in face.Edges if any(v.isSame(vtx) for v in e.Vertexes)]
+            if touching and all(e.isClosed() for e in touching):
+                continue
+            name = findVertexNameInObject(vtx, obj)
+            if name:
+                out.append((vtx.Point, name, "corner"))
+
+    for i, edge in enumerate(face.Edges):
+        curve = edge.Curve
+        name = "Edge" + str(i + 1)  # the index within the face
+        if curve.TypeId in ("Part::GeomCircle", "Part::GeomEllipse"):
+            out.append((curve.Location, name, "circle"))
+            if curve.TypeId == "Part::GeomCircle" and not edge.isClosed():
+                # ops#683: the midpoint of the face's arc, with the face's frame
+                out.append((arcMidpoint(edge), MIDPOINT_PREFIX + name, "midpoint"))
+        elif curve.TypeId == "Part::GeomLine" and _type not in (
+            "Part::GeomCylinder",
+            "Part::GeomCone",
+        ):
+            pts = getPointsFromVertexes(edge.Vertexes)
+            out.append(((pts[0] + pts[1]) * 0.5, name, "midpoint"))
+        elif _type == "Part::GeomCylinder" and curve.TypeId == "Part::GeomBSplineCurve":
+            # two cylinders intersecting (findCylindersIntersection)
+            for j, facej in enumerate(shape.Faces):
+                if (elt_index - 1) != j and facej.Surface.TypeId == "Part::GeomCylinder":
+                    for edgej in facej.Edges:
+                        if (
+                            edgej.Curve.TypeId == "Part::GeomBSplineCurve"
+                            and edgej.CenterOfGravity == edge.CenterOfGravity
+                            and edgej.Length == edge.Length
+                        ):
+                            out.append((edgej.CenterOfGravity, name, "circle"))
+    out.append(partOriginCandidate(obj))
+    return out
+
+
+# FreeCAD-CH (ops#683): implicit connectors with no element of their own, named in the pick's point
+# slot. "MidEdgeN" is the midpoint of arc N (N counted as the element slot counts it: the object's
+# edges for an edge picked alone, the face's for a face); "PartOrigin" is the part's origin with the
+# part's axes, offered while one of its faces is hovered (GC-A1: 17 of the team's 148 connectors sit
+# on a part origin; how Onshape offers it, A5, is not known).
+MIDPOINT_PREFIX = "Mid"
+PART_ORIGIN = "PartOrigin"
+
+
+def arcMidpoint(edge):
+    return edge.valueAt((edge.FirstParameter + edge.LastParameter) * 0.5)
+
+
+def partOriginCandidate(obj):
+    """The part's origin, in its shape's coordinates (as the other candidates)"""
+    return (App.Vector(obj.Placement.Base), PART_ORIGIN, "origin")
+
+
+def shapeToGlobal(ref, point):
+    """A point in the reference object's shape coordinates, in the document's (the inverse of
+    findElementClosestVertex's change of mousePos)."""
+    obj = getObject(ref)
+    return getGlobalPlacement(ref).multVec(obj.Placement.inverse().multVec(point))
+
+
+def chooseConnector(ref, candidates, mousePos, view=None, pixels=CONNECTOR_PICK_PIXELS):
+    """The candidate under the cursor, else the element's centre (Onshape's plain click), as an
+    index into candidates. mousePos is in the document's coordinates. Without a view, the nearest
+    candidate (as before C3)."""
+    if not candidates:
+        return None
+    points = [shapeToGlobal(ref, p) for p, _n, _k in candidates]
+    nearest, _ = findClosestPointToMousePos(points, mousePos)
+    if view is None or not hasattr(view, "getPointOnViewport"):
+        return nearest
+    under = connectorUnderCursor(ref, candidates, mousePos, view, pixels)
+    if under is not None:
+        return under
+    if candidates[0][2] == "centre":
+        return 0
+    return nearest
+
+
+def connectorUnderCursor(ref, candidates, mousePos, view, pixels=CONNECTOR_PICK_PIXELS):
+    """The index of the candidate nearest the cursor on screen if it is within `pixels`, else None
+    (Snap mode, design C9, snaps only onto a point under the cursor). mousePos is in the
+    document's coordinates."""
+    if not candidates or view is None:
+        return None
+    try:
+        mx, my = view.getPointOnViewport(mousePos)
+        best, bestDist = None, None
+        for i, (p, _n, _k) in enumerate(candidates):
+            px, py = view.getPointOnViewport(shapeToGlobal(ref, p))
+            d = math.hypot(px - mx, py - my)
+            if bestDist is None or d < bestDist:
+                best, bestDist = i, d
+    except Exception:
+        return None
+    return best if bestDist <= pixels else None
 
 
 def getPointsFromVertexes(vertexes):
@@ -1017,6 +1229,29 @@ So here we want to find a placement that corresponds to a local coordinate syste
 """
 
 
+def onshapeFrame(zAxis):
+    """FreeCAD-CH (ops#683, design C2, oracle 12 GC-B2): Onshape's implicit connector frame for a
+    Z axis given in the part's axes: X is the first of the part's +x, +y, +z not parallel to Z,
+    made square to Z, and Y = Z x X."""
+    z = App.Vector(zAxis)
+    if z.Length < 1e-12:
+        return App.Rotation()
+    z.normalize()
+    for axis in (App.Vector(1, 0, 0), App.Vector(0, 1, 0), App.Vector(0, 0, 1)):
+        if axis.cross(z).Length > 1e-6:
+            break
+    x = axis - z * axis.dot(z)
+    x.normalize()
+    y = z.cross(x)
+    return App.Rotation(App.Matrix(x.x, y.x, z.x, 0, x.y, y.y, z.y, 0, x.z, y.z, z.z, 0, 0, 0, 0, 1))
+
+
+def outwardNormal(face):
+    """The planar face's normal out of the material (the face's orientation in its solid)"""
+    u0, u1, v0, v1 = face.ParameterRange
+    return face.normalAt((u0 + u1) * 0.5, (v0 + v1) * 0.5)
+
+
 def findPlacement(ref, ignoreVertex=False):
     if not isRefValid(ref, 2):
         return App.Placement()
@@ -1026,6 +1261,10 @@ def findPlacement(ref, ignoreVertex=False):
 
     elt = getElementName(ref[1][0])
     vtx = getElementName(ref[1][1])
+
+    if vtx == PART_ORIGIN:
+        # ops#683: the part's origin and axes, whatever element carries the pick
+        return App.Placement()
 
     if not elt or not vtx:
         # case of whole parts such as PartDesign::Body or App/PartDesign::CordinateSystem/Point/Line/Plane.
@@ -1044,6 +1283,9 @@ def findPlacement(ref, ignoreVertex=False):
     vtx_type, _ = extract_type_and_number(vtx)
 
     isLine = False
+    # FreeCAD-CH (ops#683, C2): the Z axis of Onshape's frame, in the shape's coordinates, for a
+    # planar face (its outward normal) and a straight edge (along it)
+    onshapeZ = None
 
     if elt_type == "Vertex":
         vertex = get_element(obj.Shape, elt)
@@ -1058,7 +1300,12 @@ def findPlacement(ref, ignoreVertex=False):
         curve = edge.Curve
 
         # First we find the translation
-        if vtx_type == "Edge" or ignoreVertex:
+        if vtx_type == MIDPOINT_PREFIX + "Edge" and not ignoreVertex:
+            # ops#683: the arc's midpoint, Z along the edge there (Onshape's MID_POINT)
+            mid = (edge.FirstParameter + edge.LastParameter) * 0.5
+            plc.Base = edge.valueAt(mid)
+            onshapeZ = App.Vector(edge.tangentAt(mid))
+        elif vtx_type == "Edge" or ignoreVertex:
             # In this case the wanted vertex is the center.
             if curve.TypeId == "Part::GeomCircle":
                 center_point = curve.Location
@@ -1075,11 +1322,12 @@ def findPlacement(ref, ignoreVertex=False):
             plc.Base = (vertex.X, vertex.Y, vertex.Z)
 
         # Then we find the Rotation
-        if curve.TypeId == "Part::GeomCircle":
+        if curve.TypeId == "Part::GeomCircle" and onshapeZ is None:
             plc.Rotation = App.Rotation(curve.Rotation)
 
         if curve.TypeId == "Part::GeomLine":
             isLine = True
+            onshapeZ = App.Vector(curve.Direction)
             plane_normal = round_vector(curve.Direction)
             plane_origin = App.Vector(0, 0, 0)
             plane = Part.Plane(plane_origin, plane_normal)
@@ -1104,6 +1352,12 @@ def findPlacement(ref, ignoreVertex=False):
                 plc.Base = surface.Apex
             else:
                 plc.Base = face.CenterOfGravity
+        elif vtx_type == MIDPOINT_PREFIX + "Edge":
+            # ops#683: the midpoint of the face's arc (the edge counted within the face)
+            edge = get_element(face, vtx[len(MIDPOINT_PREFIX) :])
+            if edge is None:
+                return App.Placement()
+            plc.Base = arcMidpoint(edge)
         elif vtx_type == "Edge":
             # In this case the edge is a circle/arc and the wanted vertex is its center.
             edge = get_element(face, vtx)
@@ -1121,6 +1375,12 @@ def findPlacement(ref, ignoreVertex=False):
                 # handle special case of 2 cylinder intersecting.
                 plc.Base = findCylindersIntersection(obj, surface, edge, elt_index)
 
+            elif curve.TypeId == "Part::GeomLine":
+                # FreeCAD-CH (ops#640, design C3): the midpoint of the face's straight edge,
+                # with the face's frame (Onshape's MID_POINT with a second entity, GC-A1)
+                edge_points = getPointsFromVertexes(edge.Vertexes)
+                plc.Base = (edge_points[0] + edge_points[1]) * 0.5
+
         else:
             vertex = get_element(obj.Shape, vtx)
             if vertex is None:
@@ -1131,13 +1391,23 @@ def findPlacement(ref, ignoreVertex=False):
         # Then we find the Rotation
         if hasattr(surface, "Rotation") and surface.Rotation is not None:
             plc.Rotation = App.Rotation(surface.Rotation)
+        if surface.TypeId == "Part::GeomPlane":
+            onshapeZ = outwardNormal(face)
 
+    toPart = App.Placement()
     if hasattr(obj, "ExpandArray"):
         # For draft arrays, the Shape has both the array placement and the base placement.
         plc = obj.Base.Placement.inverse() * plc
+        toPart = obj.Base.Placement.inverse()
 
     # change plc to be relative to the object placement.
     plc = obj.Placement.inverse() * plc
+    toPart = obj.Placement.inverse() * toPart
+
+    if onshapeZ is not None:
+        # Onshape's frame, chosen in the part's axes (GC-B2)
+        plc.Rotation = onshapeFrame(toPart.Rotation.multVec(onshapeZ))
+        isLine = False
 
     # post-process of plc for some special cases
     if elt_type == "Vertex":

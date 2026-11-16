@@ -40,6 +40,7 @@
 #include <format>
 #include <optional>
 #include <cerrno>
+#include <cstdint>
 #include <cstdlib>
 #include <limits>
 
@@ -55,6 +56,7 @@
 
 #include <QCryptographicHash>
 #include <QCoreApplication>
+#include <QDateTime>
 
 #include <FCConfig.h>
 
@@ -81,6 +83,8 @@
 #include "Application.h"
 #include "AutoTransaction.h"
 #include "BackupPolicy.h"
+#include "TeamFolder.h"
+#include "ProjectFile.h"
 #include "ElementSolverBatch.h"
 #include "ElementSolverEdits.h"
 #include "ExpressionParser.h"
@@ -116,6 +120,14 @@ using Base::Writer;
 using namespace App;
 using namespace boost;
 using namespace zipios;
+
+namespace App
+{
+// FreeCAD-CH (ops#652): defined in PropertyLinks.cpp, used only here (declared here, not in
+// ElementReferences.h, to keep App's headers as they are): takes the records of the references
+// into an object the recompute stopped, before the rule's afterStop() clears its shape.
+void takeElementReferencesInto(DocumentObject* target);
+}  // namespace App
 
 namespace
 {
@@ -173,7 +185,26 @@ namespace
 // 16: ops#502, a result without history (a Part primitive, a Python feature's shape, a PartDesign
 // primitive's tool) names its elements by a verified match against the result it replaces (`MLN`
 // ids from a counter saved with the shape), where its consumers named them by index.
-constexpr int ForkNamingRevision = 16;
+// 17: ops#640 (sweeps slice 2, batch 4's T1 and I-R3), a PartDesign Helix's caps are the profile
+// face and its edges and vertexes, modified (the start) and projected (the end), so turn 1's side
+// faces and edges are told apart by the start cap's names; the one turn left without them keeps
+// the count, `0of1`, where its lone `0` was the name of turn 1 in a helix of one turn. A Pipe
+// along a helix edge (a Part::Helix) sweeps turn by turn, the path cut at each whole turn, and
+// turn k and the vertex k turns from the start are named by the edge's name and k (`TRN`, `TRV`;
+// batch 6's R1), where the whole edge's name was the side faces'.
+// 18: ops#640 (batch 11: sweeps 15 and 16), a PartDesign Pipe along a helix whose turns touch (swept
+// whole) names its side faces as the merge of its turns; a Thin pipe names its wall's edges and side
+// faces from the profile's curves (by index before); the solver keeps a helix's turn 1 and the lone
+// face of one turn as one element at the same place (a 1 <-> 2 turn edit).
+// 19: ops#640 (name growth at split faces), a piece of a split element no longer takes as a
+// Connected Name a neighbour whose name holds the element's own name as it was (a face made from
+// the split edge, a dress-up's or refine's edge named from the split face): such a mark multiplied
+// the name's full length per split. The pieces keep their other marks.
+// 20: ops#806, a face that a feature split and its refine made whole again (a flush rib reaching
+// into a plate's top face; a groove filled flush) takes its name from before the split again,
+// first, when the merged face holds every piece of that split; the pieces' names follow. The
+// elements later features generate on it are named from the whole face, as without the split.
+constexpr int ForkNamingRevision = 20;
 
 // The `.N<n>` of the element map version: the form interned names are saved in (ops#6). 2: the
 // references are indices into the file's table (NamingFormat 2).
@@ -227,6 +258,248 @@ std::map<const Document*, DocumentForkRelease> documentForkReleases;
 // The saved names and IDs of the objects each document's running import read (importedSource,
 // ops#158)
 std::map<const Document*, std::map<const DocumentObject*, ImportedSource>> importedSources;
+
+// The id each running Save a Copy gives its file (ops#640, A1): a copy is a document of its own
+std::map<const Document*, std::string> copyUids;
+
+// The ids each open document had before a Save As gave it a new one (ops#640, A1 review T4): a
+// clipboard taken before the Save As still pastes as from the document itself (importedWithin)
+std::map<const Document*, std::set<std::string>> formerUids;
+
+// Whether target already holds doc (ops#640, A1 review A11, A15): its own file under another
+// spelling, or a file with its id, as when a backup is restored onto the document's name. A Save
+// As onto it keeps the document's id
+bool holdsDocument(const Document& doc, const std::string& target)
+{
+    try {
+        std::error_code error;
+        const auto to = Base::FileInfo::stringToPath(target);
+        if (!std::filesystem::exists(to, error)) {
+            return false;
+        }
+        const std::string& own = doc.FileName.getStrValue();
+        if (!own.empty()
+            && std::filesystem::equivalent(Base::FileInfo::stringToPath(own), to, error)) {
+            return true;
+        }
+        ProjectFile project(target);
+        return project.loadDocument() && project.getMetadata().uuid == doc.Uid.getValueStr();
+    }
+    catch (...) {
+        return false;
+    }
+}
+
+// FreeCAD-CH (ops#640, A1 fix review): whether a written zip ends with its end record and the
+// record's central directory sits right before it: a file cut short, or with bytes lost before
+// its end, fails this. Reads only the file's last 64 KB
+bool zipEndIsWhole(const std::string& name)
+{
+    constexpr std::size_t endSize = 22;  // the end of central directory record, without comment
+    constexpr std::size_t maxComment = 0xffff;
+    Base::FileInfo fi(name);
+    Base::ifstream in(fi, std::ios::in | std::ios::binary);
+    if (!in) {
+        return false;
+    }
+    in.seekg(0, std::ios::end);
+    const auto size = static_cast<std::uint64_t>(in.tellg());
+    if (size < endSize) {
+        return false;
+    }
+    const std::uint64_t tail = std::min<std::uint64_t>(size, endSize + maxComment);
+    std::vector<unsigned char> bytes(static_cast<std::size_t>(tail));
+    in.seekg(static_cast<std::streamoff>(size - tail));
+    in.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(tail));
+    if (!in) {
+        return false;
+    }
+    auto read16 = [&](std::size_t at) {
+        return static_cast<std::uint64_t>(bytes[at] | (bytes[at + 1] << 8));
+    };
+    auto read32 = [&](std::size_t at) {
+        return read16(at) | (read16(at + 2) << 16);
+    };
+    for (std::size_t at = bytes.size() - endSize + 1; at-- > 0;) {
+        if (bytes[at] != 0x50 || bytes[at + 1] != 0x4b || bytes[at + 2] != 0x05
+            || bytes[at + 3] != 0x06) {
+            continue;
+        }
+        const std::uint64_t where = size - tail + at;
+        const std::uint64_t cdirSize = read32(at + 12);
+        const std::uint64_t cdirStart = read32(at + 16);
+        const std::uint64_t comment = read16(at + 20);
+        if (where + endSize + comment == size && cdirStart + cdirSize == where) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Who saves when the preferences name no author (ops#640, A1)
+std::string systemUserName()
+{
+#ifdef FC_OS_WIN32
+    return qEnvironmentVariable("USERNAME").toStdString();
+#else
+    QString name = qEnvironmentVariable("USER");
+    if (name.isEmpty()) {
+        name = qEnvironmentVariable("LOGNAME");
+    }
+    return name.toStdString();
+#endif
+}
+
+// FreeCAD-CH (ops#640, slice A2): the save guard. What this process last saw of each document's
+// file, when it read it and after each of its own saves: the file's size and time. The sync tool
+// carries the saver's time across, so a file that arrived from the other computer never matches.
+struct FileStamp
+{
+    std::string path;
+    std::uintmax_t size = 0;
+    std::filesystem::file_time_type time {};
+};
+std::map<const Document*, FileStamp> fileStamps;
+
+std::optional<FileStamp> stampOf(const std::string& path)
+{
+    std::error_code error;
+    const auto where = Base::FileInfo::stringToPath(path);
+    FileStamp stamp;
+    stamp.path = path;
+    stamp.size = std::filesystem::file_size(where, error);
+    if (error) {
+        return std::nullopt;
+    }
+    stamp.time = std::filesystem::last_write_time(where, error);
+    if (error) {
+        return std::nullopt;
+    }
+    return stamp;
+}
+
+// No sure record of the document's file (A2 review P1-P3): the stamp matches no file, so the next
+// save over an existing file asks
+constexpr std::uintmax_t unknownSize = static_cast<std::uintmax_t>(-1);
+void markUnknown(const Document& doc)
+{
+    const std::string file = doc.FileName.getStrValue();
+    if (file.empty()) {
+        fileStamps.erase(&doc);
+        return;
+    }
+    FileStamp stamp;
+    stamp.path = file;
+    stamp.size = unknownSize;
+    fileStamps[&doc] = stamp;
+}
+
+void recordFile(const Document& doc)
+{
+    if (auto stamp = stampOf(doc.FileName.getStrValue())) {
+        fileStamps[&doc] = *stamp;
+    }
+    else {
+        markUnknown(doc);
+    }
+}
+
+bool sameStamp(const FileStamp& first, const FileStamp& second)
+{
+    return first.size == second.size && first.time == second.time;
+}
+
+bool samePath(const std::string& first, const std::string& second)
+{
+    if (first == second) {
+        return true;
+    }
+    std::error_code error;
+    return std::filesystem::equivalent(Base::FileInfo::stringToPath(first),
+                                       Base::FileInfo::stringToPath(second),
+                                       error);
+}
+
+// The author a save writes (A1): the preferences' name, else the system's user name
+std::string saveAuthor()
+{
+    std::string author = App::GetApplication()
+                             .GetParameterGroupByPath("User parameter:BaseApp/Preferences/Document")
+                             ->GetASCII("prefAuthor", "");
+    return author.empty() ? systemUserName() : author;
+}
+
+// A saved file's date (ISO, UTC) as the person's local time, for names and messages
+QDateTime localTime(const std::string& iso)
+{
+    QDateTime time = QDateTime::fromString(QString::fromStdString(iso), Qt::ISODate);
+    return time.isValid() ? time.toLocalTime() : QDateTime::currentDateTime();
+}
+
+// A free name beside `file` for a kept version: `<stem> (<who> <yyyy-mm-dd hh-mm>).<ext>`, which no
+// sync tool's conflict pattern and no ignore pattern matches, so it travels as a document
+std::string namedCopy(const std::string& file, const std::string& who, const std::string& when)
+{
+    const Base::FileInfo fi(file);
+    std::string person = who.empty() ? std::string("unknown") : who;
+    for (char& ch : person) {
+        if (std::string_view("<>:\"/\\|?*").find(ch) != std::string_view::npos
+            || static_cast<unsigned char>(ch) < 0x20) {
+            ch = '-';
+        }
+    }
+    const std::string tag =
+        person + " " + localTime(when).toString(QStringLiteral("yyyy-MM-dd HH-mm")).toStdString();
+    const std::string dir = fi.dirPath();
+    const std::string ext = fi.extension().empty() ? std::string("FCStd") : fi.extension();
+    for (int n = 1;; ++n) {
+        const std::string name = (dir.empty() ? std::string() : dir + "/") + fi.fileNamePure() + " ("
+            + tag + (n > 1 ? " " + std::to_string(n) : std::string()) + ")." + ext;
+        if (!Base::FileInfo(name).exists()) {
+            return name;
+        }
+    }
+}
+
+// The sync tools' names for the losing side of a conflict (design section 3, item 3): Syncthing's
+// `<stem>.sync-conflict-<date>-<time>-<device>.<ext>`; Dropbox's `<stem> (<who>'s conflicted copy
+// <date>).<ext>` and Nextcloud's `<stem> (conflicted copy <date> <time>).<ext>` (a date: a digit
+// inside). OneDrive's `<stem>-<computer>.<ext>` is not matched: it can't be told from a document's
+// own name. Compiled once per folder scan, with a cheap prefix test first (A2 review)
+class ConflictMatcher
+{
+public:
+    ConflictMatcher(const std::string& stem, const std::string& ext)
+        : stem(stem)
+        , syncthing("^" + quoted(stem) + R"(\.sync-conflict-\d{8}-\d{6}-[A-Z0-9]{7}\.)" + quoted(ext) + "$",
+                    boost::regex::icase)
+        , conflictedCopy("^" + quoted(stem) + R"( \([^)]*conflicted copy[^)]*\d[^)]*\)\.)" + quoted(ext)
+                             + "$",
+                         boost::regex::icase)
+    {}
+
+    bool operator()(const std::string& name) const
+    {
+        if (name.size() <= stem.size()
+            || !boost::iequals(std::string_view(name).substr(0, stem.size()), stem)) {
+            return false;
+        }
+        return boost::regex_match(name, syncthing) || boost::regex_match(name, conflictedCopy);
+    }
+
+private:
+    static std::string quoted(const std::string& text)
+    {
+        return boost::regex_replace(text,
+                                    boost::regex(R"([.^$|()\[\]{}*+?\\])"),
+                                    R"(\\$&)",
+                                    boost::match_default | boost::format_perl);
+    }
+
+    std::string stem;
+    boost::regex syncthing;
+    boost::regex conflictedCopy;
+};
 // The UUIDs of the documents each running import's objects were copied from, by document name
 // (exportObjects writes them, ops#171); under "" the one UUID of a copy of one document's objects
 // (SourceDocument). None for a saved project or a copy made by a build before ops#171
@@ -315,8 +588,10 @@ bool App::importedWithin(const ImportedSource& source, const Document& doc)
     // original keeps the UUID; PR 266 review M1). Still alike: a file of the same name in another
     // folder that, once the first is closed, opens under the same name (both copies of one file)
     const auto at = source.name.find('@');
-    return !source.document.empty() && source.document == doc.Uid.getValueStr()
-        && at != std::string::npos
+    auto former = formerUids.find(&doc);
+    const bool ownId = source.document == doc.Uid.getValueStr()
+        || (former != formerUids.end() && former->second.contains(source.document));
+    return !source.document.empty() && ownId && at != std::string::npos
         && source.name.compare(at + 1, std::string::npos, doc.getName()) == 0;
 }
 
@@ -463,10 +738,8 @@ bool transactionStateBlocksRecoveryWrite(const DocumentP& documentPrivate)
         || documentPrivate.activeUndoTransaction != nullptr || documentPrivate.committing;
 }
 
-/// The format of the interned names a file holds and of its `NameTable` element (ops#6). A build
-/// reads files of this format only: 2 writes references in the maps and the table as indices
-/// into the table (T2), and format 1 never shipped.
-constexpr int namingFormat = 2;
+// The naming formats this build writes and reads: Data::NamingFormatWritten and
+// Data::NamingFormatOldestRead (NameTable.h; the reader policy, ops#640 B1).
 
 /** Collects the references to interned names (ops#6) in everything written to a stream while it
  * lives: its NameRefScanBuffer stands in front of the stream's buffer. release() (or the
@@ -549,7 +822,8 @@ public:
         std::ostream& stream = writer.Stream();
         stream << startTag;
         if (!entries.empty()) {
-            stream << " NamingFormat=\"" << namingFormat << '"';
+            stream << " NamingFormat=\"" << Data::NamingFormatWritten << '"'
+                   << " NamingFormatOldestRead=\"" << Data::NamingFormatOldestRead << '"';
         }
         stream << ">\n";
         if (!entries.empty()) {
@@ -573,27 +847,48 @@ private:
 /** Reads the `NameTable` element that follows a `Document` start tag with `NamingFormat` into
  * the process's table, through \a remap (ops#6): the names read afterwards are remapped where
  * the file's IDs collide with this process's, or where the file lacks them. A file without the
- * attribute has no table, and every reference in it is unknown.
+ * attribute has no table, and every reference in it is unknown. The table is read in the format
+ * namingFormatToRead() picks from the file's \a fileWritten and \a fileOldestRead (the reader
+ * policy, ops#640 B1).
  */
 void restoreNameTable(Base::XMLReader& reader,
-                      int format,
+                      int fileWritten,
+                      int fileOldestRead,
                       Data::NameRemap& remap,
                       const char* documentName)
 {
-    if (format == 0) {
-        return;
-    }
-    if (format != namingFormat) {
-        // A newer format, or format 1, which never shipped (ops#6 T2)
-        FC_WARN(documentName << ": the file's interned names are in naming format " << format
-                             << ", which this build doesn't read (it reads " << namingFormat << ')'
-                             << ": its element maps with interned names are dropped and "
-                                "recomputed, and the references to interned names are missing");
-        remap.setNewerFormat();
-        return;  // the element's layout is unknown; the next readElement() passes over it
+    using Verdict = Data::NamingFormatRead::Verdict;
+    const auto read = Data::namingFormatToRead(fileWritten, fileOldestRead);
+    switch (read.verdict) {
+        case Verdict::NoTable:
+            return;
+        case Verdict::NeedsNewerReader:
+            FC_ERR(documentName << ": the file's interned names are in naming format "
+                                << fileWritten << " and need a reader of naming format "
+                                << fileOldestRead << " or newer; this build reads formats "
+                                << Data::NamingFormatOldestRead << " to "
+                                << Data::NamingFormatWritten
+                                << ": its name table is refused, its element maps with interned "
+                                   "names are dropped and recomputed, and the references to "
+                                   "interned names are missing");
+            remap.setNewerFormat();
+            return;  // the element's layout is unknown; the next readElement() passes over it
+        case Verdict::Unreadable:
+            // Format 1, which never shipped (ops#6 T2), or no format at all
+            FC_WARN(documentName << ": the file's interned names are in naming format "
+                                 << fileWritten << ", which this build doesn't read (it reads "
+                                 << Data::NamingFormatOldestRead << " to "
+                                 << Data::NamingFormatWritten
+                                 << "): its element maps with interned names are dropped and "
+                                    "recomputed, and the references to interned names are "
+                                    "missing");
+            remap.setNewerFormat();
+            return;
+        case Verdict::Read:
+            break;
     }
     reader.readElement("NameTable");
-    auto summary = remap.load(reader.beginCharStream());
+    auto summary = remap.load(reader.beginCharStream(), read.format);
     reader.readEndElement("NameTable");
     if (remap.inlineCount() != 0) {
         FC_WARN(documentName << ": " << summary.refused.size()
@@ -663,8 +958,16 @@ void noteNewerMarkers(Base::XMLReader& reader, const Document* doc)
     if (!format.readable) {
         noteNewerFormat(doc, unreadableMarker("NamingFormat", format));
     }
-    else if (format.value > namingFormat) {
+    else if (format.value > Data::NamingFormatWritten) {
         noteNewerFormat(doc, "NamingFormat " + std::to_string(format.value));
+    }
+    // The oldest reader the file's table needs, when it is newer than this build's (ops#640 B1)
+    const auto oldestRead = intAttribute(reader, "NamingFormatOldestRead");
+    if (!oldestRead.readable) {
+        noteNewerFormat(doc, unreadableMarker("NamingFormatOldestRead", oldestRead));
+    }
+    else if (oldestRead.value > Data::NamingFormatWritten) {
+        noteNewerFormat(doc, "NamingFormatOldestRead " + std::to_string(oldestRead.value));
     }
     const auto revision = intAttribute(reader, "NamingRevision");
     if (!revision.readable) {
@@ -994,6 +1297,17 @@ bool Document::checkOnCycle()
 
 bool Document::undo(const int id)
 {
+    // FreeCAD-CH (ops#640): with a feature dialog open its step can't be undone, nor committed
+    // behind it (the preamble below would)
+    if (isStepLocked()) {
+        FC_LOG("Step locked, ignore undo in " << getName());
+        return false;
+    }
+    ++d->undoRedoDepth;
+    Base::ScopeGuard depth([this]() {
+        --d->undoRedoDepth;
+    });
+
     if (id != 0) {
         const auto it = mUndoMap.find(id);
         if (it == mUndoMap.end()) {
@@ -1007,7 +1321,18 @@ bool Document::undo(const int id)
     }
 
     if (d->activeUndoTransaction) {
+        const int pending = d->activeUndoTransaction->getID();
         _commitTransaction(true);
+        if (!mUndoMap.contains(pending)) {
+            // FreeCAD-CH (ops#640): the pending transaction changed no input, and its commit
+            // dropped it (_commitTransaction): undoing it undoes nothing, not the step before
+            if (d->undoRedoDepth == 1) {
+                regenerateAfterTransaction();
+            }
+            // True: the pending transaction was committed (as nothing), no step popped. False
+            // when there is no step at all (also with UndoMaxStackSize 0, which pops at once)
+            return !mUndoTransactions.empty();
+        }
     }
     if (mUndoTransactions.empty()) {
         return false;
@@ -1015,6 +1340,12 @@ bool Document::undo(const int id)
     // redo
     d->activeUndoTransaction = new Transaction(mUndoTransactions.back()->getID());
     d->activeUndoTransaction->Name = mUndoTransactions.back()->Name;
+
+    // FreeCAD-CH (ops#640): what the step changed, for the regeneration below
+    std::vector<DocumentObject*> changed;
+    if (d->regenerateOnCommit) {
+        changed = mUndoTransactions.back()->inputChangedObjects();
+    }
 
     {
         Base::FlagToggler<bool> flag(d->undoing);
@@ -1039,6 +1370,13 @@ bool Document::undo(const int id)
         }
     }
 
+    // FreeCAD-CH (ops#640): the model of the step before, as Onshape shows it; undo(id) once, at
+    // its last step
+    if (d->undoRedoDepth == 1) {
+        enforceChangedForRegeneration(changed);
+        regenerateAfterTransaction();
+    }
+
     signalUndo(*this);  // now signal the undo
     signalBecameStable(*this);
 
@@ -1047,6 +1385,16 @@ bool Document::undo(const int id)
 
 bool Document::redo(const int id)
 {
+    // FreeCAD-CH (ops#640): as undo()
+    if (isStepLocked()) {
+        FC_LOG("Step locked, ignore redo in " << getName());
+        return false;
+    }
+    ++d->undoRedoDepth;
+    Base::ScopeGuard depth([this]() {
+        --d->undoRedoDepth;
+    });
+
     if (id != 0) {
         const auto it = mRedoMap.find(id);
         if (it == mRedoMap.end()) {
@@ -1060,12 +1408,21 @@ bool Document::redo(const int id)
     if (d->activeUndoTransaction) {
         _commitTransaction(true);
     }
-
-    assert(mRedoTransactions.size() != 0);
+    // FreeCAD-CH (ops#640): the Redo stack outlives an open transaction now; committed as a step,
+    // the transaction cleared it
+    if (mRedoTransactions.empty()) {
+        return false;
+    }
 
     // undo
     d->activeUndoTransaction = new Transaction(mRedoTransactions.back()->getID());
     d->activeUndoTransaction->Name = mRedoTransactions.back()->Name;
+
+    // FreeCAD-CH (ops#640): what the step changes, for the regeneration below
+    std::vector<DocumentObject*> changed;
+    if (d->regenerateOnCommit) {
+        changed = mRedoTransactions.back()->inputChangedObjects();
+    }
 
     // do the redo
     {
@@ -1087,6 +1444,12 @@ bool Document::redo(const int id)
             obj->onUndoRedoFinished();
             obj->setStatus(ObjectStatus::PendingTransactionUpdate, false);
         }
+    }
+
+    // FreeCAD-CH (ops#640): as undo()
+    if (d->undoRedoDepth == 1) {
+        enforceChangedForRegeneration(changed);
+        regenerateAfterTransaction();
     }
 
     signalRedo(*this);
@@ -1195,6 +1558,11 @@ int Document::openTransaction(TransactionName name, int tid) // NOLINT
         }
         return 0;
     }
+    // FreeCAD-CH (ops#640): no transaction beside an open dialog's step
+    if (isStepLocked()) {
+        FC_LOG("Step locked, ignore new transaction '" << name.name << "'");
+        return 0;
+    }
     if (isPerformingTransaction() || d->committing) {
         if (FC_LOG_INSTANCE.isEnabled(FC_LOGLEVEL_LOG)) {
             FC_WARN("Cannot open transaction while transacting");
@@ -1218,6 +1586,17 @@ int Document::_openTransaction(std::string name, int id)
             FC_WARN("Transaction locked, ignore new transaction '" << name << "'");
         }
     }
+    // FreeCAD-CH (ops#640): step-locked, only the booked step opens (an open dialog's first
+    // change), and nothing commits the active one to open another. With no step booked or open
+    // there is nothing to protect: _checkTransaction's "Delete" (recording the removal of an
+    // object that older steps hold) still opens.
+    const bool stepPending = d->bookedTransaction != NullTransaction || d->activeUndoTransaction;
+    if (isStepLocked() && stepPending
+        && (id != d->bookedTransaction
+            || (d->activeUndoTransaction && d->activeUndoTransaction->getID() != id))) {
+        FC_LOG("Step locked, ignore new transaction '" << name << "'");
+        return 0;
+    }
     if (isPerformingTransaction() || d->committing) {
         if (FC_LOG_INSTANCE.isEnabled(FC_LOGLEVEL_LOG)) {
             FC_WARN("Cannot open transaction while transacting");
@@ -1240,7 +1619,8 @@ int Document::_openTransaction(std::string name, int id)
     if (d->activeUndoTransaction) {
         _commitTransaction(true);
     }
-    _clearRedos();
+    // FreeCAD-CH (ops#640): the Redo stack is cleared when this transaction is committed as a
+    // step (_commitTransaction), not here: an unchanged accept or a Cancel keeps it
 
     // When id == 0, this creates a new id
     // for instance, when there is no global transaction
@@ -1278,6 +1658,17 @@ void Document::renameTransaction(const std::string& name, const int id) const
 }
 int Document::setActiveTransaction(TransactionName name, int tid)
 {
+    // FreeCAD-CH (ops#640): step-locked, only the booked step can be named again; another id,
+    // or a new one, would commit it behind the open dialog. The caller gets no id, so its own
+    // commit (Gui::Command::commitCommand) can't close the step either.
+    if (isStepLocked()) {
+        if (tid != NullTransaction && tid == d->bookedTransaction) {
+            return tid;
+        }
+        FC_LOG("Step locked, ignore transaction '" << name.name << "'");
+        return NullTransaction;
+    }
+
     // Probably a group transaction situation
     if (tid != NullTransaction) {
         if (!GetApplication().transactionIsActive(tid)) {
@@ -1325,6 +1716,75 @@ bool Document::isTransactionLocked() const
 {
     return d->TransactionLock > 0;
 }
+
+void Document::lockStep()
+{
+    d->StepLock++;
+}
+void Document::unlockStep()
+{
+    if (d->StepLock > 0) {
+        d->StepLock--;
+    }
+}
+bool Document::isStepLocked() const
+{
+    return d->StepLock > 0;
+}
+
+void Document::setRegenerateOnCommit(const bool on)
+{
+    d->regenerateOnCommit = on;
+}
+bool Document::regeneratesOnCommit() const
+{
+    return d->regenerateOnCommit;
+}
+
+// FreeCAD-CH (ops#640): after an undo or redo, the objects whose inputs the step changed (still
+// in the document) and their dependants recompute, whatever their touch state: one pass heals
+// them (F34)
+void Document::enforceChangedForRegeneration(const std::vector<DocumentObject*>& changed)
+{
+    for (auto obj : changed) {
+        if (!isIn(obj)) {
+            continue;  // the step took it out: never read through the pointer
+        }
+        obj->enforceRecompute();
+        for (auto inObj : obj->getInList()) {
+            if (inObj && inObj->isAttachedToDocument()) {
+                inObj->enforceRecompute();
+            }
+        }
+    }
+}
+
+bool Document::regenerateAfterTransaction()
+{
+    if (!d->regenerateOnCommit || isPerformingTransaction() || d->committing
+        || testStatus(Document::Recomputing) || testStatus(Document::Restoring)
+        || testStatus(Document::PartialDoc) || GetApplication().isClosingAll()) {
+        return false;
+    }
+    if (!mustExecute()) {
+        return false;
+    }
+    // Synchronous, on the calling thread; opens no transaction: the closed one is gone, and
+    // nothing is booked (_checkTransaction opens nothing), so the Redo stack stays
+    try {
+        recompute();
+    }
+    catch (Base::Exception& e) {
+        e.reportException();
+    }
+    catch (std::exception& e) {
+        FC_ERR("Exception in the regeneration of " << getName() << ": " << e.what());
+    }
+    catch (...) {
+        FC_ERR("Unknown exception in the regeneration of " << getName());
+    }
+    return true;
+}
 bool Document::transacting() const
 {
     return isPerformingTransaction() || d->committing;
@@ -1337,6 +1797,14 @@ void Transaction::openPendingTransaction(Document& doc)
 {
     if (!doc.d->rollback && !globalIsRelabeling && !doc.d->definingTransaction) {
         doc._checkTransaction(nullptr, nullptr, __LINE__);
+        // FreeCAD-CH (ops#640): a step's commit clears the Redo stack now, not the open
+        // (_commitTransaction). The change coming is to an object an undo or redo transaction
+        // holds, so the transaction is a step: cleared at its commit, the Redo stack would free an
+        // object the step records, and its undo would read freed memory. Cleared here, as the
+        // open did before, a redo-held object goes first and its change is skipped (the caller)
+        if (doc.d->activeUndoTransaction) {
+            doc._clearRedos();
+        }
     }
 }
 
@@ -1444,19 +1912,40 @@ bool Document::_commitTransaction(const bool notify)
     d->bookedTransaction = 0;
     bool committed = false;
     if (d->activeUndoTransaction) {
+        // FreeCAD-CH (ops#640): a transaction that changed no input (an unchanged accept of a
+        // feature dialog, whose live preview rewrote only the shapes) is no undo step, as in
+        // Onshape. Kept when another document shares its id: it marks a change there. Only a
+        // step clears the Redo stack (before the committing flag, which _clearRedos refuses).
+        const bool isStep = d->clearingUndos || d->activeUndoTransaction->changesInputs()
+            || transactionSharedElsewhere(d->activeUndoTransaction->getID());
+        if (isStep) {
+            _clearRedos();
+        }
         {
             Base::FlagToggler<> flag(d->committing);
             Application::TransactionSignaller signaller(false, true);
             const int id = d->activeUndoTransaction->getID();
 
-            mUndoTransactions.push_back(d->activeUndoTransaction);
-            d->activeUndoTransaction = nullptr;
+            if (!isStep) {
+                FC_LOG("drop transaction '" << d->activeUndoTransaction->Name
+                                            << "' with no change of an input in " << getName());
+                mUndoMap.erase(id);
+                delete d->activeUndoTransaction;
+                d->activeUndoTransaction = nullptr;
+            }
+            else {
+                mUndoTransactions.push_back(d->activeUndoTransaction);
+                d->activeUndoTransaction = nullptr;
 
-            // check the stack for the limits
-            if (mUndoTransactions.size() > d->UndoMaxStackSize) {
-                mUndoMap.erase(mUndoTransactions.front()->getID());
-                delete mUndoTransactions.front();
-                mUndoTransactions.pop_front();
+                // check the stack for the limits. FreeCAD-CH (ops#640): after a push only, and
+                // down to the limit: the Gui sets it before each commit so that the trim takes
+                // whole steps (a closed sketch session is several transactions; Gui::Document's
+                // DocumentP::updateUndoLimit)
+                while (mUndoTransactions.size() > d->UndoMaxStackSize) {
+                    mUndoMap.erase(mUndoTransactions.front()->getID());
+                    delete mUndoTransactions.front();
+                    mUndoTransactions.pop_front();
+                }
             }
             signalCommitTransaction(*this);
 
@@ -1471,6 +1960,16 @@ bool Document::_commitTransaction(const bool notify)
         signalBecameStable(*this);
     }
     return true;
+}
+
+bool Document::transactionSharedElsewhere(const int id) const
+{
+    for (auto doc : GetApplication().getDocuments()) {
+        if (doc != this && doc->mUndoMap.contains(id)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 void Document::abortTransaction() const
@@ -1611,6 +2110,9 @@ void Document::clearUndos()
     }
 
     if (d->activeUndoTransaction) {
+        // FreeCAD-CH (ops#640): no no-op test for a transaction about to be discarded; it may
+        // record view providers that are being deleted.
+        Base::FlagToggler<> clearing(d->clearingUndos);
         _commitTransaction(true);
     }
 
@@ -1964,6 +2466,9 @@ Document::Document(const char* documentName)
 Document::~Document()
 {
     App::forgetEditsSinceOpen(this);
+    formerUids.erase(this);
+    fileStamps.erase(this);
+    copyUids.erase(this);
 #ifdef FC_LOGUPDATECHAIN
     Console().log("-App::Document: %s %p\n", getName(), this);
 #endif
@@ -2035,7 +2540,10 @@ void Document::Save(Base::Writer& writer) const
              << Application::Config()["BuildVersionMajor"] << "."
              << Application::Config()["BuildVersionMinor"] << "R"
              << Application::Config()["BuildRevision"] << "\" FileVersion=\""
-             << writer.getFileVersion() << "\" StringHasher=\"1\"";
+             << writer.getFileVersion() << "\" StringHasher=\"1\""
+             // The highest object ID ever given (FreeCAD-CH ops#657): a reopened document never
+             // gives a deleted object's ID again, which a stored reference by ID would re-bind to
+             << " LastObjectId=\"" << d->lastObjectId << '"';
     // The fork release of the build that writes it (ops#323). A recovery snapshot of a newer
     // document keeps it newer (writer mode "ForkRecovery", set by RecoverySnapshot.cpp): the
     // recovered document reopens at the original path, and its first save must still ask (PR 293
@@ -2143,6 +2651,9 @@ void Document::Restore(Base::XMLReader& reader)
     else {
         reader.FileVersion = 0;
     }
+    // ops#657: the saved high-water object ID (none before it)
+    const long savedLastObjectId =
+        reader.hasAttribute("LastObjectId") ? reader.getAttribute<long>("LastObjectId") : 0;
     // The naming revision of its references (ops#116): none in files saved before, so 0
     // (an unreadable one is newer, noted below: no migration)
     auto& namingRevision = documentNamingRevisions[this];
@@ -2171,7 +2682,8 @@ void Document::Restore(Base::XMLReader& reader)
         remap = &ownRemap.emplace();
     }
     const int format = namingFormatOf(intAttribute(reader, "NamingFormat"));
-    restoreNameTable(reader, format, *remap, getName());
+    const int oldestRead = namingFormatOf(intAttribute(reader, "NamingFormatOldestRead"));
+    restoreNameTable(reader, format, oldestRead, *remap, getName());
 
     if (hasStringHasher) {
         d->Hasher->Restore(reader);
@@ -2238,6 +2750,9 @@ void Document::Restore(Base::XMLReader& reader)
     else if (scheme >= 3) {
         // read the feature types
         readObjects(reader);
+        if (savedLastObjectId > d->lastObjectId) {
+            d->lastObjectId = savedLastObjectId;  // ops#657
+        }
 
         // tip object handling. First the whole document has to be read, then we
         // can restore the Tip link out of the TipName Property:
@@ -2572,6 +3087,9 @@ void Document::writeObjects(const std::vector<DocumentObject*>& objs,
     if (writer.hasFailed()) {
         std::cerr << "Output stream is in error state. As a result the "
                      "Document.xml file may be incomplete.\n";
+        // FreeCAD-CH (ops#640, A1 fix review 2): a save that sees this error fails (its file never
+        // replaces the document's); the flags are still reset for the data files that follow
+        writer.addError("the output stream failed: Document.xml is incomplete");
         // reset the error flags to try to safe the data files
         writer.clear();
     }
@@ -2963,7 +3481,8 @@ std::vector<DocumentObject*> Document::importObjects(Base::XMLReader& reader)
     noteNewerMarkers(reader, this);
     // The entries of the imported interned names come first (ops#6)
     const int format = namingFormatOf(intAttribute(reader, "NamingFormat"));
-    restoreNameTable(reader, format, *remap, getName());
+    const int oldestRead = namingFormatOf(intAttribute(reader, "NamingFormatOldestRead"));
+    restoreNameTable(reader, format, oldestRead, *remap, getName());
     if (hasStringHasher) {
         StringHasherRef sourceHasher = new StringHasher;
         sourceHasher->Restore(reader);
@@ -3085,19 +3604,255 @@ bool Document::saveAs(const char* _file)
 {
     const std::string file = checkFileName(_file);
     const Base::FileInfo fi(file.c_str());
-    if (this->FileName.getStrValue() != file) {
-        this->FileName.setValue(file);
-        this->Label.setValue(fi.fileNamePure());
+    if (this->FileName.getStrValue() == file) {
+        return save();
+    }
+    const bool newId = !this->FileName.getStrValue().empty() && !holdsDocument(*this, file);
+    const std::string oldFile = this->FileName.getStrValue();
+    const std::string oldLabel = this->Label.getStrValue();
+    const Base::Uuid oldUid = this->Uid.getValue();
+    bool recorded = false;
+    this->FileName.setValue(file);
+    this->Label.setValue(fi.fileNamePure());
+    if (newId) {
+        // FreeCAD-CH (ops#640, A1): the new file is a document of its own, with its own id
+        // (its history and its links are found by it); the old file keeps the old one. A
+        // document that had no file keeps its id: no other file has it; so does a Save As
+        // onto the file that already holds this document (holdsDocument)
+        recorded = formerUids[this].insert(oldUid.getValue()).second;
+        this->Uid.setValue(Base::Uuid());  // renames the transient directory too
+    }
+    else {
         this->Uid.touch();  // this forces a rename of the transient directory
     }
 
-    return save();
+    // A Save As that fails leaves the document as it was: its file, its name and its id, so the
+    // next save goes where it went before (A1 fix review)
+    auto undo = [&]() {
+        this->FileName.setValue(oldFile);
+        this->Label.setValue(oldLabel);
+        if (newId) {
+            this->Uid.setValue(oldUid);
+            if (recorded) {
+                formerUids[this].erase(oldUid.getValue());
+            }
+        }
+        else {
+            this->Uid.touch();  // the transient directory goes back to the old file's name
+        }
+    };
+    bool saved = false;
+    try {
+        saved = save();
+    }
+    catch (...) {
+        undo();
+        throw;
+    }
+    if (!saved) {
+        undo();
+    }
+    return saved;
 }
 
 bool Document::saveCopy(const char* file) const
 {
     const std::string checked = checkFileName(file);
-    return this->FileName.getStrValue() != checked ? saveToFile(checked.c_str()) : false;
+    // The document's own file under any spelling: no copy over it, past the guard (A2 review R3)
+    if (samePath(this->FileName.getStrValue(), checked)) {
+        return false;
+    }
+    // FreeCAD-CH (ops#640, A1): the copy gets an id of its own; the open document keeps its id
+    copyUids[this] = Base::Uuid::createUuid();
+    struct Forget
+    {
+        const Document* doc;
+        ~Forget()
+        {
+            copyUids.erase(doc);
+        }
+    } forget {this};
+    return saveToFile(checked.c_str());
+}
+
+// FreeCAD-CH (ops#640, slice A2): the save guard and the conflict copies
+
+Document::FileChange Document::fileChangeOnDisk() const
+{
+    FileChange change;
+    const std::string file = FileName.getStrValue();
+    const auto known = fileStamps.find(this);
+    if (file.empty() || known == fileStamps.end() || !samePath(known->second.path, file)) {
+        return change;  // nothing read or written here under this name: nothing to compare
+    }
+    const auto now = stampOf(file);
+    if (!now) {
+        return change;  // gone: a save overwrites nothing
+    }
+    if (sameStamp(*now, known->second)) {
+        return change;
+    }
+    change.changed = true;
+    change.known = known->second.size != unknownSize;
+    try {
+        const ProjectFile project(file);
+        const ProjectFile::Metadata meta = project.getMetadata();
+        change.by = meta.lastModifiedBy;
+        change.when = meta.lastModifiedDate;
+    }
+    catch (...) {
+        // Not a document we can read: who and when stay unknown
+    }
+    return change;
+}
+
+std::string Document::resolveFileChange(const std::string& choice)
+{
+    const FileChange change = fileChangeOnDisk();
+    if (!change.changed) {
+        throw Base::RuntimeError("The document's file has not changed on disk: nothing to resolve");
+    }
+    const std::string file = FileName.getStrValue();
+    if (choice == "KeepMineAsCopy") {
+        // Mine becomes a document of its own beside theirs (a new id, A1)
+        const std::string copy = namedCopy(file, saveAuthor(), std::string());
+        if (!saveAs(copy.c_str())) {
+            throw Base::FileException("Cannot save this version as a copy", copy);
+        }
+        return copy;
+    }
+    if (choice == "TakeTheirs") {
+        // Mine is kept as a copy (a new id), then theirs is read
+        const std::string copy = namedCopy(file, saveAuthor(), std::string());
+        if (!saveCopy(copy.c_str())) {
+            throw Base::FileException("Cannot save this version as a copy", copy);
+        }
+        restore();
+        return copy;
+    }
+    if (choice == "SaveMineOver") {
+        // Theirs is kept under its author's name and time, then mine is saved over it
+        const std::string kept = namedCopy(file, change.by, change.when);
+        const auto theirs = stampOf(file);
+        if (!keepFileAs(file, kept)) {
+            throw Base::FileException("Cannot keep the other version: not saved", kept);
+        }
+        // A third version arriving meanwhile is not overwritten (review P4); the kept copy stays
+        const auto still = stampOf(file);
+        if (!theirs || !still || !sameStamp(*theirs, *still)) {
+            throw Base::FileException(
+                "The file changed again while the other version was kept: not saved", file);
+        }
+        // The save goes over the version kept, and over no other: the guard's checks compare with
+        // it, so a third version arriving during the save is not overwritten (A2 fix review f2)
+        const auto previous = fileStamps.find(this) != fileStamps.end()
+            ? std::optional<FileStamp>(fileStamps[this])
+            : std::nullopt;
+        fileStamps[this] = *theirs;
+        bool saved = false;
+        try {
+            saved = save();
+        }
+        catch (...) {
+            if (previous) {
+                fileStamps[this] = *previous;
+            }
+            throw;
+        }
+        if (!saved) {
+            if (previous) {
+                fileStamps[this] = *previous;
+            }
+            throw Base::FileException("Cannot save this version", file);
+        }
+        return kept;
+    }
+    throw Base::ValueError(
+        ("Unknown choice '" + choice + "': KeepMineAsCopy, TakeTheirs or SaveMineOver").c_str());
+}
+
+std::vector<std::string> Document::conflictCopies() const
+{
+    std::vector<std::string> copies;
+    const std::string file = FileName.getStrValue();
+    if (file.empty()) {
+        return copies;
+    }
+    const Base::FileInfo fi(file);
+    const ConflictMatcher isConflictCopy(fi.fileNamePure(), fi.extension());
+    std::error_code error;
+    const auto dir = Base::FileInfo::stringToPath(fi.dirPath());
+    for (std::filesystem::directory_iterator it(dir, error), end; !error && it != end;
+         it.increment(error)) {
+        const std::string name = Base::FileInfo::pathToString(it->path().filename());
+        if (isConflictCopy(name) && it->is_regular_file(error)) {
+            copies.push_back(Base::FileInfo::pathToString(it->path()));
+        }
+    }
+    std::sort(copies.begin(), copies.end());
+    return copies;
+}
+
+std::string Document::resolveConflictCopy(const std::string& path, const std::string& choice)
+{
+    const auto copies = conflictCopies();
+    const auto other = std::find_if(copies.begin(), copies.end(), [&](const std::string& copy) {
+        return samePath(copy, path);
+    });
+    if (other == copies.end()) {
+        throw Base::ValueError(("Not a conflict copy of this document: " + path).c_str());
+    }
+    const std::string file = FileName.getStrValue();
+    auto metadataOf = [](const std::string& name) {
+        try {
+            return ProjectFile(name).getMetadata();
+        }
+        catch (...) {
+            return ProjectFile::Metadata {};
+        }
+    };
+    if (choice == "KeepThis") {
+        // The other stays, under its author's name and time: no conflict name any more
+        const ProjectFile::Metadata meta = metadataOf(*other);
+        const std::string kept = namedCopy(file, meta.lastModifiedBy, meta.lastModifiedDate);
+        std::error_code error;
+        std::filesystem::rename(Base::FileInfo::stringToPath(*other),
+                                Base::FileInfo::stringToPath(kept),
+                                error);
+        if (error) {
+            throw Base::FileException("Cannot rename the other version", *other);
+        }
+        return kept;
+    }
+    if (choice == "KeepOther") {
+        // This one is kept under its author's name and time, the other takes the document's
+        // name, and the document reads it
+        // This version is kept as the document holds it, its unsaved edits too, as a document of
+        // its own (a new id; A2 review R2)
+        const std::string kept = namedCopy(file, saveAuthor(), std::string());
+        if (!saveCopy(kept.c_str())) {
+            throw Base::FileException("Cannot keep this version: nothing changed", kept);
+        }
+        // The file under the name is another version still when it changed since it was read
+        // (the sync's winner): it is kept too, under its author's name and time (A2 review N1)
+        if (const FileChange change = fileChangeOnDisk(); change.changed) {
+            const std::string winner = namedCopy(file, change.by, change.when);
+            const auto before = stampOf(file);
+            if (!keepFileAs(file, winner)) {
+                throw Base::FileException(
+                    "Cannot keep the version under the document's name: nothing replaced", winner);
+            }
+            const auto after = stampOf(file);
+            if (!before || !after || !sameStamp(*before, *after)) {
+                throw Base::FileException(
+                    "The file changed again while it was kept: nothing replaced", file);
+            }
+        }
+        replaceFileWith(*other, file);
+        restore();
+        return kept;
+    }
+    throw Base::ValueError(("Unknown choice '" + choice + "': KeepThis or KeepOther").c_str());
 }
 
 bool Document::canWriteRecoverySnapshot() const
@@ -3126,18 +3881,36 @@ bool Document::save()
 
         const std::string LastModifiedDateString = Base::Tools::currentDateTimeString();
         LastModifiedDate.setValue(LastModifiedDateString.c_str());
-        // set author if needed
-        const bool saveAuthor =
-            GetApplication()
-                .GetParameterGroupByPath("User parameter:BaseApp/Preferences/Document")
-                ->GetBool("prefSetAuthorOnSave", false);
-        if (saveAuthor) {
-            const std::string Author =
-                GetApplication()
-                    .GetParameterGroupByPath("User parameter:BaseApp/Preferences/Document")
-                    ->GetASCII("prefAuthor", "");
-            LastModifiedBy.setValue(Author.c_str());
+        // FreeCAD-CH (ops#640, A1): every save writes who made it (the save guard and the
+        // history read it from the file): the author the preferences name, else the system's
+        // user name. Upstream's switch "prefSetAuthorOnSave" is no longer read.
+        // FreeCAD-CH (ops#640, A2): the save guard. A file that is no longer the one this
+        // document read or last wrote (the other computer's save, carried by the sync) is not
+        // overwritten: the save stops, and resolveFileChange() offers the three ways out (a
+        // script is guarded too)
+        {
+            const FileChange change = fileChangeOnDisk();
+            if (change.changed) {
+                const std::string who = change.by.empty() ? std::string("Someone") : change.by;
+                const std::string when = change.when.empty()
+                    ? std::string()
+                    : " at "
+                        + localTime(change.when)
+                              .toString(QStringLiteral("yyyy-MM-dd HH:mm"))
+                              .toStdString();
+                const std::string what = change.known
+                    ? who + " saved this document" + when + ", after it was opened here"
+                    : "This document was not read from the file under its name as it is now (last "
+                        "saved by " + who + when + ")";
+                throw Base::FileException(
+                    (what
+                     + ": not saved, so as not to overwrite it. Keep this version as a copy, take "
+                       "the other (this one is kept), or save this one over it (the other is kept)")
+                        .c_str(),
+                    Base::FileInfo(FileName.getValue()));
+            }
         }
+        LastModifiedBy.setValue(saveAuthor().c_str());
 
         // A newer file (ops#323): the GUI asked first; a script saves, with a warning
         if (isNewerFormat(this)) {
@@ -3145,6 +3918,7 @@ bool Document::save()
         }
         bool result = saveToFile(FileName.getValue());
         if (result) {
+            recordFile(*this);  // the file this document knows now (A2)
             d->programVersion = Application::Config()["BuildVersionMajor"] + "."
                 + Application::Config()["BuildVersionMinor"] + "R"
                 + Application::Config()["BuildRevision"];
@@ -3160,15 +3934,16 @@ bool Document::save()
 bool Document::saveToFile(const char* filename) const
 {
     signalStartSave(*this, filename);
+    // FreeCAD-CH (ops#640, folder sync item 3): a file used from outside the team folder is
+    // missing on the other computer; say so here, not when the other person opens it
+    TeamFolder::warnOutside(*this, filename);
 
     auto hGrp = GetApplication().GetParameterGroupByPath(
         "User parameter:BaseApp/Preferences/Document");
-    int compression = static_cast<int>(hGrp->GetInt("CompressionLevel", 7));
+    // Level 3, not zlib's 7 (deflate_slow): on a 300-object document deflate took 57% of the save
+    // at 7; 3 saves it in about 60% of the time for about 11% more bytes (ops#640)
+    int compression = static_cast<int>(hGrp->GetInt("CompressionLevel", 3));
     compression = Base::clamp<int>(compression, Z_NO_COMPRESSION, Z_BEST_COMPRESSION);
-
-    bool policy = GetApplication()
-                      .GetParameterGroupByPath("User parameter:BaseApp/Preferences/Document")
-                      ->GetBool("BackupPolicy", true);
 
     auto canonical_path = [](const char* filename) {
         try {
@@ -3208,29 +3983,43 @@ bool Document::saveToFile(const char* filename) const
         throw Base::FileWritePermissionException(originalFileInfo);
     }
 
-    // make a tmp. file where to save the project data first and then rename to
-    // the actual file name. This may be useful if overwriting an existing file
-    // fails so that the data of the work up to now isn't lost.
-    std::string uuid = Base::Uuid::createUuid();
-    std::string fn = nativePath;
-    if (policy) {
-        fn += ".";
-        fn += uuid;
-    }
-
+    // FreeCAD-CH (ops#640, slice A1): the file is written under a temporary name beside the
+    // document, then flushed, the old file kept and the new one renamed into place
+    // (BackupPolicy::apply). The name ends in `.fctmp`, which the team folder's sync ignores.
+    // Upstream's "BackupPolicy" switch, which wrote straight into the document's file, is no
+    // longer read; "CreateBackupFiles", "CountBackupFiles", "UseFCBakExtension" and
+    // "SaveBackupDateFormat" still choose the backups.
+    // Short, so that a path near the system's limit still saves (A1 review A13)
+    std::string fn;
+    do {
+        fn = nativePath + "." + Base::Uuid::createUuid().substr(0, 8) + ".fctmp";
+    } while (Base::FileInfo(fn).exists());
+    // Once BackupPolicy::apply has put the file under the document's name, the save happened,
+    // whatever error follows (A1 fix review 2); apply says so itself, the file system's state is
+    // no proof (a network share gone, A1 fix review 3)
+    bool applying = false;
+    auto replaced = [&]() {
+        return applying && saveReplacedFile();
+    };
+    try {
 
     // open extra scope to close ZipWriter properly
     {
         Base::FileInfo tmp(fn);
         Base::ofstream file(tmp, std::ios::out | std::ios::binary);
 
-        Base::ZipWriter writer(file);
+        auto zip = std::make_unique<Base::ZipWriter>(file);
+        Base::ZipWriter& writer = *zip;
         if (!file.is_open()) {
             throw Base::FileException("Failed to open file", tmp);
         }
 
         writer.setComment("FreeCAD Document");
         writer.setLevel(compression);
+        // Save a Copy: the copy's own document id (PropertyUUID::Save)
+        if (auto copy = copyUids.find(this); copy != copyUids.end()) {
+            writer.setMode(std::string(copyUidMode) + copy->second);
+        }
         writer.putNextEntry("Document.xml");
 
         if (hGrp->GetBool("SaveBinaryBrep", false)) {
@@ -3246,6 +4035,9 @@ bool Document::saveToFile(const char* filename) const
         // to them by index (ops#6 T2)
         Data::NameRefCollector collector;
         Document::Save(writer);
+        if (saveFaultPoint("write")) {
+            writer.Stream().setstate(std::ios::badbit);  // as a short write would leave it
+        }
 
         // Special handling for Gui document.
         signalSaveDocument(writer);
@@ -3261,10 +4053,31 @@ bool Document::saveToFile(const char* filename) const
         }
 
         GetApplication().signalSaveDocument(*this);
+
+        // The zip's end and the file's close can fail too (a full disk): such a file never
+        // replaces the document's (A1 review)
+        if (writer.isBad()) {
+            throw Base::FileException("Failed to write the file", tmp);
+        }
+        zip.reset();
+        file.close();
+        if (file.fail()) {
+            throw Base::FileException("Failed to write the file", tmp);
+        }
+    }
+    if (saveFaultPoint("written")) {
+        std::error_code error;
+        const auto path = Base::FileInfo::stringToPath(fn);
+        fs::resize_file(path, fs::file_size(path, error) / 2, error);
+    }
+    // The zip's own end says how long the file should be: a write that went short is caught here
+    // (zipios writes its end through a stream of its own, whose errors reach no one; A1 fix review)
+    if (!zipEndIsWhole(fn)) {
+        throw Base::FileException("Failed to write the file: it is incomplete",
+                                  Base::FileInfo(fn));
     }
 
-    if (policy) {
-        // if saving the project data succeeded rename to the actual file name
+    {
         int count_bak = static_cast<int>(GetApplication()
                             .GetParameterGroupByPath("User parameter:BaseApp/Preferences/Document")
                             ->GetInt("CountBackupFiles", 1));
@@ -3273,6 +4086,11 @@ bool Document::saveToFile(const char* filename) const
                           ->GetBool("CreateBackupFiles", true);
         if (!backup) {
             count_bak = -1;
+        }
+        // FreeCAD-CH (ops#640, folder sync item 2): inside the team folder the backups are
+        // local-only (its ignore list), and they are the net against an overwrite: keep five
+        else if (TeamFolder::contains(fn)) {
+            count_bak = std::max(count_bak, TeamFolder::backupsKept);
         }
         bool useFCBakExtension =
             GetApplication()
@@ -3293,7 +4111,50 @@ bool Document::saveToFile(const char* filename) const
             backupPolicy.setPolicy(BackupPolicy::Standard);
         }
         backupPolicy.setNumberOfFiles(count_bak);
+        // FreeCAD-CH (ops#640, A2 review R1): a file that arrived while this one was written is
+        // not overwritten either (the window left is the flush and the rename)
+        if (samePath(filename, FileName.getStrValue())) {
+            const FileChange change = fileChangeOnDisk();
+            if (change.changed) {
+                throw Base::FileException(
+                    ((change.by.empty() ? std::string("Someone") : change.by)
+                     + " saved this document while it was being saved here: not saved, so as not "
+                       "to overwrite it")
+                        .c_str(),
+                    Base::FileInfo(filename));
+            }
+        }
+        applying = true;
         backupPolicy.apply(fn, nativePath);
+    }
+    }
+    catch (const Base::Exception& error) {
+        // A save that fails before its file is in place leaves nothing beside the document. An
+        // error after it (managing the backups) is reported, but the document is saved: a Save As
+        // must not be undone then (A1 fix review 2)
+        if (!replaced()) {
+            std::error_code ignored;
+            fs::remove(Base::FileInfo::stringToPath(fn), ignored);
+            throw;
+        }
+        Base::Console().warning("%s saved, but: %s\n", filename, error.what());
+    }
+    catch (const std::exception& error) {
+        // The same for the standard library's errors
+        if (!replaced()) {
+            std::error_code ignored;
+            fs::remove(Base::FileInfo::stringToPath(fn), ignored);
+            throw;
+        }
+        Base::Console().warning("%s saved, but: %s\n", filename, error.what());
+    }
+    catch (...) {
+        if (!replaced()) {
+            std::error_code ignored;
+            fs::remove(Base::FileInfo::stringToPath(fn), ignored);
+            throw;
+        }
+        Base::Console().warning("%s saved, but an error followed\n", filename);
     }
 
     signalFinishSave(*this, filename);
@@ -3383,6 +4244,7 @@ void Document::restore(const char* filename,
     Base::FlagToggler<> flag(globalIsRestoring, false);
 
     setStatus(Document::PartialDoc, false);
+    setStatus(Document::RestoreError, false);  // this read's own (A2 fix review f6b)
 
     d->clearRecomputeLog();
     d->_WarningLog.clear();
@@ -3405,6 +4267,12 @@ void Document::restore(const char* filename,
     }
     Base::FileInfo fi(filename);
     Base::ifstream file(fi, std::ios::in | std::ios::binary);
+    // The file this document knows (A2): its own file as it is before the read, kept only once the
+    // read succeeded and if the file did not change meanwhile; until then, and for a document read
+    // from another file (a recovery copy), no sure record (review P1-P3)
+    const std::optional<FileStamp> stampBefore =
+        samePath(filename, FileName.getStrValue()) ? stampOf(filename) : std::nullopt;
+    markUnknown(*this);
     std::streambuf* buf = file.rdbuf();
     std::streamoff size = buf->pubseekoff(0, std::ios::end, std::ios::in);
     buf->pubseekoff(0, std::ios::beg, std::ios::in);
@@ -3448,6 +4316,28 @@ void Document::restore(const char* filename,
     // without GUI. But if available then follow after all data files of the App document.
     signalRestoreDocument(reader);
     reader.readFiles(zipstream);
+    if (stampBefore && !testStatus(Document::RestoreError)) {
+        const auto stampAfter = stampOf(filename);
+        if (stampAfter && sameStamp(*stampAfter, *stampBefore)) {
+            fileStamps[this] = *stampBefore;
+        }
+    }
+    else if (!stampBefore && !testStatus(Document::RestoreError) && !FileName.getStrValue().empty()
+             && !samePath(filename, FileName.getStrValue())) {
+        // Read from another file (a recovery copy): the document's own file is the version it was
+        // made from when that file was saved by the same person at the same time (A2 review R4);
+        // else no sure record, and the first save asks
+        try {
+            const ProjectFile::Metadata meta = ProjectFile(FileName.getStrValue()).getMetadata();
+            if (!meta.lastModifiedDate.empty()
+                && meta.lastModifiedDate == LastModifiedDate.getStrValue()
+                && meta.lastModifiedBy == LastModifiedBy.getStrValue()) {
+                recordFile(*this);
+            }
+        }
+        catch (...) {
+        }
+    }
     reportNameRemap(*remap, getName());
     remap.reset();
     reportNewerFormat(this);
@@ -4155,6 +5045,9 @@ int Document::recompute(const std::vector<DocumentObject*>& objs,
     // signalBeforeRecompute() temporarily release it when they need to run
     // Python on the GUI thread to avoid deadlocks.
     Base::PyGILStateLocker locker;
+    // Each object's placement digest made once for the whole recompute, its end included (ops#640,
+    // notes\recompute-cost.md: an edit of an early feature was O(N^2) in the feature count)
+    PlacementDigestScope digestScope;
 
     if (d->undoing || d->rollback) {
         if (FC_LOG_INSTANCE.isEnabled(FC_LOGLEVEL_LOG)) {
@@ -4304,6 +5197,8 @@ int Document::recompute(const std::vector<DocumentObject*>& objs,
                 bool doRecompute = false;
                 // In error before it runs (ops#579): its dependants failed naming it
                 bool wasError = false;
+                // FreeCAD-CH (ops#640): failed without running (a Fail verdict, or blocked)
+                bool stopped = false;
                 if (obj->mustRecompute()) {
                     doRecompute = true;
                     wasError = obj->isError();
@@ -4340,6 +5235,7 @@ int Document::recompute(const std::vector<DocumentObject*>& objs,
                         d->addRecomputeLog(why, obj);
                         unmade.push_back(obj);
                         res = 1;
+                        stopped = true;
                     }
                     else if (continuation && continuation->blocked(obj, why)) {
                         // A reference set aside by a reorder (ops#127): it doesn't run either, so
@@ -4349,6 +5245,7 @@ int Document::recompute(const std::vector<DocumentObject*>& objs,
                         d->addRecomputeLog(why, obj);
                         unmade.push_back(obj);
                         res = 1;
+                        stopped = true;
                     }
                     // Counted when it runs or fails
                     ++objectCount;
@@ -4384,6 +5281,22 @@ int Document::recompute(const std::vector<DocumentObject*>& objs,
                         filter.insert(obj);
                         if (std::find(unmade.begin(), unmade.end(), obj) == unmade.end()) {
                             unmade.push_back(obj);
+                        }
+                        if (stopped && continuation) {
+                            // FreeCAD-CH (ops#652): the records into it are taken first, as the
+                            // end of the recompute would, while it still has its last shape
+                            takeElementReferencesInto(obj);
+                            // FreeCAD-CH (ops#640, F37): the rule writes what the view shows
+                            // of it (PartDesign: a stopped Body, nothing)
+                            continuation->afterStop(obj);
+                        }
+                        if (stopped) {
+                            // FreeCAD-CH (ops#640 round 8, J13): judged, so nothing is pending:
+                            // as Onshape, which has no needs-recompute state, a recompute
+                            // would only stop it again. It runs again when what stopped it
+                            // changes: a recomputed input enforces its in-list (above, and
+                            // wasError), a reorder's put-back writes its link
+                            obj->purgeTouched();
                         }
                         failDependantsOutside(obj);
                         if (continuation) {
@@ -4508,7 +5421,79 @@ int Document::recompute(const std::vector<DocumentObject*>& objs,
 
     signalRecomputed(*this, topoSortedObjects);
     recomputingStatus.reset();
-    signalBecameStable(*this);
+
+    // FreeCAD-CH (ops#654 10.15): what the observers write here (PartDesign's studio resync, after
+    // a record decided at compute changed) goes into the last undo step when the recompute ran
+    // outside any transaction (a commit, then a recompute): the step is reopened for the signal
+    // and put back after it as it is, its id unchanged, nothing signalled, no commit. Undoing the
+    // edit then undoes what the resync made of it. Booked Recompute is set aside (the seventh
+    // settled point): a booked step that only recorded this recompute's outputs (Std_Refresh's
+    // "Recompute") is set aside meanwhile and restored after; it changes no input and its close
+    // drops it. One whose recompute changed an input (a record written at compute) is a step of
+    // its own, and the observers record into it. Not inside an undo or redo, nor with Redo
+    // non-empty: a write there is unrecorded, and a later redo would put its steps beside the
+    // resync's, so it clears Redo, loudly. On the main thread: a recompute on the worker hops
+    // there for the signal, and the move and the put-back go inside the hop (the Gui's undo list
+    // reads the stack there)
+    const auto becameStable = [this]() {
+        Transaction* const active = d->activeUndoTransaction;
+        const bool bookedOutputsOnly = active && active->getID() == d->bookedTransaction
+            && !active->changesInputs();
+        const bool join = (!active || bookedOutputsOnly) && !mUndoTransactions.empty()
+            && mRedoTransactions.empty() && d->undoRedoDepth == 0 && !isPerformingTransaction()
+            && !d->committing && !testStatus(Restoring) && !isStepLocked()
+            && GetApplication().getGlobalTransaction() == NullTransaction
+            && !GetApplication().isClosingAll();
+        Transaction* reopened = nullptr;
+        Transaction* setAside = nullptr;
+        if (join) {
+            setAside = active;
+            reopened = mUndoTransactions.back();
+            mUndoTransactions.pop_back();
+            d->activeUndoTransaction = reopened;
+        }
+        bool wrote = false;
+        const auto mark = [&wrote](const DocumentObject&) {
+            wrote = true;
+        };
+        const fastsignals::scoped_connection created = signalNewObject.connect(mark);
+        const fastsignals::scoped_connection deleted = signalDeletedObject.connect(mark);
+        const fastsignals::scoped_connection changed = signalChangedObject.connect(
+            [&wrote](const DocumentObject&, const Property&) {
+                wrote = true;
+            }
+        );
+        const Base::ScopeGuard after([&]() {
+            if (reopened) {
+                if (d->activeUndoTransaction == reopened
+                    && (mUndoTransactions.empty() || mUndoTransactions.back() != reopened)) {
+                    mUndoTransactions.push_back(reopened);
+                    d->activeUndoTransaction = setAside;
+                }
+                else {
+                    FC_WARN(getName() << ": the undo step reopened for the regeneration was "
+                                         "closed or replaced during it; left as it is");
+                }
+                return;
+            }
+            if (wrote && !d->activeUndoTransaction && !mRedoTransactions.empty()
+                && !isPerformingTransaction() && !d->committing) {
+                FC_WARN(getName() << ": the studio's history changed after an unrecorded edit; "
+                                     "Redo cleared");
+                _clearRedos();
+            }
+        });
+        signalBecameStable(*this);
+    };
+    if (MainThreadSignalConfig::isMainThread()) {
+        becameStable();
+    }
+    else {
+        // The emission's own hop (GIL released, the worker's wait served), around the whole of it
+        MainThreadSignal<void()> hop;
+        const fastsignals::scoped_connection inHop = hop.connect(becameStable);
+        hop();
+    }
 
     tracker.checkpoint("Recompute total");
 
@@ -4877,23 +5862,59 @@ int Document::_recomputeFeature(DocumentObject* Feat) // NOLINT
 
 bool Document::recomputeFeature(DocumentObject* feature, bool recursive)
 {
-    // delete recompute log
-    d->clearRecomputeLog(feature);
-
     // verify that the feature is (active) part of the document
     if (!feature->isAttachedToDocument()) {
         return false;
     }
 
     if (recursive) {
+        // FreeCAD-CH (ops#640): the log is left to recompute(), which keeps the text of a failure
+        // it doesn't re-run (ops#126). Cleared here first, a failed feature with nothing touched
+        // (a dialog's second preview of an empty pattern) kept its error and lost its text: "Error"
         bool hasError = false;
         recompute({feature}, true, &hasError);
         return !hasError;
     }
+    // Each object's placement digest made once (ops#640, notes\recompute-cost.md)
+    PlacementDigestScope digestScope;
+    // delete recompute log
+    d->clearRecomputeLog(feature);
     auto continuation = recomputeContinuation();
     std::string why;
     int res = 0;
-    if (continuation && !continuation->holds(feature) && continuation->blocked(feature, why)) {
+    // FreeCAD-CH (ops#640 rank 29, F20): an input in error fails it without running, as in a
+    // full recompute (ops#579, decision 253), so a dialog's own recompute keeps the error the
+    // document's gives ("Base links to X, which has an error") instead of clearing it
+    bool inputFailed = false;
+    if (!(continuation && continuation->holds(feature))) {
+        for (auto in : feature->getOutList()) {
+            if (!in->isError()) {
+                continue;
+            }
+            auto verdict = AfterInputFailure::Run;
+            if (continuation && continuation->continuesAfter(in)) {
+                verdict = continuation->decide(in, feature, why);
+            }
+            else if (failedInputText(feature, in, why)) {
+                verdict = AfterInputFailure::Fail;
+            }
+            if (verdict == AfterInputFailure::Fail) {
+                inputFailed = true;
+                break;
+            }
+        }
+        if (!inputFailed && failedReadText(feature, continuation.get(), why)) {
+            inputFailed = true;
+        }
+    }
+    if (inputFailed) {
+        // It doesn't run: its warning goes, as in a recompute (ops#127, ops#391)
+        clearWarning(feature);
+        ReferenceReport::forgetPrintedWarning(feature);
+        d->addRecomputeLog(why, feature);
+        res = 1;
+    }
+    else if (continuation && !continuation->holds(feature) && continuation->blocked(feature, why)) {
         // A reference set aside by a reorder fails it here too (ops#127), without its warning
         clearWarning(feature);
         ReferenceReport::forgetPrintedWarning(feature);

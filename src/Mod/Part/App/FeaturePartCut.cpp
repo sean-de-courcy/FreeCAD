@@ -43,5 +43,6 @@ const char* Cut::opCode() const
 BRepAlgoAPI_BooleanOperation* Cut::makeOperation(const TopoDS_Shape& base, const TopoDS_Shape& tool) const
 {
     // Let's call algorithm computing a cut operation:
-    return new FCBRepAlgoAPI_Cut(base, tool);
+    // Built by Boolean::execute(), under the time limit
+    return new FCBRepAlgoAPI_Cut(base, tool, false);
 }

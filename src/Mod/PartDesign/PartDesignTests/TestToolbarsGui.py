@@ -23,8 +23,10 @@
 """The PartDesign toolbar in Onshape's order, and Onshape's words (FreeCAD-CH, ops#605 brief C).
 
 PartDesign has one "Features" toolbar in Onshape's order (notes/onshape-gui-plan.md 2.0, as
-corrected by section 7: Pocket, Groove and the subtractive Pipe and Loft stay beside their additive
-twins, because a Pad has no "Remove from"). The four stock toolbars are still there, hidden until
+corrected by section 7). Groove and the subtractive Pipe and Loft are off it (ops#796): Remove is in
+the dialogs of Revolve, Pipe and Loft.
+Pocket is off it (ops#640, rank 22: Onshape's one Extrude removes too), and Onshape's Variable tool
+(Std_AddVariable, rank 15) is on it. The four stock toolbars are still there, hidden until
 the user shows them from the toolbar menu. Pad, Pocket, Thickness, Mirrored, LinearPattern and
 PolarPattern read "Extrude", "Extrude (remove)", "Shell", "Mirror", "Linear pattern" and "Circular
 pattern" in menus and tooltips; the command names, the object types and the saved files keep
@@ -49,34 +51,36 @@ SEP = "|"
 FEATURES = [
     "PartDesign_NewSketch",
     "PartDesign_Pad",
-    "PartDesign_Pocket",
     "PartDesign_Revolution",
-    "PartDesign_Groove",
     "PartDesign_AdditivePipe",
-    "PartDesign_SubtractivePipe",
     "PartDesign_AdditiveLoft",
-    "PartDesign_SubtractiveLoft",
     SEP,
     "PartDesign_Fillet",
     "PartDesign_Chamfer",
     "PartDesign_Draft",
+    "PartDesign_Thicken",  # lane solid-ops: Thicken, Scale, Offset surface before Shell
+    "PartDesign_ScalePart",
+    "PartDesign_OffsetSurface",
     "PartDesign_Thickness",
     "PartDesign_Hole",
     SEP,
     "PartDesign_Mirrored",
     "PartDesign_LinearPattern",
     "PartDesign_PolarPattern",
+    "PartDesign_CurvePattern",
     "PartDesign_MultiTransform",
     SEP,
     "PartDesign_Boolean",
     "PartDesign_Split",
     "PartDesign_MergeParts",
+    "PartDesign_Derived",  # Onshape's Derived (ops#640 round 6)
     SEP,
     "PartDesign_CompDatums",
     "PartDesign_AdditiveHelix",
     "PartDesign_SubShapeBinder",
     "PartDesign_Body",
     "PartDesign_CompPrimitiveAdditive",
+    "Std_AddVariable",  # Onshape's Variable tool (ops#640, rank 15)
     "Sketcher_ValidateSketch",
     "PartDesign_ToggleModelTree",  # brings the model tree back (ops#602, decision 279)
 ]
@@ -121,6 +125,7 @@ STOCK = {
         "PartDesign_Mirrored",
         "PartDesign_LinearPattern",
         "PartDesign_PolarPattern",
+        "PartDesign_CurvePattern",
         "PartDesign_MultiTransform",
     ],
 }
@@ -133,6 +138,44 @@ TEXTS = {
     "PartDesign_Mirrored": "Mirror",
     "PartDesign_LinearPattern": "Linear pattern",
     "PartDesign_PolarPattern": "Circular pattern",
+    "PartDesign_CurvePattern": "Curve pattern",
+    # ops#796, the terminology pass
+    "PartDesign_NewSketch": "Sketch",
+    "PartDesign_Groove": "Revolve (remove)",
+    "PartDesign_AdditivePipe": "Sweep",
+    "PartDesign_SubtractivePipe": "Sweep (remove)",
+    "PartDesign_AdditiveLoft": "Loft",
+    "PartDesign_SubtractiveLoft": "Loft (remove)",
+    "PartDesign_Boolean": "Boolean",
+    "PartDesign_Split": "Split",
+    "PartDesign_Body": "New part",
+}
+
+# ops#796: commands that need not have an action in the main window: read from the command itself
+COMMAND_TEXTS = {
+    "PartDesign_Plane": "Plane",
+    "PartDesign_Defeaturing": "Delete face",
+    "Sketcher_NewSketch": "Sketch",
+    "Sketcher_ToggleConstruction": "Construction",
+    "Sketcher_ConstrainCoincidentUnified": "Coincident",
+    "Sketcher_ConstrainHorizontal": "Horizontal",
+    "Sketcher_ConstrainVertical": "Vertical",
+    "Sketcher_ConstrainParallel": "Parallel",
+    "Sketcher_ConstrainPerpendicular": "Perpendicular",
+    "Sketcher_ConstrainEqual": "Equal",
+    "Sketcher_ConstrainSymmetric": "Symmetric",
+    "Sketcher_ConstrainBlock": "Fix",
+    "Sketcher_CreateArc": "Center point arc",
+    "Sketcher_Create3PointArc": "3 point arc",
+    "Sketcher_CreateCircle": "Center point circle",
+    "Sketcher_Create3PointCircle": "3 point circle",
+    "Sketcher_CreateRectangle": "Corner rectangle",
+    "Sketcher_CreateRectangle_Center": "Center point rectangle",
+    "Sketcher_Trimming": "Trim",
+    "Sketcher_Extend": "Extend",
+    "Sketcher_Split": "Split",
+    "Sketcher_Projection": "Use",
+    "Sketcher_Intersection": "Intersect",
 }
 
 
@@ -222,6 +265,16 @@ class TestToolbarsGui(unittest.TestCase):
         actions = {a.objectName(): a for a in Gui.getMainWindow().findChildren(QtGui.QAction)}
         self.assertIn("Shell", actions["PartDesign_Thickness"].toolTip())
         self.assertIn("circular pattern", actions["PartDesign_PolarPattern"].toolTip().lower())
+
+    def test_command_menu_texts_are_onshapes_words(self):
+        """ops#796: the commands' own menu texts, for tools not on a main-window toolbar."""
+        import SketcherGui  # noqa: F401  (registers the Sketcher commands)
+
+        for name, text in COMMAND_TEXTS.items():
+            with self.subTest(name):
+                command = Gui.Command.get(name)
+                self.assertIsNotNone(command, name)
+                self.assertEqual(command.getInfo()["menuText"].replace("&", ""), text)
 
     def test_command_names_are_unchanged(self):
         """The words change in menus only: the commands keep their names."""

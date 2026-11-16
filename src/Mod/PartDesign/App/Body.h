@@ -45,6 +45,20 @@ class PartDesignExport Body: public Part::BodyBase
 public:
     App::PropertyBool AllowCompound;
 
+    /** @name The part's identity in its studio (FreeCAD-CH ops#654, notes/one-history-design.md 9)
+     * Hidden; scopes, tools and picks name parts by StudioPartId, never by a link to the Body */
+    //@{
+    /// The part id: minted when the part is made ("<owner>:<ordinal>" for a New), or the Body's
+    /// name for a Body made before its studio's list existed (adopted)
+    App::PropertyString StudioPartId;
+    /// The id of the part this one is a piece of (a split), or empty
+    App::PropertyString StudioParentId;
+    /// The owner or piece record that made this part, or null
+    App::PropertyLinkHidden StudioMadeBy;
+    /// The piece's witness: element names of the parent that lie on it (P6p)
+    App::PropertyStringList StudioPieceWitness;
+    //@}
+
     /// True if this body feature is active or was active when the document was last closed
     // App::PropertyBool IsActive;
 
@@ -108,6 +122,13 @@ public:
     bool isRolledBack() const;
     /// Is obj held by the bar (obj is this Body or one of its members)?
     bool holds(const App::DocumentObject* obj) const;
+    /** FreeCAD-CH (ops#640 rank 34): is obj a member that waits below the bar with the features
+     * it is made for? A sketch, datum or other non-solid member after the effective bar, not held
+     * itself (the first solid after the bar comes later), with users that are all held: Onshape
+     * lists it below the bar, rolled back with them (the studio's bar goes above it, and a new
+     * feature is inserted before it). One with no users (made at the bar just now) is live.
+     */
+    bool waitsBelowBar(const App::DocumentObject* obj) const;
     /// The transient edit roll-back point (not saved, not undone), or null
     App::DocumentObject* getEditRollPoint() const;
     /// Sets the edit roll-back point (null clears it); touches nothing
@@ -159,6 +180,17 @@ public:
      */
     static Body* findBodyOf(const App::DocumentObject* feature);
 
+    /** FreeCAD-CH (ops#640, F37): the recompute stopped this Body without running it (a Fail
+     * verdict on its Tip's unclaimed failure, decisions 254-259, or blocked()). It shows no part,
+     * as Onshape shows none when the feature that makes it fails (a failed feature contributes
+     * nothing): Shape becomes the empty shape, written as execute() writes it (the Placement
+     * kept), and its error stays. The failure rule's afterStop() calls it. A Body whose own
+     * execute() fails ("Tip shape is empty") isn't stopped this way and keeps its last Shape.
+     * In "Through" display the members' own shapes would still show, so ViewProviderBody shows
+     * the Body's (empty) Shape while it is stopped (ViewProviderBody::isStopped)
+     */
+    void writeStoppedShape();
+
     /**
      * New part (FreeCAD-CH ops#325, B+ Stage 1 2.3): moves `feature`, its Body's Tip that nothing
      * else uses (the feature being created), into a new Body at identity placement, in the
@@ -168,6 +200,26 @@ public:
      * Base::ValueError for any other feature.
      */
     static Body* newPartFrom(App::DocumentObject* feature);
+
+    /**
+     * Add to part (FreeCAD-CH ops#640, the Onshape experiment): newPartFrom() the other way. Moves
+     * `feature`, the only member of its Body besides its Profile sketch (which moves along when
+     * nothing else uses it) and that nothing else uses, into `target`, a studio sibling not rolled
+     * back, where the studio's history has it: after target's last member that comes before it,
+     * as target's Tip when no solid of target follows. The Body it leaves, empty, is removed. Runs
+     * in the caller's transaction and doesn't recompute. Returns target; throws Base::ValueError,
+     * before anything is written, for any other case.
+     */
+    static Body* addToPart(App::DocumentObject* feature, Body* target);
+
+    /**
+     * Why addToPart(feature, target) would refuse, without the "Add to part: " prefix; empty when
+     * it is allowed (FreeCAD-CH ops#640: the one rule, which the dialog's Add rows read). Besides
+     * the rules above, the Body the feature leaves must have no other user, as it is removed: a
+     * Merge consuming it, a Boolean's tool, a binder, a link or an expression, or a link into its
+     * origin from elsewhere.
+     */
+    static std::string addToPartRefusal(const App::DocumentObject* feature, const Body* target);
 
     PyObject* getPyObject() override;
 

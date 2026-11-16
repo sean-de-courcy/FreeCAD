@@ -345,6 +345,8 @@ TaskBoxPrimitives::TaskBoxPrimitives(ViewProviderPrimitive* vp, QWidget* parent)
             App::Origin *origin = body->getOrigin();
             Gui::ViewProviderCoordinateSystem* vpOrigin {};
             vpOrigin = static_cast<Gui::ViewProviderCoordinateSystem*>(Gui::Application::Instance->getViewProvider(origin));
+            // A new part studio's planes stay shown after the dialog (ops#626, rank 52)
+            setProperty("studioPlanes", vpOrigin->isTemporaryVisibility());
             vpOrigin->setTemporaryVisibility(Gui::DatumElement::Planes | Gui::DatumElement::Axes);
         } catch (const Base::Exception &ex) {
             Base::Console().error ("%s\n", ex.what () );
@@ -472,6 +474,11 @@ TaskBoxPrimitives::~TaskBoxPrimitives()
                 Gui::Application::Instance->getViewProvider(origin)
             );
             vpOrigin->resetTemporaryVisibility();
+            // ...and a new part studio's planes, shown before the dialog, stay (ops#626, rank 52)
+            if (property("studioPlanes").toBool()) {
+                vpOrigin->setTemporaryVisibility(Gui::DatumElement::Planes);
+                vpOrigin->setPlaneLabelVisibility(true);
+            }
         }
     }
     catch (const Base::Exception& ex) {

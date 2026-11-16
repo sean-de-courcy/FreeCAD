@@ -926,7 +926,7 @@ TEST_F(NameTableTest, fileFormWritesIndicesAndTheRemapReadsThemBack)
     NameTable::writeEntries(file, collector.fileEntries(source));
     NameTable process;
     Data::NameRemap remap(process);
-    remap.load(file);
+    remap.load(file, Data::NamingFormatWritten);
 
     for (std::size_t i = 0; i < forms.size(); ++i) {
         // Act
@@ -967,7 +967,7 @@ TEST_F(NameTableTest, fileFormNeverPutsAnIndexBeforeADigit)
     std::stringstream file;
     NameTable::writeEntries(file, collector.fileEntries(table));
     Data::NameRemap remap(table);
-    remap.load(file);
+    remap.load(file, Data::NamingFormatWritten);
 
     // Act and assert
     EXPECT_EQ(fileForm(collector, data, ';'), "_;~0");
@@ -1012,7 +1012,7 @@ TEST_F(NameTableTest, readEntriesTakesWindowsLineEndsAndCountsMalformedLines)
     // Act
     NameTable loaded;
     Data::NameRemap remap(loaded);
-    auto summary = remap.load(file);
+    auto summary = remap.load(file, Data::NamingFormatWritten);
 
     // Assert: five entries load; the two bad lines and the references to the entry itself and
     // past the end count (the one to the empty line refers to its stand-in)
@@ -1186,7 +1186,7 @@ TEST_F(NameTableTest, remapLeavesNamesAloneWithoutCollisions)
 
     // Act
     Data::NameRemap remap(process);
-    auto summary = remap.load(file);
+    auto summary = remap.load(file, Data::NamingFormatWritten);
 
     // Assert
     EXPECT_TRUE(summary.refused.empty());
@@ -1215,7 +1215,7 @@ TEST_F(NameTableTest, remapKeepsCollidingNamesInlineAsTheFileMeansThem)
 
     // Act
     Data::NameRemap remap(process);
-    auto summary = remap.load(file);
+    auto summary = remap.load(file, Data::NamingFormatWritten);
 
     // Assert: the edge is refused, and every entry above it (face, upper edge) is inline
     ASSERT_EQ(summary.refused.size(), 1U);
@@ -1277,7 +1277,7 @@ TEST_F(NameTableTest, remapMakesReferencesTheFileLacksUnresolvable)
 
     // Act
     Data::NameRemap remap(process);
-    remap.load(file);
+    remap.load(file, Data::NamingFormatWritten);
 
     // Assert: the edge and the entries above it are unknown; names that use them don't resolve
     EXPECT_TRUE(remap.isUnknown(edge));
@@ -1308,7 +1308,7 @@ TEST_F(NameTableTest, remapOfANewerFormatDropsMapsAndKnowsNoReference)
     std::stringstream file(savedFile(source, exampleNames(), forms));
     NameTable process;
     Data::NameRemap remap(process);
-    remap.load(file);
+    remap.load(file, Data::NamingFormatWritten);
 
     // Act
     remap.setNewerFormat();
@@ -1338,20 +1338,20 @@ TEST_F(NameTableTest, remapLoadsOneTableOnly)
     std::string fromB = "~0";
     {
         Data::NameRemap other(process);
-        other.load(fileB);
+        other.load(fileB, Data::NamingFormatWritten);
         other.fromFileForm(fromB);
     }
     fileB.clear();
     fileB.seekg(0);
     Data::NameRemap remap(process);
     EXPECT_FALSE(remap.holdsFile());
-    remap.load(fileA);
+    remap.load(fileA, Data::NamingFormatWritten);
     std::string fromA = "~0";
     remap.fromFileForm(fromA);
     ASSERT_NE(fromA, fromB);
 
     // Act
-    auto summary = remap.load(fileB);
+    auto summary = remap.load(fileB, Data::NamingFormatWritten);
 
     // Assert
     EXPECT_TRUE(remap.holdsFile());
@@ -1390,7 +1390,7 @@ TEST_F(NameTableTest, attributeFilterRemapsWhatItsReaderReadsAfterwards)
     NameTable process;
     ASSERT_TRUE(process.insertForTesting(edgeId(source), "Other;_;1;XYZ;0;E;0;_;_"));
     Data::NameRemap remap(process);
-    remap.load(file);
+    remap.load(file, Data::NamingFormatWritten);
     std::string subname = "Body.Pad.;" + forms[0] + ".Face1";
     std::string xml = "<?xml version='1.0' encoding='utf-8'?>\n<Document><A v=\"" + subname
         + "\"/><B v=\"" + subname + "\"/></Document>\n";
@@ -1415,4 +1415,113 @@ TEST_F(NameTableTest, attributeFilterRemapsWhatItsReaderReadsAfterwards)
     EXPECT_EQ(after, expected);
     EXPECT_NE(after, subname);
     EXPECT_EQ(unfiltered, subname) << "only the remap's reader is filtered";
+}
+
+// The reader table (the reader policy, ops#640 B1): a file says the format it was written in and
+// the oldest format a reader needs; a reader reads its own formats, and a newer file only when
+// the file says a reader of the reader's newest format reads it.
+
+using Verdict = Data::NamingFormatRead::Verdict;
+
+TEST(NamingFormatReaderTable, coversExactlyOldestReadToWritten)
+{
+    // Assert
+    EXPECT_LE(Data::NamingFormatOldestRead, Data::NamingFormatWritten);
+    for (int format = Data::NamingFormatOldestRead; format <= Data::NamingFormatWritten; ++format) {
+        EXPECT_TRUE(Data::NameRemap::readsFormat(format)) << format;
+    }
+    EXPECT_FALSE(Data::NameRemap::readsFormat(Data::NamingFormatOldestRead - 1));
+    EXPECT_FALSE(Data::NameRemap::readsFormat(Data::NamingFormatWritten + 1));
+    EXPECT_FALSE(Data::NameRemap::readsFormat(0));
+}
+
+TEST(NamingFormatReaderTable, aFileOfThisBuildIsReadInItsFormat)
+{
+    // Act
+    auto read = Data::namingFormatToRead(Data::NamingFormatWritten, Data::NamingFormatOldestRead);
+
+    // Assert
+    EXPECT_EQ(read.verdict, Verdict::Read);
+    EXPECT_EQ(read.format, Data::NamingFormatWritten);
+}
+
+TEST(NamingFormatReaderTable, aFileWithoutATableHasNone)
+{
+    EXPECT_EQ(Data::namingFormatToRead(0, 0).verdict, Verdict::NoTable);
+}
+
+TEST(NamingFormatReaderTable, aNewerReaderReadsAFileOfAnOlderFormatInThatFormat)
+{
+    // Arrange: a later build that writes N + 1 and keeps the reader of N
+    const int n = 2;
+
+    // Act
+    auto read = Data::namingFormatToRead(n, n, n + 1, n);
+
+    // Assert: the file's names are read as written, not dropped
+    EXPECT_EQ(read.verdict, Verdict::Read);
+    EXPECT_EQ(read.format, n);
+}
+
+TEST(NamingFormatReaderTable, aFileWithoutOldestReadNeedsItsOwnFormat)
+{
+    // Act: an absent (0), unreadable (-1) or inconsistent (above the written) oldest
+    auto absent = Data::namingFormatToRead(3, 0, 2, 2);
+    auto unreadable = Data::namingFormatToRead(3, -1, 2, 2);
+    auto above = Data::namingFormatToRead(3, 4, 3, 2);
+
+    // Assert
+    EXPECT_EQ(absent.verdict, Verdict::NeedsNewerReader);
+    EXPECT_EQ(unreadable.verdict, Verdict::NeedsNewerReader);
+    EXPECT_EQ(above.verdict, Verdict::Read);
+    EXPECT_EQ(above.format, 3);
+}
+
+TEST(NamingFormatReaderTable, aNewerFileThatAnOlderReaderReadsIsReadInTheReadersFormat)
+{
+    // Act: written in 3, readable by a reader of 2
+    auto read = Data::namingFormatToRead(3, 2, 2, 2);
+
+    // Assert
+    EXPECT_EQ(read.verdict, Verdict::Read);
+    EXPECT_EQ(read.format, 2);
+}
+
+TEST(NamingFormatReaderTable, aFileNeedingANewerReaderIsRefused)
+{
+    // Act
+    auto read = Data::namingFormatToRead(3, 3, 2, 2);
+
+    // Assert
+    EXPECT_EQ(read.verdict, Verdict::NeedsNewerReader);
+}
+
+TEST(NamingFormatReaderTable, aFormatBelowTheReadersOldestIsUnreadable)
+{
+    // Act: format 1 never shipped; -1 is an unreadable attribute
+    auto old = Data::namingFormatToRead(1, 1, 2, 2);
+    auto bad = Data::namingFormatToRead(-1, 0, 2, 2);
+
+    // Assert
+    EXPECT_EQ(old.verdict, Verdict::Unreadable);
+    EXPECT_EQ(bad.verdict, Verdict::Unreadable);
+}
+
+TEST_F(NameTableTest, aTableOfAFormatWithoutAReaderIsRefused)
+{
+    // Arrange
+    NameTable source;
+    Strings forms;
+    std::stringstream file(savedFile(source, exampleNames(), forms));
+    NameTable process;
+    Data::NameRemap remap(process);
+
+    // Act
+    auto summary = remap.load(file, Data::NamingFormatWritten + 1);
+
+    // Assert: nothing loaded, and the file's names are dropped as a newer format's
+    EXPECT_EQ(summary.inserted, 0U);
+    EXPECT_TRUE(remap.isNewerFormat());
+    std::string name = forms[0];
+    EXPECT_EQ(remap.remapMapName(name), Data::NameRemap::MapName::Dropped);
 }

@@ -25,6 +25,7 @@
 
 
 #include <algorithm>
+#include <cstring>
 
 #include <QAction>
 #include <QLabel>
@@ -74,8 +75,9 @@ TaskDraftParameters::TaskDraftParameters(ViewProviderDressUp* DressUpView, QWidg
     ui->draftAngle->setMaximum(pcDraft->Angle.getMaximum());
     ui->draftAngle->setValue(a);
     ui->draftAngle->selectAll();
-    // A new draft's faces field takes the focus when the dialog opens (Q2)
-    if (!pcDraft->Base.getSubValues().empty()) {
+    // A new draft's faces field takes the focus when the dialog opens (Q2), and keeps it
+    // after its first pick placed it (ops#640 rank 14)
+    if (!pcDraft->Base.getSubValues().empty() && !armsBaseOnOpen()) {
         QMetaObject::invokeMethod(ui->draftAngle, "setFocus", Qt::QueuedConnection);
     }
 
@@ -132,7 +134,9 @@ ReferenceField* TaskDraftParameters::createSingleField(QWidget* placeholder,
     options.target = [this]() -> App::DocumentObject* {
         return getBase();
     };
-    options.required = false;
+    // The neutral plane must be picked (the draft fails without one): red while empty, and armed
+    // when the dialog opens on a draft with faces and no plane, as Onshape arms it (rank 17)
+    options.required = std::strcmp(property, "NeutralPlane") == 0;
     options.label = label;
     options.kinds = kinds;
     // Another body's element through the copy or cross-reference question, as before

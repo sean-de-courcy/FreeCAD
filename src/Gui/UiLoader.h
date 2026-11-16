@@ -34,6 +34,7 @@
 
 #include <CXX/Extensions.hxx>
 #include <memory>
+#include <QSet>
 
 
 QT_BEGIN_NAMESPACE
@@ -150,9 +151,26 @@ public:
         QWidget* parent = nullptr,
         const QString& name = QString()
     ) override;
+    QLayout* createLayout(
+        const QString& className,
+        QObject* parent = nullptr,
+        const QString& name = QString()
+    ) override;
+    QAction* createAction(QObject* parent = nullptr, const QString& name = QString()) override;
+    QActionGroup* createActionGroup(QObject* parent = nullptr, const QString& name = QString()) override;
+
+    /**
+     * QUiLoader::load(), then drops a stale wrapper at each object of the loaded form that the
+     * create functions above didn't make (FreeCAD-CH, ops#825): a button group, or what Qt makes
+     * as the builder adds children (a splitter's handles, a tool box's buttons).
+     */
+    QWidget* load(QIODevice* device, QWidget* parentWidget = nullptr);
 
 private:
+    void dropMade(QObject* object);
+
     QStringList cw;
+    QSet<QObject*> made;  // objects the create functions made during load(), with their children
 };
 
 // --------------------------------------------------------------------

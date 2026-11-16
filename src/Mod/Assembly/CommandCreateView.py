@@ -1339,14 +1339,19 @@ class TaskAssemblyCreateView(QtCore.QObject):
             self.assembly.ViewObject.DraggerVisibility = False
             return
 
-        ref = self.presel_ref
+        newPos = App.Vector(cursor_info["x"], cursor_info["y"], cursor_info["z"])
+        self.alignDraggerTo(self.presel_ref, newPos, view)
+
+    def alignDraggerTo(self, ref, newPos, view=None):
+        """Puts the dragger on the connector point of the hovered element that a click at newPos
+        (document coordinates) takes, as the joint dialog does (FreeCAD-CH, ops#640, design C3).
+        Before, the call passed the assembly as the reference and raised a TypeError."""
         element_name = UtilsAssembly.getElementName(ref[1][0])
 
         if element_name == "":
             vertex_name = ""
         else:
-            newPos = App.Vector(cursor_info["x"], cursor_info["y"], cursor_info["z"])
-            vertex_name = UtilsAssembly.findElementClosestVertex(self.assembly, ref, newPos)
+            vertex_name = UtilsAssembly.findElementClosestVertex(ref, newPos, view)
 
         ref = UtilsAssembly.addVertexToReference(ref, vertex_name)
 
@@ -1379,13 +1384,13 @@ class TaskAssemblyCreateView(QtCore.QObject):
     def eventFilter(self, watched, event):
         if self.form is not None and watched == self.form.stepList:
             if event.type() == QtCore.QEvent.ShortcutOverride:
-                if event.key() == QtCore.Qt.Key_Delete:
+                if UtilsAssembly.isDeleteKey(event):  # Backspace too on the Mac
                     event.accept()
                     return True  # Indicate that the event has been handled
                 return False
 
             elif event.type() == QtCore.QEvent.KeyPress:
-                if event.key() == QtCore.Qt.Key_Delete:
+                if UtilsAssembly.isDeleteKey(event):  # Backspace too on the Mac
                     selected_indexes = self.form.stepList.selectedIndexes()
                     sorted_indexes = sorted(selected_indexes, key=lambda x: x.row(), reverse=True)
                     for index in sorted_indexes:

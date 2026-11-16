@@ -74,8 +74,10 @@ TaskChamferParameters::TaskChamferParameters(ViewProviderDressUp* DressUpView, Q
     bool useAllEdges = pcChamfer->UseAllEdges.getValue();
     ui->checkBoxUseAllEdges->setChecked(useAllEdges);
     baseField->setEnabled(!useAllEdges);
-    // A new chamfer's edges field takes the focus when the dialog opens (Q2)
-    if (!pcChamfer->Base.getSubValues().empty()) {
+    ui->checkBoxTangentPropagation->setChecked(pcChamfer->TangentPropagation.getValue());
+    // A new chamfer's edges field takes the focus when the dialog opens (Q2), and keeps it
+    // after its first pick placed it (ops#640 rank 14)
+    if (!pcChamfer->Base.getSubValues().empty() && !armsBaseOnOpen()) {
         QMetaObject::invokeMethod(ui->chamferSize, "setFocus", Qt::QueuedConnection);
     }
 
@@ -94,6 +96,8 @@ TaskChamferParameters::TaskChamferParameters(ViewProviderDressUp* DressUpView, Q
             this, &TaskChamferParameters::onFlipDirection);
     connect(ui->checkBoxUseAllEdges, &QCheckBox::toggled,
             this, &TaskChamferParameters::onCheckBoxUseAllEdgesToggled);
+    connect(ui->checkBoxTangentPropagation, &QCheckBox::toggled,
+            this, &TaskChamferParameters::onTangentPropagationToggled);
     // clang-format on
 
     createAddAllEdgesAction();
@@ -216,6 +220,18 @@ void TaskChamferParameters::onAngleChanged(double angle)
         disarmFields();
         setupTransaction();
         chamfer->Angle.setValue(angle);
+        chamfer->recomputeFeature();
+        // hide the chamfer if there was a computation error
+        hideOnError();
+    }
+}
+
+void TaskChamferParameters::onTangentPropagationToggled(bool checked)
+{
+    if (auto chamfer = getObject<PartDesign::Chamfer>()) {
+        disarmFields();
+        setupTransaction();
+        chamfer->TangentPropagation.setValue(checked);
         chamfer->recomputeFeature();
         // hide the chamfer if there was a computation error
         hideOnError();

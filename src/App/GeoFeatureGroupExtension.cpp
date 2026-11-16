@@ -134,6 +134,46 @@ bool isStudioSibling(const DocumentObject* group, const DocumentObject* other)
     // (a link to a Body has the Body's container as its group). Shown by a link, as the gates
     return !isShownThroughALink(other);
 }
+
+// FreeCAD-CH (ops#654, notes/parts-design.md 10.1): a studio feature (an owner) is a PartDesign
+// feature outside every Body, in its studio (group: an App::Part, not an Assembly, or the
+// document's top level). Its Local links into a Body of that studio placed at the studio's
+// origin are in scope, as a Body's into a sibling's
+bool isStudioOwnerLink(const DocumentObject* obj,
+                       const DocumentObject* group,
+                       const DocumentObject* other)
+{
+    static Base::Type feature = Base::Type::BadType;
+    static Base::Type body = Base::Type::BadType;
+    static Base::Type assembly = Base::Type::BadType;
+    const Base::Type featureType = typeNamed(feature, "PartDesign::Feature");
+    const Base::Type bodyType = typeNamed(body, "Part::BodyBase");
+    const Base::Type assemblyType = typeNamed(assembly, "Assembly::AssemblyObject");
+    if (!obj || !other || featureType.isBad() || bodyType.isBad()
+        || !obj->isDerivedFrom(featureType) || !other->isDerivedFrom(bodyType) || !obj->getDocument()
+        || obj->getDocument() != other->getDocument()) {
+        return false;
+    }
+    if (group
+        && (!group->isDerivedFrom<App::Part>()
+            || (!assemblyType.isBad() && group->isDerivedFrom(assemblyType)))) {
+        return false;
+    }
+    if (App::Part::getPartOfObject(other, /*recursive=*/true) != group) {
+        return false;
+    }
+    try {
+        const Base::Placement origin =
+            group ? GeoFeature::getGlobalPlacement(group) : Base::Placement();
+        if (!GeoFeature::getGlobalPlacement(other).isSame(origin, 1e-7)) {
+            return false;
+        }
+    }
+    catch (const Base::Exception&) {
+        return false;
+    }
+    return !isShownThroughALink(other);
+}
 }  // namespace
 
 
@@ -611,7 +651,8 @@ bool GeoFeatureGroupExtension::isLinkValid(App::Property* prop)
 
     for (auto link : result) {
         auto linkGroup = getGroupOfObject(link);
-        if (linkGroup != group && !isStudioSibling(group, linkGroup)) {
+        if (linkGroup != group && !isStudioSibling(group, linkGroup)
+            && !isStudioOwnerLink(obj, group, linkGroup)) {
             return false;
         }
     }
@@ -645,7 +686,8 @@ void GeoFeatureGroupExtension::getInvalidLinkObjects(const DocumentObject* obj,
         : getGroupOfObject(obj);
     for (auto link : result) {
         auto linkGroup = getGroupOfObject(link);
-        if (linkGroup != group && !isStudioSibling(group, linkGroup)) {
+        if (linkGroup != group && !isStudioSibling(group, linkGroup)
+            && !isStudioOwnerLink(obj, group, linkGroup)) {
             vec.push_back(link);
         }
     }

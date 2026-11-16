@@ -125,6 +125,7 @@
 #include "DocumentObjectGroup.h"
 #include "DocumentObjectGroupPy.h"
 #include "DocumentObserver.h"
+#include "DocumentTabs.h"
 #include "DocumentPy.h"
 #include "DocumentSettingsPy.h"
 #include "ExpressionParser.h"
@@ -176,6 +177,8 @@
 #include <App/CMakeScript.h>
 
 #include "SafeMode.h"
+#include "TeamFolder.h"
+#include "DocumentPresence.h"
 
 #ifdef FC_OS_WIN32
 #include <windows.h>
@@ -614,6 +617,11 @@ void Application::setupPythonTypes()
     Py_INCREF(pUnitsModule);
     PyModule_AddObject(pAppModule, "Units", pUnitsModule);
 
+    // FreeCAD-CH (ops#640, rank 59): the typed tabs' registry, FreeCAD.DocumentTabs
+    PyObject* pTabsModule = App::DocumentTabs::initModule();
+    Py_INCREF(pTabsModule);
+    PyModule_AddObject(pAppModule, "DocumentTabs", pTabsModule);
+
     Base::ProgressIndicatorPy::init_type();
     Base::InterpreterSingleton::addType(Base::ProgressIndicatorPy::type_object(),
         pBaseModule,"ProgressIndicator");
@@ -884,7 +892,11 @@ bool Application::isAsyncRecomputeEnabled()
     static const ParameterGrp::handle hGrp = GetParameterGroupByPath(
         "User parameter:BaseApp/Preferences/Document"
     );
-    bool enableAsyncRecompute = hGrp->GetBool("EnableAsyncRecompute", true);
+    // FreeCAD-CH (ops#640, F5): one regeneration at a time, on the GUI thread: the worker is off
+    // unless AsyncRecomputeWorker is set (the async tests set it themselves). A new key: the old
+    // EnableAsyncRecompute was written true by every OK of the preferences (its checkbox's
+    // default), so a stored value says nothing of a choice and is ignored
+    bool enableAsyncRecompute = hGrp->GetBool("AsyncRecomputeWorker", false);
     return enableAsyncRecompute;
 }
 
@@ -1151,6 +1163,24 @@ Document* Application::openDocument(const char * FileName, DocumentInitFlags ini
     return nullptr;
 }
 
+namespace
+{
+// FreeCAD-CH (folder-sync item 4): whether two paths name the same existing file on disk
+// (`std::filesystem::equivalent`), whatever their spelling: case, `..`, a symlink. False when
+// either doesn't exist.
+bool isSameFile(const char* first, const char* second)
+{
+    if (Base::Tools::isNullOrEmpty(first) || Base::Tools::isNullOrEmpty(second)) {
+        return false;
+    }
+    std::error_code ec;
+    const bool same = std::filesystem::equivalent(Base::FileInfo::stringToPath(first),
+                                                  Base::FileInfo::stringToPath(second),
+                                                  ec);
+    return same && !ec;
+}
+}  // namespace
+
 Document *Application::getDocumentByPath(const char *path, PathMatchMode checkCanonical) const {
     if(Base::Tools::isNullOrEmpty(path))
         return nullptr;
@@ -1173,7 +1203,11 @@ Document *Application::getDocumentByPath(const char *path, PathMatchMode checkCa
     const QString canonicalPath = QFileInfo(QString::fromUtf8(path)).canonicalFilePath();
     for (const auto &v : DocMap) {
         QFileInfo fi(QString::fromUtf8(v.second->FileName.getValue()));
-        if (canonicalPath == fi.canonicalFilePath()) {
+        // FreeCAD-CH (folder-sync item 4): the same file on disk also matches when only the case
+        // of its spelling differs (`Parts` and `PARTS` on Windows or APFS), which the canonical
+        // path doesn't fold
+        if (canonicalPath == fi.canonicalFilePath()
+            || isSameFile(path, v.second->FileName.getValue())) {
             if (checkCanonical == PathMatchMode::MatchCanonical) {
                 return v.second;
             }
@@ -1407,8 +1441,11 @@ Document* Application::openDocumentPrivate(const char * FileName,
         throw Base::FileSystemError(str.str());
     }
 
-    // Before creating a new document we check whether the document is already open
-    auto doc = getDocumentByPath(File.filePath().c_str(), PathMatchMode::MatchCanonicalWarning);
+    // Before creating a new document we check whether the document is already open.
+    // FreeCAD-CH (folder-sync item 4, PLAN decision 441): one file is one document whatever the
+    // spelling of its path, so a canonical match returns the open document (upstream warned and
+    // opened a second copy, for symlink users who want that; Onshape can't have two)
+    auto doc = getDocumentByPath(File.filePath().c_str(), PathMatchMode::MatchCanonical);
     if(doc) {
         if(doc->testStatus(Document::PartialDoc)
                 || doc->testStatus(Document::PartialRestore)) {
@@ -1557,6 +1594,11 @@ Application::TransactionSignaller::TransactionSignaller(bool abort, bool signal)
         _TransSignalled = true;
         GetApplication().signalBeforeCloseTransaction(abort);
     }
+}
+
+bool Application::TransactionSignaller::isActive()
+{
+    return _TransSignalCount > 0;
 }
 
 Application::TransactionSignaller::~TransactionSignaller() {
@@ -3261,6 +3303,84 @@ void Application::initCrashReporter()
     }
 }
 
+namespace
+{
+
+// FreeCAD-CH (ops#640, folder sync item 7; notes/folder-sync.md 2.5): FreeCAD's own folders belong
+// to one computer. Inside the team folder, Syncthing would copy this computer's settings, cache and
+// recovery files to every other computer. Warns once per folder and team folder.
+void warnSettingsInTeamFolder()
+{
+    const std::string team = TeamFolder::folder();
+    if (team.empty()) {
+        return;
+    }
+    static std::set<std::string> warned;
+    const std::string macroPath =
+        GetApplication()
+            .GetParameterGroupByPath("User parameter:BaseApp/Preferences/Macro")
+            ->GetASCII("MacroPath", "");
+    const std::pair<const char*, std::string> places[] = {
+        {"settings folder", Application::getUserConfigPath()},
+        {"data folder", Application::getUserAppDataDir()},
+        {"cache folder", Application::getUserCachePath()},
+        {"macro folder", Application::getUserMacroDir()},
+        {"macro path (Preferences, Macro)", macroPath},
+    };
+    for (const auto& [what, path] : places) {
+        if (path.empty() || !TeamFolder::contains(path)) {
+            continue;
+        }
+        if (!warned.insert(team + '\n' + path).second) {
+            continue;
+        }
+        const std::string shown =
+            Base::FileInfo::pathToString(Base::FileInfo::stringToPath(path).make_preferred());
+        Base::Console().warning(
+            "FreeCAD-CH: the %s '%s' is inside the team folder '%s': Syncthing would copy this "
+            "computer's files to every other computer. Move it out of the team folder.\n",
+            what,
+            shown.c_str(),
+            team.c_str()
+        );
+    }
+}
+
+// Checks again when the team folder or the macro path is set while FreeCAD-CH runs.
+class SettingsInTeamFolderWatcher: public ParameterGrp::ObserverType
+{
+public:
+    void OnChange(Base::Subject<const char*>& /*caller*/, const char* reason) override
+    {
+        if (!reason) {
+            return;
+        }
+        const std::string name(reason);
+        if (name == "TeamFolder" || name == "MacroPath") {
+            warnSettingsInTeamFolder();
+        }
+    }
+};
+
+void watchSettingsInTeamFolder()
+{
+    // Never deleted, as TeamFolder's own watcher: the parameter groups outlive static destructors
+    static auto* watcher = [] {
+        auto* created = new SettingsInTeamFolderWatcher;
+        GetApplication()
+            .GetParameterGroupByPath("User parameter:BaseApp/Preferences/Document")
+            ->Attach(created);
+        GetApplication()
+            .GetParameterGroupByPath("User parameter:BaseApp/Preferences/Macro")
+            ->Attach(created);
+        return created;
+    }();
+    (void)watcher;
+    warnSettingsInTeamFolder();
+}
+
+}  // namespace
+
 void Application::initApplication()
 {
     // interpreter and Init script ==========================================================
@@ -3294,6 +3414,13 @@ void Application::initApplication()
     catch (const Base::Exception& e) {
         e.reportException();
     }
+
+    // FreeCAD-CH (ops#640, folder sync item 2): the team folder's ignore list, now and on change
+    TeamFolder::watchPreference();
+    // FreeCAD-CH (ops#640, folder sync item 7): FreeCAD's own folders outside the team folder
+    watchSettingsInTeamFolder();
+    // FreeCAD-CH (ops#640, folder sync item 6): presence markers of open team-folder documents
+    DocumentPresence::start();
 
     // seed randomizer
     srand(time(nullptr));

@@ -41,11 +41,22 @@ set(EXT_VARIABLES_FILES
     variables/__init__.py
     variables/onshape.py
     variables/copies.py
+    variables/measured.py
+    variables/measuredgui.py
     variables/importer.py
     variables/importgui.py
 )
 
 foreach (it ${EXT_VARIABLES_FILES})
+    configure_file(${it} ${NAMESPACE_DIR}/${it} COPYONLY)
+endforeach()
+
+# FreeCAD-CH (notes/derived-design.md): freecad.derived, Derived parts from another document
+set(EXT_DERIVED_FILES
+    derived.py
+)
+
+foreach (it ${EXT_DERIVED_FILES})
     configure_file(${it} ${NAMESPACE_DIR}/${it} COPYONLY)
 endforeach()
 
@@ -59,6 +70,7 @@ INSTALL(
     FILES
         ${NAMESPACE_INIT}
         ${EXT_FILES}
+        ${EXT_DERIVED_FILES}
     DESTINATION
         ${SITE_PACKAGE_DIR}
 )

@@ -466,7 +466,8 @@ names it.
 | `infra/628-superseded-tag` | infra | ops#628 | - | `integration` `76a3cc24b7` | `0c4c64265d` (fork PR 437), 2026-11-06 | never |
 | `infra/628-gen2` | infra | ops#628 | - | `integration` `0c4c64265d` | `43f1c1ba26` (fork PR 438), 2026-11-06 | never |
 | `fix/629-merge-sketches-mln` | fix | ops#629 | - | `integration` `43f1c1ba26` | `a476b0725c` (fork PR 439), 2026-11-07 | never (fork fix) |
-| `feat/634-sketch-picks` | feat | ops#634 | - | `integration` `43f1c1ba26` | (fork PR 440) | never (fork feature) |
+| `feat/634-sketch-picks` | feat | ops#634 | - | `integration` `43f1c1ba26` | `1afe3b9190` (fork PR 440), 2026-11-07 | never (fork feature) |
+| `fix/i863-release-baseline` | fix | ops#863, ops#874 | - | `fix/lx12-candidate` `91f12f266e` (fork-1.0.0; the lx12 line, supersedes fork PRs 465 and 458) | (fork PR 466) | never (the first release's line) |
 
 ## Fork-only commits in carried topics
 

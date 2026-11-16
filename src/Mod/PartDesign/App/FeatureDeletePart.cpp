@@ -14,6 +14,7 @@
 #include <Base/Exception.h>
 
 #include "Body.h"
+#include "FeatureBase.h"
 #include "FeatureBoolean.h"
 #include "Studio.h"
 
@@ -133,6 +134,66 @@ DeletePart* DeletePart::deletePart(Body* body)
     // At the bar, as the Tip, its base the solid before it (Body::insertObject)
     body->addObject(feature);
     return feature;
+}
+
+Body* DeletePart::removeEmptyPart(Body* body)
+{
+    App::Document* doc = body ? body->getDocument() : nullptr;
+    App::Part* studio = nullptr;
+    if (!doc || !Part::BodyBase::studioOf(body, studio)) {
+        return nullptr;
+    }
+    const std::vector<App::DocumentObject*> members = body->Group.getValues();
+    if (std::ranges::any_of(members, [](const App::DocumentObject* obj) {
+            return Body::isSolidFeature(obj);
+        })) {
+        return nullptr;
+    }
+    std::vector<Body*> others = studioBodies(doc, studio);
+    std::erase(others, body);
+    // Only a Body placed as this one: relinked to another frame, its sketches would move in the
+    // world without a word (review R7W-1); with none, the empty Body stays, as before
+    std::erase_if(others, [body](const Body* other) {
+        return !other->Placement.getValue().isSame(body->Placement.getValue(), 1e-9);
+    });
+    if (others.empty()) {
+        return nullptr;
+    }
+    auto readOwner = [&]() -> Body* {
+        for (App::DocumentObject* member : members) {
+            for (App::DocumentObject* read : member->getOutList()) {
+                Body* owner = Body::findBodyOf(read);
+                if (owner && std::ranges::find(others, owner) != others.end()) {
+                    return owner;
+                }
+            }
+        }
+        return others.front();
+    };
+    Body* target = readOwner();
+    // Each after the target's last member listed before it (the base feature stays first)
+    const std::vector<App::DocumentObject*> sequence = studioSequence(doc, studio);
+    for (App::DocumentObject* member : members) {
+        const std::vector<App::DocumentObject*>& group = target->Group.getValues();
+        App::DocumentObject* after = nullptr;
+        for (App::DocumentObject* obj : sequence) {
+            if (obj == member) {
+                break;
+            }
+            if (std::ranges::find(group, obj) != group.end()) {
+                after = obj;
+            }
+        }
+        if (!after && !group.empty() && group.front()->isDerivedFrom<FeatureBase>()) {
+            after = group.front();
+        }
+        body->removeObject(member);
+        // relinked to the target's origin, as addToPart's insert does
+        target->insertObject(member, after, /*after = */ true);
+    }
+    saveHistoryOrder(sequence);
+    doc->removeObject(body->getNameInDocument());
+    return target;
 }
 
 std::string DeletePart::deleteLock(const App::DocumentObject* feature)

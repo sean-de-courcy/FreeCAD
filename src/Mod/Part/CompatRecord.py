@@ -64,6 +64,8 @@ prints the differences of two record files.
 
 import json
 import math
+import os
+import re
 import sys
 
 FORMAT = 1
@@ -751,16 +753,38 @@ class _Drift:
 
 
 class _Comparison:
-    def __init__(self, tolerance):
+    def __init__(self, tolerance, deltas=None):
         self.rel, self.abs = tolerance
         self.lines = []
+        self.found = []
         self.drift = _Drift()
+        self.deltas = deltas or {}
+        self.used = set()
 
     def differ(self, where, expected, actual):
         self.lines.append(f"{where}: expected {_short(expected)}, got {_short(actual)}")
+        self.found.append((where, expected, actual))
+
+    def delta(self, where, expected, actual, entry):
+        """An intended change of one float (a generation's delta file): the record must hold the
+        entry's old value and the build give its new one, each within the entry's tolerance."""
+        self.used.add(where)
+        rel, floor = entry.get("rel", DELTA_TOLERANCE[0]), entry.get("abs", DELTA_TOLERANCE[1])
+
+        def close(a, b):
+            return abs(a - b) <= max(floor, rel * max(abs(a), abs(b)))
+
+        if not isinstance(expected, (int, float)) or not close(float(expected), entry["old"]):
+            self.differ(where + " (the delta's old value)", entry["old"], expected)
+        elif not isinstance(actual, (int, float)) or not close(float(actual), entry["new"]):
+            self.differ(where + " (the delta's new value)", entry["new"], actual)
 
     def value(self, where, expected, actual):
         """Compares two plain values, floats with the tolerance."""
+        entry = self.deltas.get(where)
+        if entry is not None and not isinstance(expected, (bool, list, dict)):
+            self.delta(where, expected, actual, entry)
+            return
         if isinstance(expected, bool) or isinstance(actual, bool):
             if type(expected) is not type(actual) or expected != actual:
                 self.differ(where, expected, actual)
@@ -804,7 +828,8 @@ def _short(value, limit=160):
     return text if len(text) <= limit else text[:limit] + "..."
 
 
-def compare(expected, actual, stage, tolerance=None, names=None, touched=True):
+def compare(expected, actual, stage, tolerance=None, names=None, touched=True, deltas=None,
+            allDeltas=True):
     """The differences between two records as lines, and the drift (largest float deviations).
 
     Objects, their types and ids must match. A saved property that is gone or whose type
@@ -812,8 +837,12 @@ def compare(expected, actual, stage, tolerance=None, names=None, touched=True):
     it) is not. Names are compared unless `names` is False (by default, in every stage but
     "rehearsal"); a caller turns them off when the file's naming revision isn't the build's.
     Guess records are compared in every stage. `touched=False` leaves out which objects are
-    Touched (a forced naming migration touches every migrated object at the open)."""
-    c = _Comparison(tolerance or TOLERANCE[stage])
+    Touched (a forced naming migration touches every migrated object at the open).
+
+    `deltas` {where: {"old", "new", "rel", "abs"}}: a generation's intended changes for this
+    record (`loadDeltas`), each a float the record holds as old and the build must give as new;
+    with `allDeltas`, an entry nothing compared is a difference too (a stale delta)."""
+    c = _Comparison(tolerance or TOLERANCE[stage], deltas)
     if names is None:
         names = stage != "rehearsal"
     eobjs, aobjs = expected.get("objects", {}), actual.get("objects", {})
@@ -848,12 +877,147 @@ def compare(expected, actual, stage, tolerance=None, names=None, touched=True):
         c.value(f"{name}.shape", e.get("shape"), a.get("shape"))
         c.value(f"{name}.geometry", e.get("geometry"), a.get("geometry"))
         if names:
-            _compareNames(c, name, e.get("names"), a.get("names"))
+            _compareNames(c, name, _namesMoved(e, a, name, c.deltas), a.get("names"))
         if e.get("guesses", []) != a.get("guesses", []):
             c.differ(f"{name}.guesses", e.get("guesses", []), a.get("guesses", []))
         if stage != "open" and e.get("dof") != a.get("dof"):
             c.differ(f"{name}.dof", e.get("dof"), a.get("dof"))
+    if allDeltas:
+        for where in sorted(set(c.deltas) - c.used):
+            c.lines.append(f"{where}: a delta entry that nothing compared")
     return c.lines, c.drift.asDict()
+
+
+def differences(expected, actual, stage):
+    """[(where, expected, actual)] of the leaves that differ, as `compare` finds them: what a
+    delta file's entries are made from (`deltaEntries`)."""
+    c = _Comparison(TOLERANCE[stage])
+    for name in sorted(set(expected.get("objects", {})) & set(actual.get("objects", {}))):
+        e, a = expected["objects"][name], actual["objects"][name]
+        for prop in sorted(set(e.get("props", {})) & set(a.get("props", {}))):
+            c.value(f"{name}.{prop}", e["props"][prop][1], a["props"][prop][1])
+        # FreeCAD-CH (ops#683): a reference's geometry too, as `compare` walks it (an angle mate
+        # that turns its part moves the face it references)
+        erefs, arefs = e.get("refs", {}), a.get("refs", {})
+        for ref in sorted(set(erefs) & set(arefs)):
+            er, ar = erefs[ref], arefs[ref]
+            if er.get("target") != ar.get("target"):
+                continue
+            c.value(f"{name}.{ref} ({er.get('sub')} -> {ar.get('sub')})", er.get("key"), ar.get("key"))
+        c.value(f"{name}.shape", e.get("shape"), a.get("shape"))
+        c.value(f"{name}.geometry", e.get("geometry"), a.get("geometry"))
+    return c.found
+
+
+# An intended change's tolerance (relative, absolute floor in mm): far above both platforms'
+# spread of an adaptive integration (about 1e-12), far below the changes a delta records (SC7's
+# readouts: 1e-8 to 1e-3), so one delta holds on Windows and on macOS
+DELTA_TOLERANCE = (1e-9, 1e-12)
+
+
+def deltaEntries(expected, actual, stage, rel=DELTA_TOLERANCE[0]):
+    """{where: entry} for every float leaf that differs, old from `expected`, new from `actual`;
+    and, as lines, every difference those entries don't cover: whatever `compare` (names, refs,
+    guesses, objects, types included) still reports with the entries as the record's deltas. A
+    delta can't hold those, and a caller that writes delta files must stop on them (ops#640:
+    make_delta skipped a names change and the corpus failed after it)."""
+    entries = {}
+    for where, e, a in differences(expected, actual, stage):
+        if isinstance(e, float) and isinstance(a, (int, float)) and not isinstance(a, bool):
+            if PLACEMENT_FIELD.search(where):
+                # FreeCAD-CH (ops#683, c768): a placement's base or quaternion component holds to
+                # the absolute floor, so a 1e-9 slip in a unit quaternion is red
+                entries[where] = {"old": e, "new": float(a), "rel": PLACEMENT_TOLERANCE[0],
+                                  "abs": PLACEMENT_TOLERANCE[1]}
+            else:
+                entries[where] = {"old": e, "new": float(a), "rel": rel}
+    # names as the gate compares them: a pass that skipped them (a generation of another naming
+    # revision) recorded none for the build
+    names = _hasNames(expected) and _hasNames(actual)
+    others, _ = compare(expected, actual, stage, names=names, deltas=entries, allDeltas=False)
+    return entries, others
+
+
+# FreeCAD-CH (ops#683, c768): a placement property's fields in a record ("X.Placement.base[0]",
+# "J.Placement2.rotation[3]", "J.Offset1.rotation[0]"): relative 1e-13 with an absolute floor of
+# 1e-12 (mm, or a unit quaternion's component), far below a real change, above both platforms'
+# spread (about 1e-13 on gen0)
+PLACEMENT_FIELD = re.compile(r"\.(base|rotation)\[\d\]$")
+PLACEMENT_TOLERANCE = (1e-13, 1e-12)
+
+
+def _hasNames(rec):
+    return any("names" in obj for obj in rec.get("objects", {}).values())
+
+
+def _placementOf(entry):
+    """The object's own Placement from its record, or None."""
+    import FreeCAD as App
+
+    value = entry.get("props", {}).get("Placement", [None, None])[1]
+    if not isinstance(value, dict) or "base" not in value or "rotation" not in value:
+        return None
+    x, y, z, w = value["rotation"]
+    return App.Placement(App.Vector(*value["base"]), App.Rotation(x, y, z, w))
+
+
+_NAME_CENTRE = re.compile(r"^(\w+ c=\()(-?\d+\.\d+),(-?\d+\.\d+),(-?\d+\.\d+)(\).*)$", re.S)
+
+
+def _namesMoved(expected, actual, name, deltas):
+    """The expected record's names lines, their centres moved as the object's placement moved,
+    when that placement change is an intended one (a delta entry on the object's Placement);
+    otherwise the lines as they are. A body a mate moves keeps its element names, at new centres
+    (ops#683, c768). The moved centres are printed as the record prints them; a line on the
+    rounding edge matches within NAMES_CENTRE_ABS (`unmatchedNameLines`)."""
+    lines = expected.get("names")
+    if not lines or not deltas:
+        return lines
+    prefix = f"{name}.Placement."
+    if not any(where.startswith(prefix) for where in deltas):
+        return lines
+    old, new = _placementOf(expected), _placementOf(actual)
+    if old is None or new is None:
+        return lines
+    move = new.multiply(old.inverse())
+    out = []
+    for line in lines:
+        m = _NAME_CENTRE.match(line)
+        if not m:
+            out.append(line)
+            continue
+        import FreeCAD as App
+
+        p = move.multVec(App.Vector(float(m.group(2)), float(m.group(3)), float(m.group(4))))
+        out.append(f"{m.group(1)}{_format(p.x)},{_format(p.y)},{_format(p.z)}{m.group(5)}")
+    return sorted(out)
+
+
+def loadDeltas(folder, model):
+    """{stem: {where: entry}} of `<folder>/<model>.delta.json`, or {} when there is none. The
+    file (beta-compatibility 3.5): {"format": 1, "issue", "label", "approved", "why", "changes":
+    {stem: {where: {"old", "new", "rel", "abs"}}}}."""
+    path = os.path.join(folder, model + ".delta.json")
+    if not os.path.isfile(path):
+        return {}
+    with open(path, encoding="utf-8") as fh:
+        data = json.load(fh)
+    for key in ("format", "issue", "label", "approved", "why", "changes"):
+        if key not in data:
+            raise ValueError(f"{path}: no {key!r}")
+    if data["label"] not in ("compat-change", "compat-neutral"):
+        raise ValueError(f"{path}: label {data['label']!r}")
+    return data["changes"]
+
+
+def deltasFor(deltas, passName):
+    """The entries of `deltas` that hold in the gate's pass `passName`: an entry with "passes"
+    holds only in those (a change in what a recompute builds leaves the saved shape that the open
+    pass reads as it was: ops#640, a loft's planes); one without holds in every pass."""
+    if not deltas:
+        return deltas
+    return {where: entry for where, entry in deltas.items()
+            if passName in entry.get("passes", (passName,))}
 
 
 def delta(base, other, stage="open"):
@@ -920,16 +1084,87 @@ def applyDelta(base, changes):
     return out
 
 
+# A names line's `m=` field (the element's area or length) is a measure printed beside the name,
+# not the area record: the float records and their deltas own areas, volumes and centres at their
+# own tolerance. Names lines compare their `m=` within this relative tolerance, the rest of the
+# line exactly (the coordinator's ruling c742, ops#640).
+NAMES_MEASURE_REL = 1e-3
+_MEASURE = re.compile(r"(.*? m=)(-?\d+(?:\.\d+)?)( : .*)", re.S)
+
+
+def unmatchedNameLines(expected, actual, rel=NAMES_MEASURE_REL):
+    """(gone, new): the lines of `expected` with no partner in `actual`, and the reverse, sorted.
+    A partner is the same line except for its `m=` value, which may differ by `rel` relative;
+    each line partners at most one (equal lines counted differently don't match)."""
+    def groups(lines):
+        out = {}
+        for line in lines:
+            m = _MEASURE.fullmatch(line)
+            key = (m.group(1), m.group(3)) if m else (line, None)
+            out.setdefault(key, []).append((float(m.group(2)) if m else 0.0, line))
+        return out
+
+    eg, ag = groups(expected), groups(actual)
+    gone, new = [], []
+    _pairOnRoundingEdge(eg, ag)
+    for key in set(eg) | set(ag):
+        es, acts = sorted(eg.get(key, [])), sorted(ag.get(key, []))
+        for i in range(max(len(es), len(acts))):
+            if i < len(es) and i < len(acts):
+                e, a = es[i][0], acts[i][0]
+                if abs(e - a) <= rel * max(abs(e), abs(a)):
+                    continue
+            if i < len(es):
+                gone.append(es[i][1])
+            if i < len(acts):
+                new.append(acts[i][1])
+    return sorted(gone), sorted(new)
+
+
+# A moved centre is printed again from the 4-decimal centre it was recorded at: it may land one
+# unit of the last decimal off the build's own print (ops#683)
+NAMES_CENTRE_ABS = 2.5e-4
+
+
+def _pairOnRoundingEdge(eg, ag):
+    """Moves the lines of `ag` whose centre is within NAMES_CENTRE_ABS of an unpartnered line of
+    `eg` (the same kind, the rest of the line equal) under that line's key, in place."""
+    def split(key):
+        m = _NAME_CENTRE.match(key[0] + "0" + key[1]) if key[1] is not None else None
+        if not m:
+            return None
+        return m.group(1), m.group(5), tuple(float(m.group(i)) for i in (2, 3, 4))
+
+    def count(groups, key):
+        return len(groups.get(key, []))
+
+    for ekey in list(eg):
+        if count(eg, ekey) <= count(ag, ekey):
+            continue
+        es = split(ekey)
+        if es is None:
+            continue
+        for akey in list(ag):
+            if akey == ekey or count(ag, akey) <= count(eg, akey):
+                continue
+            a = split(akey)
+            if a is None or a[0] != es[0] or a[1] != es[1]:
+                continue
+            if all(abs(x - y) <= NAMES_CENTRE_ABS for x, y in zip(a[2], es[2])):
+                while ag.get(akey) and count(eg, ekey) > count(ag, ekey) and count(ag, akey) > count(eg, akey):
+                    ag.setdefault(ekey, []).append(ag[akey].pop())
+                if not ag[akey]:
+                    del ag[akey]
+
+
 def _compareNames(c, name, expected, actual, limit=8):
     if expected == actual:
         return
     if expected is None or actual is None:
         c.differ(f"{name}.names", expected is not None, actual is not None)
         return
-    gone = sorted(set(expected) - set(actual))
-    new = sorted(set(actual) - set(expected))
+    gone, new = unmatchedNameLines(expected, actual)
     if not gone and not new:
-        c.lines.append(f"{name}.names: the same lines, counted differently")
         return
     lines = [f"{name}.names: {len(gone)} lines gone, {len(new)} new"]
     lines += ["  - " + line for line in gone[:limit]]

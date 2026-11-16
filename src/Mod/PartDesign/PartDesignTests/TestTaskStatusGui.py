@@ -61,6 +61,11 @@ def statusBanners():
     return Gui.getMainWindow().findChildren(QtWidgets.QLabel, "TaskEditStatus")
 
 
+def onshapeKeymap():
+    general = App.ParamGet("User parameter:BaseApp/Preferences/General")
+    return general.GetString("Keymap", "Onshape") != "FreeCAD"
+
+
 def plainText(label):
     document = QtGui.QTextDocument()
     document.setHtml(label.text())
@@ -124,6 +129,10 @@ class TestTaskStatusGui(unittest.TestCase):
         self.assertTrue(text.startswith("Error:"), text)
         status = feature.getStatusString().strip()
         self.assertTrue(status, "the feature has no error text")
+        # Under the Onshape keymap in the rows' tooltips' words (round 8): an extrusion's
+        # "SketchBased: " goes
+        if onshapeKeymap():
+            status = status.removeprefix("SketchBased: ")
         self.assertIn(status, text)
 
     def testWorkingFeatureShowsNothing(self):
@@ -141,18 +150,18 @@ class TestTaskStatusGui(unittest.TestCase):
         banner = self.banner()
         self.assertFalse(banner.isVisible())
 
-        self.setMode("To last")
+        self.setMode("Up to last")
         self.assertIn("Invalid", pad.State)
         self.checkShowsError(pad)
         # It shows the error without taking the focus from the panel's fields
         self.assertEqual(banner.focusPolicy(), QtCore.Qt.NoFocus)
 
-        self.setMode("Dimension")
+        self.setMode("Blind")
         self.assertNotIn("Invalid", pad.State)
         self.assertTrue(waitFor(lambda: not banner.isVisible()), "the error stays")
         self.assertEqual(banner.text(), "")
 
-        self.setMode("To last")
+        self.setMode("Up to last")
         self.checkShowsError(pad)
 
     def testOpenedInError(self):
@@ -164,7 +173,7 @@ class TestTaskStatusGui(unittest.TestCase):
         self.assertIn("Invalid", pad.State)
         self.edit(pad)
         self.checkShowsError(pad)
-        self.setMode("Dimension")
+        self.setMode("Blind")
         self.assertTrue(waitFor(lambda: not self.banner().isVisible()), "the error stays")
 
     def testPocketUpToNoFace(self):
@@ -176,6 +185,43 @@ class TestTaskStatusGui(unittest.TestCase):
         self.assertIn("Invalid", pocket.State)
         self.edit(pocket)
         self.checkShowsError(pocket)
+
+    def testBannerSaysPlainWords(self):
+        """Round 8 (J3, J5, J12): under the Onshape keymap the banner shows the rows' tooltips'
+        words, the report view keeping the technical text: the pocket up to no face loses its
+        "SketchBased: ", and a hole whose sketch failed "Depends on 'Round', which failed" (not
+        "Profile links to 'Round', which has an error")."""
+        if not onshapeKeymap():
+            self.skipTest("the Onshape keymap's words")
+        self.plate()
+        square = models.sketch(self.doc, "Square", models.rectangle(2, 2, 4, 4), self.body, z=10)
+        pocket = models.pocket(self.body, square, 3)
+        pocket.Type = "UpToFace"
+        self.doc.recompute()
+        self.assertIn("SketchBased: ", pocket.getStatusString())
+        self.edit(pocket)
+        banner = self.banner()
+        self.assertTrue(waitFor(banner.isVisible), "the pocket's error isn't shown")
+        text = plainText(banner)
+        self.assertNotIn("SketchBased", text)
+        self.assertIn(pocket.getStatusString().removeprefix("SketchBased: ").strip(), text)
+        taskButton(QtWidgets.QDialogButtonBox.Cancel).click()
+        self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "the dialog stays")
+        pump()
+        # A hole whose sketch fails by itself: a malformed constraint (a conflict no longer fails
+        # a sketch, ops#640)
+        round_ = models.sketch(self.doc, "Round", [models.circle(7, 7, 1)], self.body, z=10)
+        hole = models.pocket(self.body, round_, 3)
+        self.doc.recompute()
+        round_.addConstraint(Sketcher.Constraint("Radius", 0, 1))
+        round_.addConstraint(Sketcher.Constraint("Midpoint", 0, 3, 0))
+        self.doc.recompute()
+        self.assertFalse(round_.isValid())
+        self.assertIn("links to 'Round', which has an error", hole.getStatusString())
+        self.edit(hole)
+        banner = self.banner()
+        self.assertTrue(waitFor(banner.isVisible), "the hole's error isn't shown")
+        self.assertIn("Depends on 'Round', which failed", plainText(banner))
 
     def testClosedPanelLeavesNoLabel(self):
         pad = self.plate()
@@ -191,9 +237,9 @@ class TestTaskStatusGui(unittest.TestCase):
     def testSketchEditorShowsNothing(self):
         """The sketch editor has no status label, even for a sketch in error."""
         self.body = models.body(self.doc)
-        sketch = models.sketch(self.doc, "Conflict", models.polyline([(0, 0), (10, 0)]), self.body)
+        sketch = models.sketch(self.doc, "Broken", models.polyline([(0, 0), (10, 0)]), self.body)
         sketch.addConstraint(Sketcher.Constraint("Distance", 0, 5.0))
-        sketch.addConstraint(Sketcher.Constraint("Distance", 0, 7.0))
+        sketch.addConstraint(Sketcher.Constraint("Midpoint", 0, 1, 0))  # malformed (ops#640)
         self.doc.recompute()
         self.assertIn("Invalid", sketch.State)
         self.edit(sketch)
@@ -280,11 +326,11 @@ class TestTaskStatusGui(unittest.TestCase):
         self.edit(pad)
         banner = self.banner()
         combo = Gui.getMainWindow().findChild(QtWidgets.QComboBox, "changeMode")
-        combo.setCurrentIndex(combo.findText("To last"))
+        combo.setCurrentIndex(combo.findText("Up to last"))
         QtWidgets.QApplication.processEvents()
         self.assertIn("Invalid", pad.State)
         shown = banner.isVisible()
-        combo.setCurrentIndex(combo.findText("Dimension"))
+        combo.setCurrentIndex(combo.findText("Blind"))
         for _ in range(40):
             pump(0.02)
             shown = shown or banner.isVisible()
@@ -360,28 +406,67 @@ class TestTaskStatusGui(unittest.TestCase):
         self.assertTrue(hidden, f"the label showed {looked:.3f} s after the second failure")
         self.assertTrue(waitFor(banner.isVisible), "the error isn't shown")
 
-    def testLabelFollowsUndoAndRedo(self):
-        """The edited feature failing in a transaction of its own: after undo (and a recompute)
-        the label is gone, after redo (and a recompute) it is back. Undo and redo alone change
-        no status bit, only the recompute does, so this checks the label against the document,
-        not the undo and redo signals (which Python can't isolate)."""
+    def testLabelStaysThroughARefusedUndo(self):
+        """The edited feature failing in its panel, then the App document's undo and redo with
+        the panel open (a script's doc.undo()): both refused (ops#640, the step lock: they would
+        undo the steps before the dialog), so the feature still fails and the label still shows
+        its error; Cancel takes the failure back. Ctrl+Z in the dialog, its own history, is
+        testLabelFollowsTheDialogUndo. (Before the step lock the failure was a transaction of its
+        own under the panel, and the label followed its undo and redo.)"""
         pad = self.plate()
         self.edit(pad)
         banner = self.banner()
-        self.doc.openTransaction("Fail")
         pad.Type = "UpToLast"
-        self.doc.commitTransaction()
         self.doc.recompute()
         self.assertIn("Invalid", pad.State)
         self.checkShowsError(pad)
 
-        self.doc.undo()
+        self.assertFalse(self.doc.undo(), "the document's undo ran under the panel")
         self.doc.recompute()
-        self.assertNotIn("Invalid", pad.State)
-        self.assertTrue(waitFor(lambda: not banner.isVisible()), "the error stays after undo")
-        self.assertEqual(banner.text(), "")
+        self.assertEqual(pad.Type, "UpToLast")
+        self.assertIn("Invalid", pad.State)
+        self.checkShowsError(pad)
+        self.assertFalse(self.doc.redo(), "the document's redo ran under the panel")
+        self.assertIn("Invalid", pad.State)
+        self.checkShowsError(pad)
 
-        self.doc.redo()
+        cancel = taskButton(QtWidgets.QDialogButtonBox.Cancel)
+        self.assertIsNotNone(cancel, "no Cancel button")
+        cancel.click()
+        self.assertTrue(waitFor(lambda: not Gui.Control.activeDialog()), "Cancel didn't close")
         self.doc.recompute()
+        self.assertEqual(pad.Type, "Length")
+        self.assertNotIn("Invalid", pad.State)
+
+    def testLabelFollowsTheDialogUndo(self):
+        """The edited feature failing in its panel (To last, nothing to reach), then Std_Undo, the
+        dialog's own undo (ops#640, hands-on R1): the type is back at Dimension in the open
+        dialog, the feature computes and the rebuilt panel shows no error; Std_Redo fails it
+        again and the label shows the error."""
+        pad = self.plate()
+        App.setActiveDocument(self.doc.Name)
+        Gui.setActiveDocument(self.doc.Name)
+        self.edit(pad)
+        pad.Type = "UpToLast"
+        self.doc.recompute()
+        pump(0.1)
+        self.assertIn("Invalid", pad.State)
+        self.checkShowsError(pad)
+
+        self.assertTrue(Gui.Command.get("Std_Undo").isActive(), "no edit in the dialog's history")
+        Gui.runCommand("Std_Undo")
+        pump(0.3)
+        self.assertTrue(Gui.Control.activeDialog(), "the dialog closed")
+        self.assertEqual(pad.Type, "Length")
+        self.assertNotIn("Invalid", pad.State)
+        self.assertTrue(
+            waitFor(lambda: not any(b.isVisible() for b in statusBanners())),
+            "the error stays after the dialog's undo",
+        )
+
+        self.assertTrue(Gui.Command.get("Std_Redo").isActive())
+        Gui.runCommand("Std_Redo")
+        pump(0.3)
+        self.assertEqual(pad.Type, "UpToLast")
         self.assertIn("Invalid", pad.State)
         self.checkShowsError(pad)

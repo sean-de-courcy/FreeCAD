@@ -46,7 +46,7 @@ class PreferencesPage:
         self.form.checkBoxEnableEscape.setChecked(pref.GetBool("LeaveEditWithEscape", True))
         self.form.checkBoxSolverDebug.setChecked(pref.GetBool("LogSolverDebug", False))
         self.form.groundFirstPart.clear()
-        self.form.groundFirstPart.addItem(translate("Assembly", "Ask"))
+        # FreeCAD-CH (ops#640): no prompt, so No (0) or Always (1); an old Never (2) reads as No
+        self.form.groundFirstPart.addItem(translate("Assembly", "No"))
         self.form.groundFirstPart.addItem(translate("Assembly", "Always"))
-        self.form.groundFirstPart.addItem(translate("Assembly", "Never"))
-        self.form.groundFirstPart.setCurrentIndex(pref.GetInt("GroundFirstPart", 0))
+        self.form.groundFirstPart.setCurrentIndex(1 if pref.GetInt("GroundFirstPart", 0) == 1 else 0)

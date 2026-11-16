@@ -624,6 +624,10 @@ void AssemblyLink::synchronizeJoints()
         copyPropertyIfDifferent<App::PropertyEnumeration>(joint, lJoint, "JointType");
         copyPropertyIfDifferent<App::PropertyPlacement>(joint, lJoint, "Offset1");
         copyPropertyIfDifferent<App::PropertyPlacement>(joint, lJoint, "Offset2");
+        // FreeCAD-CH (ops#683, C2): Reorient secondary axis
+        copyPropertyIfDifferent<App::PropertyInteger>(joint, lJoint, "Reorient");
+        // FreeCAD-CH (ops#826): the offset's pick order
+        copyPropertyIfDifferent<App::PropertyBool>(joint, lJoint, "PicksSwapped");
 
         copyPropertyIfDifferent<App::PropertyBool>(joint, lJoint, "Detach1");
         copyPropertyIfDifferent<App::PropertyBool>(joint, lJoint, "Detach2");

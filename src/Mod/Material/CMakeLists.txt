@@ -315,6 +315,7 @@ set(MaterialTest_Files
     materialtests/TestMaterialCreation.py
     materialtests/TestMaterialDocument.py
     materialtests/TestMaterialFilter.py
+    materialtests/TestMaterialInFile.py
 )
 
 ADD_CUSTOM_TARGET(MaterialTest ALL

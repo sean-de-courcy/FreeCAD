@@ -26,6 +26,8 @@
  * FCBRepAlgoAPI provides a wrapper for various OCCT functions.
  */
 
+#include <algorithm>
+
 #include <FCBRepAlgoAPI_BooleanOperation.h>
 #include <BRepAlgoAPI_Common.hxx>
 #include <BRepBndLib.hxx>
@@ -34,6 +36,13 @@
 #include <BRepCheck_Analyzer.hxx>
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
+#include <BRepTools.hxx>
+#include <GeomAdaptor_Surface.hxx>
+#include <Message_ProgressScope.hxx>
+#include <Geom_Surface.hxx>
+#include <Standard_ConstructionError.hxx>
+#include <TopLoc_Location.hxx>
+#include <TopoDS_Face.hxx>
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
@@ -108,6 +117,35 @@ void FCBRepAlgoAPIHelper::setAutoFuzzy(BRepAlgoAPI_BuilderAlgo* op)
     );
 }
 
+void FCBRepAlgoAPIHelper::refuseFacesWithoutWidth(const TopTools_ListOfShape& shapes)
+{
+    TopTools_IndexedMapOfShape faces;
+    for (TopTools_ListOfShape::Iterator it(shapes); it.More(); it.Next()) {
+        TopExp::MapShapes(it.Value(), TopAbs_FACE, faces);
+    }
+    for (int i = 1; i <= faces.Extent(); ++i) {
+        const TopoDS_Face& face = TopoDS::Face(faces(i));
+        TopLoc_Location location;
+        const Handle(Geom_Surface)& surface = BRep_Tool::Surface(face, location);
+        if (surface.IsNull()) {
+            continue;
+        }
+        const GeomAbs_SurfaceType type = GeomAdaptor_Surface(surface).GetType();
+        if (type == GeomAbs_Plane || type == GeomAbs_Cylinder) {
+            continue;
+        }
+        double u0 = 0.0, u1 = 0.0, v0 = 0.0, v1 = 0.0;
+        BRepTools::UVBounds(face, u0, u1, v0, v1);
+        // Also a range that is NaN or reversed
+        if (!(u1 - u0 >= Precision::PConfusion()) || !(v1 - v0 >= Precision::PConfusion())) {
+            throw Standard_ConstructionError(
+                "an input has a face of no width (no area), on which OCCT's intersection would "
+                "not end"
+            );
+        }
+    }
+}
+
 namespace
 {
 /// The solids of the shapes in \a list, also inside compounds and compsolids
@@ -158,12 +196,16 @@ bool leftNoTrace(BRepAlgoAPI_BooleanOperation* op, const TopoDS_Shape& tool, boo
 /// common part is more than a millionth of the tool's (OCCT's Common is right where the solid
 /// builder fails, ops#472). The first vertex not ON the solid's boundary decides, as such a tool
 /// lies wholly in the material or wholly outside it (a vertex may touch the boundary), and each
-/// classification costs about 0.1 s on a 1000-span face
-bool overlaps(const TopoDS_Shape& solid, const TopoDS_Shape& tool, double fuzzy)
+/// classification costs about 0.1 s on a 1000-span face. The boxes are the caller's, each made once
+/// (perf profile 4, ops#640: made per pair, a fuse of 200 separate solids made 40,000 of them)
+bool overlaps(
+    const TopoDS_Shape& solid,
+    const Bnd_Box& solidBounds,
+    const TopoDS_Shape& tool,
+    const Bnd_Box& toolBounds,
+    double fuzzy
+)
 {
-    Bnd_Box solidBounds, toolBounds;
-    BRepBndLib::Add(solid, solidBounds);
-    BRepBndLib::Add(tool, toolBounds);
     if (solidBounds.IsOut(toolBounds)) {
         return false;
     }
@@ -222,23 +264,57 @@ void FCBRepAlgoAPIHelper::checkLostTools(BRepAlgoAPI_BooleanOperation* op)
     if (!cut && results.size() <= bases.size()) {
         return;
     }
-    for (const auto& tool : tools) {
-        if (!leftNoTrace(op, tool, cut)) {
+    // Each solid's box, made when first needed
+    struct Boxed
+    {
+        TopoDS_Shape shape;
+        Bnd_Box box;
+        bool made = false;
+        const Bnd_Box& bounds()
+        {
+            if (!made) {
+                BRepBndLib::Add(shape, box);
+                made = true;
+            }
+            return box;
+        }
+    };
+    auto boxed = [](const std::vector<TopoDS_Shape>& shapes) {
+        std::vector<Boxed> out;
+        out.reserve(shapes.size());
+        for (const auto& shape : shapes) {
+            out.push_back({shape, Bnd_Box(), false});
+        }
+        return out;
+    };
+    std::vector<Boxed> boxedTools = boxed(tools);
+    std::vector<Boxed> boxedOthers = boxed(cut ? results : bases);
+    for (auto& tool : boxedTools) {
+        if (!leftNoTrace(op, tool.shape, cut)) {
             continue;
         }
         // A cut that removed nothing lost the tool if the result still has material where the
         // tool is (a tool outside the base, or inside another tool, has none). A fuse that merged
         // nothing lost it if the tool lies in the material of the base or of another tool
-        std::vector<TopoDS_Shape> others = cut ? results : bases;
+        std::vector<Boxed*> others;
+        for (auto& other : boxedOthers) {
+            others.push_back(&other);
+        }
         if (!cut) {
-            for (const auto& other : tools) {
-                if (!other.IsSame(tool)) {
-                    others.push_back(other);
+            for (auto& other : boxedTools) {
+                if (!other.shape.IsSame(tool.shape)) {
+                    others.push_back(&other);
                 }
             }
         }
-        for (const auto& other : others) {
-            if (overlaps(other, tool, op->FuzzyValue())) {
+        for (Boxed* other : others) {
+            if (overlaps(
+                    other->shape,
+                    other->bounds(),
+                    tool.shape,
+                    tool.bounds(),
+                    op->FuzzyValue()
+                )) {
                 throw Base::CADKernelError(
                     cut ? "Cut failed: a tool solid lies inside the base, but the result lost its "
                           "cavity (OCCT solid builder fault, ops#472)"
@@ -267,7 +343,7 @@ void FCBRepAlgoAPI_BooleanOperation::Build(const Message_ProgressRange& progress
         // cut argument and compound tool
         TopTools_ListOfShape myOriginalArguments = myArguments;
         TopTools_ListOfShape myOriginalTools = myTools;
-        RecursiveCutFusedTools(myOriginalArguments, myOriginalTools.First());
+        RecursiveCutFusedTools(myOriginalArguments, myOriginalTools.First(), progressRange);
         myArguments = myOriginalArguments;
         myTools = myOriginalTools;
     }
@@ -277,10 +353,13 @@ void FCBRepAlgoAPI_BooleanOperation::Build(const Message_ProgressRange& progress
     ) {
         // cut compound argument
         TopTools_ListOfShape myOriginalArguments = myArguments;
-        RecursiveCutCompound(myOriginalArguments.First());
+        RecursiveCutCompound(myOriginalArguments.First(), progressRange);
         myArguments = myOriginalArguments;
     }
     else {
+        // The pieces of the two paths above come here one by one
+        FCBRepAlgoAPIHelper::refuseFacesWithoutWidth(myArguments);
+        FCBRepAlgoAPIHelper::refuseFacesWithoutWidth(myTools);
 #if OCC_VERSION_HEX >= 0x070600
         BRepAlgoAPI_BooleanOperation::Build(progressRange);
 #else
@@ -307,9 +386,13 @@ void FCBRepAlgoAPI_BooleanOperation::RecursiveAddTools(const TopoDS_Shape& theTo
 
 void FCBRepAlgoAPI_BooleanOperation::RecursiveCutFusedTools(
     const TopTools_ListOfShape& theOriginalArguments,
-    const TopoDS_Shape& theTool
+    const TopoDS_Shape& theTool,
+    const Message_ProgressRange& progressRange
 )
 {
+    // The fuse and the cut each get a part of the caller's range, so that a cancel (the kernel
+    // budget's time limit, Esc) stops them too (ops#773): a Build() without one never reads it
+    Message_ProgressScope scope(progressRange, "Cut by fused tools", 2);
     // get a list of shapes in the tool compound
     myTools.Clear();
     RecursiveAddTools(theTool);
@@ -320,7 +403,7 @@ void FCBRepAlgoAPI_BooleanOperation::RecursiveCutFusedTools(
         myArguments.Append(myTools.First());
         myTools.RemoveFirst();
         myOperation = BOPAlgo_FUSE;
-        Build();
+        Build(scope.Next());
 
         // restore original state
         myOperation = BOPAlgo_CUT;
@@ -339,21 +422,30 @@ void FCBRepAlgoAPI_BooleanOperation::RecursiveCutFusedTools(
     }
 
     // do the cut
-    Build();
+    Build(scope.Next());
 }
 
-void FCBRepAlgoAPI_BooleanOperation::RecursiveCutCompound(const TopoDS_Shape& theArgument)
+void FCBRepAlgoAPI_BooleanOperation::RecursiveCutCompound(
+    const TopoDS_Shape& theArgument,
+    const Message_ProgressRange& progressRange
+)
 {
     BRep_Builder builder;
     TopoDS_Compound comp;
     builder.MakeCompound(comp);
 
+    // Each piece's cut gets a part of the caller's range, as in RecursiveCutFusedTools (ops#773)
+    int pieces = 0;
+    for (TopoDS_Iterator count(theArgument); count.More(); count.Next()) {
+        ++pieces;
+    }
+    Message_ProgressScope scope(progressRange, "Cut of a compound", std::max(pieces, 1));
     // iterate through shapes in argument compound and cut each one with the tool
     TopoDS_Iterator it(theArgument);
     for (; it.More(); it.Next()) {
         myArguments.Clear();
         myArguments.Append(it.Value());
-        Build();
+        Build(scope.Next());
 
         if (!IsDone()) {
             myShape = {};

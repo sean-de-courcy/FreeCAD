@@ -22,7 +22,7 @@
 # *                                                                         *
 # ***************************************************************************
 
-from math import pi
+from math import cos, pi, sin
 import unittest
 
 import FreeCAD
@@ -426,6 +426,174 @@ class TestHelix(unittest.TestCase):
         helix.Reversed = False
         self.Doc.recompute()
         self.assertAlmostEqual(helix.Shape.Volume / 1e5, 6.0643, places=4)
+
+    def testRefineAfterThreadMergesCoplanarFaces(self):
+        """A refined feature after a thread merges coplanar neighbours, as Onshape does.
+
+        A tube (r 10..20, height 8) carries an outer thread on r 20; a ring (r 20..23) padded down
+        1 mm from the tube's top plane puts its top face beside the tube's. The two make one face
+        r 10..23 at z = 8, area pi (23^2 - 10^2). The helix widens its edges' tolerance, and the
+        refine kept the two faces apart, with no warning (rehearsal 5, rb43)."""
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        planes = {f.Role: f for f in body.Origin.OriginFeatures}
+
+        def annulus(name, r0, r1, z):
+            sketch = body.newObject("Sketcher::SketchObject", name)
+            sketch.AttachmentSupport = [(planes["XY_Plane"], "")]
+            sketch.MapMode = "FlatFace"
+            sketch.AttachmentOffset = FreeCAD.Placement(Base.Vector(0, 0, z), FreeCAD.Rotation())
+            sketch.addGeometry(Part.Circle(Base.Vector(0, 0, 0), Base.Vector(0, 0, 1), r1))
+            sketch.addGeometry(Part.Circle(Base.Vector(0, 0, 0), Base.Vector(0, 0, 1), r0))
+            return sketch
+
+        tube = body.newObject("PartDesign::Pad", "Tube")
+        tube.Profile = annulus("TubeSketch", 10, 20, 0)
+        tube.Length = 8
+        profile = body.newObject("Sketcher::SketchObject", "ThreadProfile")
+        profile.AttachmentSupport = [(planes["XZ_Plane"], "")]
+        profile.MapMode = "FlatFace"
+        corners = [Base.Vector(20, 1.0, 0), Base.Vector(20, 2.0, 0), Base.Vector(20.8, 1.5, 0)]
+        for i in range(3):
+            profile.addGeometry(Part.LineSegment(corners[i], corners[(i + 1) % 3]))
+        thread = body.newObject("PartDesign::AdditiveHelix", "Thread")
+        thread.Profile = profile
+        thread.ReferenceAxis = (planes["Z_Axis"], [""])
+        thread.Mode = "pitch-height-angle"
+        thread.Pitch = 2.5
+        thread.Height = 4.0
+        thread.Refine = True
+        ring = body.newObject("PartDesign::Pad", "Ring")
+        ring.Profile = annulus("RingSketch", 20, 23, 8)
+        ring.Length = 1
+        ring.Reversed = True
+        ring.Refine = True
+        self.Doc.recompute()
+
+        self.assertTrue(ring.isValid(), ring.getStatusString())
+        self.assertTrue(ring.Shape.isValid())
+        top = [
+            f
+            for f in ring.Shape.Faces
+            if f.Surface.__class__.__name__ == "Plane"
+            and abs(f.BoundBox.ZMin - 8) < 1e-7
+            and abs(f.BoundBox.ZMax - 8) < 1e-7
+        ]
+        self.assertEqual(len(top), 1, [f.Area for f in top])
+        self.assertAlmostEqual(top[0].Area, pi * (23**2 - 10**2), places=6)
+
+    def testRefineAfterThreadKeepsTorusHalvesApart(self):
+        """The refine after a thread merges only what it merges without one.
+
+        A tube (r 10..20, height 8) carries an outer thread; two refined AdditiveTorus halves
+        (R 15, r 3, 180 degrees each, turned 180 degrees apart) sit on its top. The face uniter
+        never merges toroidal faces, with or without the thread, so the bead keeps two of them.
+        The refine's fallback after a thread merged them (review replc r2, T-A)."""
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        planes = {f.Role: f for f in body.Origin.OriginFeatures}
+        sketch = body.newObject("Sketcher::SketchObject", "TubeSketch")
+        sketch.AttachmentSupport = [(planes["XY_Plane"], "")]
+        sketch.MapMode = "FlatFace"
+        sketch.addGeometry(Part.Circle(Base.Vector(0, 0, 0), Base.Vector(0, 0, 1), 20))
+        sketch.addGeometry(Part.Circle(Base.Vector(0, 0, 0), Base.Vector(0, 0, 1), 10))
+        tube = body.newObject("PartDesign::Pad", "Tube")
+        tube.Profile = sketch
+        tube.Length = 8
+        profile = body.newObject("Sketcher::SketchObject", "ThreadProfile")
+        profile.AttachmentSupport = [(planes["XZ_Plane"], "")]
+        profile.MapMode = "FlatFace"
+        corners = [Base.Vector(20, 1.0, 0), Base.Vector(20, 2.0, 0), Base.Vector(20.8, 1.5, 0)]
+        for i in range(3):
+            profile.addGeometry(Part.LineSegment(corners[i], corners[(i + 1) % 3]))
+        thread = body.newObject("PartDesign::AdditiveHelix", "Thread")
+        thread.Profile = profile
+        thread.ReferenceAxis = (planes["Z_Axis"], [""])
+        thread.Mode = "pitch-height-angle"
+        thread.Pitch = 2.5
+        thread.Height = 4.0
+        thread.Refine = True
+        for i, angle in enumerate((0, 180)):
+            bead = body.newObject("PartDesign::AdditiveTorus", "Bead%d" % i)
+            bead.Radius1 = 15
+            bead.Radius2 = 3
+            bead.Angle3 = 180
+            bead.Placement = FreeCAD.Placement(
+                Base.Vector(0, 0, 8), FreeCAD.Rotation(Base.Vector(0, 0, 1), angle)
+            )
+            bead.Refine = True
+        self.Doc.recompute()
+
+        self.assertTrue(bead.isValid(), bead.getStatusString())
+        tori = [f for f in bead.Shape.Faces if f.Surface.__class__.__name__ == "Toroid"]
+        self.assertEqual(len(tori), 2, [f.Area for f in tori])
+
+    def testRefineKeepsThreadWallWithinOnePeriod(self):
+        """The refine keeps a threaded wall's faces within one turn, so booleans see them.
+
+        A tube (r 75.5..76.5, height 6.6, its seam turned 50 degrees) carries an outer thread of
+        2.64 turns that runs past both of the tube's ends. Refined, the face uniter merged the
+        wall between the turns into one cylinder face spanning 3.36 periods with no seam edge.
+        OCCT projects a point to the principal period, finds it outside such a face, and drops
+        the face's sections: a box half in the wall then overlapped the whole of itself (the
+        native replica's #30 revolved a thread's cap across such a wall and overlapped nothing).
+        Expected: each wall face spans at most one period; a box straddling the wall between
+        the turns overlaps the part as it overlaps the plain tube; the volume is the tube's plus
+        the profile's area swept round its centroid (Pappus), the profile touching the wall."""
+        r, height, z0, pitch = 76.5, 6.6, -0.3, 2.5
+        tube = Part.makeCylinder(r, height).cut(Part.makeCylinder(r - 1, height))
+        tube.rotate(Base.Vector(0, 0, 0), Base.Vector(0, 0, 1), 50)
+        base = self.Doc.addObject("Part::Feature", "Tube")
+        base.Shape = tube
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        body.BaseFeature = base
+        planes = {f.Role: f for f in body.Origin.OriginFeatures}
+        profile = body.newObject("Sketcher::SketchObject", "ThreadProfile")
+        profile.AttachmentSupport = [(planes["XZ_Plane"], "")]
+        profile.MapMode = "FlatFace"
+        corners = [(r, z0), (r, z0 + 0.7), (r + 0.75, z0 + 0.1), (r + 0.8, z0)]
+        for i in range(4):
+            (x1, y1), (x2, y2) = corners[i], corners[(i + 1) % 4]
+            profile.addGeometry(Part.LineSegment(Base.Vector(x1, y1, 0), Base.Vector(x2, y2, 0)))
+        thread = body.newObject("PartDesign::AdditiveHelix", "Thread")
+        thread.Profile = profile
+        thread.ReferenceAxis = (planes["Z_Axis"], [""])
+        thread.Mode = "pitch-height-angle"
+        thread.Pitch = pitch
+        thread.Height = height
+        thread.Refine = True
+        self.Doc.recompute()
+
+        self.assertTrue(thread.isValid(), thread.getStatusString())
+        shape = thread.Shape
+        self.assertTrue(shape.isValid())
+        walls = [
+            f
+            for f in shape.Faces
+            if f.Surface.__class__.__name__ == "Cylinder" and abs(f.Surface.Radius - r) < 1e-9
+        ]
+        spans = [f.ParameterRange[1] - f.ParameterRange[0] for f in walls]
+        self.assertTrue(all(s <= 2 * pi + 1e-9 for s in spans), spans)
+        wrong = []
+        for k in range(12):
+            phi = 2 * pi * k / 12
+            for turn in range(2):
+                z = z0 + 1.6 + pitch * (phi / (2 * pi) + turn)
+                if z > height - 0.5:
+                    continue
+                center = Base.Vector(r * cos(phi), r * sin(phi), z)
+                box = Part.makeBox(0.4, 0.4, 0.4, center - Base.Vector(0.2, 0.2, 0.2))
+                expected, got = box.common(tube).Volume, box.common(shape).Volume
+                if abs(expected - got) > 1e-7:
+                    wrong.append((k * 30, turn, got, expected))
+        self.assertEqual(wrong, [])
+        area = centroid = 0.0
+        for i in range(4):
+            (x1, y1), (x2, y2) = corners[i], corners[(i + 1) % 4]
+            cross = x1 * y2 - x2 * y1
+            area += cross / 2
+            centroid += (x1 + x2) * cross / 6
+        centroid /= area
+        volume = pi * (r**2 - (r - 1) ** 2) * height + abs(area) * 2 * pi * centroid * height / pitch
+        self.assertAlmostEqual(shape.Volume, volume, delta=5e-4)
 
     def tearDown(self):
         FreeCAD.closeDocument("PartDesignTestHelix")

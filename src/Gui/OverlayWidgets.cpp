@@ -39,6 +39,8 @@
 #include <QTimerEvent>
 #include <QToolTip>
 #include <QTreeView>
+#include <QBoxLayout>
+#include <QScrollArea>
 #include <QScrollBar>
 
 
@@ -59,6 +61,7 @@
 #include "ComboView.h"
 #include "Command.h"
 #include "Control.h"
+#include "ForkKeymap.h"
 #include "MainWindow.h"
 #include "MDIView.h"
 #include "NaviCube.h"
@@ -1661,6 +1664,32 @@ void OverlayTabWidget::setSizeDelta(int delta)
         }
         sizeDelta = delta;
     }
+}
+
+int OverlayTabWidget::fitTaskHeight(int maxHeight) const
+{
+    if (count() != 1 || !ForkKeymap::isOnshape()) {
+        return maxHeight;
+    }
+    auto dock = dockWidget(0);
+    auto taskView = dock ? dock->findChild<TaskView::TaskView*>() : nullptr;
+    auto panel = taskView ? qobject_cast<TaskView::TaskPanel*>(taskView->currentWidget()) : nullptr;
+    auto boxes = panel ? panel->scrollArea->widget() : nullptr;  // the action panel
+    if (!boxes || !taskView->isVisible()) {
+        return maxHeight;
+    }
+    // the task panel's own height hint with the scroll area's part replaced by its boxes' height
+    int width = panel->scrollArea->viewport()->width();
+    int boxesHeight = width > 0 && boxes->hasHeightForWidth() ? boxes->heightForWidth(width)
+                                                              : boxes->sizeHint().height();
+    int content = panel->mainLayout->sizeHint().height() - panel->scrollArea->sizeHint().height()
+        + boxesHeight + 2 * panel->scrollArea->frameWidth();
+    // the panel's frame, title and tab rows around the task panel, as laid out now
+    int around = height() - panel->height();
+    if (content <= 0 || around < 0) {
+        return maxHeight;
+    }
+    return std::min(maxHeight, content + around);
 }
 
 void OverlayTabWidget::setRect(QRect rect)

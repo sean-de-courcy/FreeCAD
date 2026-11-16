@@ -703,6 +703,114 @@ TEST_F(DocumentTest, importedWithinTellsDocumentsWithOneUuidApart)
     app.closeDocument(name.c_str());
 }
 
+// FreeCAD-CH (ops#654 10.15): what an observer of signalBecameStable writes after a recompute
+// outside any transaction goes into the last undo step, which keeps its id and its place
+class StableStepTest: public DocumentTest
+{
+protected:
+    void TearDown() override
+    {
+        _observer.disconnect();
+        DocumentTest::TearDown();
+    }
+
+    /// At the next signalBecameStable, an observer adds the object name, once. Groups: their
+    /// recompute writes no input (a FeatureTest's does)
+    void addOnStable(const char* name)
+    {
+        _observer = doc()->signalBecameStable.connect([this, made = std::string(name)](
+                                                          const App::Document&
+                                                      ) {
+            if (!_added) {
+                _added = true;
+                doc()->addObject("App::DocumentObjectGroup", made.c_str());
+            }
+        });
+    }
+
+    App::DocumentObject* addInStep(const char* step, const char* name)
+    {
+        doc()->openTransaction(step);
+        auto obj = doc()->addObject("App::DocumentObjectGroup", name);
+        doc()->recompute();
+        doc()->commitTransaction();
+        return obj;
+    }
+
+private:
+    fastsignals::scoped_connection _observer;
+    bool _added = false;
+};
+
+TEST_F(StableStepTest, anObserverWriteAfterACommitJoinsTheLastStep)
+{
+    auto a = addInStep("add", "A");
+    const int id = doc()->getTransactionID(true, 0);
+    ASSERT_EQ(doc()->getAvailableUndos(), 1);
+    addOnStable("W");
+    a->touch();
+    doc()->recompute();
+    ASSERT_NE(doc()->getObject("W"), nullptr);
+    EXPECT_EQ(doc()->getAvailableUndos(), 1);
+    EXPECT_EQ(doc()->getTransactionID(true, 0), id);
+    EXPECT_EQ(doc()->getAvailableUndoNames(), std::vector<std::string>({"add"}));
+    EXPECT_FALSE(doc()->hasPendingTransaction());
+    EXPECT_TRUE(doc()->undo());
+    EXPECT_EQ(doc()->getObject("W"), nullptr);
+    EXPECT_EQ(doc()->getObject("A"), nullptr);
+    EXPECT_TRUE(doc()->redo());
+    EXPECT_NE(doc()->getObject("W"), nullptr);
+    EXPECT_NE(doc()->getObject("A"), nullptr);
+}
+
+TEST_F(StableStepTest, aRecomputeWithNoWriteLeavesTheStepsAsTheyWere)
+{
+    addInStep("first", "A");
+    auto b = addInStep("second", "B");
+    const int first = doc()->getTransactionID(true, 1);
+    const int second = doc()->getTransactionID(true, 0);
+    b->touch();
+    doc()->recompute();
+    EXPECT_EQ(doc()->getAvailableUndos(), 2);
+    EXPECT_EQ(doc()->getTransactionID(true, 0), second);
+    EXPECT_EQ(doc()->getTransactionID(true, 1), first);
+    EXPECT_EQ(doc()->getAvailableRedos(), 0);
+    EXPECT_FALSE(doc()->hasPendingTransaction());
+    EXPECT_TRUE(doc()->undo());
+    EXPECT_EQ(doc()->getObject("B"), nullptr);
+    EXPECT_NE(doc()->getObject("A"), nullptr);
+}
+
+TEST_F(StableStepTest, aWriteWithRedoNonEmptyClearsRedo)
+{
+    addInStep("first", "A");
+    addInStep("second", "B");
+    ASSERT_TRUE(doc()->undo());
+    ASSERT_EQ(doc()->getAvailableRedos(), 1);
+    addOnStable("W");
+    doc()->getObject("A")->touch();
+    doc()->recompute();
+    ASSERT_NE(doc()->getObject("W"), nullptr);
+    EXPECT_EQ(doc()->getAvailableRedos(), 0);
+    EXPECT_EQ(doc()->getAvailableUndos(), 1);
+    EXPECT_FALSE(doc()->redo());
+}
+
+TEST_F(StableStepTest, aBookedRecomputeMakesNoStepOfItsOwn)
+{
+    auto a = addInStep("add", "A");
+    addOnStable("W");
+    App::GetApplication().setActiveDocument(doc());
+    App::GetApplication().setActiveTransaction(App::TransactionName {.name = "Recompute"});
+    a->touch();
+    doc()->recompute();
+    App::GetApplication().closeActiveTransaction();
+    ASSERT_NE(doc()->getObject("W"), nullptr);
+    EXPECT_EQ(doc()->getAvailableUndoNames(), std::vector<std::string>({"add"}));
+    EXPECT_TRUE(doc()->undo());
+    EXPECT_EQ(doc()->getObject("W"), nullptr);
+}
+
 class RecomputeContinuationTest: public DocumentTest
 {
 protected:
@@ -756,7 +864,9 @@ TEST_F(RecomputeContinuationTest, withoutRuleAFailureFailsItsDependantsNamingThe
     // Act
     int count = doc()->recompute();
 
-    // Assert: none runs; each fails naming its direct input and stays touched (ops#579)
+    // Assert: none runs; each fails naming its direct input (ops#579). The failure stays touched;
+    // its dependants, stopped and judged, are left with nothing pending (round 8, J13: Onshape has
+    // no needs-recompute state)
     EXPECT_EQ(count, 3);
     EXPECT_TRUE(member->isError());
     EXPECT_TRUE(member->isTouched());
@@ -764,10 +874,19 @@ TEST_F(RecomputeContinuationTest, withoutRuleAFailureFailsItsDependantsNamingThe
                              std::pair {later, "Source1 links to 'Dependant', which has an error"}}) {
         EXPECT_EQ(obj->ExecCount.getValue(), 0);
         EXPECT_TRUE(obj->isError());
-        EXPECT_TRUE(obj->isTouched());
+        EXPECT_FALSE(obj->isTouched());
         ASSERT_NE(doc()->getErrorDescription(obj), nullptr);
         EXPECT_STREQ(doc()->getErrorDescription(obj), text);
     }
+
+    // And they run again when what stopped them is repaired: its recompute enforces its in-list
+    member->ExceptionType.setValue(0);
+    doc()->recompute();
+    for (auto obj : {member, dependant, later}) {
+        EXPECT_TRUE(obj->isValid()) << obj->getNameInDocument();
+    }
+    EXPECT_EQ(dependant->ExecCount.getValue(), 1);
+    EXPECT_EQ(later->ExecCount.getValue(), 1);
 }
 
 TEST_F(RecomputeContinuationTest, anUnclaimedFailureFailsItsDependants)
@@ -780,12 +899,13 @@ TEST_F(RecomputeContinuationTest, anUnclaimedFailureFailsItsDependants)
     // Act
     doc()->recompute();
 
-    // Assert: the rule doesn't claim Other, so its dependant fails naming it (ops#579)
+    // Assert: the rule doesn't claim Other, so its dependant fails naming it (ops#579), and is left
+    // with nothing pending (round 8, J13)
     EXPECT_TRUE(other->isError());
     EXPECT_TRUE(other->isTouched());
     EXPECT_EQ(dependant->ExecCount.getValue(), 0);
     EXPECT_TRUE(dependant->isError());
-    EXPECT_TRUE(dependant->isTouched());
+    EXPECT_FALSE(dependant->isTouched());
     ASSERT_NE(doc()->getErrorDescription(dependant), nullptr);
     EXPECT_STREQ(doc()->getErrorDescription(dependant),
                  "Source1 links to 'Other', which has an error");

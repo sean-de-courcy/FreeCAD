@@ -56,6 +56,9 @@ class Document(PropertyContainer):
     RecomputesFrozen: bool = False
     """Returns or sets if automatic recomputes for this document are disabled."""
 
+    RegenerateOnCommit: bool = False
+    """FreeCAD-CH (ops#640): recompute on an explicit commit or abort and after undo/redo (off by default; the GUI sets it)"""
+
     HasPendingTransaction: Final[bool] = False
     """Check if there is a pending transaction"""
 
@@ -101,6 +104,45 @@ class Document(PropertyContainer):
     def saveCopy(self, path: str, /) -> None:
         """
         Save a copy of the document under a new name to disk.
+        """
+        ...
+
+    def fileChangeOnDisk(self) -> dict:
+        """
+        FreeCAD-CH (ops#640, slice A2): the save guard's view of the document's file.
+
+        Returns a dict: "changed" (the file is no longer the one this document read or
+        last saved, so save() refuses to overwrite it), "by" and "when" (who saved the
+        file on disk and when, from its LastModifiedBy and LastModifiedDate), "known"
+        (False when this document has no sure record of its file: its read failed, the
+        file changed during the read, or it was read from a recovery copy).
+        """
+        ...
+
+    def resolveFileChange(self, choice: str, /) -> str:
+        """
+        FreeCAD-CH (ops#640, slice A2): the ways out when the document's file changed on
+        disk; none loses a version. "KeepMineAsCopy" saves this document beside the
+        other as a document of its own; "TakeTheirs" keeps this version as a copy and
+        reads the other; "SaveMineOver" keeps the other as a copy and saves this one.
+        Returns the copy's file name.
+        """
+        ...
+
+    def conflictCopies(self) -> list:
+        """
+        FreeCAD-CH (ops#640, slice A2): the siblings a sync tool made of the document's
+        file in a conflict (Syncthing's ".sync-conflict-" names, the "conflicted copy"
+        names of Dropbox and Nextcloud).
+        """
+        ...
+
+    def resolveConflictCopy(self, path: str, choice: str, /) -> str:
+        """
+        FreeCAD-CH (ops#640, slice A2): settles a conflict copy; neither version is lost.
+        "KeepThis" gives the other its author's name and time; "KeepOther" keeps this
+        version under its author's name and time, puts the other under the document's
+        name and reads it. Returns the renamed or kept file's name.
         """
         ...
 
@@ -181,9 +223,12 @@ class Document(PropertyContainer):
         """
         ...
 
-    def openTransaction(self, name: str, /) -> None:
+    def openTransaction(self, name: str, /) -> int:
         """
         Open a new Undo/Redo transaction.
+
+        FreeCAD-CH (ops#640): returns the transaction id, or 0 when refused (the document's
+        transaction or step is locked, or it is transacting).
 
         This function no long creates a new transaction, but calls
         FreeCAD.setActiveTransaction(name) instead, which will auto creates a
@@ -345,21 +390,51 @@ class Document(PropertyContainer):
         """
         ...
 
-    def undo(self) -> None:
+    def undo(self) -> bool:
         """
         Undo one transaction
+
+        FreeCAD-CH (ops#640): returns whether a transaction was undone (False with nothing to
+        undo, or while the step is locked: lockStep()). A pending transaction is committed
+        first; one that changed no input leaves no step, and undo() then pops nothing and
+        returns True if older steps remain.
         """
         ...
 
-    def redo(self) -> None:
+    def redo(self) -> bool:
         """
         Redo a previously undone transaction
+
+        FreeCAD-CH (ops#640): returns whether a transaction was redone (False with nothing to
+        redo, or while the step is locked: lockStep()).
+        """
+        ...
+
+    def lockStep(self) -> None:
+        """
+        FreeCAD-CH (ops#640): lock the step in progress (a counter; the GUI holds it while a
+        feature dialog is open). While locked, undo() and redo() refuse, and so does opening a
+        transaction other than the booked one; commitTransaction() and abortTransaction() pass.
+        """
+        ...
+
+    def unlockStep(self) -> None:
+        """
+        FreeCAD-CH (ops#640): release one lockStep().
+        """
+        ...
+
+    def isStepLocked(self) -> bool:
+        """
+        FreeCAD-CH (ops#640): whether the step is locked (lockStep()).
         """
         ...
 
     def clearUndos(self) -> None:
         """
         Clear the undo stack of the document
+
+        FreeCAD-CH (ops#640): does nothing while the step is locked (lockStep()).
         """
         ...
 

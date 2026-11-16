@@ -27,6 +27,9 @@
 #include <QListWidget>
 #include <QTimer>
 
+#include <BRepAdaptor_Surface.hxx>
+#include <TopoDS.hxx>
+
 
 #include <App/Application.h>
 #include <App/Document.h>
@@ -43,6 +46,8 @@
 #include <Mod/PartDesign/App/Body.h>
 #include <Mod/PartDesign/App/FeatureAddSub.h>
 #include <Mod/PartDesign/App/FeatureTransformed.h>
+#include <Mod/PartDesign/App/StudioList.h>
+#include <Mod/Part/App/PartFeature.h>
 
 #include "ui_TaskTransformedParameters.h"
 #include "TaskTransformedParameters.h"
@@ -57,6 +62,40 @@ using namespace PartDesignGui;
 using namespace Gui;
 
 /* TRANSLATOR PartDesignGui::TaskTransformedParameters */
+
+namespace
+{
+/// FreeCAD-CH ops#654 slice 8: the studio feature (owner) an original picked in a listed studio
+/// stands for: an owner row, or a step of one (a face of the part maps to the step); null for any
+/// other object
+App::DocumentObject* studioOwnerOfPick(App::DocumentObject* obj)
+{
+    if (!obj) {
+        return nullptr;
+    }
+    if (PartDesign::isStudioOwner(obj)) {
+        return obj;
+    }
+    if (PartDesign::StudioList::isStep(obj)) {
+        auto feature = freecad_cast<PartDesign::Feature*>(obj);
+        return feature ? feature->StudioOwner.getValue() : nullptr;
+    }
+    return nullptr;
+}
+
+/// A pattern of studio features that can't copy one (ops#654 slice 8: an original acting on
+/// other parts, an Up to next one...) says why in its Features field, in red until the next pick
+void showStudioRefusal(ReferenceField* field, PartDesign::Transformed* pattern)
+{
+    if (!field || !pattern || !pattern->isError()) {
+        return;
+    }
+    const auto& originals = pattern->Originals.getValues();
+    if (std::ranges::any_of(originals, [](auto obj) { return studioOwnerOfPick(obj) != nullptr; })) {
+        field->setNote(QString::fromUtf8(pattern->getStatusString()));
+    }
+}
+}  // namespace
 
 TaskTransformedParameters::TaskTransformedParameters(
     ViewProviderTransformed* TransformedView,
@@ -125,6 +164,7 @@ void TaskTransformedParameters::setupUI()
     );
     originalsField->list()->setMaximumHeight(120);
     originalsField->takePlaceOf(ui->originalsPlaceholder);
+    showStudioRefusal(originalsField, pcTransformed);
     connect(originalsField, &ReferenceField::arming, this, [this]() { endPickModes(); });
 
     using Mode = PartDesign::Transformed::Mode;
@@ -146,6 +186,37 @@ void TaskTransformedParameters::setupUI()
     }
 
     setupParameterUI(ui->featureUI);  // create parameter UI widgets
+
+    // FreeCAD-CH ops#654 T3: Onshape's "Reapply features" (a feature pattern's, off by default):
+    // each instance re-runs its features there, against the part as it grows
+    if (!insideMultiTransform) {
+        auto reapply = new QCheckBox(tr("Reapply features"), proxy);
+        reapply->setObjectName(QStringLiteral("checkBoxReapply"));
+        reapply->setToolTip(
+            tr("Recompute each feature at each instance, against the part there: its end "
+               "conditions apply per instance")
+        );
+        reapply->setChecked(pcTransformed->Reapply.getValue());
+        reapply->setEnabled(mode == Mode::Features);
+        ui->verticalLayout->insertWidget(ui->verticalLayout->indexOf(ui->featureUI) + 1, reapply);
+        connect(reapply, &QCheckBox::toggled, this, [this](bool on) {
+            auto pattern = getObject<PartDesign::Transformed>();
+            if (!pattern || pattern->Reapply.getValue() == on) {
+                return;
+            }
+            setupTransaction();
+            pattern->Reapply.setValue(on);
+            recomputeFeature();
+            if (originalsField) {
+                originalsField->setNote(QString());
+            }
+            showStudioRefusal(originalsField, pattern);
+        });
+        connect(ui->buttonGroupMode, &QButtonGroup::idClicked, reapply, [reapply](int id) {
+            reapply->setEnabled(id == static_cast<int>(Mode::Features));
+        });
+    }
+
     this->groupLayout()->addWidget(proxy);
 }
 
@@ -183,14 +254,26 @@ std::vector<ReferenceField*> TaskTransformedParameters::referenceFields() const
     return {};
 }
 
+
 bool TaskTransformedParameters::acceptOriginal(App::DocumentObject* obj, std::string& why) const
 {
-    if (!obj->isDerivedFrom<PartDesign::FeatureAddSub>()) {
+    PartDesign::Transformed* pcTransformed = getObject();
+    PartDesign::Body* body = pcTransformed ? pcTransformed->getFeatureBody() : nullptr;
+    // A studio feature whose step is in the pattern's part (ops#654 slice 8): its step is copied.
+    // One acting on other parts too is taken, and the pattern says why it can't copy it
+    if (App::DocumentObject* owner = studioOwnerOfPick(obj)) {
+        if (body && !PartDesign::StudioList::stepOf(owner, body)) {
+            why = QT_TR_NOOP("Pick a feature that acts on the pattern's part.");
+            return false;
+        }
+        return true;
+    }
+    // A pattern or mirror brings its own instances (Onshape's pattern of a pattern)
+    if (!obj->isDerivedFrom<PartDesign::FeatureAddSub>()
+        && !obj->isDerivedFrom<PartDesign::Transformed>()) {
         why = QT_TR_NOOP("Pick a feature that adds or removes material.");
         return false;
     }
-    PartDesign::Transformed* pcTransformed = getObject();
-    PartDesign::Body* body = pcTransformed ? pcTransformed->getFeatureBody() : nullptr;
     if (body && PartDesign::Body::findBodyOf(obj) != body) {
         why = QT_TR_NOOP("Pick a feature of the pattern's body.");
         return false;
@@ -204,17 +287,36 @@ void TaskTransformedParameters::writeOriginals(const std::vector<App::DocumentOb
     if (!pcTransformed) {
         return;
     }
-    // In the body's order, as getSortedOriginals() gives them
-    std::vector<App::DocumentObject*> originals = objs;
+    // A step picked (a face of the part) stands for its studio feature; picked again, it takes
+    // the feature out (ops#654 slice 8)
+    std::vector<App::DocumentObject*> originals;
+    for (App::DocumentObject* obj : objs) {
+        App::DocumentObject* owner = studioOwnerOfPick(obj);
+        App::DocumentObject* entry = owner ? owner : obj;
+        if (auto found = std::ranges::find(originals, entry); found != originals.end()) {
+            originals.erase(found);
+        }
+        else {
+            originals.push_back(entry);
+        }
+    }
+    // In the body's order, as getSortedOriginals() gives them (a studio feature at its step)
     if (PartDesign::Body* body = pcTransformed->getFeatureBody()) {
         const std::vector<App::DocumentObject*>& group = body->Group.getValues();
-        std::ranges::stable_sort(originals, {}, [&group](App::DocumentObject* obj) {
-            return std::ranges::find(group, obj) - group.begin();
+        std::ranges::stable_sort(originals, {}, [&group, body](App::DocumentObject* obj) {
+            App::DocumentObject* inBody = obj;
+            if (PartDesign::isStudioOwner(obj)) {
+                if (auto step = PartDesign::StudioList::stepOf(obj, body)) {
+                    inBody = step;
+                }
+            }
+            return std::ranges::find(group, inBody) - group.begin();
         });
     }
     setupTransaction();
     pcTransformed->Originals.setValues(originals);
     recomputeFeature();
+    showStudioRefusal(originalsField, pcTransformed);
 }
 
 void TaskTransformedParameters::setupTransaction()
@@ -465,6 +567,55 @@ void TaskTransformedParameters::addReferenceSelectionGate(AllowSelectionFlags al
     std::unique_ptr<Gui::SelectionFilterGate> gateRefPtr(
         new ReferenceSelection(getBaseObject(), allow)
     );
+    std::unique_ptr<Gui::SelectionFilterGate> gateDepPtr(
+        new NoDependentsSelection(getTopTransformedObject())
+    );
+    Gui::Selection().addSelectionGate(new CombineSelectionFilterGates(gateRefPtr, gateDepPtr));
+}
+
+namespace
+{
+
+/// What a ReferenceSelection with `allow` takes, or a cylindrical face it would take as a face of
+/// any kind (FreeCAD-CH ops#640 rank 27)
+class DirectionSelection: public Gui::SelectionFilterGate
+{
+    ReferenceSelection references;
+    ReferenceSelection faces;
+
+public:
+    DirectionSelection(const App::DocumentObject* support, AllowSelectionFlags allow)
+        : Gui::SelectionFilterGate(nullPointer())
+        , references(support, allow)
+        , faces(support, AllowSelection::FACE)
+    {}
+
+    bool allow(App::Document* pDoc, App::DocumentObject* pObj, const char* sSubName) override
+    {
+        if (references.allow(pDoc, pObj, sSubName)) {
+            return true;
+        }
+        if (!pObj || !sSubName || !faces.allow(pDoc, pObj, sSubName)) {
+            return false;
+        }
+        const Part::TopoShape shape = Part::Feature::getTopoShape(
+            pObj,
+            Part::ShapeOption::NeedSubElement | Part::ShapeOption::ResolveLink,
+            sSubName
+        );
+        if (shape.isNull() || shape.shapeType(true) != TopAbs_FACE) {
+            return false;
+        }
+        BRepAdaptor_Surface adapt(TopoDS::Face(shape.getShape()));
+        return adapt.GetType() == GeomAbs_Cylinder;
+    }
+};
+
+}  // namespace
+
+void TaskTransformedParameters::addDirectionSelectionGate(AllowSelectionFlags allow)
+{
+    std::unique_ptr<Gui::SelectionFilterGate> gateRefPtr(new DirectionSelection(getBaseObject(), allow));
     std::unique_ptr<Gui::SelectionFilterGate> gateDepPtr(
         new NoDependentsSelection(getTopTransformedObject())
     );

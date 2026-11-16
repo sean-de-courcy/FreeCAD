@@ -101,6 +101,46 @@ public:
      */
     static bool isPieceOf(std::string_view name, std::string_view oldName);
 
+    /** True if \a name is \a oldName made again from pieces of its sources (ops#808): the same
+     * sections, but in the first one, which says how the element was made, at least one linked
+     * name is a split piece of \a oldName's (isPieceOf()), or is itself made from pieces of it;
+     * the other linked names and every other field are equal (the flags and the linked names
+     * compared as sets). One exception: where \a oldName was the only element its sources made
+     * (no duplicate counter, no connected elements), \a name may carry them: a piece that makes
+     * two elements in its place tells them apart so. E.g. a boss's junction edge with a plate's top face,
+     * `_;{<top>, <cylinder>};<boss>;FUS;0;E;0;GEN;_`, once a wall inserted before the boss has cut
+     * the top in two: `_;{<top>|<split>, <cylinder>};<boss>;FUS;0;E;0;GEN;_`. The same feature
+     * made the element in the same way from what is left of the same sources; an edge that runs
+     * over two pieces gives one such name per piece. A source that is a profile's face
+     * (`_;{<edges>};<sketch>;FAC;0;F;0;LOW;_`, a pad's bottom cap, and inside its top cap's name)
+     * may also be the same face of an edited profile (ops#849): the same section, its edges (those
+     * of its outer wire that are its own alone) all among the old ones or the old ones all among
+     * its own, as after a sketch edge was split in two or two were joined; a profile with an edge
+     * replaced by a new one is another face. Faces of one profile share no edge name, so only one
+     * can hold all of the old one's edges; a face cut in two by a new line gives two that each
+     * hold some, both pieces of it. So
+     * an edge a pocket cuts in a pad's top, named after the top and the pocket's side, is still
+     * that edge once the pad's sketch has an edge more. Sections after the first must be equal,
+     * or \a name's further ones its own split's. A name is not made from pieces of itself, and
+     * a plain piece of \a oldName isn't either.
+     *
+     * With \a keptVertices (ops#852) a sketch's vertex (`{g1v2, g2v1};_;<sketch>;SKT;0;V;0;SRC;_`,
+     * named after the edge ends that meet there, its reference IDs) also stands for the old one when it keeps at
+     * least one of its edge ends: Sketcher's split leaves the edge's id on the first piece, so
+     * the vertex at the old end becomes `{g2v1, g5v2}` without moving. The names alone can't
+     * tell that vertex from the split point (`{g1v2, g5v1}`, which keeps the other end), and a
+     * corner cut off by a new line leaves the same two names. So each such vertex accepted is
+     * added to \a keptVertices (its section), and the caller takes the answer only when every
+     * element it finds this way names the same vertices: the usual case, since a pad joins the
+     * faces beside a collinear split point and no edge is made there. On false \a keptVertices
+     * may hold entries of the failed comparison.
+     */
+    static bool isMadeFromPiecesOf(
+        std::string_view name,
+        std::string_view oldName,
+        std::vector<std::string>* keptVertices = nullptr
+    );
+
     /** True if \a a and \a b are single sections naming the same element of a source shape by
      * its index (the IDX flag, e.g. `Face6;_;<tag>;MKR;0;F;0;IDX,SRC;_`): equal in every field
      * but the op code, the flags compared as sets. A shape without an element map gives its
@@ -489,6 +529,10 @@ AppExport bool isMarkedCapName(std::string_view name);
  * another order while the pieces slid onto the next face, gives the name to another piece that
  * no longer overlaps the old one: an exact reference to it that moved goes to solveOwner()'s
  * moved check, which breaks it then.
+ *
+ * isOrderedName(), isMarkedCapName() and isMarkedPieceName() read top-level sections only (a
+ * marked cap's one mark through its own sections): a plain name and its own sections
+ * (ownSectionsOf()) give the same answer (ops#640, R1 of notes/names-bounded.md).
  */
 AppExport bool isMarkedPieceName(std::string_view name);
 
@@ -535,6 +579,18 @@ isCounterSiblingName(std::string_view name, std::string_view other, bool copySib
  * `CUT;1;V`, are twins.
  */
 AppExport bool isTwinName(std::string_view name, std::string_view other);
+
+/** A name as the map holds it (interned) with its own sections in full and the names they embed
+ * left as references: its leading reference, the whole name or the prefix of a split piece, is
+ * replaced by its content, and a list's reference to the empty name is emptied, as
+ * NameTable::toPlain() does at the top level. A plain name is itself. Each section's fields
+ * besides its name lists are the plain form's, at the cost of the name's own text instead of its
+ * whole history's (ops#640). isTwinName() takes plain names, these, or names as the map holds
+ * them, and answers as for their plain forms, reading a reference as its content. That holds
+ * for the names the encoder writes: a content ending in the escape character `^` is outside the
+ * grammar (no field ends in one), and its plain form would swallow the delimiter after it.
+ */
+AppExport std::string ownSectionsOf(std::string_view name);
 
 /** True if \a name is keyed by its order (ops#503 class D, D1): a section carries the ORD flag,
  * a duplicate counter or a role, or is a counter section (isTwinName()) with a non-zero Index.
@@ -733,6 +789,10 @@ struct AppExport SolveInput
         /// the person asked for the whole element, so a split breaks with the pieces listed,
         /// never G3's one piece.
         bool listHolder = false;
+        /// Under Equivalent, two or more pieces of the old element break the entry even when
+        /// they give the consumer one result (an attachment: Onshape's SW19 (a), a sketch and
+        /// a mate connector on a face cut in two fail and come back once it is whole again).
+        bool piecesBreak = false;
         /// Resolved exactly (tier 0) to exactElement, e.g. `Face3`, whose mapped name is
         /// exactName (the name the reference holds).
         bool exact = false;
@@ -958,6 +1018,9 @@ struct AppExport SolveOutcome
     std::string from;
     /// Resolved by a collapse: the group's `from` is cleared.
     bool collapsed = false;
+    /// Resolved to the representative of pieces of the old element that give the consumer one
+    /// result (the Equivalent policy): the batch keeps the way back to the whole element.
+    bool equivalentPieces = false;
     /// Broken: the candidates the user may choose from, pieces first, each part in index order,
     /// with their mapped names (parallel). Resolved by tier 2 or 3 (ops#127): the other
     /// candidates tier 1 found, which the user may prefer to the one geometry chose.

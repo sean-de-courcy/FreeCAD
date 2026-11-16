@@ -67,25 +67,25 @@ using namespace Gui::TaskView;
 
 // Translation block for context menu: do not remove
 #if 0
-QT_TRANSLATE_NOOP("SketcherGui::ElementView", "Coincident Constraint");
+QT_TRANSLATE_NOOP("SketcherGui::ElementView", "Coincident");
 
 QT_TRANSLATE_NOOP("SketcherGui::ElementView", "Point-On-Object Constraint");
 
-QT_TRANSLATE_NOOP("SketcherGui::ElementView", "Vertical Constraint");
+QT_TRANSLATE_NOOP("SketcherGui::ElementView", "Vertical");
 
-QT_TRANSLATE_NOOP("SketcherGui::ElementView", "Horizontal Constraint");
+QT_TRANSLATE_NOOP("SketcherGui::ElementView", "Horizontal");
 
-QT_TRANSLATE_NOOP("SketcherGui::ElementView", "Parallel Constraint");
+QT_TRANSLATE_NOOP("SketcherGui::ElementView", "Parallel");
 
-QT_TRANSLATE_NOOP("SketcherGui::ElementView", "Perpendicular Constraint");
+QT_TRANSLATE_NOOP("SketcherGui::ElementView", "Perpendicular");
 
 QT_TRANSLATE_NOOP("SketcherGui::ElementView", "Tangent Constraint");
 
-QT_TRANSLATE_NOOP("SketcherGui::ElementView", "Equal Constraint");
+QT_TRANSLATE_NOOP("SketcherGui::ElementView", "Equal");
 
-QT_TRANSLATE_NOOP("SketcherGui::ElementView", "Symmetric Constraint");
+QT_TRANSLATE_NOOP("SketcherGui::ElementView", "Symmetric");
 
-QT_TRANSLATE_NOOP("SketcherGui::ElementView", "Block Constraint");
+QT_TRANSLATE_NOOP("SketcherGui::ElementView", "Fix");
 
 QT_TRANSLATE_NOOP("SketcherGui::ElementView", "Group Constraint");
 
@@ -105,7 +105,7 @@ QT_TRANSLATE_NOOP("SketcherGui::ElementView", "Radius/Diameter Dimension");
 
 QT_TRANSLATE_NOOP("SketcherGui::ElementView", "Angle Dimension");
 
-QT_TRANSLATE_NOOP("SketcherGui::ElementView", "Toggle Construction Geometry");
+QT_TRANSLATE_NOOP("SketcherGui::ElementView", "Construction");
 
 QT_TRANSLATE_NOOP("SketcherGui::ElementView", "Select Constraints");
 
@@ -774,7 +774,7 @@ void ElementView::contextMenuEvent(QContextMenuEvent* event)
 
     // CONTEXT_ITEM(ICONSTR,NAMESTR,CMDSTR,FUNC,ACTSONSELECTION)
     CONTEXT_ITEM("Constraint_PointOnPoint",
-                 "Coincident Constraint",
+                 "Coincident",
                  "Sketcher_ConstrainCoincident",
                  doPointCoincidence,
                  true)
@@ -784,22 +784,22 @@ void ElementView::contextMenuEvent(QContextMenuEvent* event)
                  doPointOnObjectConstraint,
                  true)
     CONTEXT_ITEM("Constraint_Horizontal",
-                 "Horizontal Constraint",
+                 "Horizontal",
                  "Sketcher_ConstrainHorizontal",
                  doHorizontalConstraint,
                  true)
     CONTEXT_ITEM("Constraint_Vertical",
-                 "Vertical Constraint",
+                 "Vertical",
                  "Sketcher_ConstrainVertical",
                  doVerticalConstraint,
                  true)
     CONTEXT_ITEM("Constraint_Parallel",
-                 "Parallel Constraint",
+                 "Parallel",
                  "Sketcher_ConstrainParallel",
                  doParallelConstraint,
                  true)
     CONTEXT_ITEM("Constraint_Perpendicular",
-                 "Perpendicular Constraint",
+                 "Perpendicular",
                  "Sketcher_ConstrainPerpendicular",
                  doPerpendicularConstraint,
                  true)
@@ -809,17 +809,17 @@ void ElementView::contextMenuEvent(QContextMenuEvent* event)
                  doTangentConstraint,
                  true)
     CONTEXT_ITEM("Constraint_EqualLength",
-                 "Equal Constraint",
+                 "Equal",
                  "Sketcher_ConstrainEqual",
                  doEqualConstraint,
                  true)
     CONTEXT_ITEM("Constraint_Symmetric",
-                 "Symmetric Constraint",
+                 "Symmetric",
                  "Sketcher_ConstrainSymmetric",
                  doSymmetricConstraint,
                  true)
     CONTEXT_ITEM(
-        "Constraint_Block", "Block Constraint", "Sketcher_ConstrainBlock", doBlockConstraint, true)
+        "Constraint_Block", "Fix", "Sketcher_ConstrainBlock", doBlockConstraint, true)
     CONTEXT_ITEM(
         "Constraint_Group", "Group constraint", "Sketcher_ConstrainGroup", doGroupConstraint, true)
     CONTEXT_ITEM("Constraint_HorizontalDistance",
@@ -863,7 +863,7 @@ void ElementView::contextMenuEvent(QContextMenuEvent* event)
     menu.addSeparator();
 
     CONTEXT_ITEM("Sketcher_ToggleConstruction",
-                 "Toggle Construction Geometry",
+                 "Construction",
                  "Sketcher_ToggleConstruction",
                  doToggleConstruction,
                  true)

@@ -686,6 +686,436 @@ def IndexToldGroups(make):
     }
 
 
+ROUND_ON_SPLINE_TWIST = 0.02
+ROUND_ON_SPLINE_RADIUS = 1.5
+
+
+def twistedLid(twist):
+    """The face z = 20 + twist x y over x -45..45, y -25..25, as a bicubic B-spline."""
+    x, y = 45.0, 25.0
+    surface = Part.BSplineSurface()
+    poles = [
+        [V(-x, -y, 20 + twist * x * y), V(-x, y, 20 - twist * x * y)],
+        [V(x, -y, 20 - twist * x * y), V(x, y, 20 + twist * x * y)],
+    ]
+    surface.buildFromPolesMultsKnots(poles, [2, 2], [2, 2], [0, 1], [0, 1], False, False, 1, 1)
+    surface.increaseDegree(3, 3)
+    return surface.toShape()
+
+
+def roundOnSplineContact(fillet, twist, radius, grid=17):
+    """How far the rim round of `RoundOnSpline` is from the ball's contact, in closed form (no
+    kernel distance): (blend faces, ball residual, seam residual, seams).
+
+    A round of radius r is the surface a ball of radius r sweeps while it touches both walls.
+    For a point p of a blend face with outward normal n the ball's centre is c = p - r n, and
+    it must be at distance r from the lid z = 20 + twist x y and from the stadium's side wall
+    (the planes y = -10 and y = 10 for |x| <= 20, else the cylinders of radius 10 about
+    x = -20 and x = 20). The ball residual is the largest | distance - r | over a grid on
+    every blend face. Two blend faces meet where the ball's contact crosses a tangent line
+    x = +-20, y = +-10 of the wall: there the centre is at (+-20, +-(10 - r), z) with z at
+    distance r below the lid, and the seam is that ball's circle. The seam residual is the
+    largest | distance from that centre - r | along the four seams."""
+
+    def lidDistance(a, b, h):
+        x, y = a, b
+        for _ in range(50):
+            g = 20 + twist * x * y - h
+            fx = (x - a) + g * twist * y
+            fy = (y - b) + g * twist * x
+            fxx = 1 + twist * twist * y * y
+            fyy = 1 + twist * twist * x * x
+            fxy = g * twist + twist * twist * x * y
+            det = fxx * fyy - fxy * fxy
+            dx = (fx * fyy - fy * fxy) / det
+            dy = (fy * fxx - fx * fxy) / det
+            x -= dx
+            y -= dy
+            if abs(dx) + abs(dy) < 1e-15:
+                break
+        return math.sqrt((x - a) ** 2 + (y - b) ** 2 + (20 + twist * x * y - h) ** 2)
+
+    def wallDistance(a, b):
+        return 10 - abs(b) if abs(a) <= 20 else 10 - math.hypot(abs(a) - 20, b)
+
+    def isBlend(face):
+        if isinstance(face.Surface, Part.Plane):
+            return False
+        if isinstance(face.Surface, Part.Cylinder) and abs(face.Surface.Radius - 10) < 1e-9:
+            return False
+        return face.Area < 500  # the lid is over 1000
+
+    blends = [f for f in fillet.Shape.Faces if isBlend(f)]
+    ball = 0.0
+    for face in blends:
+        u0, u1, v0, v1 = face.ParameterRange
+        for i in range(grid):
+            for j in range(grid):
+                u = u0 + (u1 - u0) * (i + 0.5) / grid
+                v = v0 + (v1 - v0) * (j + 0.5) / grid
+                c = face.valueAt(u, v) - face.normalAt(u, v) * radius
+                ball = max(
+                    ball,
+                    abs(lidDistance(c.x, c.y, c.z) - radius),
+                    abs(wallDistance(c.x, c.y) - radius),
+                )
+    seamEdges = [
+        e
+        for e in fillet.Shape.Edges
+        if sum(1 for f in blends if any(e.isSame(x) for x in f.Edges)) == 2
+    ]
+    seam = 0.0
+    for sx in (-1, 1):
+        for sy in (-1, 1):
+            a, b = 20.0 * sx, (10.0 - radius) * sy
+            low, high = 0.0, 20 + twist * a * b
+            for _ in range(200):
+                middle = (low + high) / 2
+                if lidDistance(a, b, middle) > radius:
+                    low = middle
+                else:
+                    high = middle
+            centre = V(a, b, (low + high) / 2)
+            if not seamEdges:
+                continue
+            seam = max(
+                seam,
+                min(
+                    max(abs((p - centre).Length - radius) for p in e.discretize(25))
+                    for e in seamEdges
+                ),
+            )
+    return len(blends), ball, seam, len(seamEdges)
+
+
+def RoundOnSpline(make):
+    """A round on a B-spline support (ops#640, decision 425: a round is the rolling ball's
+    surface, also where the kernel's own fillet is not).
+
+    A Part feature's face, the twisted lid z = 20 + 0.02 x y (a bicubic B-spline). Body: a
+    SubShapeBinder of the lid; a stadium on the XY plane (the lines y = -10 and y = 10 for x
+    -20..20, half circles of radius 10 about (-20, 0) and (20, 0)) padded up to the binder's
+    face (UpToShape), so the Pad's top is the B-spline; a Fillet of radius 1.5 round the
+    top's whole rim (five edges: the half cylinder about x = 20 is cut at its seam, so its
+    rim is two edges): four blend faces in one closed chain, meeting on the wall's four
+    tangent lines. The lid's normal turns about the rim, so a circle swept in the plane
+    normal to the edge is off the ball by 3.6e-3 and its seams by 0.07.
+
+    The expected result is the ball's contact, in closed form (`roundOnSplineContact`): every
+    blend face within 1e-6 of it, and each seam the ball's circle where the contact crosses a
+    tangent line of the wall."""
+    twist, radius = ROUND_ON_SPLINE_TWIST, ROUND_ON_SPLINE_RADIUS
+    doc = make("RoundOnSpline")
+    lid = doc.addObject("Part::Feature", "TwistedLid")
+    lid.Shape = twistedLid(twist)
+    body = newBody(doc, "Body")
+    binder = body.newObject("PartDesign::SubShapeBinder", "LidBinder")
+    binder.Support = [(lid, ("Face1",))]
+    stadium = [
+        Part.LineSegment(V(-20, -10, 0), V(20, -10, 0)),
+        Part.ArcOfCircle(Part.Circle(V(20, 0, 0), TOP, 10), -math.pi / 2, math.pi / 2),
+        Part.LineSegment(V(20, 10, 0), V(-20, 10, 0)),
+        Part.ArcOfCircle(Part.Circle(V(-20, 0, 0), TOP, 10), math.pi / 2, 3 * math.pi / 2),
+    ]
+    pad = body.newObject("PartDesign::Pad", "StadiumPad")
+    pad.Profile = attachedSketch(body, "StadiumSketch", plane(body, "XY_Plane"), stadium)
+    pad.Type = "UpToShape"
+    pad.UpToShape = (binder, ["Face1"])
+    pad.Refine = False
+    doc.recompute()
+    top = [f for f in pad.Shape.Faces if isinstance(f.Surface, Part.BSplineSurface)]
+    if len(top) != 1:
+        raise AssertionError(f"StadiumPad has {len(top)} B-spline faces, expected its top")
+    rim = [
+        f"Edge{i + 1}"
+        for i, e in enumerate(pad.Shape.Edges)
+        if any(e.isSame(x) for x in top[0].Edges)
+    ]
+    if len(rim) != 5:
+        raise AssertionError(f"the top's rim has {len(rim)} edges, expected five")
+    fillet = body.newObject("PartDesign::Fillet", "RimRound")
+    fillet.Base = (pad, rim)
+    fillet.Radius = radius
+    body.Tip = fillet
+    doc.recompute()
+    faces, ball, seam, seams = roundOnSplineContact(fillet, twist, radius)
+    if (faces, seams) != (4, 4):
+        raise AssertionError(f"RimRound has {faces} blend faces and {seams} seams, expected 4 and 4")
+    if ball > 1e-6 or seam > 1e-6:
+        raise AssertionError(
+            f"RimRound is off the ball's contact by {ball:.3g} (seams {seam:.3g}), allowed 1e-6"
+        )
+    return {"volumes": {}}
+
+
+LEANING_BOSS_LEAN = (0.3, 0.2)
+LEANING_BOSS_RADIUS = 2.0
+LEANING_BOSS_FLOOR = 5.0
+
+
+def roundUnderLeaningWallContact(fillet, radius, grid=13):
+    """How far the foot round of `RoundUnderLeaningWall` is from the ball's contact, in closed
+    form (no kernel distance): (cylinder blend faces, other blend faces, ball residual).
+
+    A round of radius r is the surface a ball of radius r sweeps while it touches both walls.
+    Here the walls are the slab's top z = 5 and the boss's side: the stadium (the lines
+    y = -10 and y = 10 for x -20..20, half circles of radius 10 about (-20, 0) and (20, 0))
+    drawn at z = 0 and swept along (0.3, 0.2, 1). For a point p of a blend face with unit
+    normal n the ball's centre is c = p + r n or p - r n, the one at height 5 + r, and it
+    must be at distance r from the boss's side: under a leaning plane the distance to that
+    plane, under a leaning circle's wall the distance from c, moved back along the sweep to
+    z = 0, to the circle, measured across the sweep (one angle, found by search). The ball
+    residual is the largest | distance - r | and | height - (5 + r) | over a grid on every
+    blend face."""
+    lx, ly = LEANING_BOSS_LEAN
+    floor = LEANING_BOSS_FLOOR
+    sweep = V(lx, ly, 1)
+    sweep.normalize()
+
+    def across(offset):
+        return (offset - sweep * offset.dot(sweep)).Length
+
+    def circleWallDistance(c, centreX):
+        def at(angle):
+            on = V(centreX + 10 * math.cos(angle), 10 * math.sin(angle), 0)
+            return across(c - on)
+
+        step = math.pi / 180
+        k = min(range(360), key=lambda i: at(i * step))
+        low, high = (k - 1) * step, (k + 1) * step
+        for _ in range(80):
+            m1 = low + (high - low) * 0.381966
+            m2 = low + (high - low) * 0.618034
+            if at(m1) < at(m2):
+                high = m2
+            else:
+                low = m1
+        return at((low + high) / 2)
+
+    planeNormal = V(1, 0, 0).cross(sweep)
+    planeNormal.normalize()
+
+    def planeWallDistance(c, y0):
+        return abs((c - V(0, y0, 0)).dot(planeNormal))
+
+    blends = [
+        f
+        for f in fillet.Shape.Faces
+        if not isinstance(f.Surface, Part.Plane)
+        # by its corners (a spline face's box is its poles'); a wall that leans over the round
+        # is touched above 5 + r
+        and all(floor - 1e-6 < v.Point.z < floor + 2 * radius for v in f.Vertexes)
+    ]
+    cylinders = [
+        f
+        for f in blends
+        if isinstance(f.Surface, Part.Cylinder) and abs(f.Surface.Radius - radius) < 1e-9
+    ]
+    ball = 0.0
+    for face in blends:
+        u0, u1, v0, v1 = face.ParameterRange
+        for i in range(grid):
+            for j in range(grid):
+                u = u0 + (u1 - u0) * (i + 0.5) / grid
+                v = v0 + (v1 - v0) * (j + 0.5) / grid
+                p = face.valueAt(u, v)
+                n = face.normalAt(u, v)
+                c = min((p + n * radius, p - n * radius), key=lambda q: abs(q.z - floor - radius))
+                # Back along the sweep to the sketch's plane: which part of the stadium is beside it
+                foot = c - V(lx, ly, 1) * c.z
+                if face in cylinders:
+                    wall = planeWallDistance(c, 10.0 if foot.y > 0 else -10.0)
+                else:
+                    wall = circleWallDistance(c, 20.0 if foot.x > 0 else -20.0)
+                ball = max(ball, abs(c.z - floor - radius), abs(wall - radius))
+    return len(cylinders), len(blends) - len(cylinders), ball
+
+
+def RoundUnderLeaningWall(make):
+    """A round whose chain has cylinders and spline faces (ops#640, decision 425: a round is
+    the rolling ball's surface, also where the kernel's own fillet is not; Nest Insert's slot
+    round under a leaning elliptic wall).
+
+    Body: a slab, the rectangle -45..55 by -30..40 padded 5; a stadium on the XY plane (the
+    lines y = -10 and y = 10 for x -20..20, half circles of radius 10 about (-20, 0) and
+    (20, 0)) padded 30 along (0.3, 0.2, 1), so the boss leans: its side is two leaning planes
+    and two walls swept from the circles, which are elliptic cylinders, not normal to the
+    slab; a Fillet of radius 2 round the boss's whole foot on the slab. Under the planes the
+    round is a cylinder of radius 2. Under the circles' walls the wall's normal turns about
+    the foot's edge, so a circle swept in the plane normal to the edge is off the ball by
+    5e-3, and the kernel's seams between the four faces by 1.4e-2.
+
+    The expected result is the ball's contact, in closed form (`roundUnderLeaningWallContact`):
+    two cylinders of the radius and two other faces, each within 1e-6 of it."""
+    radius = LEANING_BOSS_RADIUS
+    doc = make("RoundUnderLeaningWall")
+    body = newBody(doc, "Body")
+    slab = block(body, -45, -30, 55, 40, LEANING_BOSS_FLOOR, "Slab")
+    stadium = [
+        Part.LineSegment(V(-20, -10, 0), V(20, -10, 0)),
+        Part.ArcOfCircle(Part.Circle(V(20, 0, 0), TOP, 10), -math.pi / 2, math.pi / 2),
+        Part.LineSegment(V(20, 10, 0), V(-20, 10, 0)),
+        Part.ArcOfCircle(Part.Circle(V(-20, 0, 0), TOP, 10), math.pi / 2, 3 * math.pi / 2),
+    ]
+    boss = body.newObject("PartDesign::Pad", "LeaningBoss")
+    boss.Profile = attachedSketch(body, "StadiumSketch", plane(body, "XY_Plane"), stadium)
+    boss.UseCustomVector = True
+    boss.Direction = V(LEANING_BOSS_LEAN[0], LEANING_BOSS_LEAN[1], 1)
+    boss.AlongSketchNormal = True
+    boss.Length = 30
+    boss.Refine = False
+    doc.recompute()
+    if abs(slab.Shape.Volume - 100 * 70 * LEANING_BOSS_FLOOR) > 1e-6:
+        raise AssertionError("the slab is not 100 x 70 x 5")
+    foot = [
+        f"Edge{i + 1}"
+        for i, e in enumerate(boss.Shape.Edges)
+        if abs(e.BoundBox.ZMin - LEANING_BOSS_FLOOR) < 1e-7
+        and abs(e.BoundBox.ZMax - LEANING_BOSS_FLOOR) < 1e-7
+        and e.BoundBox.XMin > -40
+        and e.BoundBox.XMax < 50
+        and e.BoundBox.YMin > -25
+        and e.BoundBox.YMax < 35
+    ]
+    if len(foot) != 5:
+        raise AssertionError(f"the boss's foot has {len(foot)} edges, expected five")
+    fillet = body.newObject("PartDesign::Fillet", "FootRound")
+    fillet.Base = (boss, foot)
+    fillet.Radius = radius
+    body.Tip = fillet
+    doc.recompute()
+    cylinders, others, ball = roundUnderLeaningWallContact(fillet, radius)
+    if (cylinders, others) != (2, 2):
+        raise AssertionError(
+            f"FootRound has {cylinders} cylinders and {others} other blend faces, expected 2 and 2"
+        )
+    if ball > 1e-6:
+        raise AssertionError(f"FootRound is off the ball's contact by {ball:.3g}, allowed 1e-6")
+    return {"volumes": {}}
+
+
+def bossTops(shape, z):
+    """The (x, y) centres of the shape's 6 x 6 planar faces facing +z at height z, sorted."""
+    return sorted(
+        (round(f.CenterOfMass.x, 6), round(f.CenterOfMass.y, 6))
+        for f in shape.Faces
+        if isinstance(f.Surface, Part.Plane)
+        and abs(f.CenterOfMass.z - z) < 1e-6
+        and abs(f.Area - 36) < 1e-6
+    )
+
+
+def FacePatternCentered(make):
+    """Face patterns with Centered and a second direction (ops#655, ops#640; Onshape's rule,
+    notes/patterns-design.md section 10: Centered counts per side, the seed included, so count n
+    makes 2n - 1 instances along that direction).
+
+    Two Bodies, each a 60 x 30 x 10 plate (x -30..30, y 0..30) with a 6 x 6 boss, 5 high, at its
+    centre (x -3..3, y 12..18), patterned by its faces (the boss's top and four sides):
+    - `Row`: a face linear pattern along the X axis, spacing 15, count 2, Centered: three bosses,
+      centres x -15, 0, 15 at y 15;
+    - `Grid`: the same along X, and a second direction along the Y axis, spacing 10, count 2,
+      Centered2: a 3 x 3 grid, centres x -15, 0, 15 by y 5, 15, 25 (the bosses 4 apart in y)."""
+    doc = make("FacePatternCentered")
+    plate = 60 * 30 * 10
+    boss = 6 * 6 * 5
+    expected = {
+        "Row": [(x, 15) for x in (-15, 0, 15)],
+        "Grid": sorted((x, y) for x in (-15, 0, 15) for y in (5, 15, 25)),
+    }
+    volumes = {}
+    for name, centres in expected.items():
+        body = newBody(doc, name + "Body")
+        pad = block(body, -30, 0, 30, 30, 10, name + "Plate")
+        doc.recompute()
+        top = faceWhere(pad.Shape, planeFacing(TOP, V(0, 0, 10)))
+        seed = m.pad(
+            body,
+            attachedSketch(body, name + "BossSketch", (pad, top), m.rectangle(-3, 12, 3, 18)),
+            5,
+            name + "Boss",
+        )
+        doc.recompute()
+        picks = [
+            f"Face{i + 1}"
+            for i, f in enumerate(seed.Shape.Faces)
+            if -3 - 1e-6 <= f.CenterOfMass.x <= 3 + 1e-6
+            and 12 - 1e-6 <= f.CenterOfMass.y <= 18 + 1e-6
+            and 10 + 1e-3 <= f.CenterOfMass.z <= 15 + 1e-6
+        ]
+        if len(picks) != 5:
+            raise AssertionError(f"{name}: {len(picks)} boss faces, expected 5")
+        pattern = body.newObject("PartDesign::FaceLinearPattern", name)
+        pattern.Base = (seed, picks)
+        pattern.Direction = (plane(body, "X_Axis"), [""])
+        pattern.Mode = "Spacing"
+        pattern.Offset = 15
+        pattern.Occurrences = 2
+        pattern.Centered = True
+        if name == "Grid":
+            pattern.Direction2 = (plane(body, "Y_Axis"), [""])
+            pattern.Mode2 = "Spacing"
+            pattern.Offset2 = 10
+            pattern.Occurrences2 = 2
+            pattern.Centered2 = True
+        body.Tip = pattern
+        doc.recompute()
+        found = bossTops(pattern.Shape, 15)
+        if found != sorted(centres):
+            raise AssertionError(f"{name}: boss tops at {found}, expected {sorted(centres)}")
+        volumes[name] = plate + len(centres) * boss
+    return {"volumes": volumes}
+
+
+def RevolveFreeFormProfile(make):
+    """Revolutions of profiles drawn with B-spline lines and circle arcs (ops#768).
+
+    Body: on the XZ plane, the half disk of radius 2 about (5, 0) outside x = 5 (its arc an exact
+    rational B-spline) and the triangle (5, 2), (4, -2), (5, -2) (its slanted side a B-spline
+    segment), revolved 360 degrees about the V axis (the Z axis): Pappus's volume, 2 pi times
+    (2 pi (5 + 8 / (3 pi)) + 2 * 14 / 3). Builds since d637412375 make the arc's face a torus and
+    the side's a cone; builds before it made both SurfaceOfRevolution faces of B-splines.
+    Body001: on the XZ plane, the half disk of radius 3 about (0, 30) right of the V axis, its arc a
+    rational B-spline ending on the axis and its chord on it, revolved 90 degrees: a quarter of a
+    ball, 9 pi (since d637412375 a sphere face)."""
+    doc = make("RevolveFreeFormProfile")
+    body = newBody(doc, "Body")
+    arc = Part.ArcOfCircle(Part.Circle(V(5, 0, 0), V(0, 0, 1), 2), -math.pi / 2, math.pi / 2)
+    profile = attachedSketch(
+        body,
+        "Sketch",
+        plane(body, "XZ_Plane"),
+        [
+            arc.toNurbs(),
+            Part.LineSegment(V(5, 2, 0), V(4, -2, 0)).toBSpline(),
+            Part.LineSegment(V(4, -2, 0), V(5, -2, 0)),
+        ],
+    )
+    revolution = body.newObject("PartDesign::Revolution", "Revolution")
+    revolution.Profile = profile
+    revolution.ReferenceAxis = (profile, ["V_Axis"])
+    revolution.Angle = 360
+    body2 = newBody(doc, "Body001")
+    cap = Part.ArcOfCircle(Part.Circle(V(0, 30, 0), V(0, 0, 1), 3), -math.pi / 2, math.pi / 2)
+    profile2 = attachedSketch(
+        body2,
+        "Sketch001",
+        plane(body2, "XZ_Plane"),
+        [cap.toNurbs(), Part.LineSegment(V(0, 33, 0), V(0, 27, 0))],
+    )
+    revolution2 = body2.newObject("PartDesign::Revolution", "Revolution001")
+    revolution2.Profile = profile2
+    revolution2.ReferenceAxis = (profile2, ["V_Axis"])
+    revolution2.Angle = 90
+    doc.recompute()
+    return {
+        "volumes": {
+            "Revolution": 2 * math.pi * (2 * math.pi * (5 + 8 / (3 * math.pi)) + 2 * 14 / 3),
+            "Revolution001": 9 * math.pi,
+        }
+    }
+
+
 MODELS = [
     RevolutionGroove,
     SidedVariants,
@@ -699,4 +1129,8 @@ MODELS = [
     BodyFromFeature,
     Binders,
     IndexToldGroups,
+    RoundOnSpline,
+    FacePatternCentered,
+    RevolveFreeFormProfile,
+    RoundUnderLeaningWall,
 ]

@@ -51,6 +51,7 @@
 #include <Mod/Part/App/TopoShape.h>
 
 #include "ShapeBinder.h"
+#include "StudioConfig.h"
 #include "Mod/Part/App/TopoShapeOpCode.h"
 #include "Base/Tools.h"
 
@@ -1423,6 +1424,14 @@ void SubShapeBinder::slotRecomputedObject(const App::DocumentObject& Obj)
 
 App::DocumentObjectExecReturn* SubShapeBinder::recompute()
 {
+    // FreeCAD-CH ops#671: a binder of a configured studio's part (a Derived's) shows the studio's
+    // active configuration; until it can show its own, a difference is its error
+    for (auto obj : Support.getValues()) {
+        const std::string why = configReaderError(this, obj);
+        if (!why.empty()) {
+            return new App::DocumentObjectExecReturn(why, this);
+        }
+    }
     // A support that depends on this binder makes a cycle, which no recompute settles: its
     // objects stay touched after every one, with no error. A path through a Body does it when
     // that Body holds a binder of this one's Body ((Body1, "PadA.Face6") in Body2, then

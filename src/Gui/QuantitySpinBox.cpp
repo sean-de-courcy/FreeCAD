@@ -30,6 +30,8 @@
 #include <QRegularExpressionMatch>
 #include <QStyle>
 #include <QStyleOptionSpinBox>
+#include <QPointer>
+#include <QTimer>
 #include <QToolTip>
 
 #include <sstream>
@@ -45,7 +47,9 @@
 
 #include "QuantitySpinBox.h"
 #include "QuantitySpinBox_p.h"
+#include "Application.h"
 #include "Command.h"
+#include "ExpressionCompleter.h"
 #include "Dialogs/DlgExpressionInput.h"
 #include "Tools.h"
 #include "Widgets.h"
@@ -54,6 +58,74 @@
 using namespace Gui;
 using namespace App;
 using namespace Base;
+
+namespace
+{
+
+// FreeCAD-CH (ops#640, rank 55): the model role of ExpressionCompleter.cpp's "New variable..." row
+constexpr int newVariableRole = Qt::UserRole + 0x4E56;
+
+/// Whether @a text has a '#' that the parser resolves as a variable, as App's rewriteVariableRefs
+/// finds them: one followed by an identifier start, outside a `<<...>>` string and not after a
+/// word. `#Width` has one; `Doc#Box.Length`, `#1` and `<<a #b>>` don't (as VariablesView.cpp).
+bool hasVariableRef(const QString& text)
+{
+    auto isPart = [](QChar c) {
+        return c == u'_' || c == u'@' || c.isLetterOrNumber() || c.isMark();
+    };
+    bool afterWord = false;
+    for (qsizetype i = 0; i < text.size(); ++i) {
+        QChar c = text[i];
+        if (c == u' ' || c == u'\t' || c == u'\n' || c == u'\r') {
+            continue;
+        }
+        if (c == u'<' && i + 1 < text.size() && text[i + 1] == u'<') {
+            qsizetype end = text.indexOf(QStringLiteral(">>"), i + 2);
+            afterWord = end >= 0;
+            i = end < 0 ? i + 1 : end + 1;
+            continue;
+        }
+        if (c == u'#' && !afterWord && i + 1 < text.size()
+            && (text[i + 1] == u'_' || text[i + 1].isLetter())) {
+            return true;
+        }
+        afterWord = isPart(c);
+    }
+    return false;
+}
+
+/// Whether @a text ends with a '#' that starts a variable's name being typed: not after a word
+/// (`#` alone, or `2 * #`). The validator takes it as Intermediate, else the key that begins
+/// `#Width` was refused and the name went into the number
+bool endsWithVariableStart(const QString& text)
+{
+    if (!text.endsWith(u'#')) {
+        return false;
+    }
+    qsizetype i = text.size() - 2;
+    while (i >= 0 && (text[i] == u' ' || text[i] == u'\t')) {
+        --i;
+    }
+    if (i < 0) {
+        return true;
+    }
+    const QChar c = text[i];
+    return !(c == u'_' || c == u'@' || c.isLetterOrNumber() || c.isMark());
+}
+
+/// "New variable..." from a field: the Variables panel's Add dialog with the typed name and the
+/// field's value, after the event that asked for it (Std_AddVariable, VariablesView.cpp, reads
+/// them from this application property).
+void requestNewVariable(const QString& name, const QString& value)
+{
+    QTimer::singleShot(0, [name, value] {
+        qApp->setProperty("FreeCADCH_NewVariable", QStringList {name, value});
+        Gui::Application::Instance->commandManager().runCommandByName("Std_AddVariable");
+        qApp->setProperty("FreeCADCH_NewVariable", QVariant());
+    });
+}
+
+}  // namespace
 
 namespace Gui
 {
@@ -323,6 +395,179 @@ public:
     double singleStep;
     QuantitySpinBox* q_ptr;
     std::unique_ptr<Base::UnitsSchema> scheme;
+
+    // FreeCAD-CH (ops#640, V23): text typed into a bound field that uses a variable (`#w`,
+    // `#w * 2`) is bound as the field's expression when the edit ends (Enter, Tab, focus out),
+    // as Onshape does: before, it was evaluated and today's value stored (or `#w * 1 mm`). A
+    // `#name` that doesn't resolve keeps the field red and is never committed; the field's
+    // `unresolvedVariable` property says so (for the dialog's check). Rank 55: `#` offers the
+    // document's variables and, for a new name, "New variable...".
+    QString variableText;   // the text typed, while it uses a variable
+    QString variableError;  // why it can't be bound; empty if it can
+    QPointer<ExpressionCompleter> completer;
+
+    /// Checks @a text as the field's expression; @a result is its value. Sets variableText/Error.
+    bool checkVariableText(const QString& text, const App::ObjectIdentifier& path, Base::Quantity& result)
+    {
+        variableText = text;
+        variableError.clear();
+        App::DocumentObject* owner = path.getDocumentObject();
+        if (!owner) {
+            variableError = QuantitySpinBox::tr("The field is not bound to a property.");
+            return false;
+        }
+        try {
+            std::shared_ptr<Expression> expr(ExpressionParser::parse(owner, text.toUtf8().constData()));
+            const std::string error = owner->ExpressionEngine.validateExpression(path, expr);
+            if (!error.empty()) {
+                variableError = QString::fromStdString(error);
+                return false;
+            }
+            std::unique_ptr<Expression> value(expr->eval());
+            auto number = freecad_cast<NumberExpression*>(value.get());
+            if (!number) {
+                variableError = QuantitySpinBox::tr("The expression doesn't give a number.");
+                return false;
+            }
+            Base::Quantity quantity = number->getQuantity();
+            if (quantity.isDimensionless()) {
+                quantity.setUnit(unit);
+            }
+            else if (quantity.getUnit() != unit) {
+                variableError = QuantitySpinBox::tr("The expression's unit doesn't fit this field.");
+                return false;
+            }
+            if (checkRangeInExpression
+                && (quantity.getValue() < minimum || quantity.getValue() > maximum)) {
+                variableError = QuantitySpinBox::tr("The value is out of range.");
+                return false;
+            }
+            quantity.setFormat(this->quantity.getFormat());
+            result = quantity;
+            return true;
+        }
+        catch (const Base::Exception& e) {
+            variableError = QString::fromUtf8(e.what());
+        }
+        catch (const std::exception& e) {
+            variableError = QString::fromUtf8(e.what());
+        }
+        return false;
+    }
+
+    /// The field red with the reason as its tip while the variable text can't be bound.
+    void showVariableState()
+    {
+        Q_Q(QuantitySpinBox);
+        QLineEdit* edit = q->lineEdit();
+        QPalette p(edit->palette());
+        p.setColor(
+            QPalette::Active,
+            QPalette::Text,
+            variableError.isEmpty() ? q->defaultPalette.color(QPalette::Text) : QColor(Qt::red)
+        );
+        edit->setPalette(p);
+        edit->setToolTip(variableError);
+        q->setProperty("unresolvedVariable", !variableText.isEmpty() && !variableError.isEmpty());
+    }
+
+    void clearVariableState()
+    {
+        if (variableText.isEmpty()) {
+            return;
+        }
+        variableText.clear();
+        variableError.clear();
+        showVariableState();
+    }
+
+    /// Binds the field to its variable text; false if there is none or it doesn't resolve.
+    bool commitVariableText()
+    {
+        Q_Q(QuantitySpinBox);
+        if (variableText.isEmpty() || !variableError.isEmpty() || !q->isBound()) {
+            return false;
+        }
+        std::shared_ptr<Expression> expr;
+        try {
+            expr = ExpressionParser::parse(
+                q->getPath().getDocumentObject(),
+                variableText.toUtf8().constData()
+            );
+        }
+        catch (const Base::Exception& e) {
+            variableError = QString::fromUtf8(e.what());
+            showVariableState();
+            return false;
+        }
+        if (completer && completer->popup()) {
+            completer->popup()->hide();
+        }
+        clearVariableState();
+        // As the f(x) dialog's OK: an open dialog's transaction takes it
+        q->setExpression(expr);
+        q->updateExpression();
+        return true;
+    }
+
+    /// `#` completion in the field: the variables, and "New variable..." for a new name.
+    void updateVariableCompleter(const QString& text)
+    {
+        Q_Q(QuantitySpinBox);
+        if (!q->isBound() || q->hasExpression() || !text.contains(u'#')) {
+            if (completer && completer->popup()) {
+                completer->popup()->hide();
+            }
+            return;
+        }
+        QLineEdit* edit = q->lineEdit();
+        if (!completer) {
+            completer = new ExpressionCompleter(q->getPath().getDocumentObject(), q);
+            completer->setWidget(edit);
+            completer->setCaseSensitivity(Qt::CaseInsensitive);
+            completer->setFilterMode(Qt::MatchContains);
+            QObject::connect(
+                completer,
+                qOverload<const QModelIndex&>(&QCompleter::activated),
+                q,
+                [this](const QModelIndex& index) { completeVariable(index); }
+            );
+        }
+        completer->slotUpdate(text, edit->cursorPosition());
+        int start = 0;
+        int end = 0;
+        completer->getPrefixRange(start, end);
+        // Only a `#` operand is completed here: a plain value gets no object list.
+        if (!text.mid(start, end - start).startsWith(u'#') && completer->popup()) {
+            completer->popup()->hide();
+        }
+    }
+
+    void completeVariable(const QModelIndex& index)
+    {
+        Q_Q(QuantitySpinBox);
+        if (!completer) {
+            return;
+        }
+        QLineEdit* edit = q->lineEdit();
+        int start = 0;
+        int end = 0;
+        completer->getPrefixRange(start, end);
+        const QString text = edit->text();
+        if (index.data(newVariableRole).toBool()) {
+            QString value;
+            if (!quantity.isDimensionless() || quantity.getValue() != 0.0) {
+                value = QString::fromStdString(quantity.getUserString());
+            }
+            requestNewVariable(text.mid(start + 1, end - start - 1), value);
+            return;
+        }
+        const QString before = text.left(start) + index.data(Qt::EditRole).toString();
+        edit->setText(before + text.mid(end));
+        edit->setCursorPosition(before.length());
+        completer->updatePrefixEnd(before.length());
+    }
+
     Q_DECLARE_PUBLIC(QuantitySpinBox)
 };
 }  // namespace Gui
@@ -336,6 +581,11 @@ QuantitySpinBox::QuantitySpinBox(QWidget* parent)
     this->setContextMenuPolicy(Qt::DefaultContextMenu);
     connect(lineEdit(), &QLineEdit::textChanged, this, &QuantitySpinBox::userInput);
     connect(this, &QuantitySpinBox::editingFinished, this, [&] { this->handlePendingEmit(true); });
+    // FreeCAD-CH (ops#640, rank 55): `#` completion, on what the user types only
+    connect(lineEdit(), &QLineEdit::textEdited, this, [this](const QString& text) {
+        Q_D(QuantitySpinBox);
+        d->updateVariableCompleter(text);
+    });
 }
 
 QuantitySpinBox::~QuantitySpinBox() = default;
@@ -467,6 +717,18 @@ void Gui::QuantitySpinBox::keyPressEvent(QKeyEvent* event)
     Q_D(QuantitySpinBox);
 
     const auto isEnter = event->key() == Qt::Key_Enter || event->key() == Qt::Key_Return;
+
+    // FreeCAD-CH (ops#640, V23): Enter binds a variable text; an unresolved one stays red and
+    // Enter goes no further than the field
+    if (isEnter && !d->variableText.isEmpty()) {
+        if (!d->commitVariableText()) {
+            event->accept();
+            return;
+        }
+        QAbstractSpinBox::keyPressEvent(event);
+        returnPressed();
+        return;
+    }
 
     if (d->normalize && isEnter && !isNormalized()) {
         // ensure that input is up to date
@@ -730,6 +992,22 @@ void QuantitySpinBox::userInput(const QString& text)
 {
     Q_D(QuantitySpinBox);
     d->pendingEmit = true;
+
+    // FreeCAD-CH (ops#640, V23): a text using a variable is the field's expression to be; its
+    // value previews as any value does
+    if (isBound() && !hasExpression() && hasVariableRef(text)) {
+        Base::Quantity res;
+        d->validInput = d->checkVariableText(text, getPath(), res);
+        d->showVariableState();
+        if (d->validInput) {
+            d->cached = res;
+            if (keyboardTracking()) {
+                handlePendingEmit(false);
+            }
+        }
+        return;
+    }
+    d->clearVariableState();
 
     QString tmp = text;
     Base::Quantity res;
@@ -1106,6 +1384,13 @@ void QuantitySpinBox::closeEvent(QCloseEvent* event)
 
 bool QuantitySpinBox::event(QEvent* event)
 {
+    // FreeCAD-CH (ops#640, rank 55): back from the Add dialog, a `#name` it made resolves now
+    if (event->type() == QEvent::WindowActivate) {
+        Q_D(QuantitySpinBox);
+        if (!d->variableText.isEmpty() && !d->variableError.isEmpty()) {
+            userInput(lineEdit()->text());
+        }
+    }
     return QAbstractSpinBox::event(event);
 }
 
@@ -1136,7 +1421,29 @@ void QuantitySpinBox::focusInEvent(QFocusEvent* event)
 
 void QuantitySpinBox::focusOutEvent(QFocusEvent* event)
 {
-    Q_D(const QuantitySpinBox);
+    Q_D(QuantitySpinBox);
+
+    // FreeCAD-CH (ops#640, V23): leaving the field binds a variable text; an unresolved one
+    // stays as typed, red. Not for a popup (the `#` list) or another window (the Add dialog).
+    if (!d->variableText.isEmpty()) {
+        if (event->reason() != Qt::PopupFocusReason
+            && event->reason() != Qt::ActiveWindowFocusReason) {
+            d->commitVariableText();
+        }
+        if (!d->variableText.isEmpty()) {
+            QToolTip::hideText();
+            QAbstractSpinBox::focusOutEvent(event);
+            return;
+        }
+    }
+    // The `#` list opening on a lone `#` takes the focus too (a popup): the `#` begun stays, not
+    // validated back to the last value (the next keys went into the number)
+    if (event->reason() == Qt::PopupFocusReason && isBound() && !hasExpression()
+        && endsWithVariableStart(lineEdit()->text())) {
+        QToolTip::hideText();
+        QAbstractSpinBox::focusOutEvent(event);
+        return;
+    }
 
     validateInput();
 
@@ -1196,6 +1503,13 @@ QValidator::State QuantitySpinBox::validate(QString& text, int& pos) const
 {
     Q_D(const QuantitySpinBox);
     Q_UNUSED(pos)
+
+    // FreeCAD-CH (ops#640, V23): a text using a variable is judged by userInput, whatever value
+    // it has: a value outside the range must not refuse the key that completes `#name`, nor
+    // the '#' that begins it
+    if (isBound() && !hasExpression() && (hasVariableRef(text) || endsWithVariableStart(text))) {
+        return QValidator::Intermediate;
+    }
 
     QValidator::State state;
     const App::ObjectIdentifier& path = getPath();

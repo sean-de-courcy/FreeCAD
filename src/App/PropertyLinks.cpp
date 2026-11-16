@@ -32,6 +32,7 @@
 
 #include <Base/Console.h>
 #include <Base/Exception.h>
+#include <Base/FileInfo.h>
 #include <Base/Reader.h>
 #include <Base/Writer.h>
 #include <Base/Tools.h>
@@ -42,6 +43,7 @@
 #include "ElementFingerprint.h"
 #include "ElementSolver.h"
 #include "ElementSolverBatch.h"
+#include "ElementSolverEdits.h"
 #include "ReferenceReport.h"
 #include "DocumentObject.h"
 #include "MergeDocuments.h"
@@ -52,6 +54,7 @@
 #include "GeoFeature.h"
 #include "Link.h"
 #include "ElementReferences.h"
+#include "RecomputeContinuation.h"
 #include "LinkRetarget.h"
 #include "NamingRevision.h"
 #include "ComplexGeoData.h"
@@ -637,22 +640,21 @@ bool PropertyLinkBase::isSame(const Property& other) const
     if (&other == this) {
         return true;
     }
-    if (other.isDerivedFrom<PropertyLinkBase>()
-        || getScope() != static_cast<const PropertyLinkBase*>(&other)->getScope()) {
+    // FreeCAD-CH (ops#640): a link is the same as another link of the same scope with the same
+    // targets and subnames. The test was inverted (every link differed from every other, and a
+    // property that isn't a link was cast to one), and the two sides' subnames were taken in
+    // different styles
+    auto otherLink = freecad_cast<const PropertyLinkBase*>(&other);
+    if (!otherLink || getScope() != otherLink->getScope()) {
         return false;
     }
 
-    static std::vector<App::DocumentObject*> ret;
-    static std::vector<std::string> subs;
-    static std::vector<App::DocumentObject*> ret2;
-    static std::vector<std::string> subs2;
-
-    ret.clear();
-    subs.clear();
-    ret2.clear();
-    subs2.clear();
+    std::vector<App::DocumentObject*> ret;
+    std::vector<std::string> subs;
+    std::vector<App::DocumentObject*> ret2;
+    std::vector<std::string> subs2;
     getLinks(ret, true, &subs, false);
-    static_cast<const PropertyLinkBase*>(&other)->getLinks(ret2, true, &subs2, true);
+    otherLink->getLinks(ret2, true, &subs2, false);
 
     return ret == ret2 && subs == subs2;
 }
@@ -851,6 +853,7 @@ void PropertyLinkBase::updateElementReferences(DocumentObject* feature, bool rev
     if (it == _ElementRefMap.end()) {
         return;
     }
+    App::SolverSiteTimer updateTimer(App::SolverSite::UpdateReferences);
     std::vector<PropertyLinkBase*> props;
     props.reserve(it->second.size());
     props.insert(props.end(), it->second.begin(), it->second.end());
@@ -901,6 +904,13 @@ void PropertyLinkBase::updateAllElementReferences(bool reverse)
         !reverse && (App::anyOpenedWithOlderNaming() || !_ConsumerPassLinks.empty());
     std::unordered_map<PropertyLinkBase*, std::vector<std::string>> passed;  // the state before
     std::unordered_set<const PropertyLinkBase*> destroyed;  // since, by a handler
+    // Each object's placement digest is made once for every reference updated below, as in a
+    // recompute (Document.cpp's one scope for all links): without it, each link property's own
+    // scope (_updateElementFingerprints()) ended with its update, and every link re-digested its
+    // chain, printing each sketch's geometry to fold it (ops#640: a third of a 300-object open).
+    // A digest is dropped when a property of its object changes, so the updates here can't read
+    // a stale one.
+    App::PlacementDigestScope digestScope;
     _DestroyedWatches.push_back(&destroyed);
     struct Unwatch
     {
@@ -991,52 +1001,115 @@ bool PropertyLinkBase::inSolverDocument() const
 
 // The marks in the writer's order, one entry per ID and flag: two objects of different documents
 // can share an ID (F5), and their flags, if they differ, both stay, which the solver reads as a
-// switch (ops#549 PS). Of one ID and flag, the highest geometry ID.
+// switch (ops#549 PS). Of one ID and flag, the highest geometry ID. The flag is the mark's world():
+// suppressed, failed (ops#814), both or neither.
 static void sortMarks(std::vector<Data::ElementFingerprint::Mark>& marks)
 {
     std::sort(marks.begin(), marks.end(), [](const auto& a, const auto& b) {
-        return a.tag < b.tag || (a.tag == b.tag && a.suppressed < b.suppressed)
-            || (a.tag == b.tag && a.suppressed == b.suppressed && a.mark > b.mark);
+        return a.tag < b.tag || (a.tag == b.tag && a.world() < b.world())
+            || (a.tag == b.tag && a.world() == b.world() && a.mark > b.mark);
     });
     marks.erase(std::unique(marks.begin(),
                             marks.end(),
                             [](const auto& a, const auto& b) {
-                                return a.tag == b.tag && a.suppressed == b.suppressed;
+                                return a.tag == b.tag && a.world() == b.world();
                             }),
                 marks.end());
 }
 
+// The worlds (Mark::world()) `marks` list for the ID `tag`, as bits: 1 << world
+static unsigned worldsOf(const std::vector<Data::ElementFingerprint::Mark>& marks, long tag)
+{
+    unsigned worlds = 0;
+    for (const auto& mark : marks) {
+        if (mark.tag == tag) {
+            worlds |= 1U << mark.world();
+        }
+    }
+    return worlds;
+}
+
+// One mark of `tag` and `mark` per world of `worlds` (worldsOf())
+static void pushWorlds(std::vector<Data::ElementFingerprint::Mark>& marks,
+                       long tag,
+                       long mark,
+                       unsigned worlds)
+{
+    for (int world = 0; world < 4; ++world) {
+        if (worlds & (1U << world)) {
+            marks.push_back({tag, mark, (world & 1) != 0, (world & 2) != 0});
+        }
+    }
+}
+
 // A setter's refresh of a record (ops#549 PS): `fresh`, measured now, takes the world of `old`,
-// each object's flags as `old` had them (an object it doesn't list wasn't suppressed). True if
-// that changed `fresh`.
+// each object's flags as `old` had them (an object it doesn't list wasn't suppressed, nor passing
+// its base through after a failure: ops#814). True if that changed `fresh`.
 static bool keepWorld(const Data::ElementFingerprint& old, Data::ElementFingerprint& fresh)
 {
     using Mark = Data::ElementFingerprint::Mark;
     std::vector<Mark> marks;
     if (fresh.marksPartial) {
-        // Only the suppressed objects are listed: the old record's
+        // Only the flagged objects are listed: the old record's
         for (const auto& mark : old.marks) {
-            if (mark.suppressed) {
+            if (mark.world() != 0) {
                 marks.push_back(mark);
             }
         }
     }
     else {
         for (const auto& mark : fresh.marks) {
-            bool flagged = false;
-            bool unflagged = false;
-            for (const auto& was : old.marks) {
-                if (was.tag == mark.tag) {
-                    (was.suppressed ? flagged : unflagged) = true;
-                }
-            }
-            if (flagged) {
-                marks.push_back({mark.tag, mark.mark, true});
-            }
-            if (!flagged || unflagged) {
-                marks.push_back({mark.tag, mark.mark, false});
-            }
+            const unsigned worlds = worldsOf(old.marks, mark.tag);
+            pushWorlds(marks, mark.tag, mark.mark, worlds ? worlds : 1U);
         }
+    }
+    sortMarks(marks);
+    if (marks == fresh.marks) {
+        return false;
+    }
+    fresh.marks = std::move(marks);
+    return true;
+}
+
+// keepWorld()'s converse, for a record held by a solve (ops#833): `held`, kept as it was, takes
+// the world of `fresh`, each object's flags as `fresh` has them (one it doesn't list keeps its
+// own). True if that changed `held`. A partial record (only the flagged listed) is left as it
+// was: it can't tell an unlisted object from an unflagged one.
+static bool takeWorld(const Data::ElementFingerprint& fresh, Data::ElementFingerprint& held)
+{
+    using Mark = Data::ElementFingerprint::Mark;
+    if (fresh.marksPartial || held.marksPartial) {
+        return false;
+    }
+    std::vector<Mark> marks;
+    for (const auto& mark : held.marks) {
+        const unsigned worlds = worldsOf(fresh.marks, mark.tag);
+        if (!worlds) {
+            marks.push_back(mark);
+            continue;
+        }
+        pushWorlds(marks, mark.tag, mark.mark, worlds);
+    }
+    sortMarks(marks);
+    if (marks == held.marks) {
+        return false;
+    }
+    held.marks = std::move(marks);
+    return true;
+}
+
+// For a record measured while its failed flags couldn't be taken (elementFingerprint()'s
+// `failuresTaken` false): each object of `fresh` is failed as `old` had it (ops#814). True if that
+// changed `fresh`.
+static bool keepFailures(const Data::ElementFingerprint& old, Data::ElementFingerprint& fresh)
+{
+    std::vector<Data::ElementFingerprint::Mark> marks;
+    for (const auto& mark : fresh.marks) {
+        bool failed = false;
+        for (const auto& was : old.marks) {
+            failed = failed || (was.tag == mark.tag && was.failed);
+        }
+        marks.push_back({mark.tag, mark.mark, mark.suppressed, failed});
     }
     sortMarks(marks);
     if (marks == fresh.marks) {
@@ -1048,13 +1121,16 @@ static bool keepWorld(const Data::ElementFingerprint& old, Data::ElementFingerpr
 
 // _getElementFingerprint(), and the objects the marks are taken from in \a closureOut (if given):
 // the reference's object and the element's holder first (ops#564)
+// \a failuresTaken (if given): whether the marks' failed flags are the model's now, see below.
 static std::string elementFingerprint(App::DocumentObject* feature,
                                       App::DocumentObject* obj,
                                       const std::string& sub,
                                       const PropertyLinkBase::ShadowSub& shadow,
-                                      std::vector<App::DocumentObject*>* closureOut)
+                                      std::vector<App::DocumentObject*>* closureOut,
+                                      bool* failuresTaken = nullptr)
 {
     using ShadowSub = PropertyLinkBase::ShadowSub;
+    App::SolverSiteTimer fingerprintTimer(App::SolverSite::Fingerprint);
     // A broken reference keeps its fingerprint, even when the name it holds is found again: an
     // exact reference the solver broke (Task 2 PR 7) still holds its element's name.
     if (!obj || !obj->isAttachedToDocument() || Data::hasMissingElement(shadow.oldName.c_str())) {
@@ -1066,6 +1142,7 @@ static std::string elementFingerprint(App::DocumentObject* feature,
     ShadowSub elementName;
     GeoFeature* geo = nullptr;
     const char* element = nullptr;
+    std::optional<App::SolverSiteTimer> resolveTimer(std::in_place, App::SolverSite::FpResolve);
     if (!GeoFeature::resolveElement(obj,
                                     subname,
                                     elementName,
@@ -1078,6 +1155,7 @@ static std::string elementFingerprint(App::DocumentObject* feature,
         || GeoFeature::hasMissingElement(elementName.oldName.c_str())) {
         return {};
     }
+    resolveTimer.reset();
     // A PartDesign feature's old shape under the new frame its execute set before making the shape
     // again (ops#557; Part::Feature marks the Shape NoRecompute while it re-places it): a record
     // taken now would pair the old shape with the new frame and hide the move from the update
@@ -1086,8 +1164,15 @@ static std::string elementFingerprint(App::DocumentObject* feature,
         && geo->isRecomputing() && prop->testStatus(Property::NoRecompute)) {
         return {};
     }
+    // The running solve's measurement of its target's element, if it took one (perf profile 2)
     Data::ElementFingerprint fingerprint;
-    if (!geo->getElementFingerprint(elementName.oldName.c_str(), fingerprint)) {
+    bool measured = false;
+    if (!App::batchElementFingerprint(geo, elementName.oldName, measured, fingerprint)) {
+        App::SolverSiteTimer getTimer(App::SolverSite::FpGet);
+        measured = geo->getElementFingerprint(elementName.oldName.c_str(), fingerprint);
+        App::keepBatchElementFingerprint(geo, elementName.oldName, measured, fingerprint);
+    }
+    if (!measured) {
         return {};
     }
     // An element told apart from its twins only by its place among them: their centroid, for the
@@ -1095,23 +1180,29 @@ static std::string elementFingerprint(App::DocumentObject* feature,
     // the twin-pick rule (ops#503 D1)
     Base::Vector3d centroid;
     int count = 0;
+    std::optional<App::SolverSiteTimer> twinTimer(std::in_place, App::SolverSite::FpTwin);
     if (elementTwinCentroid(geo, elementName.oldName.c_str(), centroid, count)) {
         if (count >= 2) {
             fingerprint.twinCentroid = centroid;
         }
         fingerprint.twinCount = count;
     }
+    twinTimer.reset();
     // A far piece of a Pad up to a face or a shape: the up-to faces under its point, for the
     // solver to tell whether the cap or edge made whole again lies on the same ones (ops#522)
     std::vector<Data::ElementFingerprint::UpToFace> upToFaces;
+    std::optional<App::SolverSiteTimer> upToTimer(std::in_place, App::SolverSite::FpUpTo);
     if (elementUpToFaces(geo, elementName.oldName.c_str(), fingerprint, upToFaces)) {
         fingerprint.upToFaces = std::move(upToFaces);
     }
+    upToTimer.reset();
     // The marks (ops#526 D2): every object the target is built from, the target and the element's
     // holder included, by its ID and its highest geometry ID now. Geometry with a higher ID is
-    // drawn later; an object listed was feeding the target. Each says whether it was suppressed:
-    // the world the record is taken in (ops#549 PS).
+    // drawn later; an object listed was feeding the target. Each says whether it was suppressed,
+    // or passing its base through after a failure (ops#814): the world the record is taken in
+    // (ops#549 PS).
     // A dependency cycle (getOutListRecursive() throws) has no closure: no marks, unjudged.
+    std::optional<App::SolverSiteTimer> closureTimer(std::in_place, App::SolverSite::FpClosure);
     std::vector<App::DocumentObject*> closure {obj, geo};
     try {
         for (auto from : {obj, static_cast<App::DocumentObject*>(geo)}) {
@@ -1122,22 +1213,38 @@ static std::string elementFingerprint(App::DocumentObject* feature,
     catch (const Base::Exception&) {
         closure.clear();
     }
+    // A failed flag says the element's holder was made on the failure's pass-through. That holds
+    // while the holder is being made (its Shape set in its own recompute), and when nothing the
+    // holder is built from is left to recompute. Otherwise (the failed feature recomputed alone,
+    // a holder behind the roll-back bar, an aborted recompute) the holder's shape may still be
+    // the one made with the feature, and no failed flag is taken: the caller keeps the record's
+    // (ops#814, the skeptic's S1).
+    const auto continuation = App::recomputeContinuation();
+    const bool takeFailures = continuation
+        && (geo->isRecomputing()
+            || std::none_of(closure.begin(), closure.end(), [](const App::DocumentObject* object) {
+                   return object && object->isAttachedToDocument() && object->isTouched();
+               }));
+    if (failuresTaken) {
+        *failuresTaken = takeFailures;
+    }
     for (auto object : closure) {
         if (object && object->isAttachedToDocument()) {
             fingerprint.marks.push_back({object->getID(),
                                          std::max(object->elementIdMark(), -1L),
-                                         object->passesBaseThrough()});
+                                         object->passesBaseThrough(),
+                                         takeFailures && continuation->passesFailureThrough(object)});
         }
     }
     sortMarks(fingerprint.marks);
     if (fingerprint.marks.size() > Data::ElementFingerprint::MaxMarks) {
-        // Too many for D2's judging, which then has none; the suppressed ones stay, the record's
+        // Too many for D2's judging, which then has none; the flagged ones stay, the record's
         // world (PLAN decision 216: an unsuppress is never judged on a record that lost it)
         fingerprint.marksPartial = true;
         fingerprint.marks.erase(std::remove_if(fingerprint.marks.begin(),
                                                fingerprint.marks.end(),
                                                [](const auto& mark) {
-                                                   return !mark.suppressed;
+                                                   return mark.world() == 0;
                                                }),
                                 fingerprint.marks.end());
         if (fingerprint.marks.size() > Data::ElementFingerprint::MaxMarks) {
@@ -1145,6 +1252,7 @@ static std::string elementFingerprint(App::DocumentObject* feature,
             return {};
         }
     }
+    closureTimer.reset();
     // The frame (ops#557): for a target whose placement is its chain's frame (a PartDesign
     // feature), the placement the fingerprint was taken without. A turn of it under a tool
     // fixed in the body can leave the local shape and its names as they were.
@@ -1157,10 +1265,14 @@ static std::string elementFingerprint(App::DocumentObject* feature,
     }
     // The chain's placement sources and loci (decision 218): the solver tells a part moved as
     // one piece from an edit that moved some of it by them
-    placementSources(geo, fingerprint.sources);
+    {
+        App::SolverSiteTimer sourcesTimer(App::SolverSite::FpSources);
+        placementSources(geo, fingerprint.sources);
+    }
     if (closureOut) {
         *closureOut = std::move(closure);
     }
+    App::SolverSiteTimer stringTimer(App::SolverSite::FpString);
     return fingerprint.toString();
 }
 
@@ -1223,6 +1335,7 @@ bool PropertyLinkBase::_updateElementFingerprints(App::DocumentObject* feature,
                                                   const std::vector<ShadowSub>& shadows,
                                                   std::vector<std::string>& fingerprints)
 {
+    App::SolverSiteTimer updateTimer(App::SolverSite::Update);
     bool holdsElements = false;
     for (const auto& sub : subs) {
         const char* element = Data::findElementName(sub.c_str());
@@ -1239,6 +1352,11 @@ bool PropertyLinkBase::_updateElementFingerprints(App::DocumentObject* feature,
         // The list was rebuilt: the old fingerprints can't be matched to the references.
         fingerprints.assign(subs.size(), std::string());
     }
+    // The targets' names are read once for the whole list's twin tests, and each object's
+    // placement digest is made once for the whole list, as in a recompute (ops#640: with N
+    // references each one's placementSources() saved every source anew, N^2 in all)
+    App::TwinIndexScope twinScope;
+    App::PlacementDigestScope digestScope;
     // Restored, or attached to a target restored later: the saved fingerprints are kept until a
     // check has confirmed the element each name gives now (ops#116, the updates after opening),
     // since the target may have changed while this document was closed. Taken from the name's
@@ -1255,11 +1373,13 @@ bool PropertyLinkBase::_updateElementFingerprints(App::DocumentObject* feature,
         }
         auto target = objs ? (i < objs->size() ? (*objs)[i] : nullptr) : obj;
         std::vector<App::DocumentObject*> closure;
+        bool failuresTaken = true;
         auto text = elementFingerprint(feature,
                                        target,
                                        subs[i],
                                        i < shadows.size() ? shadows[i] : ShadowSub(),
-                                       &closure);
+                                       &closure,
+                                       &failuresTaken);
         // A reference that doesn't resolve keeps its last fingerprint, for the next retry.
         if (text.empty()) {
             continue;
@@ -1277,7 +1397,16 @@ bool PropertyLinkBase::_updateElementFingerprints(App::DocumentObject* feature,
         // the target is made again, the element is the old one and the marks would already hold
         // the edit, so a sketch line redrawn in place would read as there before. The record is
         // held, and taken again at the end of the recompute (updateHeldElementFingerprints()).
+        std::optional<App::SolverSiteTimer> compareTimer(std::in_place, App::SolverSite::UpdateCompare);
         const auto old = Data::ElementFingerprint::fromString(fingerprints[i]);
+        // The failed flags couldn't be read from the model (see elementFingerprint()): the
+        // record's stay (ops#814)
+        if (!failuresTaken && old.isValid()) {
+            auto fresh = Data::ElementFingerprint::fromString(text);
+            if (fresh.isValid() && keepFailures(old, fresh)) {
+                text = fresh.toString();
+            }
+        }
         // The record's world (ops#549 PS) changes only where the solver judged the reference
         // against its target (feature given: the batch's veto ran). A setter's refresh keeps
         // each object's suppressed flag as the record had it, so the next solve still sees the
@@ -1299,10 +1428,24 @@ bool PropertyLinkBase::_updateElementFingerprints(App::DocumentObject* feature,
             // recomputed too: a digest already holds the edit
             now.frame = old.frame;
             now.sources = old.sources;
+            compareTimer.reset();
             if (now == old && recordPending(closure)) {
                 _HeldFingerprints.insert(this);
                 FC_LOG("record held while its target is to be recomputed: " << propertyName(this)
                                                                              << " " << subs[i]);
+                // Judged by a solve (feature given), the record takes the world it was judged
+                // in now (ops#833): the take at the end of the recompute is a setter's, which
+                // keeps the record's world, so a suppression the solve already judged would
+                // read as a switch at the next solve and veto a move made after it. Only the
+                // marks' flags change; the rest stays held. Only a reference into the solve's
+                // target was judged (the batch skips the others): one into another object, still
+                // to be recomputed, keeps its world for its own solve (closure[1]: the holder).
+                if (feature && closure.size() > 1 && closure[1] == feature) {
+                    auto held = old;
+                    if (takeWorld(Data::ElementFingerprint::fromString(text), held)) {
+                        fingerprints[i] = held.toString();
+                    }
+                }
                 continue;
             }
         }
@@ -5797,11 +5940,60 @@ public:
         }
 
         if (relative) {
-            return std::string(docDir.relativeFilePath(path).toUtf8().constData());
+            return std::string(relativeToCanonical(docDir, path).toUtf8().constData());
         }
         else {
             return std::string(path.toUtf8().constData());
         }
+    }
+
+    // `path` as the file system resolves it (links, junctions, macOS's /var -> /private/var):
+    // its longest existing part made canonical, the rest appended as spelled
+    static QString canonicalSpelling(const QString& path)
+    {
+        QString parent = QDir::cleanPath(path);
+        QString tail;
+        while (true) {
+            const QString canonical = QFileInfo(parent).canonicalFilePath();
+            if (!canonical.isEmpty()) {
+                return tail.isEmpty() ? canonical : QDir::cleanPath(canonical + QLatin1Char('/') + tail);
+            }
+            const QFileInfo info(parent);
+            const QString up = info.absolutePath();
+            if (up == parent || info.fileName().isEmpty()) {
+                return path;
+            }
+            tail = tail.isEmpty() ? info.fileName() : info.fileName() + QLatin1Char('/') + tail;
+            parent = up;
+        }
+    }
+
+    // FreeCAD-CH (ops#640): `docDir` is canonical, so `path` is made canonical too before the
+    // two are compared; otherwise a link reached through a symbolic link (on macOS every
+    // temporary folder) climbs to the root. The part below the shared folder keeps the link's
+    // own spelling (its case), as the link was made.
+    static QString relativeToCanonical(const QDir& docDir, const QString& path)
+    {
+        const QString relative = docDir.relativeFilePath(canonicalSpelling(path));
+        if (QDir::isAbsolutePath(relative)) {
+            return relative;  // another drive: no relative path
+        }
+        QStringList parts = relative.split(QLatin1Char('/'));
+        const QStringList spelled = QDir::cleanPath(path).split(QLatin1Char('/'));
+        qsizetype below = 0;
+        while (below < parts.size() && parts[parts.size() - 1 - below] != QLatin1String("..")) {
+            ++below;
+        }
+        if (below <= spelled.size()) {
+            for (qsizetype i = 0; i < below; ++i) {
+                const QString& own = spelled[spelled.size() - below + i];
+                QString& part = parts[parts.size() - below + i];
+                if (own.compare(part, Qt::CaseInsensitive) == 0) {
+                    part = own;
+                }
+            }
+        }
+        return parts.join(QLatin1Char('/'));
     }
 
     static DocInfoPtr
@@ -5825,7 +6017,7 @@ public:
                            l->testFlag(PropertyLinkBase::LinkAllowPartial))
                         == 0) {
                     for (App::Document* doc : App::GetApplication().getDocuments()) {
-                        if (getFullPath(doc->getFileName()) == fullpath) {
+                        if (isFileOf(doc->getFileName(), fullpath)) {
                             info->attach(doc);
                             break;
                         }
@@ -5849,6 +6041,26 @@ public:
 
         info->links.insert(l);
         return info;
+    }
+
+    // FreeCAD-CH (folder-sync item 4): whether the open document's file is the one at fullpath,
+    // also when its path is spelled differently (`parts/A.FCStd` for `Parts/A.FCStd`): the link
+    // then attaches to that document instead of opening the file a second time
+    static bool isFileOf(const char* docFile, const QString& fullpath)
+    {
+        const QString path = getFullPath(docFile);
+        if (path == fullpath) {
+            return true;
+        }
+        if (path.isEmpty() || fullpath.isEmpty() || fullpath.startsWith(QLatin1String("https://"))) {
+            return false;
+        }
+        std::error_code ec;
+        const bool same =
+            std::filesystem::equivalent(Base::FileInfo::stringToPath(path.toUtf8().constData()),
+                                        Base::FileInfo::stringToPath(fullpath.toUtf8().constData()),
+                                        ec);
+        return same && !ec;
     }
 
     static QString getFullPath(const char* p)
@@ -5921,7 +6133,7 @@ public:
         }
         else {
             for (App::Document* doc : App::GetApplication().getDocuments()) {
-                if (getFullPath(doc->getFileName()) == fullpath) {
+                if (isFileOf(doc->getFileName(), fullpath)) {
                     if (doc->testStatus(App::Document::PartialDoc) && !doc->getObject(objName)) {
                         break;
                     }
@@ -6157,7 +6369,7 @@ public:
             return;
         }
         QString fullpath(getFullPath());
-        if (!fullpath.isEmpty() && getFullPath(doc.getFileName()) == fullpath) {
+        if (!fullpath.isEmpty() && isFileOf(doc.getFileName(), fullpath)) {
             attach(const_cast<App::Document*>(&doc));
         }
     }
@@ -6177,7 +6389,10 @@ public:
         const char* filename = doc.getFileName();
         QString docPath(getFullPath(filename));
 
-        if (path.isEmpty() || path != docPath) {
+        // FreeCAD-CH (folder-sync item 4): another spelling of the same file is not a move. Moving
+        // this entry to the document's own spelling would collide with the entry of a link that
+        // spells it that way, and the collision detaches these links
+        if (path.isEmpty() || (path != docPath && !isFileOf(filename, path))) {
             FC_LOG("document '" << doc.getName() << "' path changed");
             auto me = shared_from_this();
             auto ret = _DocInfoMap.insert(std::make_pair(docPath, me));
@@ -6501,6 +6716,32 @@ static bool recordsHoldMarks(const PropertyLinkBase* prop, const std::map<long, 
     return true;
 }
 
+namespace
+{
+// The end of a recompute as recordPending() reads it: \a doc's, or, with \a doc null, that of
+// \a recomputed alone. Restored at the scope's end.
+struct RecomputeEndedScope
+{
+    const Document* previous = _RecomputeEnded;
+    const DocumentObject* previousAlone = _RecomputedAlone;
+    RecomputeEndedScope(const Document* doc, const DocumentObject* recomputed)
+    {
+        _RecomputeEnded = doc;
+        _RecomputedAlone = doc ? nullptr : recomputed;
+    }
+    ~RecomputeEndedScope()
+    {
+        _RecomputeEnded = previous;
+        _RecomputedAlone = previousAlone;
+    }
+    RecomputeEndedScope(const RecomputeEndedScope&) = delete;
+    RecomputeEndedScope& operator=(const RecomputeEndedScope&) = delete;
+};
+
+// The marks of \a target's closure now (empty on a dependency cycle).
+std::map<long, long> closureMarks(DocumentObject* target);
+}  // namespace
+
 void App::holdElementReferencesInto(DocumentObject* target)
 {
     const auto& references = PropertyLinkBase::getElementReferences(target);
@@ -6511,6 +6752,87 @@ void App::holdElementReferencesInto(DocumentObject* target)
     // element is measured on the target's last shape, which it still has. Only the others are
     // taken, so a stopped Body costs nothing per recompute while nothing is drawn (decision 263:
     // each recompute took every record into it again, 0.8 s with 160 references)
+    const std::map<long, long> marks = closureMarks(target);
+    std::size_t taken = 0;
+    for (auto prop : references) {
+        if (marks.empty() || !recordsHoldMarks(prop, marks)) {
+            _HeldFingerprints.insert(prop);
+            ++taken;
+        }
+    }
+    if (taken) {
+        FC_LOG(taken << " records into " << target->getFullName()
+                     << " held: in error, its shape not made");
+    }
+}
+
+namespace App
+{
+/** Takes the records of the references into \a target now, as the end of its recompute would:
+ * \a target, an object the recompute stopped, has its last shape only until the rule's
+ * afterStop() (F37 writes a stopped Body empty), and a record taken from an empty shape keeps its
+ * old marks (ops#652). Its closure is made, since it sorts before it. A reference that also links
+ * an object still to be recomputed waits for the end, as before. Called by Document::recompute(),
+ * which declares it (not ElementReferences.h, to keep App's headers as they are).
+ */
+void takeElementReferencesInto(DocumentObject* target);
+}  // namespace App
+
+void App::takeElementReferencesInto(DocumentObject* target)
+{
+    const auto& references = PropertyLinkBase::getElementReferences(target);
+    if (references.empty() || !target->getDocument()) {
+        return;
+    }
+    const std::map<long, long> marks = closureMarks(target);
+    std::vector<PropertyLinkBase*> due;
+    for (auto prop : references) {
+        if (!marks.empty() && recordsHoldMarks(prop, marks)) {
+            continue;
+        }
+        // One that also links an object still to be recomputed would date that one's edit too
+        // early (ops#564): it waits for the end of the recompute, as before
+        std::vector<DocumentObject*> links;
+        prop->getLinks(links, true);
+        const bool waits = std::any_of(links.begin(), links.end(), [target](DocumentObject* o) {
+            return o && o != target && o->isAttachedToDocument() && o->isTouched();
+        });
+        if (!waits) {
+            due.push_back(prop);
+        }
+    }
+    if (due.empty()) {
+        return;
+    }
+    // As at the end of the recompute: target's closure, sorted before it, is made, and what in
+    // it stays touched (a failure) is judged
+    RecomputeEndedScope ended(target->getDocument(), nullptr);
+    std::size_t taken = 0;
+    for (auto prop : due) {
+        // Taking one can destroy a later one, which leaves the references
+        if (!PropertyLinkBase::getElementReferences(target).contains(prop)) {
+            continue;
+        }
+        _HeldFingerprints.erase(prop);
+        try {
+            prop->updateElementFingerprints();
+            ++taken;
+        }
+        catch (Base::Exception& e) {
+            e.reportException();
+            FC_ERR("Failed to update the records of " << propertyName(prop));
+        }
+    }
+    if (taken) {
+        FC_LOG(taken << " records into " << target->getFullName()
+                     << " taken before its shape is cleared");
+    }
+}
+
+namespace
+{
+std::map<long, long> closureMarks(DocumentObject* target)
+{
     std::map<long, long> marks;
     try {
         auto closure = target->getOutListRecursive();
@@ -6525,18 +6847,9 @@ void App::holdElementReferencesInto(DocumentObject* target)
         // A dependency cycle: the records have no marks to compare, so all are taken
         marks.clear();
     }
-    std::size_t taken = 0;
-    for (auto prop : references) {
-        if (marks.empty() || !recordsHoldMarks(prop, marks)) {
-            _HeldFingerprints.insert(prop);
-            ++taken;
-        }
-    }
-    if (taken) {
-        FC_LOG(taken << " records into " << target->getFullName()
-                     << " held: in error, its shape not made");
-    }
+    return marks;
 }
+}  // namespace
 
 void App::resolveReregisteredReferences()
 {
@@ -6578,6 +6891,7 @@ void App::updateHeldElementFingerprints(const Document* doc, const DocumentObjec
     // Every document's: a holder in another document than its target is solved in the target's
     // recompute (review pr564opus-r1 T1). Not one whose own document is in a recompute still
     // running (this one nested in it): its end takes it.
+    App::SolverSiteTimer heldTimer(App::SolverSite::Held);
     std::vector<PropertyLinkBase*> held;
     for (auto prop : _HeldFingerprints) {
         auto owner = freecad_cast<DocumentObject*>(prop->getContainer());
@@ -6589,23 +6903,7 @@ void App::updateHeldElementFingerprints(const Document* doc, const DocumentObjec
     }
     // One at a time: taking one can destroy a later one, which leaves the set. One whose target
     // is still to be recomputed puts itself back.
-    struct Ended
-    {
-        const Document* previous = _RecomputeEnded;
-        const DocumentObject* previousAlone = _RecomputedAlone;
-        Ended(const Document* doc, const DocumentObject* recomputed)
-        {
-            _RecomputeEnded = doc;
-            _RecomputedAlone = doc ? nullptr : recomputed;
-        }
-        ~Ended()
-        {
-            _RecomputeEnded = previous;
-            _RecomputedAlone = previousAlone;
-        }
-        Ended(const Ended&) = delete;
-        Ended& operator=(const Ended&) = delete;
-    } ended(doc, recomputed);
+    RecomputeEndedScope ended(doc, recomputed);
     for (auto prop : held) {
         if (_HeldFingerprints.erase(prop) == 0) {
             continue;
@@ -9023,6 +9321,19 @@ void PropertyXLinkContainer::breakLink(App::DocumentObject* obj, bool clear)
             obj->_removeBackLinkProp(getName(), owner);
         }
         _Deps.erase(it);
+        // FreeCAD-CH (ops#640 round 5): the property-level entries for obj go too, as obj does,
+        // with obj's back links to them (review R5-1: erased alone, they left obj an edge to the
+        // owner that outlived it, and a later recompute of obj followed it into freed memory)
+        for (auto entry = _PropDeps.begin(); entry != _PropDeps.end();) {
+            if (entry->first.second != obj) {
+                ++entry;
+                continue;
+            }
+            if (!entry->second && obj->getDocument() == owner->getDocument()) {
+                obj->_removeBackLinkProp(getName(), owner, entry->first.first.c_str());
+            }
+            entry = _PropDeps.erase(entry);
+        }
         onRemoveDep(obj);
         hasSetValue();
         return;
@@ -9038,8 +9349,21 @@ void PropertyXLinkContainer::breakLink(App::DocumentObject* obj, bool clear)
         onBreakLink(key);
         if (!v.second && key->getDocument() == owner->getDocument()) {
             key->_removeBackLink(owner);
+            key->_removeBackLinkProp(getName(), owner);
         }
     }
+    // FreeCAD-CH (ops#640 round 5): and the property-level back links updateDepsProp added (the
+    // fine-grained recompute's): left behind, an owner created and deleted in one transaction is
+    // freed, and the next recompute of what it linked followed the edge into freed memory (a
+    // cut's sibling made and dropped in one dialog)
+    for (const auto& [entry, hidden] : _PropDeps) {
+        DocumentObject* key = entry.second;
+        if (!hidden && key && key->isAttachedToDocument()
+            && key->getDocument() == owner->getDocument()) {
+            key->_removeBackLinkProp(getName(), owner, entry.first.c_str());
+        }
+    }
+    _PropDeps.clear();
     _XLinks.clear();
     _Deps.clear();
 }

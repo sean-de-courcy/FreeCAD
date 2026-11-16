@@ -89,12 +89,22 @@ struct DocumentP
     bool rollback {false};
     bool undoing {false};  ///< document in the middle of undo or redo
     bool committing {false};
+    bool clearingUndos {false};  ///< FreeCAD-CH (ops#640): clearUndos commits its open transaction
     bool definingTransaction {false};
     bool opentransaction {false};
     std::bitset<32> StatusBits;
     unsigned int UndoMemSize {0};
     unsigned int UndoMaxStackSize {20};
     unsigned int TransactionLock {0};
+    // FreeCAD-CH (ops#640): the step lock (Document::lockStep()): an open feature dialog's
+    // transaction is a step in progress that only its explicit commit or abort ends
+    unsigned int StepLock {0};
+    // FreeCAD-CH (ops#640): regenerate at the close of a transaction and after undo/redo
+    // (Document::setRegenerateOnCommit(); off in App, the Gui turns it on)
+    bool regenerateOnCommit {false};
+    // FreeCAD-CH (ops#640): the depth of undo()/redo() calls, so that undo(id), which undoes the
+    // steps above id one by one, regenerates once, at its end
+    int undoRedoDepth {0};
     // Id and name that the next transaction will take
     // as soon as there is a change to the document
     int bookedTransaction {0};

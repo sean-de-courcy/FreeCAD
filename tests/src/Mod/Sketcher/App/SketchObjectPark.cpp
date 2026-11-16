@@ -724,9 +724,11 @@ TEST_F(SketchObjectParkTest, markMissingFlagsTheParkedGeometry)
     int marked = sketch->markExternalGeometryMissing(ids, ref);
     doc->recompute();
 
-    // Assert: a missing reference, kept with its constraints, and the sketch fails naming it
+    // Assert: a missing reference, kept with its constraints, and the sketch computes on the
+    // frozen geometry with a warning naming it, as Onshape's Use (ops#656 D4 row 2)
     EXPECT_EQ(marked, 1);
-    EXPECT_FALSE(sketch->isValid());
+    EXPECT_TRUE(sketch->isValid());
+    EXPECT_TRUE(sketch->isWarning());
     EXPECT_EQ(sketch->ExternalGeo.getSize(), geoCount);
     EXPECT_EQ(refOf(projection()), ref);
     EXPECT_TRUE(ExternalGeometryFacade::getFacade(projection())

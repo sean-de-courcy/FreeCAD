@@ -42,6 +42,24 @@ class PartDesignExport LinearPattern: public PartDesign::Transformed,
 public:
     LinearPattern();
 
+    /** @name Onshape's linear pattern options (FreeCAD-CH ops#640 rank 8)
+     * Off and empty by default, so a file saved before them computes as it did.
+     */
+    //@{
+    /// Centered: the instances run both ways from the original along Direction, Occurrences on
+    /// each side, the original included (Onshape's, oracle 9j: count n makes 2n - 1)
+    App::PropertyBool Centered;
+    /// Centered along Direction2, likewise (Onshape's own box for it, oracle 9j)
+    App::PropertyBool Centered2;
+    /// Skip instances: (i, j) pairs, flattened (i1, j1, i2, j2, ...): i counts the instances along
+    /// Direction, j along Direction2, both from 0 at the negative end (the original is (0, 0)
+    /// unless centered), as Onshape lists them. The original is never skipped; a pair out of
+    /// range is ignored
+    App::PropertyIntegerList SkippedInstances;
+    //@}
+
+    std::vector<std::size_t> getSkippedPositions() const override;
+
     // Virtual override to support PartDesign datum objects
     gp_Dir getDirectionFromProperty(const App::PropertyLinkSub& dirProp) const override;
 

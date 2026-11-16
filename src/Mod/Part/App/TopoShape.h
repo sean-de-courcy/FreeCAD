@@ -1950,6 +1950,10 @@ public:
      * @param maxDegree: define the maximal U degree of the result surface
      * @param op: optional string to be encoded into topo naming for indicating
      *            the operation
+     * @param checkCompatibility: if true (the default), OCCT makes the wires
+     *            compatible (edge counts, orientation, origin). FreeCAD-CH (loft
+     *            connections, ops#640): false when the caller has matched the
+     *            wires itself, same edge count and orientation, edge i to edge i.
      *
      * @return The original content of this TopoShape is discarded and replaced
      *         with the new shape. The function returns the TopoShape itself as
@@ -1962,7 +1966,8 @@ public:
         IsRuled isRuled,
         IsClosed isClosed = IsClosed::notClosed,
         Standard_Integer maxDegree = 5,
-        const char* op = nullptr
+        const char* op = nullptr,
+        bool checkCompatibility = true
     );
 
     /** Make a ruled surface

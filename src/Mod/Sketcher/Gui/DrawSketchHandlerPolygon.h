@@ -373,6 +373,11 @@ void DSHPolygonController::adaptDrawingToParameterChange(int parameterindex, dou
     switch (parameterindex) {
         case WParameter::First:
             handler->numberOfCorners = std::max(3, static_cast<int>(value));
+            // FreeCAD-CH (ops#640, rank 49): the next polygon starts from this count, as the
+            // window's count did (Onshape's polygon opens no window)
+            App::GetApplication()
+                .GetParameterGroupByPath("User parameter:BaseApp/Preferences/Mod/Sketcher")
+                ->SetInt("DefaultRegularPolygonSides", static_cast<long>(handler->numberOfCorners));
             break;
     }
 }

@@ -99,6 +99,11 @@
          <string>Reference</string>
         </property>
        </item>
+       <item>
+        <property name="text">
+         <string>Start from part</string>
+        </property>
+       </item>
       </widget>
      </item>
      <item row="2" column="0" colspan="2">
@@ -241,7 +246,7 @@
           </property>
           <item>
            <property name="text">
-            <string>Dimension</string>
+            <string>Blind</string>
            </property>
           </item>
           <item>
@@ -249,7 +254,20 @@
             <string>Through all</string>
            </property>
           </item>
+          <item>
+           <property name="text">
+            <string>Up to next</string>
+           </property>
+          </item>
+          <item>
+           <property name="text">
+            <string>Up to entity</string>
+           </property>
+          </item>
          </widget>
+        </item>
+        <item row="4" column="0" colspan="2">
+         <widget class="QWidget" name="upToFaceFieldPlaceholder"/>
         </item>
        </layout>
       </item>

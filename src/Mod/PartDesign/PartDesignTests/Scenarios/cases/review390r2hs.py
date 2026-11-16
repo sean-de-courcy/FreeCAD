@@ -212,6 +212,23 @@ class R2hsMovedWithNewAtOwnPlace(Base):
         self.addCircle(-2, 0.7)
 
 
+class R2hsMovedLittleWithNewOverlapping(Base):
+    """Profile regions 4 (batch 2's R1, the control of R2hsMovedWithNewAtOwnPlace): A (-2, 0.7)
+    moves 0.1 to (-2.1, 0.7) and a new circle C is drawn at (-1.6, 0.7). A and C overlap above
+    the Pad only (y 0.53 to 0.87), so the whole sketch turns from loops into regions and names its
+    faces anew; each of A's crossings is still the nearest to its saved place (0.1 away, the other
+    0.35 or more) and should follow it: the source twin's offset among A's two crossings is the
+    saved one. On 1b273122d5's build `second` follows (tier 3) and `first` breaks before the
+    tie-break with evidence `ambiguous` (loud)."""
+
+    def after(self, name):
+        return self.place(self.BEFORE[name][0] - 0.1, 0.5)
+
+    def change(self, doc):
+        self.moveCircle(0, -2.1, 0.7)
+        self.addCircle(-1.6, 0.7)
+
+
 class R2hsMovedOffNewCircleNearPlace(Base):
     """R2gbMovedOffNewCircleAtPlace with the new circle C drawn a little off A's old place
     (OFFSET along x): its crossings lie near the saved places, not at them (tier 3's nearest, no

@@ -29,6 +29,7 @@
 #include <QString>
 
 #include <App/Datums.h>
+#include <Gui/ForkKeymap.h>
 #include <Gui/Action.h>
 #include <Gui/Application.h>
 #include <Gui/BitmapFactory.h>
@@ -358,7 +359,7 @@ CmdSketcherCreateArc::CmdSketcherCreateArc()
 {
     sAppModule = "Sketcher";
     sGroup = "Sketcher";
-    sMenuText = QT_TR_NOOP("Arc From Center");
+    sMenuText = QT_TR_NOOP("Center point arc");  // FreeCAD-CH (ops#796): Onshape's word
     sToolTipText = QT_TR_NOOP("Creates an arc defined by a center point and an end point");
     sWhatsThis = "Sketcher_CreateArc";
     sStatusTip = sToolTipText;
@@ -390,7 +391,7 @@ CmdSketcherCreate3PointArc::CmdSketcherCreate3PointArc()
 {
     sAppModule = "Sketcher";
     sGroup = "Sketcher";
-    sMenuText = QT_TR_NOOP("Arc From 3 Points");
+    sMenuText = QT_TR_NOOP("3 point arc");  // FreeCAD-CH (ops#796): Onshape's word
     sToolTipText = QT_TR_NOOP("Creates an arc defined by 2 end points and 1 point on the arc");
     sWhatsThis = "Sketcher_Create3PointArc";
     sStatusTip = sToolTipText;
@@ -586,7 +587,7 @@ CmdSketcherCreateCircle::CmdSketcherCreateCircle()
 {
     sAppModule = "Sketcher";
     sGroup = "Sketcher";
-    sMenuText = QT_TR_NOOP("Circle From Center");
+    sMenuText = QT_TR_NOOP("Center point circle");  // FreeCAD-CH (ops#796): Onshape's word
     sToolTipText = QT_TR_NOOP("Creates a circle from a center and rim point");
     sWhatsThis = "Sketcher_CreateCircle";
     sStatusTip = sToolTipText;
@@ -617,7 +618,7 @@ CmdSketcherCreate3PointCircle::CmdSketcherCreate3PointCircle()
 {
     sAppModule = "Sketcher";
     sGroup = "Sketcher";
-    sMenuText = QT_TR_NOOP("Circle From 3 Points");
+    sMenuText = QT_TR_NOOP("3 point circle");  // FreeCAD-CH (ops#796): Onshape's word
     sToolTipText = QT_TR_NOOP("Creates a circle from 3 perimeter points");
     sWhatsThis = "Sketcher_Create3PointCircle";
     sStatusTip = sToolTipText;
@@ -790,7 +791,7 @@ CmdSketcherCreateRectangle::CmdSketcherCreateRectangle()
 {
     sAppModule = "Sketcher";
     sGroup = "Sketcher";
-    sMenuText = QT_TR_NOOP("Rectangle");
+    sMenuText = QT_TR_NOOP("Corner rectangle");  // FreeCAD-CH (ops#796): Onshape's word
     sToolTipText = QT_TR_NOOP("Creates a rectangle from 2 corner points");
     sWhatsThis = "Sketcher_CreateRectangle";
     sStatusTip = sToolTipText;
@@ -826,7 +827,7 @@ CmdSketcherCreateRectangleCenter::CmdSketcherCreateRectangleCenter()
 {
     sAppModule = "Sketcher";
     sGroup = "Sketcher";
-    sMenuText = QT_TR_NOOP("Centered Rectangle");
+    sMenuText = QT_TR_NOOP("Center point rectangle");  // FreeCAD-CH (ops#796): Onshape's word
     sToolTipText = QT_TR_NOOP("Creates a centered rectangle from a center and a corner point");
     sWhatsThis = "Sketcher_CreateRectangle_Center";
     sStatusTip = sToolTipText;
@@ -849,6 +850,41 @@ void CmdSketcherCreateRectangleCenter::activated(int iMsg)
 }
 
 bool CmdSketcherCreateRectangleCenter::isActive()
+{
+    return isCommandActive(getActiveGuiDocument());
+}
+
+// FreeCAD-CH (ops#640, rank 49): Onshape's aligned rectangle, a tool of its own: a side by two
+// clicks, then the width square off it (the 3-corner method, kept square under Onshape's keymap)
+DEF_STD_CMD_AU(CmdSketcherCreateRectangleAligned)
+
+CmdSketcherCreateRectangleAligned::CmdSketcherCreateRectangleAligned()
+    : Command("Sketcher_CreateRectangle_Aligned")
+{
+    sAppModule = "Sketcher";
+    sGroup = "Sketcher";
+    sMenuText = QT_TR_NOOP("Aligned rectangle");  // FreeCAD-CH (ops#796): Onshape's word
+    sToolTipText = QT_TR_NOOP("Creates a rectangle from one side, then its width");
+    sWhatsThis = "Sketcher_CreateRectangle_Aligned";
+    sStatusTip = sToolTipText;
+    sPixmap = "Sketcher_CreateRectangle";
+    eType = ForEdit;
+}
+
+CONSTRUCTION_UPDATE_ACTION(CmdSketcherCreateRectangleAligned, "Sketcher_CreateRectangle")
+
+void CmdSketcherCreateRectangleAligned::activated(int iMsg)
+{
+    Q_UNUSED(iMsg);
+    ActivateHandler(
+        getActiveGuiDocument(),
+        std::make_unique<DrawSketchHandlerRectangle>(
+            ConstructionMethods::RectangleConstructionMethod::ThreePoints
+        )
+    );
+}
+
+bool CmdSketcherCreateRectangleAligned::isActive()
 {
     return isCommandActive(getActiveGuiDocument());
 }
@@ -1174,6 +1210,19 @@ CONSTRUCTION_UPDATE_ACTION(CmdSketcherCreateRegularPolygon, "Sketcher_CreateRegu
 void CmdSketcherCreateRegularPolygon::activated(int iMsg)
 {
     Q_UNUSED(iMsg);
+
+    // FreeCAD-CH (ops#640, rank 49): Onshape's polygon opens no window (gap S28): the tool's
+    // Sides field sets the count while drawing, starting from the last one used [guess: 6 when
+    // none was, Onshape's hexagon]
+    if (Gui::ForkKeymap::isOnshape()) {
+        const int sides = static_cast<int>(
+            App::GetApplication()
+                .GetParameterGroupByPath("User parameter:BaseApp/Preferences/Mod/Sketcher")
+                ->GetInt("DefaultRegularPolygonSides", 6));
+        ActivateHandler(getActiveGuiDocument(),
+                        std::make_unique<DrawSketchHandlerPolygon>(std::max(3, sides)));
+        return;
+    }
 
     // Pop-up asking for values
     SketcherRegularPolygonDialog srpd;
@@ -1720,7 +1769,7 @@ CmdSketcherTrimming::CmdSketcherTrimming()
 {
     sAppModule = "Sketcher";
     sGroup = "Sketcher";
-    sMenuText = QT_TR_NOOP("Trim Edge");
+    sMenuText = QT_TR_NOOP("Trim");  // FreeCAD-CH (ops#796): Onshape's word
     sToolTipText = QT_TR_NOOP("Trims an edge with respect to the selected position");
     sWhatsThis = "Sketcher_Trimming";
     sStatusTip = sToolTipText;
@@ -1750,7 +1799,7 @@ CmdSketcherExtend::CmdSketcherExtend()
 {
     sAppModule = "Sketcher";
     sGroup = "Sketcher";
-    sMenuText = QT_TR_NOOP("Extend Edge");
+    sMenuText = QT_TR_NOOP("Extend");  // FreeCAD-CH (ops#796): Onshape's word
     sToolTipText = QT_TR_NOOP("Extends an edge with respect to the selected position");
     sWhatsThis = "Sketcher_Extend";
     sStatusTip = sToolTipText;
@@ -1780,7 +1829,7 @@ CmdSketcherSplit::CmdSketcherSplit()
 {
     sAppModule = "Sketcher";
     sGroup = "Sketcher";
-    sMenuText = QT_TR_NOOP("Split Edge");
+    sMenuText = QT_TR_NOOP("Split");  // FreeCAD-CH (ops#796): Onshape's word
     sToolTipText = QT_TR_NOOP("Splits an edge into 2 segments while preserving constraints");
     sWhatsThis = "Sketcher_Split";
     sStatusTip = sToolTipText;
@@ -1869,7 +1918,7 @@ CmdSketcherProjection::CmdSketcherProjection()
 {
     sAppModule = "Sketcher";
     sGroup = "Sketcher";
-    sMenuText = QT_TR_NOOP("External Projection");
+    sMenuText = QT_TR_NOOP("Use");  // FreeCAD-CH (ops#796): Onshape's word
     sToolTipText = QT_TR_NOOP("Creates the projection of external geometry in the sketch plane");
     sWhatsThis = "Sketcher_Projection";
     sStatusTip = sToolTipText;
@@ -1906,7 +1955,7 @@ CmdSketcherIntersection::CmdSketcherIntersection()
 {
     sAppModule = "Sketcher";
     sGroup = "Sketcher";
-    sMenuText = QT_TR_NOOP("External Intersection");
+    sMenuText = QT_TR_NOOP("Intersect");  // FreeCAD-CH (ops#796): Onshape's word
     sToolTipText = QT_TR_NOOP("Creates the intersection of external geometry with the sketch plane");
     sWhatsThis = "Sketcher_Intersection";
     sStatusTip = sToolTipText;
@@ -1989,6 +2038,7 @@ void CreateSketcherCommandsCreateGeo()
     rcCmdMgr.addCommand(new CmdSketcherCreatePolylineLegacy());
     rcCmdMgr.addCommand(new CmdSketcherCreateRectangle());
     rcCmdMgr.addCommand(new CmdSketcherCreateRectangleCenter());
+    rcCmdMgr.addCommand(new CmdSketcherCreateRectangleAligned());  // FreeCAD-CH (ops#640)
     rcCmdMgr.addCommand(new CmdSketcherCreateOblong());
     rcCmdMgr.addCommand(new CmdSketcherCreateTriangle());
     rcCmdMgr.addCommand(new CmdSketcherCreateSquare());

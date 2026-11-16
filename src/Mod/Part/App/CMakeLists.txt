@@ -587,6 +587,8 @@ SET(Part_SRCS
     PreCompiled.h
     ProgressIndicator.cpp
     ProgressIndicator.h
+    RollingBallBlend.cpp
+    RollingBallBlend.h
     Services.cpp
     Services.h
     SignalException.cpp

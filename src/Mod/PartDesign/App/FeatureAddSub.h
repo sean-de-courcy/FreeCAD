@@ -98,14 +98,34 @@ public:
     App::PropertyEnumeration Operation;
     /// The primary this feature follows (Hidden scope: no dependency); empty unless a sibling
     App::PropertyLinkHidden SiblingOf;
+    /** @name Merge scope (FreeCAD-CH ops#640 ranks 1 and 3a, Onshape's Extrude)
+     * The merge scope is the feature's own part (when something comes before it there) and the
+     * parts the Merge right after it merges (PartDesign.setMergeScope). Both default off, so a
+     * file saved before them computes as it did.
+     */
+    //@{
+    /// Onshape's "Merge with all": the Result box merges every part the tool touches, taken at OK
+    /// (a snapshot: Onshape most likely takes it again at each regeneration)
+    App::PropertyBool MergeWithAll;
+    /// An Add with an empty merge scope: with nothing before it in its part and MergeWithAll off it
+    /// fails, "No merge scope selected", and adds nothing (Onshape's Add). Off, such a feature is a
+    /// new part (Onshape's New)
+    App::PropertyBool EmptyMergeScope;
+    //@}
 
 protected:
     Type addSubType {Type::Additive};
     BooleanOperation booleanOperation {BooleanOperation::Union};
     void defineAdditive();
     void defineSubtractive();
+    /// Operation takes Union, Subtraction and Common, whatever the class defined, keeping its
+    /// value: Onshape's New / Add / Remove / Intersect on one feature (FreeCAD-CH ops#640). Again
+    /// after a restore, which brings back the list a file saved
+    void allowAllOperations();
+    void onDocumentRestored() override;
 
 private:
+    bool allOperations {false};
     /// Why this sibling's copied links or bound values aren't its primary's, or empty
     std::string outOfStep() const;
     /// Warns when this sibling's tool doesn't touch its part

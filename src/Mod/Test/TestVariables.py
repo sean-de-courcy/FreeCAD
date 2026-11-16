@@ -26,6 +26,7 @@ variable named `Width` in the owner's document, a VarSet property or a Spreadshe
 Every model here is built by the test, and every expected value is fixed up front.
 """
 
+import math
 import os
 import re
 import shutil
@@ -288,6 +289,111 @@ class TestResolution(VariablesBase):
         self.assertEqual({o.Name for o in varSet.InList}, {"Box", "Sheet"})
 
 
+class TestUnitNames(VariablesBase):
+    """Rank 54 (ops#640, hands-on D-2): a variable may be named like a unit or a constant (`t`,
+    `h`, `W`, `N`, `m`, `A`, `g`, `s`, `l`, `K`, `V`, `e`, `pi`), as in Onshape, and `#t` reads
+    as the variable. Written alone outside its set, `t` is still the unit."""
+
+    NAMES = ["t", "h", "W", "N", "m", "A", "g", "s", "l", "K", "V", "e", "pi"]
+
+    def test_names_accepted(self):
+        for name in self.NAMES:
+            with self.subTest(name=name):
+                self.assertEqual(FreeCAD.checkVariableName(name), "")
+        self.assertIn("function", FreeCAD.checkVariableName("cos"))
+        self.assertIn("isn't a name", FreeCAD.checkVariableName("2t"))
+        # the boolean and None constants stay reserved words
+        for name in ["True", "true", "False", "false", "None"]:
+            with self.subTest(name=name):
+                self.assertIn("is a constant", FreeCAD.checkVariableName(name))
+
+    def test_hash_name_reads_as_the_variable(self):
+        """Each name, i + 1 mm, used as `#name * 2` in a Box's Length: 2 (i + 1) mm."""
+        varSet = self.addVarSet(**{name: i + 1 for i, name in enumerate(self.NAMES)})
+        boxes = []
+        for i, name in enumerate(self.NAMES):
+            box = self.addBox("Box%d" % i)
+            box.setExpression("Length", "#%s * 2" % name)
+            boxes.append(box)
+        self.doc.recompute()
+        for i, name in enumerate(self.NAMES):
+            with self.subTest(name=name):
+                self.assertEqual(expressionText(boxes[i], "Length"), "VarSet.%s * 2" % name)
+                self.assertAlmostEqual(boxes[i].Length.Value, 2 * (i + 1))
+        # The full path typed works the same way
+        box = self.addBox("Typed")
+        box.setExpression("Length", "VarSet.t + VarSet.pi")
+        self.doc.recompute()
+        self.assertAlmostEqual(box.Length.Value, 1 + 13)
+        varSet.t = 5
+        self.doc.recompute()
+        self.assertAlmostEqual(boxes[0].Length.Value, 10)
+
+    def test_units_and_constants_elsewhere_unchanged(self):
+        """Outside a property path, `m`, `t`, `pi` and `e` are still the unit and the constants."""
+        self.addVarSet(t=3, m=4, pi=5, e=6)
+        box = self.addBox()
+        box.setExpression("Length", "0.01 m")
+        box.setExpression("Width", "2 * pi * 1 mm")
+        box.setExpression("Height", "e * 1 mm")
+        self.doc.recompute()
+        self.assertAlmostEqual(box.Length.Value, 10)
+        self.assertAlmostEqual(box.Width.Value, 2 * math.pi)
+        self.assertAlmostEqual(box.Height.Value, math.e)
+        self.assertAlmostEqual(FreeCAD.Units.Quantity("2 t").getValueAs("kg"), 2000)
+
+    def test_within_the_set(self):
+        """Inside the VarSet, `#t` is stored as `.t` (the parser's form for the owner's own
+        property, where a bare `t` would read back as the unit); a bare `t` typed there names the
+        set's own variable, as the Onshape import writes a sibling; `2 t` stays two tonnes."""
+        varSet = self.addVarSet(t=3)
+        varSet.addProperty("App::PropertyLength", "Depth")
+        varSet.addProperty("App::PropertyLength", "Thrice")
+        varSet.addProperty("App::PropertyMass", "Load")
+        varSet.setExpression("Depth", "#t + 5 mm")
+        varSet.setExpression("Thrice", "t * 3")
+        varSet.setExpression("Load", "2 t")
+        self.doc.recompute()
+        self.assertEqual(expressionText(varSet, "Depth"), ".t + 5 mm")
+        self.assertEqual(expressionText(varSet, "Thrice"), ".t * 3")
+        self.assertAlmostEqual(varSet.Depth.Value, 8)
+        self.assertAlmostEqual(varSet.Thrice.Value, 9)
+        self.assertAlmostEqual(varSet.Load.getValueAs("kg"), 2000)
+
+    def test_units_after_a_unit_and_an_operator(self):
+        """With variables `m` and `s` in the set, `5 m/s` there is still 5 m/s (a unit after a
+        unit and '/' stays a unit), and a bare `true` is still the boolean 1."""
+        varSet = self.addVarSet(m=4, s=2)
+        varSet.addProperty("App::PropertyLength", "true")
+        setattr(varSet, "true", 7)
+        varSet.addProperty("App::PropertySpeed", "Speed")
+        varSet.addProperty("App::PropertyLength", "One")
+        varSet.setExpression("Speed", "5 m/s")
+        varSet.setExpression("One", "true * 1 mm")
+        self.doc.recompute()
+        self.assertAlmostEqual(varSet.Speed.getValueAs("m/s"), 5)
+        self.assertAlmostEqual(varSet.One.Value, 1)
+
+    def test_save_and_reopen(self):
+        """The stored texts read back as the variables after a reopen, and follow them."""
+        varSet = self.addVarSet(t=3, W=4)
+        varSet.addProperty("App::PropertyLength", "Depth")
+        varSet.setExpression("Depth", "#t * 2")
+        box = self.addBox()
+        box.setExpression("Length", "#W + #t")
+        self.doc.recompute()
+        self.tempDir = tempfile.mkdtemp(prefix="TestVariables")
+        path = os.path.join(self.tempDir, "unitnames.FCStd")
+        self.doc.saveAs(path)
+        FreeCAD.closeDocument(self.doc.Name)
+        self.doc = FreeCAD.openDocument(path)
+        varSet = self.doc.getObject("VarSet")
+        varSet.t = 10
+        self.doc.recompute()
+        self.assertAlmostEqual(varSet.Depth.Value, 20)
+        self.assertAlmostEqual(self.doc.getObject("Box").Length.Value, 14)
+
+
 class TestSaveAndRename(VariablesBase):
     def buildT2T3(self):
         varSet = self.addVarSet(Width=20)
@@ -510,6 +616,11 @@ class TestSaveAndRename(VariablesBase):
         self.assertEqual(other.RedoCount, 0)
         self.assertEqual(len(other.Objects), 0)
         self.assertAlmostEqual(varSet.BoxWidth.Value, 20)
+        # FreeCAD-CH (ops#640): no step there records the freed boxes (the Redo stack, cleared at a
+        # step's commit, freed them under the rename's step, whose undo read freed memory)
+        other.undo()
+        other.redo()
+        self.assertEqual(len(other.Objects), 0)
 
     def test_rename_unchanged_object_redo_holds_keeps_redo(self):
         """The same, for an object in the redo stack that doesn't use the variable: nothing

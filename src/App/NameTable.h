@@ -37,6 +37,43 @@ namespace Data
 
 class NameRemap;
 
+/** The naming formats of a file's interned names and its `NameTable` element (ops#6; the reader
+ * policy, `beta-compatibility.md` 1.2). A file says the format it was written in (`NamingFormat`
+ * on `Document`) and the oldest format a reader must have to read its table
+ * (`NamingFormatOldestRead`). This build writes NamingFormatWritten, and its reader table
+ * (NameRemap::readsFormat()) reads every format from NamingFormatOldestRead to it. Format 2
+ * writes references as indices into the table (T2); format 1 never shipped. A build that writes
+ * a new format keeps the older readers that shipped, and writes the oldest format whose reader
+ * still reads its tables right.
+ */
+constexpr int NamingFormatWritten = 2;
+constexpr int NamingFormatOldestRead = 2;
+
+/// How a reader reads a file's name table (namingFormatToRead()).
+struct NamingFormatRead
+{
+    enum class Verdict
+    {
+        NoTable,           ///< format 0: the file has no table
+        Read,              ///< read the table in `format`
+        NeedsNewerReader,  ///< the file's oldest reader is newer than the reader: refused
+        Unreadable,        ///< below the reader's oldest, or not a format: dropped
+    };
+    Verdict verdict = Verdict::NoTable;
+    /// The format to read the table in (Read only)
+    int format = 0;
+};
+
+/** How a reader of formats \a readerOldestRead..\a readerWritten reads a file written in
+ * \a fileWritten whose table a reader of \a fileOldestRead reads. A missing or unreadable
+ * \a fileOldestRead (0 or less), or one above \a fileWritten, is \a fileWritten. A file newer
+ * than the reader is read in the reader's newest format if the file says a reader of it can.
+ */
+AppExport NamingFormatRead namingFormatToRead(int fileWritten,
+                                              int fileOldestRead,
+                                              int readerWritten = NamingFormatWritten,
+                                              int readerOldestRead = NamingFormatOldestRead);
+
 /** The process-wide table of interned V2 name nodes (bounded names, ops#6).
  *
  * **Interned form.** A V2 name in full form embeds the full strings of its Linked and Connected
@@ -448,7 +485,13 @@ public:
     /// Reads the file's entries into the table (NameTable::readEntries()) and works out which
     /// IDs are inline and which unknown. Once only: the indices of a file's maps refer to its own
     /// table, so a second table is refused (an error, and an empty summary).
-    NameTable::LoadSummary load(std::istream& stream);
+    /// \a format is the file's naming format to read the table in (namingFormatToRead()); one
+    /// this build has no reader for (readsFormat()) is refused: an error, an empty summary, and
+    /// the file's names are dropped as a newer format's (setNewerFormat()).
+    NameTable::LoadSummary load(std::istream& stream, int format);
+    /// The reader table: true if this build reads name tables of naming \a format, which every
+    /// format from NamingFormatOldestRead to NamingFormatWritten is.
+    static bool readsFormat(int format);
     /// True once a file's table was loaded or its naming format found newer: the remap belongs
     /// to that file, and another file's restore must make its own.
     bool holdsFile() const

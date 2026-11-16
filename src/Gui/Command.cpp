@@ -25,12 +25,16 @@
 #include <Inventor/nodes/SoOrthographicCamera.h>
 #include <xercesc/util/XMLException.hpp>
 #include <xercesc/util/XMLString.hpp>
+#include <algorithm>
+#include <set>
 #include <sstream>
 #include <QApplication>
 #include <QByteArray>
 #include <QDir>
 #include <QKeySequence>
 #include <QMessageBox>
+#include <QMetaObject>
+#include <QWidget>
 
 #include <boost/algorithm/string/replace.hpp>
 
@@ -446,7 +450,115 @@ void Command::invoke(int i, TriggerSource trigger)
     Base::Console().log("CmdG: %s\n", sName);
 #endif
 
+    // FreeCAD-CH (ops#640, regen-design section 3): with a feature dialog open its step is
+    // locked; a command that would alter the document accepts the dialog first (Onshape: another
+    // feature tool accepts the open dialog) or is refused visibly, never run with a silent 0
+    // from a refused openTransaction. Checked here, before isActive(), so the run-by-name paths
+    // (Gui.runCommand, the dock's row menu) get the same answer and the message as a click.
+    if (App::Document* locked = stepLockedDocument()) {
+        if ((eType & AcceptsOpenDialog) != 0) {
+            if (!acceptOpenDialog(locked)) {
+                getMainWindow()->showMessage(
+                    QCoreApplication::translate(
+                        "Gui::Command",
+                        "The open dialog could not be accepted: finish or cancel it first"
+                    ),
+                    5000
+                );
+                return;
+            }
+        }
+        else if (refusedByStepLock(locked)) {
+            getMainWindow()->showMessage(
+                QCoreApplication::translate("Gui::Command", "Finish the open dialog first"),
+                5000
+            );
+            return;
+        }
+    }
+
     _invoke(i, bCanLog && !_busy);
+}
+
+App::Document* Command::stepLockedDocument()
+{
+    if (App::Document* doc = App::GetApplication().getActiveDocument()) {
+        if (doc->isStepLocked()) {
+            return doc;
+        }
+    }
+    if (!Gui::Application::Instance) {
+        return nullptr;
+    }
+    // Another document's open dialog only when a command can reach it: through the active view
+    // (its document is the active Gui document) or the selection. Each document keeps its own
+    // dialog (PR 303): a command in another document is neither refused by it nor accepts it (a
+    // Pad in document B accepted document A's dialog, unasked).
+    Gui::Document* active = Gui::Application::Instance->activeDocument();
+    for (Gui::Document* guiDoc : Gui::Application::Instance->editDocuments()) {
+        App::Document* doc = guiDoc ? guiDoc->getDocument() : nullptr;
+        if (doc && doc->isStepLocked()
+            && (guiDoc == active || Selection().hasSelection(doc->getName()))) {
+            return doc;
+        }
+    }
+    return nullptr;
+}
+
+bool Command::refusedByStepLock(App::Document* locked) const
+{
+    if (!locked || (eType & NoTransaction) != 0) {
+        return false;  // Std_Undo/Redo (greyed by isActive), Std_Refresh, file commands: allowed
+    }
+    // view and selection commands; a GroupCommand (eType 0) runs its child's invoke(), which
+    // decides. A PythonGroupCommand keeps the default AlterDoc and is refused as a whole
+    return (eType & (AlterDoc | ForEdit)) != 0;
+}
+
+bool Command::acceptOpenDialog(App::Document* locked) const
+{
+    if (!locked) {
+        return true;
+    }
+    if (Gui::TaskView::TaskDialog* dialog = Gui::Control().activeDialog(locked)) {
+        // FreeCAD-CH (ops#640, review check-r3 (3)): a field showing an unresolved #name has
+        // disabled the dialog's OK (TaskView.cpp, hands-on F10), so the next tool doesn't accept
+        // it either: the command is refused with its message, the dialog stays as it is
+        for (const QWidget* content : dialog->getDialogContent()) {
+            if (!content) {
+                continue;
+            }
+            const QList<QWidget*> fields = content->findChildren<QWidget*>();
+            if (std::ranges::any_of(fields, [](const QWidget* field) {
+                    return field->property("unresolvedVariable").toBool();
+                })) {
+                return false;
+            }
+        }
+        // FreeCAD-CH (ops#640 rank 24, hands-on F2): Onshape's next tool commits a dialog with
+        // any input, even in error, and drops an empty new one silently. A dialog that can tell
+        // (PartDesign's TaskDlgFeatureParameters::hasInput, invoked by name: no PartDesign header
+        // here) and has none is cancelled, as its Cancel does; any other dialog is accepted
+        bool hasInput = true;
+        if (dialog->metaObject()->indexOfMethod("hasInput()") >= 0) {
+            QMetaObject::invokeMethod(
+                dialog,
+                "hasInput",
+                Qt::DirectConnection,
+                Q_RETURN_ARG(bool, hasInput)
+            );
+        }
+        if (hasInput) {
+            Gui::Control().accept(locked);
+        }
+        else {
+            Gui::Control().reject(locked);
+        }
+    }
+    // the dialog's OK (a feature in error is committed as it is) or Cancel ends its step and
+    // resets the edit, which releases the lock; a failed accept (the dialog shows its own
+    // message) leaves both
+    return !locked->isStepLocked();
 }
 
 void Command::_invoke(int id, bool disablelog)
@@ -539,6 +651,32 @@ void Command::_invoke(int id, bool disablelog)
 #endif
 }
 
+namespace
+{
+// FreeCAD-CH (ops#695): a command's isActive() runs from the main window's update timer; an
+// exception leaving it reaches the Qt event loop, which on macOS runs inside Cocoa and aborts
+// the process. A throwing command reads inactive, reported once per command.
+bool guardedIsActive(Command* cmd)
+{
+    try {
+        return cmd->isActive();
+    }
+    catch (const Base::Exception& e) {
+        static std::set<std::string> reported;
+        if (reported.insert(cmd->getName()).second) {
+            Base::Console().warning("%s: isActive() failed: %s\n", cmd->getName(), e.what());
+        }
+    }
+    catch (const std::exception& e) {
+        static std::set<std::string> reported;
+        if (reported.insert(cmd->getName()).second) {
+            Base::Console().warning("%s: isActive() failed: %s\n", cmd->getName(), e.what());
+        }
+    }
+    return false;
+}
+}  // namespace
+
 void Command::testActive()
 {
     if (!_pcAction) {
@@ -550,7 +688,17 @@ void Command::testActive()
         return;
     }
 
-    if (!(eType & ForEdit)) {  // special case for commands which are only in some edit modes active
+    // FreeCAD-CH (ops#640): the commands the open dialog's step lock refuses read disabled
+    App::Document* locked = stepLockedDocument();
+    if (locked && !(eType & AcceptsOpenDialog) && refusedByStepLock(locked)) {
+        _pcAction->setEnabled(false);
+        return;
+    }
+
+    // FreeCAD-CH (ops#640): a command that accepts the open dialog first stays enabled beside
+    // a step-locked dialog that bars altering the document; its isActive() decides
+    bool acceptsDialog = locked && (eType & AcceptsOpenDialog);
+    if (!(eType & ForEdit) && !acceptsDialog) {  // special case for commands which are only in some edit modes active
 
         App::Document* doc = getDocument();
         if ((!Gui::Control().isAllowedAlterDocument(doc) && eType & AlterDoc)
@@ -572,12 +720,12 @@ void Command::testActive()
             }
             Command* cmd = rcCmdMgr.getCommandByName(name);
             if (cmd) {
-                action->setEnabled(cmd->isActive());
+                action->setEnabled(guardedIsActive(cmd));
             }
         }
     }
 
-    bool bActive = isActive();
+    bool bActive = guardedIsActive(this);
     _pcAction->setEnabled(bActive);
 }
 
@@ -1448,6 +1596,9 @@ PythonCommand::PythonCommand(const char* name, PyObject* pcPyCommand, const char
         }
         if (cmdType.find("NoTransaction") != std::string::npos) {
             type += int(NoTransaction);
+        }
+        if (cmdType.find("AcceptsOpenDialog") != std::string::npos) {  // FreeCAD-CH (ops#640)
+            type += int(AcceptsOpenDialog);
         }
         eType = type;
     }

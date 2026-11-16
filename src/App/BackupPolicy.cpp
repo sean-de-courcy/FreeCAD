@@ -35,7 +35,203 @@
 
 #include "BackupPolicy.h"
 
+#include <filesystem>
+#include <system_error>
+#include <thread>
+
+#include <QByteArray>
+#include <QtGlobal>
+#ifdef _WIN32
+# include <windows.h>
+#else
+# include <fcntl.h>
+# include <unistd.h>
+#endif
+
 using namespace App;
+
+// FreeCAD-CH (ops#640, slice A1, notes/files-saving-history-design.md section 3): a save writes
+// its file under a temporary name, flushes it to the disk, keeps the old file by a hard link and
+// puts the new one in place with one replacing rename. The document's name holds one complete
+// file at every moment, the old or the new, also after a crash or a power cut.
+namespace
+{
+void flushToDisk(const std::string& path)
+{
+#ifdef _WIN32
+    HANDLE handle = INVALID_HANDLE_VALUE;
+    // A virus scanner can hold the new file for a moment (A1 review T6)
+    for (int attempt = 0;; ++attempt) {
+        handle = CreateFileW(Base::FileInfo(path).toStdWString().c_str(),
+                             GENERIC_WRITE,
+                             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                             nullptr,
+                             OPEN_EXISTING,
+                             FILE_ATTRIBUTE_NORMAL,
+                             nullptr);
+        if (handle != INVALID_HANDLE_VALUE) {
+            break;
+        }
+        const DWORD error = GetLastError();
+        if (attempt >= 10 || (error != ERROR_ACCESS_DENIED && error != ERROR_SHARING_VIOLATION)) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    if (handle == INVALID_HANDLE_VALUE) {
+        throw Base::FileException("Cannot open the saved file to flush it", Base::FileInfo(path));
+    }
+    const bool flushed = FlushFileBuffers(handle) != 0;
+    CloseHandle(handle);
+#else
+    const int fd = ::open(path.c_str(), O_RDWR);
+    if (fd < 0) {
+        throw Base::FileException("Cannot open the saved file to flush it", Base::FileInfo(path));
+    }
+# ifdef F_FULLFSYNC
+    // macOS: fsync() leaves the data in the drive's cache
+    bool flushed = ::fcntl(fd, F_FULLFSYNC) == 0 || ::fsync(fd) == 0;
+# else
+    bool flushed = ::fsync(fd) == 0;
+# endif
+    ::close(fd);
+#endif
+    if (!flushed) {
+        throw Base::FileException("Cannot flush the saved file to the disk", Base::FileInfo(path));
+    }
+}
+
+// Whether this thread's save has put its file in place (App::saveReplacedFile)
+thread_local bool fileReplaced = false;
+
+// One rename that replaces the target: no moment without a file under its name
+void replaceFile(const std::string& source, const std::string& target)
+{
+#ifdef _WIN32
+    const std::wstring from = Base::FileInfo(source).toStdWString();
+    const std::wstring to = Base::FileInfo(target).toStdWString();
+    // A virus scanner, an indexer or the sync tool can hold the target for a moment
+    for (int attempt = 0;; ++attempt) {
+        if (MoveFileExW(from.c_str(), to.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+            fileReplaced = true;
+            return;
+        }
+        const DWORD error = GetLastError();
+        if (attempt >= 10 || (error != ERROR_ACCESS_DENIED && error != ERROR_SHARING_VIOLATION)) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+#else
+    if (::rename(source.c_str(), target.c_str()) == 0) {
+        fileReplaced = true;
+        // The rename itself on the disk
+        const std::string dir = Base::FileInfo(target).dirPath();
+        const int fd = ::open(dir.empty() ? "." : dir.c_str(), O_RDONLY);
+        if (fd >= 0) {
+            ::fsync(fd);
+            ::close(fd);
+        }
+        return;
+    }
+#endif
+    throw Base::FileException("Save interrupted: Cannot rename temporary file to project file",
+                              Base::FileInfo(target));
+}
+
+// Keeps file under name as well, by a hard link (a copy where the filesystem has none), never
+// over an existing file. The document's file stays where it is meanwhile.
+bool keepFileNoErase(const Base::FileInfo& file, const std::string& name)
+{
+    if (name.empty() || Base::FileInfo(name).exists()) {
+        return false;
+    }
+    const auto from = Base::FileInfo::stringToPath(file.filePath());
+    const auto to = Base::FileInfo::stringToPath(name);
+    std::error_code error;
+    std::filesystem::create_hard_link(from, to, error);
+    if (!error) {
+        return true;
+    }
+    error.clear();
+    std::filesystem::copy_file(from, to, std::filesystem::copy_options::none, error);
+    return !error;
+}
+// Puts the new file in place. When that fails, the backup just made goes: it is a hard link to the
+// document's file, which keeps that name, so a later in-place write to the file would change the
+// backup too (A2 fix review); the document's file itself is untouched
+void replaceKeeping(const std::string& source, const std::string& target, const std::string& backup)
+{
+    try {
+        if (App::saveFaultPoint("kept")) {
+            std::error_code error;  // the temporary file lost (a virus scanner's quarantine)
+            std::filesystem::remove(Base::FileInfo::stringToPath(source), error);
+        }
+        replaceFile(source, target);
+    }
+    catch (...) {
+        // Only while it still is the document's file: after a sync's rename in between, or a
+        // rename reported failed that happened, it is the only copy of a version (fix review 3)
+        std::error_code error;
+        if (!backup.empty()
+            && std::filesystem::equivalent(Base::FileInfo::stringToPath(backup),
+                                           Base::FileInfo::stringToPath(target),
+                                           error)) {
+            std::filesystem::remove(Base::FileInfo::stringToPath(backup), error);
+        }
+        throw;
+    }
+}
+
+}  // namespace
+
+bool App::saveReplacedFile()
+{
+    return fileReplaced;
+}
+
+bool App::keepFileAs(const std::string& from, const std::string& to)
+{
+    // A copy, not a hard link: a kept version must not change when a program writes into the
+    // file under the document's name in place (a sync tool that does not rename; A2 fix review)
+    if (to.empty() || Base::FileInfo(to).exists()) {
+        return false;
+    }
+    std::error_code error;
+    const bool copied = std::filesystem::copy_file(Base::FileInfo::stringToPath(from),
+                                                   Base::FileInfo::stringToPath(to),
+                                                   std::filesystem::copy_options::none,
+                                                   error);
+    if (copied && !error) {
+        flushToDisk(to);
+        return true;
+    }
+    return false;
+}
+
+void App::replaceFileWith(const std::string& source, const std::string& target)
+{
+    replaceFile(source, target);
+}
+
+bool App::saveFaultPoint(const char* step)
+{
+    static const std::string fault = qgetenv("FREECAD_CH_SAVE_FAULT").toStdString();
+    if (fault.empty()) {
+        return false;
+    }
+    const auto colon = fault.find(':');
+    if (fault.compare(0, colon, step) != 0) {
+        return false;
+    }
+    if (colon != std::string::npos && fault.compare(colon + 1, std::string::npos, "throw") == 0) {
+        throw Base::FileException((std::string("Save fault injected at ") + step).c_str());
+    }
+    if (colon != std::string::npos && fault.compare(colon + 1, std::string::npos, "cut") == 0) {
+        return true;
+    }
+    std::_Exit(86);
+}
 
 void BackupPolicy::setPolicy(const Policy p)
 {
@@ -55,6 +251,9 @@ void BackupPolicy::setDateFormat(const std::string& fmt)
 }
 void BackupPolicy::apply(const std::string& sourcename, const std::string& targetname)
 {
+    fileReplaced = false;
+    flushToDisk(sourcename);
+    saveFaultPoint("flushed");
     switch (policy) {
         case Standard:
             applyStandard(sourcename, targetname);
@@ -63,10 +262,12 @@ void BackupPolicy::apply(const std::string& sourcename, const std::string& targe
             applyTimeStamp(sourcename, targetname);
             break;
     }
+    saveFaultPoint("done");
 }
 
 void BackupPolicy::applyStandard(const std::string& sourcename, const std::string& targetname) const
 {
+    std::string backupPath;  // the backup this save made
     // if saving the project data succeeded rename to the actual file name
     if (Base::FileInfo fi(targetname); fi.exists()) {
         if (numberOfFiles > 0) {
@@ -91,6 +292,19 @@ void BackupPolicy::applyStandard(const std::string& sourcename, const std::strin
                 }
             }
 
+            // FreeCAD-CH (ops#640, A1): the new backup is kept before the oldest goes, so a backup
+            // that can't be kept leaves the earlier ones (A1 fix review); it then takes the
+            // oldest's name, as upstream's did
+            std::stringstream str;
+            str << fi.filePath() << (nSuff + 1);
+            fn = str.str();
+            if (!keepFileNoErase(fi, fn)) {
+                // The old file is never lost without its backup (A1 review): no save
+                throw Base::FileException("Cannot keep the previous file as a backup: not saved",
+                                          fi);
+            }
+            backupPath = fn;
+
             if (!backup.empty() && static_cast<int>(backup.size()) >= numberOfFiles) {
                 // delete the oldest backup file we found
                 Base::FileInfo del = backup.front();
@@ -99,35 +313,28 @@ void BackupPolicy::applyStandard(const std::string& sourcename, const std::strin
                         del = it;
                     }
                 }
-
-                del.deleteFile();
-                fn = del.filePath();
-            }
-            else {
-                // create a new backup file
-                std::stringstream str;
-                str << fi.filePath() << (nSuff + 1);
-                fn = str.str();
-            }
-
-            if (!fi.renameFile(fn.c_str())) {
-                Base::Console().warning("Cannot rename project file to backup file\n");
+                if (del.deleteFile()) {
+                    std::error_code error;  // kept under its new name if this fails
+                    std::filesystem::rename(Base::FileInfo::stringToPath(fn),
+                                            Base::FileInfo::stringToPath(del.filePath()),
+                                            error);
+                    if (!error) {
+                        backupPath = del.filePath();
+                    }
+                }
             }
         }
-        else {
-            fi.deleteFile();
-        }
+        // No backups: the rename below replaces the file
     }
 
-    if (Base::FileInfo tmp(sourcename); !tmp.renameFile(targetname.c_str())) {
-        throw Base::FileException("Cannot rename tmp save file to project file",
-                                  Base::FileInfo(targetname));
-    }
+    replaceKeeping(sourcename, targetname, backupPath);
+    saveFaultPoint("replaced");
 }
 
 void BackupPolicy::applyTimeStamp(const std::string& sourcename, const std::string& targetname)
 {
     Base::FileInfo fi(targetname);
+    std::string backupPath;  // the backup this save made
 
     std::string fn = sourcename;
     std::string ext = fi.extension();
@@ -147,14 +354,18 @@ void BackupPolicy::applyTimeStamp(const std::string& sourcename, const std::stri
         if (numberOfFiles > 0) {
             // replace . by - in format to avoid . between base name and extension
             boost::replace_all(saveBackupDateFormat, ".", "-");
-            {
+            // FreeCAD-CH (ops#640, A1): the extra backups go after the new one is kept, so a
+            // backup that can't be kept leaves the earlier ones (A1 fix review); the new one is
+            // never among those removed
+            std::string keptName;
+            auto removeExtraBackups = [&]() {
                 // Remove all extra backups
                 std::string filename = fi.fileName();
                 Base::FileInfo di(fi.dirPath());
                 std::vector<Base::FileInfo> backup;
                 std::vector<Base::FileInfo> files = di.getDirectoryContent();
                 for (const Base::FileInfo& it : files) {
-                    if (it.isFile()) {
+                    if (it.isFile() && it.fileName() != keptName) {
                         std::string file = it.fileName();
                         std::string fext = it.extension();
                         std::string fextUp = fext;
@@ -203,7 +414,7 @@ void BackupPolicy::applyTimeStamp(const std::string& sourcename, const std::stri
                         }
                     }
                 }
-            }  // end remove backup
+            };  // end remove backup
 
             // create a new backup file
             {
@@ -267,17 +478,22 @@ void BackupPolicy::applyTimeStamp(const std::string& sourcename, const std::stri
                         }
                     }
                     else {
-                        if (!renameFileNoErase(fi, fn + ".FCBak")) {
+                        if (!keepFileNoErase(fi, fn + ".FCBak")) {
                             fn = fn + "-";
                         }
                         else {
+                            keptName = Base::FileInfo(fn + ".FCBak").fileName();
+                            backupPath = fn + ".FCBak";
                             done = true;
                         }
                     }
 
                     if (!done) {
                         while (ext2 < numberOfFiles + 10) {
-                            if (renameFileNoErase(fi, fn + std::to_string(ext2) + ".FCBak")) {
+                            if (keepFileNoErase(fi, fn + std::to_string(ext2) + ".FCBak")) {
+                                keptName =
+                                    Base::FileInfo(fn + std::to_string(ext2) + ".FCBak").fileName();
+                                backupPath = fn + std::to_string(ext2) + ".FCBak";
                                 break;
                             }
                             ext2++;
@@ -290,7 +506,9 @@ void BackupPolicy::applyTimeStamp(const std::string& sourcename, const std::stri
                     while (ext2 < numberOfFiles + 10) {
                         // linux just replace the file if exists, and then the existence is to
                         // be tested before rename
-                        if (renameFileNoErase(fi, fi.filePath() + std::to_string(ext2))) {
+                        if (keepFileNoErase(fi, fi.filePath() + std::to_string(ext2))) {
+                            keptName = Base::FileInfo(fi.filePath() + std::to_string(ext2)).fileName();
+                            backupPath = fi.filePath() + std::to_string(ext2);
                             break;
                         }
                         ext2++;
@@ -298,31 +516,18 @@ void BackupPolicy::applyTimeStamp(const std::string& sourcename, const std::stri
                 }
 
                 if (ext2 >= numberOfFiles + 10) {
-                    Base::Console().error(
-                        "File not saved: Cannot rename project file to backup file\n");
-                    // throw Base::FileException("File not saved: Cannot rename project file to
-                    // backup file", fi);
+                    // The old file is never lost without its backup (A1 review): no save
+                    throw Base::FileException(
+                        "Cannot keep the previous file as a backup: not saved", fi);
                 }
             }
+            removeExtraBackups();
         }
-        else {
-            try {
-                fi.deleteFile();
-            }
-            catch (...) {
-                Base::Console().warning("Cannot remove backup file: %s\n",
-                                        fi.fileName().c_str());
-                backupManagementError = true;
-            }
-        }
+        // No backups: the rename below replaces the file
     }
 
-    Base::FileInfo tmp(sourcename);
-    if (!tmp.renameFile(targetname.c_str())) {
-        throw Base::FileException(
-            "Save interrupted: Cannot rename temporary file to project file",
-            tmp);
-    }
+    replaceKeeping(sourcename, targetname, backupPath);
+    saveFaultPoint("replaced");
 
     if (backupManagementError) {
         throw Base::FileException(

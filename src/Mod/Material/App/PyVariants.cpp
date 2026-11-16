@@ -49,6 +49,13 @@ PyObject* Materials::_pyObjectFromVariant(const QVariant& value)
     if (value.userType() == QMetaType::Long) {
         return PyLong_FromLong(value.toInt());
     }
+    if (value.userType() == QMetaType::LongLong) {
+        // FreeCAD-CH: integers restored from a document keep 64 bits (ops#696)
+        return PyLong_FromLongLong(value.toLongLong());
+    }
+    if (value.userType() == QMetaType::ULongLong) {
+        return PyLong_FromUnsignedLongLong(value.toULongLong());
+    }
     if (value.userType() == QMetaType::Bool) {
         return Py::new_reference_to(Py::Boolean(value.toBool()));
     }

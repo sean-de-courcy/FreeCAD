@@ -502,3 +502,189 @@ class TestQuickMeasureGui(unittest.TestCase):
         text, tip = self.select(("P", "Vertex1"))
         self.assertEqual(text, "")
         self.assertIn("X: " + self.length(20), tip)
+
+    # FreeCAD-CH (ops#673, selection parity 11): an edge picked at its middle (the midpoint
+    # marker's 8 px) measures as that point, as in Onshape (SP10-Q9: "Point", then "Min dist"
+    # 10 mm with a corner). Box A's top edge on y = 0 runs from (0,0,10) to (10,0,10).
+    def topEdge(self):
+        shape = self.doc.getObject("A").Shape
+        for i, edge in enumerate(shape.Edges, 1):
+            ends = {tuple(round(c, 6) for c in v.Point) for v in edge.Vertexes}
+            if ends == {(0.0, 0.0, 10.0), (10.0, 0.0, 10.0)}:
+                return "Edge%d" % i
+        self.fail("no top edge on y = 0")
+
+    def corner(self):
+        shape = self.doc.getObject("A").Shape
+        for i, vertex in enumerate(shape.Vertexes, 1):
+            if (vertex.Point - App.Vector(0, 0, 10)).Length < 1e-9:
+                return "Vertex%d" % i
+        self.fail("no corner (0,0,10)")
+
+    def selectPicked(self, *picks):
+        """Like select, with picks (obj, sub, point or None) made in the 3D view."""
+        import time
+
+        view = Gui.ActiveDocument.ActiveView
+        view.viewIsometric()
+        view.fitAll()
+        Gui.Selection.clearSelection()
+        for obj, sub, point in picks:
+            if point is None:
+                Gui.Selection.addSelection(self.doc.Name, obj, sub)
+            else:
+                Gui.Selection.addSelection(self.doc.Name, obj, sub, point.x, point.y, point.z)
+        end = time.monotonic() + 1.0
+        while time.monotonic() < end:
+            QtWidgets.QApplication.processEvents()
+            time.sleep(0.02)
+        label = Gui.getMainWindow().statusBar().findChild(QtWidgets.QLabel, "rightSideLabel")
+        self.assertIsNotNone(label, "no Quick Measure label")
+        return label.text(), label.toolTip()
+
+    def testEdgeMiddleIsAPoint(self):
+        text, tip = self.selectPicked(("A", self.topEdge(), App.Vector(5, 0, 10)))
+        self.assertEqual(text, "")
+        self.assertIn("X: " + self.length(5), tip)
+        self.assertIn("Z: " + self.length(10), tip)
+
+    def testEdgeMiddleAndCorner(self):
+        text, _ = self.selectPicked(
+            ("A", self.topEdge(), App.Vector(5, 0, 10)), ("A", self.corner(), None)
+        )
+        self.assertIn("Distance: " + self.length(5), text)
+
+    def testEdgeAwayFromMiddleIsTheEdge(self):
+        # 4 mm from the middle is far more than 8 px with the model fitted
+        text, _ = self.selectPicked(("A", self.topEdge(), App.Vector(1, 0, 10)))
+        self.assertIn("Length: " + self.length(10), text)
+
+    def testEdgeWithoutPickIsTheEdge(self):
+        # a selection made without a 3D pick carries (0,0,0)
+        text, _ = self.selectPicked(("A", self.topEdge(), None))
+        self.assertIn("Length: " + self.length(10), text)
+
+    # Selection parity 11 (2): a tree or Python selection has no picked point. Its (0,0,0) lies on
+    # every edge through the origin, and zoomed out it is within 8 px of a short edge's middle, so
+    # it must not count as a pick. Designed: a 1 mm cube at the origin and one 2000 mm away,
+    # fitted, so its edges' 0.5 mm from end to middle is well under a pixel.
+    def zoomedOutCube(self):
+        import Part
+
+        tiny = self.doc.addObject("Part::Feature", "Tiny")
+        tiny.Shape = Part.makeBox(1, 1, 1)
+        far = self.doc.addObject("Part::Feature", "Far")
+        far.Shape = Part.makeBox(1, 1, 1, App.Vector(2000, 2000, 2000))
+        self.doc.recompute()
+
+        def edge(end):
+            for i, e in enumerate(tiny.Shape.Edges, 1):
+                ends = {tuple(round(c, 6) for c in v.Point) for v in e.Vertexes}
+                if ends == {(0.0, 0.0, 0.0), end}:
+                    return "Edge%d" % i
+            self.fail("no edge from the origin to %s" % (end,))
+
+        for i, v in enumerate(tiny.Shape.Vertexes, 1):
+            if (v.Point - App.Vector(1, 1, 1)).Length < 1e-9:
+                corner = "Vertex%d" % i
+        return edge((1.0, 0.0, 0.0)), edge((0.0, 1.0, 0.0)), corner
+
+    def testEdgeThroughTheOriginWithoutPickIsTheEdge(self):
+        alongX, _, _ = self.zoomedOutCube()
+        text, _ = self.selectPicked(("Tiny", alongX, None))
+        self.assertIn("Length: " + self.length(1), text)
+
+    def testThreeItemsThroughTheOriginShowSums(self):
+        alongX, alongY, corner = self.zoomedOutCube()
+        text, _ = self.selectPicked(("Tiny", corner, None), ("Tiny", alongX, None), ("Tiny", alongY, None))
+        self.assertEqual(text, "Total length: " + self.length(2))
+
+    def testPickAtTheOriginOnAShortEdgeIsItsMiddle(self):
+        # a real pick at (0,0,0) is a pick: 0.5 mm from the middle is under a pixel here
+        alongX, _, _ = self.zoomedOutCube()
+        text, tip = self.selectPicked(("Tiny", alongX, App.Vector(0, 0, 0)))
+        self.assertEqual(text, "")
+        self.assertIn("X: " + self.length(0.5), tip)
+
+
+class TestMassPropertiesNoMaterial(unittest.TestCase):
+    """Rank 16 (ops#640, hands-on D-3): a part with no material is not weighed as water.
+
+    Onshape's mass properties with a part that has no material show the volume and the surface
+    area, leave mass, centre of mass and inertia blank, and say "One or more parts do not have a
+    material defined". The panel does the same: no mass, density, centre of gravity or inertia,
+    the note above the physical properties, the volume and the centre of volume as before.
+
+    Model: box S 10 x 10 x 10 at the origin in Steel (Generic), box N 20 x 10 x 10 at (20, 0, 0)
+    with no material (the "Default" one). Both: volume 3000 mm^3, the centre of volume at
+    x = (1000 * 5 + 2000 * 30) / 3000 = 21.667 mm. S alone: mass = Steel's density * 1000 mm^3.
+    """
+
+    STEEL = "3eeccaf6-847b-46b0-aff8-5ffe08b7fdb7"  # Steel (Generic), Machining library
+
+    def setUp(self):
+        if not App.GuiUp:
+            self.skipTest("needs the GUI")
+        import Materials
+
+        self.doc = App.newDocument("MassPropertiesNoMaterial")
+        steel = self.doc.addObject("Part::Box", "S")
+        none = self.doc.addObject("Part::Box", "N")
+        none.Length = 20
+        none.Placement.Base = App.Vector(20, 0, 0)
+        self.material = Materials.MaterialManager().getMaterial(self.STEEL)
+        steel.ShapeMaterial = self.material
+        self.doc.recompute()
+        Gui.Selection.clearSelection()
+        TestMassPropertiesRemoveItem.pump()
+        Gui.runCommand("Std_MassProperties")
+        TestMassPropertiesRemoveItem.pump(20)
+
+    def tearDown(self):
+        if not App.GuiUp:
+            return
+        Gui.Selection.clearSelection()
+        Gui.Control.closeDialog()
+        TestMassPropertiesRemoveItem.pump()
+        App.closeDocument(self.doc.Name)
+        TestMassPropertiesRemoveItem.pump()
+
+    def field(self, name):
+        edits = [w for w in Gui.getMainWindow().findChildren(QtWidgets.QLineEdit) if w.objectName() == name]
+        self.assertEqual(len(edits), 1, "the panel's field " + name)
+        return edits[0].text()
+
+    def note(self):
+        """The note's text where it is shown, else None."""
+        for label in Gui.getMainWindow().findChildren(QtWidgets.QLabel):
+            if label.objectName() == "materialNote" and label.isVisibleTo(label.window()):
+                return label.text()
+        return None
+
+    def measure(self, *names):
+        for name in names:
+            Gui.Selection.addSelection(self.doc.Name, name)
+            TestMassPropertiesRemoveItem.pump(10)
+        TestMassPropertiesRemoveItem.pump(20)
+
+    @staticmethod
+    def value(text, unit):
+        return App.Units.Quantity(text.split(" (")[0]).getValueAs(unit).Value
+
+    def testAPartWithoutMaterialBlanksTheMass(self):
+        self.measure("S", "N")
+        self.assertEqual(self.note(), "One or more parts do not have a material defined")
+        self.assertAlmostEqual(self.value(self.field("volumeEdit"), "mm^3"), 3000, delta=0.5)
+        self.assertAlmostEqual(self.value(self.field("surfaceAreaEdit"), "mm^2"), 600 + 1000, delta=0.5)
+        for name in ("massEdit", "densityEdit", "cogXText", "inertiaJoxText", "inertiaJxText"):
+            self.assertEqual(self.field(name), "", name + " shows a figure without a material")
+        self.assertAlmostEqual(self.value(self.field("covXText"), "mm"), 65000 / 3000, delta=0.01)
+
+    def testAllPartsWithMaterialAreWeighed(self):
+        self.measure("S")
+        self.assertIsNone(self.note(), "the note shows with every part's material set")
+        density = self.material.getPhysicalValue("Density").getValueAs("kg/mm^3").Value
+        self.assertGreater(density, 0)
+        mass = self.value(self.field("massEdit"), "kg")
+        self.assertAlmostEqual(mass, density * 1000, delta=density * 1000 * 0.01)
+        self.assertAlmostEqual(self.value(self.field("cogXText"), "mm"), 5, delta=0.01)

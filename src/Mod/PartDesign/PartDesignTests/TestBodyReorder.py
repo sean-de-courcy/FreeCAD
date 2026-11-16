@@ -599,6 +599,83 @@ class BodyReorderBase:
         self.assertTrue(isPlaneFacing(pad2.Shape.getElement(subs[0]), V(0, 0, 1), V(0, 0, 15)))
         self.assertBody(BLOCK + PAD2 - HOLE2)
 
+    def testSketchAloneAboveTheFaceItSitsOn(self):
+        """Round 8 (J5): the hole's sketch alone moved above Pad2, the face it sits on, the hole
+        staying after Pad2. Onshape regenerates its list in order, so the sketch fails at its new
+        place at once, as when the hole moves with it: its support goes to the block, its new
+        base, with a re-target record, the sketch and the hole fail and Pad2 computes. Moved back
+        below Pad2, it heals and the record is gone."""
+        block, pad2, sketch, hole = self.onPad2()
+        self.body.reorderObject([sketch], block, True)
+        group = self.body.Group
+        self.assertLess(group.index(sketch), group.index(pad2))
+        self.assertGreater(group.index(hole), group.index(pad2))
+        self.assertChain(block, pad2, hole)
+        target, subs = sketch.AttachmentSupport[0]
+        self.assertIs(target, block)
+        self.assertTrue(all(s.startswith("?") for s in subs), subs)
+        self.assertEqual(self.savedRetargets(), ["Pad2"])
+        self.recompute()
+        self.assertFalse(sketch.isValid())
+        self.assertFalse(hole.isValid())
+        self.assertValid(pad2)
+        if self.solver:
+            self.assertIn("it was on 'Pad2'", sketch.getStatusString())
+        self.assertBody(BLOCK + PAD2)
+
+        self.body.reorderObject([sketch], pad2, True)
+        self.assertEqual(self.savedRetargets(), [])
+        self.recompute()
+        self.assertValid(sketch, hole)
+        target, subs = sketch.AttachmentSupport[0]
+        self.assertIs(target, pad2)
+        self.assertTrue(isPlaneFacing(pad2.Shape.getElement(subs[0]), V(0, 0, 1), V(0, 0, 15)))
+        self.assertBody(BLOCK + PAD2 - HOLE2)
+
+    def testSketchAloneAboveEverySolidIsSetAside(self):
+        """Round 8 (J5): the sketch alone moved above the block, with no solid before it to take
+        its support: the support is set aside, the sketch fails saying so (not naming the hole,
+        which still comes after Pad2) and the hole with it; moved back, it heals."""
+        block, pad2, sketch, hole = self.onPad2()
+        self.body.reorderObject([sketch], block, False)
+        group = self.body.Group
+        self.assertLess(group.index(sketch), group.index(block))
+        self.assertChain(block, pad2, hole)
+        self.recompute()
+        self.assertFalse(sketch.isValid())
+        self.assertFalse(hole.isValid())
+        self.assertValid(block, pad2)
+        message = sketch.getStatusString()
+        self.assertIn("refers to 'Pad2'", message)
+        self.assertNotIn(f"'{hole.Label}'", message)
+        self.assertBody(BLOCK + PAD2)
+
+        self.body.reorderObject([sketch], pad2, True)
+        self.recompute()
+        self.assertValid(sketch, hole)
+        self.assertEqual(self.parked(sketch), [])
+        self.assertBody(BLOCK + PAD2 - HOLE2)
+
+    def testASetAsideSketchDoesNotRunAgain(self):
+        """ops#796: the sketch moved above the block, its support set aside. It fails without
+        running, once: the next recompute has nothing to run. It kept the frames of the support
+        it had, which differ from none at every recompute, so it ran again each time and
+        everything after it with it. Moved back, it heals."""
+        block, pad2, sketch, hole = self.onPad2()
+        self.body.reorderObject([sketch], block, False)
+        self.recompute()
+        self.assertFalse(sketch.isValid())
+        self.assertFalse(sketch.MustExecute)
+        self.assertEqual(self.doc.recompute(), 0)
+        self.assertEqual([o.Name for o in self.doc.Objects if "Touched" in o.State], [])
+        self.assertBody(BLOCK + PAD2)
+
+        self.body.reorderObject([sketch], pad2, True)
+        self.recompute()
+        self.assertValid(sketch, hole)
+        self.assertBody(BLOCK + PAD2 - HOLE2)
+        self.assertEqual(self.doc.recompute(), 0)
+
     def testMoveAboveAFaceTheBaseHolds(self):
         """The sketch on the block's side face, which Pad2 doesn't touch: moved above Pad2, the
         support is found on the block (the same face) and everything computes; moved back, it is
@@ -1005,7 +1082,11 @@ class BodyReorderBase:
         self.assertIs(sketch.ExternalGeometry[0][0], block)
         self.assertEqual(self.savedRetargets(), ["Pad2"])
         self.recompute()
-        self.assertFalse(hole.isValid())
+        # the sketch computes on the frozen projection with a warning, and the pocket after it
+        # builds, as Onshape's Use (GB22; ops#656 D4 row 2)
+        self.assertTrue(sketch.isValid(), sketch.getStatusString())
+        self.assertIn("Warning", sketch.State)
+        self.assertTrue(hole.isValid(), hole.getStatusString())
 
         self.body.reorderObject([hole], pad2, True)
         self.recompute()
@@ -1238,10 +1319,54 @@ class BodyReorderBase:
         self.assertEqual(ref, before[1])
         self.assertTrue(ref.startswith("Pad2."), ref)
         self.recompute()
-        self.assertFalse(sketch.isValid())
+        # warned on the frozen projection (ops#656 D4 row 2)
+        self.assertTrue(sketch.isValid(), sketch.getStatusString())
+        self.assertIn("Warning", sketch.State)
         self.assertTrue(Sketcher.ExternalGeometryFacade(sketch.ExternalGeo[2]).testFlag("Missing"))
         self.assertIn("Pad2", sketch.getStatusString())
         self.assertEqual((len(sketch.ExternalGeo), len(sketch.Constraints)), counts)
+
+    def testUnparkAfterDeleteWarnsLoudly(self):
+        """RO11f x ops#656 D4 row 2 (ruled by c771: the park wins): Pad2 deleted while the
+        projection is parked is quiet in the compute (the parked geometry takes no part in it);
+        the move back below the block, which can't put it back, makes it loud: the sketch warns
+        that Pad2's reference is missing, the geometry is flagged missing and dropped from its
+        park, and the pocket after it still builds. It is row 2's missing-reference warning, not
+        the error of a geometry whose link went with its object, and it stays so through a save
+        and reopen."""
+        block, pad2, sketch, hole = self.projecting()
+        self.body.reorderObject([hole], None, True)
+        self.recompute()
+        self.deleteFeature(pad2)
+        self.recompute()
+
+        self.body.reorderObject([hole], block, True)
+        self.recompute()
+        self.assertEqual(self.parked(sketch), [])
+        facade = Sketcher.ExternalGeometryFacade(sketch.ExternalGeo[2])
+        self.assertTrue(facade.testFlag("Missing"))
+        self.assertTrue(facade.testFlag("ParkDropped"))
+        self.assertTrue(sketch.isValid(), sketch.getStatusString())
+        self.assertIn("Warning", sketch.State)
+        self.assertIn("missing", sketch.getStatusString().lower())
+        self.assertIn("Pad2", sketch.getStatusString())
+        self.assertTrue(hole.isValid(), hole.getStatusString())
+
+        self.tempDir = tempfile.mkdtemp()
+        path = os.path.join(self.tempDir, "parkdropped.FCStd")
+        self.doc.saveAs(path)
+        names = (self.body.Name, sketch.Name, hole.Name)
+        App.closeDocument(self.doc.Name)
+        self.doc = App.openDocument(path)
+        self.body, sketch, hole = (self.doc.getObject(name) for name in names)
+        sketch.touch()
+        self.recompute()
+        self.assertTrue(
+            Sketcher.ExternalGeometryFacade(sketch.ExternalGeo[2]).testFlag("ParkDropped")
+        )
+        self.assertTrue(sketch.isValid(), sketch.getStatusString())
+        self.assertIn("Warning", sketch.State)
+        self.assertIn("Pad2", sketch.getStatusString())
 
     def testParkUndoRedo(self):
         """RO11g: one transaction; undo gives the projecting model as it was, redo the parked
@@ -2188,7 +2313,9 @@ class BodyReorderBase:
         geoId, ref, _ = self.projection(sketch)
         self.assertEqual((geoId, ref), before[:2])
         self.recompute()
-        self.assertFalse(sketch.isValid())
+        # warned on the frozen projection (ops#656 D4 row 2)
+        self.assertTrue(sketch.isValid(), sketch.getStatusString())
+        self.assertIn("Warning", sketch.State)
         self.assertTrue(Sketcher.ExternalGeometryFacade(sketch.ExternalGeo[2]).testFlag("Missing"))
         self.assertEqual((len(sketch.ExternalGeo), len(sketch.Constraints)), counts)
 
@@ -2996,6 +3123,51 @@ class BodyReorderBase:
         )
         self.recompute()
         self.assertRecordEndedOnNewcomer(sketch, hole, newcomer)
+
+    def roundAtTheTop(self):
+        """A 1 mm fillet on the block's vertical edge at (0, 0), moved to the top of the history
+        (after the block's sketch, so no solid comes before it): it fails, its edge set aside."""
+        block = self.block()
+        self.recompute()
+        fillet = self.body.newObject("PartDesign::Fillet", "Round")
+        fillet.Base = (block, [edgeWhere(block.Shape, lambda e: isVerticalLineAt(e, 0, 0))])
+        fillet.Radius = 1
+        self.recompute()
+        self.assertBody(BLOCK - ROUND)
+        self.body.reorderObject([fillet], block.Profile[0], True)
+        self.assertIsNone(fillet.BaseFeature)
+        self.recompute()
+        self.assertIn("Invalid", fillet.State)
+        return block, fillet
+
+    def testDressUpMovedToTheTopAndBack(self):
+        """ops#784 (Onshape: a feature moved above what it references fails, and moved back it
+        works again): the fillet moved back after the block takes its edge again."""
+        block, fillet = self.roundAtTheTop()
+        self.body.reorderObject([fillet], block, True)
+        self.assertChain(block, fillet)
+        self.assertIs(fillet.Base[0], block)
+        self.recompute()
+        self.assertValid(block, fillet)
+        edge = fillet.Base[0].Shape.getElement(fillet.Base[1][0])
+        self.assertTrue(isVerticalLineAt(edge, 0, 0))
+        self.assertBody(BLOCK - ROUND)
+
+    def testDressUpMovedToTheTopAndBackOntoAnotherBase(self):
+        """ops#784: moved back below a hole that came after the block, the fillet's Base is the
+        hole (its base) and finds the same edge there."""
+        block, fillet = self.roundAtTheTop()
+        hole = self.hole()
+        self.recompute()
+        self.body.reorderObject([fillet], hole, True)
+        self.assertChain(block, hole, fillet)
+        self.assertIs(fillet.Base[0], hole)
+        self.recompute()
+        self.assertValid(block, hole, fillet)
+        edge = fillet.Base[0].Shape.getElement(fillet.Base[1][0])
+        self.assertTrue(isVerticalLineAt(edge, 0, 0))
+        self.assertBody(BLOCK - ROUND - HOLE)
+
 
 def isFrontFace(face):
     """A face on the block's front (y = 0), facing -y."""

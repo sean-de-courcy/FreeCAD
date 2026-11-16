@@ -120,15 +120,68 @@
     </layout>
    </item>
    <item row="5" column="0" colspan="2">
-    <layout class="QHBoxLayout" name="hLayout">
-     <item>
-      <widget class="QLabel" name="offsetLabel">
+    <layout class="QGridLayout" name="gridLayoutOffset">
+     <item row="0" column="0" colspan="2">
+      <widget class="QCheckBox" name="offsetCheckbox">
        <property name="text">
         <string>Offset</string>
        </property>
+       <property name="toolTip">
+        <string>Offsets the first pick's connector from the second's along X, Y and Z</string>
+       </property>
+       <property name="checked">
+        <bool>false</bool>
+       </property>
       </widget>
      </item>
-     <item>
+     <item row="1" column="0">
+      <widget class="QLabel" name="offsetXLabel">
+       <property name="text">
+        <string>X</string>
+       </property>
+      </widget>
+     </item>
+     <item row="1" column="1">
+      <widget class="Gui::QuantitySpinBox" name="offsetXSpinbox">
+       <property name="sizePolicy">
+        <sizepolicy hsizetype="Expanding" vsizetype="Fixed">
+         <horstretch>0</horstretch>
+         <verstretch>0</verstretch>
+        </sizepolicy>
+       </property>
+       <property name="unit" stdset="0">
+        <string notr="true">mm</string>
+       </property>
+      </widget>
+     </item>
+     <item row="2" column="0">
+      <widget class="QLabel" name="offsetYLabel">
+       <property name="text">
+        <string>Y</string>
+       </property>
+      </widget>
+     </item>
+     <item row="2" column="1">
+      <widget class="Gui::QuantitySpinBox" name="offsetYSpinbox">
+       <property name="sizePolicy">
+        <sizepolicy hsizetype="Expanding" vsizetype="Fixed">
+         <horstretch>0</horstretch>
+         <verstretch>0</verstretch>
+        </sizepolicy>
+       </property>
+       <property name="unit" stdset="0">
+        <string notr="true">mm</string>
+       </property>
+      </widget>
+     </item>
+     <item row="3" column="0">
+      <widget class="QLabel" name="offsetLabel">
+       <property name="text">
+        <string>Z</string>
+       </property>
+      </widget>
+     </item>
+     <item row="3" column="1">
       <widget class="Gui::QuantitySpinBox" name="offsetSpinbox">
        <property name="sizePolicy">
         <sizepolicy hsizetype="Expanding" vsizetype="Fixed">
@@ -234,10 +287,13 @@
       </sizepolicy>
      </property>
      <property name="toolTip">
-      <string>Reverse the direction of the joint</string>
+      <string>Turns the first pick 180 degrees about the connector's X axis</string>
      </property>
      <property name="text">
-      <string>Reverse</string>
+      <string>Flip primary axis</string>
+     </property>
+     <property name="toolButtonStyle">
+      <enum>Qt::ToolButtonStyle::ToolButtonTextBesideIcon</enum>
      </property>
      <property name="icon">
       <iconset resource="Resources/resource.qrc">
@@ -254,10 +310,13 @@
         </sizepolicy>
        </property>
        <property name="toolTip">
-        <string>Rotate the joint 90 degrees</string>
+        <string>Turns the first pick a quarter turn about the connector's Z axis</string>
        </property>
        <property name="text">
-        <string>Rotate</string>
+        <string>Reorient secondary axis</string>
+       </property>
+       <property name="toolButtonStyle">
+        <enum>Qt::ToolButtonStyle::ToolButtonTextBesideIcon</enum>
        </property>
        <property name="icon">
         <iconset>

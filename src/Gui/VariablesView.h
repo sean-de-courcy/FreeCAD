@@ -23,6 +23,7 @@
 
 #pragma once
 
+#include <functional>
 #include <set>
 #include <string>
 #include <vector>
@@ -92,12 +93,27 @@ public:
         HeaderKind,
         VarSetKind,
         AliasKind,
+        /// A Variable Studio's last row: a name typed there adds a Length (Onshape's VS3)
+        NewKind,
     };
 
     explicit VariablesModel(QObject* parent = nullptr);
 
     /// Fills the rows from @a doc's variables; no document gives no rows.
     void rebuild(const App::Document* doc);
+    /** FreeCAD-CH (ops#640, tabs slice 4): only the variables of the holder named @a holder, as
+     * top-level rows with no header (a Variable Studio's table); empty: every holder, as headers.
+     */
+    void setScope(const std::string& holder)
+    {
+        scope = holder;
+    }
+    const std::string& getScope() const
+    {
+        return scope;
+    }
+    /// What adds the variable a name typed in the new row names; false and the error if none
+    std::function<bool(const QString& name, QString& error)> addNamed;
 
     bool setData(const QModelIndex& index, const QVariant& value, int role = Qt::EditRole) override;
     Qt::ItemFlags flags(const QModelIndex& index) const override;
@@ -150,11 +166,13 @@ public:
 
 private:
     void addHolderRows(const App::DocumentObject* holder, const std::vector<std::string>& names);
+    void addNewRow(const App::Document* doc);
     bool rename(const QModelIndex& index, const QString& newName);
     bool setExpression(const QModelIndex& index, const QString& text);
 
     QString error;
     QString warning;
+    std::string scope;
 };
 
 /// The Expression column's editor: an expression line edit with `#` completion.
@@ -204,7 +222,15 @@ class VariablesView: public DockWindow
     Q_OBJECT
 
 public:
-    explicit VariablesView(Gui::Document* doc, QWidget* parent = nullptr);
+    /** @a studio: the panel shows that VarSet's variables only, in its document whichever is
+     * active, and adds to it (a Variable Studio tab's table, Gui/VariableStudioView.cpp); none:
+     * the dock, every variable of the active document.
+     */
+    explicit VariablesView(
+        Gui::Document* doc,
+        QWidget* parent = nullptr,
+        App::DocumentObject* studio = nullptr
+    );
     ~VariablesView() override;
 
     const char* getName() const override
@@ -251,6 +277,8 @@ private:
     QString usesText(const QModelIndex& index, int* count) const;
 
     App::Document* currentDocument() const;
+    /// The Variable Studio the panel is scoped to, or nullptr (the dock, or the studio is gone).
+    App::DocumentObject* studio() const;
     bool isRelevant(const App::DocumentObject* obj) const;
     /// The VarSet Add puts a variable in: the selected row's, else "Variables"; nullptr if none.
     App::DocumentObject* addTarget() const;
@@ -267,6 +295,8 @@ private:
     QAction* describeAction;
     QAction* importAction;
     std::string documentName;
+    /// The Variable Studio the panel is scoped to (its internal name), or empty: the dock
+    std::string studioName;
     /// The collapsed headers, as "document/object".
     std::set<std::string> collapsed;
     /// A change came while the panel was hidden: rebuilt when shown.

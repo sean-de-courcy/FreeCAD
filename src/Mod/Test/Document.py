@@ -778,7 +778,8 @@ class DocumentBasicCases(unittest.TestCase):
         c2.touch()
         self.Doc.recompute()
         # ops#349: the recompute reports the cycle as a link's error; the other link depends on
-        # it, so it fails without running, naming that link (ops#579), and stays touched
+        # it, so it fails without running, naming that link (ops#579), and is left with nothing
+        # pending (round 8, J13: a stopped object isn't left touched)
         cyclic = [link for link in (c1, c2) if "Cyclic link" in link.getStatusString()]
         self.assertTrue(cyclic, (c1.getStatusString(), c2.getStatusString()))
         for link in (c1, c2):
@@ -786,7 +787,7 @@ class DocumentBasicCases(unittest.TestCase):
             if link not in cyclic:
                 other = c2 if link is c1 else c1
                 self.assertIn(f"links to '{other.Label}'", link.getStatusString(), link.Name)
-                self.assertIn("Touched", link.State, link.Name)
+                self.assertNotIn("Touched", link.State, link.Name)
         # the open document still refuses a new cycle
         c3 = self.Doc.addObject("App::Link", "C3")
         c3.LinkedObject = c2
@@ -1321,6 +1322,31 @@ class DocumentRecomputeCases(unittest.TestCase):
         self.Doc.removeObject(L7.Name)
         self.Doc.removeObject(L8.Name)
 
+    def testRecomputeAloneKeepsTheFailedInputsError(self):
+        """FreeCAD-CH ops#640 rank 29 (F20): Bad fails; Uses links to it (Source1), so the
+        document's recompute fails Uses without running it, naming the link (ops#579). Uses'
+        own recompute, as a dialog's, gives the same: it doesn't run, and its error and text stay
+        (it ran and cleared them). Bad mended, both compute."""
+        bad = self.Doc.addObject("App::FeatureTest", "Bad")
+        bad.ExceptionType = 2
+        uses = self.Doc.addObject("App::FeatureTest", "Uses")
+        uses.Source1 = bad
+        self.Doc.recompute()
+        self.assertFalse(bad.isValid())
+        self.assertFalse(uses.isValid())
+        text = f"Source1 links to '{bad.Label}', which has an error"
+        self.assertIn(text, uses.getStatusString())
+        runs = uses.ExecCount
+        self.assertFalse(uses.recompute())
+        self.assertEqual(uses.ExecCount, runs, "Uses ran on its failed input")
+        self.assertFalse(uses.isValid())
+        self.assertIn(text, uses.getStatusString())
+        bad.ExceptionType = 0
+        self.Doc.recompute()
+        self.assertTrue(bad.isValid(), bad.getStatusString())
+        self.assertTrue(uses.isValid(), uses.getStatusString())
+        self.assertEqual(uses.ExecCount, runs + 1)
+
     def tearDown(self):
         # closing doc
         FreeCAD.closeDocument("RecomputeTests")
@@ -1332,6 +1358,31 @@ class UndoRedoCases(unittest.TestCase):
         self.Doc.addObject("App::FeatureTest", "Base")
         self.Doc.addObject("App::FeatureTest", "Del")
         self.Doc.getObject("Del").Integer = 2
+
+    def testCommitAPythonObjectChange(self):
+        """FreeCAD-CH (ops#804): a transaction that replaced a Python feature's Proxy commits as a
+        step (the no-op check doesn't compare a Python object; it crashed here) and undoes."""
+
+        class Proxy:
+            def __init__(self, obj=None):
+                if obj is not None:
+                    obj.Proxy = self
+
+            def execute(self, obj):
+                pass
+
+        self.Doc.UndoMode = 1
+        obj = self.Doc.addObject("App::FeaturePython", "Py")
+        Proxy(obj)
+        self.Doc.recompute()
+        self.Doc.clearUndos()
+        self.Doc.openTransaction("Replace proxy")
+        obj.Proxy = Proxy()
+        self.Doc.commitTransaction()
+        self.assertEqual(self.Doc.UndoNames, ["Replace proxy"])
+        self.Doc.undo()
+        self.assertIs(type(obj.Proxy), Proxy)
+        self.assertEqual(self.Doc.RedoNames, ["Replace proxy"])
 
     def testUndoProperties(self):
         # first transaction
@@ -1499,27 +1550,31 @@ class UndoRedoCases(unittest.TestCase):
         self.assertEqual(self.Doc.RedoCount, 3)
 
         # new transaction eight
+        # FreeCAD-CH (ops#640): only a transaction committed as a step clears the Redo stack, so
+        # an open transaction leaves it, and its abort (a dialog's Cancel) keeps it
+        redos = ["Transaction2", "Transaction3", "Transaction4"]
         self.Doc.openTransaction("Transaction8")
         self.Doc.getObject("test1").Integer = 8
         self.assertEqual(self.Doc.UndoNames, ["Transaction8", "Transaction1"])
         self.assertEqual(self.Doc.UndoCount, 2)
-        self.assertEqual(self.Doc.RedoNames, [])
-        self.assertEqual(self.Doc.RedoCount, 0)
+        self.assertEqual(self.Doc.RedoNames, redos)
+        self.assertEqual(self.Doc.RedoCount, 3)
         self.Doc.abortTransaction()
         self.assertEqual(self.Doc.UndoNames, ["Transaction1"])
         self.assertEqual(self.Doc.UndoCount, 1)
-        self.assertEqual(self.Doc.RedoNames, [])
-        self.assertEqual(self.Doc.RedoCount, 0)
+        self.assertEqual(self.Doc.RedoNames, redos)
+        self.assertEqual(self.Doc.RedoCount, 3)
 
         # again new transaction eight
         self.Doc.openTransaction("Transaction8")
         self.Doc.getObject("test1").Integer = 8
         self.assertEqual(self.Doc.UndoNames, ["Transaction8", "Transaction1"])
         self.assertEqual(self.Doc.UndoCount, 2)
-        self.assertEqual(self.Doc.RedoNames, [])
-        self.assertEqual(self.Doc.RedoCount, 0)
+        self.assertEqual(self.Doc.RedoNames, redos)
+        self.assertEqual(self.Doc.RedoCount, 3)
 
-        # again new transaction nine
+        # again new transaction nine: it commits transaction eight, a step, which clears the
+        # Redo stack
         self.Doc.openTransaction("Transaction9")
         self.Doc.getObject("test1").Integer = 9
         self.assertEqual(self.Doc.UndoNames, ["Transaction9", "Transaction8", "Transaction1"])
@@ -3427,3 +3482,1000 @@ class MultiDocumentUndo(unittest.TestCase):
         # closing doc
         FreeCAD.closeDocument("Doc1")
         FreeCAD.closeDocument("Doc2")
+
+
+import fnmatch, shutil, subprocess, sys, time
+
+
+def _freecadCmd():
+    names = ("FreeCADCmd.exe", "FreeCADCmd") if sys.platform == "win32" else ("FreeCADCmd",)
+    if os.path.basename(sys.executable).lower().startswith("freecadcmd"):
+        return sys.executable
+    for folder in ("bin", "MacOS", ""):
+        for name in names:
+            path = os.path.join(FreeCAD.getHomePath(), folder, name)
+            if os.path.isfile(path):
+                return path
+    raise FileNotFoundError("FreeCADCmd next to " + FreeCAD.getHomePath())
+
+
+class DocumentSafeSaveCases(unittest.TestCase):
+    """FreeCAD-CH ops#640, slice A1 (notes/files-saving-history-design.md, sections 3 and 8).
+
+    A save never leaves the document's name without one complete file, whatever step it stops
+    at; the files it writes beside the document carry names the team folder's sync ignores; Save
+    As and Save a Copy give the new file a document id of its own; every save writes its author.
+
+    Designed document: one App::FeatureTest, "Marker", whose Integer tells the saves apart (1 in
+    the saved file, 2 in the save a fault stops). A child FreeCADCmd makes the faulted save, with
+    FREECAD_CH_SAVE_FAULT naming the step (`App::saveFaultPoint`): it ends the process there, as a
+    crash or a kill would, or with `:throw` makes the save throw."""
+
+    # The ignore list the team folder ships (design section 3, item 2)
+    IGNORED = ("*.fctmp", "*.FCBak", ".DS_Store", "._*", "Thumbs.db", "desktop.ini")
+    # The save's steps in their order (App/BackupPolicy.h, saveFaultPoint)
+    STEPS = ("write", "written", "flushed", "kept", "replaced", "done")
+    NAME = "Plate.FCStd"
+
+    CHILD = (
+        "import os, sys, FreeCAD\n"
+        "doc = FreeCAD.openDocument({path!r})\n"
+        "doc.getObject('Marker').Integer = 2\n"
+        "try:\n"
+        "    doc.save()\n"
+        "    print('SAFESAVE saved')\n"
+        "except Exception as error:\n"
+        "    print('SAFESAVE raised ' + str(error))\n"
+        "sys.stdout.flush()\n"
+        "os._exit(0)\n"
+    )
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix="fcch_safesave_")
+        self.folder = os.path.join(self.root, "team")
+        self.scratch = os.path.join(self.root, "scratch")
+        os.makedirs(self.scratch)
+        self.path = os.path.join(self.folder, self.NAME)
+        self.group = FreeCAD.ParamGet("User parameter:BaseApp/Preferences/Document")
+        self.author = self.group.GetString("prefAuthor", "")
+        self.setAuthor = self.group.GetBool("prefSetAuthorOnSave", False)
+        self.opened = []
+
+    def tearDown(self):
+        for name in self.opened:
+            if name in FreeCAD.listDocuments():
+                FreeCAD.closeDocument(name)
+        self.group.SetString("prefAuthor", self.author)
+        self.group.SetBool("prefSetAuthorOnSave", self.setAuthor)
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def _open(self, path):
+        doc = FreeCAD.openDocument(path)
+        self.opened.append(doc.Name)
+        return doc
+
+    def _close(self, doc):
+        name = doc.Name
+        FreeCAD.closeDocument(name)
+        self.opened.remove(name)
+
+    def _freshFolder(self):
+        """The team folder holding only the saved document, marker 1"""
+        shutil.rmtree(self.folder, ignore_errors=True)
+        os.makedirs(self.folder)
+        doc = FreeCAD.newDocument("SafeSaveSource")
+        self.opened.append(doc.Name)
+        doc.addObject("App::FeatureTest", "Marker").Integer = 1
+        doc.saveAs(self.path)
+        self._close(doc)
+
+    def _marker(self, path):
+        """The marker of the document in `path`, opened from a copy with a document's extension"""
+        probe = os.path.join(self.scratch, "probe.FCStd")
+        shutil.copyfile(path, probe)
+        doc = self._open(probe)
+        try:
+            return doc.getObject("Marker").Integer
+        finally:
+            self._close(doc)
+
+    def _faultedSave(self, step, mode):
+        script = os.path.join(self.scratch, "child.py")
+        with open(script, "w", encoding="utf-8") as fh:
+            fh.write(self.CHILD.format(path=self.path))
+        env = dict(os.environ)
+        env["FREECAD_CH_SAVE_FAULT"] = step + ("" if mode == "crash" else ":" + mode)
+        run = subprocess.run([_freecadCmd(), script], cwd=self.scratch, env=env, timeout=300,
+                             check=False, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        out = run.stdout.decode("utf-8", "replace")
+        if mode == "throw" and self.STEPS.index(step) >= self.STEPS.index("replaced"):
+            # The file is in place: the error is a warning and the save counts (A1 fix review 2)
+            self.assertIn("SAFESAVE saved", out, out[-2000:])
+            self.assertIn("saved, but: Save fault injected at " + step, out)
+        elif mode == "throw":
+            self.assertIn("SAFESAVE raised Save fault injected at " + step, out)
+        elif mode == "cut":
+            self.assertIn("SAFESAVE raised", out, out[-2000:])
+        else:
+            self.assertEqual(run.returncode, 86, out[-2000:])
+            self.assertNotIn("SAFESAVE", out)
+
+    def _checkFolder(self, step, mode):
+        names = sorted(os.listdir(self.folder))
+        where = "{} ({}): {}".format(step, mode, names)
+        self.assertIn(self.NAME, names, "no file under the document's name, " + where)
+        loose = [n for n in names if n != self.NAME
+                 and not any(fnmatch.fnmatchcase(n, p) for p in self.IGNORED)]
+        self.assertEqual(loose, [], "files the sync would carry, " + where)
+        done = self.STEPS.index(step) >= self.STEPS.index("replaced")
+        self.assertEqual(self._marker(self.path), 2 if done else 1, where)
+        backups = [n for n in names if n.endswith(".FCBak")]
+        if step == "kept" and mode != "crash":
+            # Nothing replaced: the backup just made (a hard link to the document's file, which
+            # keeps its name) is removed, so no later write into the file changes it
+            self.assertEqual(backups, [], where)
+        elif self.STEPS.index(step) >= self.STEPS.index("kept"):
+            # The previous file is kept, whole
+            self.assertEqual(len(backups), 1, where)
+            self.assertEqual(self._marker(os.path.join(self.folder, backups[0])), 1, where)
+        if mode != "crash":
+            self.assertEqual([n for n in names if n.endswith(".fctmp")], [],
+                             "a failed save leaves its temporary file, " + where)
+
+    def testCrashAtEachStep(self):
+        for step in self.STEPS:
+            with self.subTest(step=step):
+                self._freshFolder()
+                self._faultedSave(step, "crash")
+                self._checkFolder(step, "crash")
+
+    def testThrowAtEachStep(self):
+        for step in self.STEPS:
+            with self.subTest(step=step):
+                self._freshFolder()
+                self._faultedSave(step, "throw")
+                self._checkFolder(step, "throw")
+
+    def testSaveLeavesOnlyIgnoredNames(self):
+        self._freshFolder()
+        doc = self._open(self.path)
+        for value in (2, 3, 4):
+            doc.getObject("Marker").Integer = value
+            doc.save()
+        names = sorted(os.listdir(self.folder))
+        loose = [n for n in names if n != self.NAME
+                 and not any(fnmatch.fnmatchcase(n, p) for p in self.IGNORED)]
+        self.assertEqual(loose, [], names)
+        self.assertTrue(any(n.endswith(".FCBak") for n in names), names)
+
+    def testSaveACopyGivesANewId(self):
+        self._freshFolder()
+        doc = self._open(self.path)
+        uid = doc.Uid
+        copy = os.path.join(self.folder, "Copy.FCStd")
+        doc.saveCopy(copy)
+        self.assertEqual(doc.Uid, uid, "the open document keeps its id")
+        other = self._open(copy)
+        self.assertNotEqual(other.Uid, uid)
+        self._close(other)
+        doc.save()
+        self._close(doc)
+        self.assertEqual(self._open(self.path).Uid, uid, "its own file keeps its id")
+
+    def testSaveAsGivesANewId(self):
+        self._freshFolder()
+        doc = self._open(self.path)
+        uid = doc.Uid
+        doc.saveAs(os.path.join(self.folder, "Next.FCStd"))
+        self.assertNotEqual(doc.Uid, uid)
+        newUid = doc.Uid
+        self._close(doc)
+        self.assertEqual(self._open(os.path.join(self.folder, "Next.FCStd")).Uid, newUid)
+        self.assertEqual(self._open(self.path).Uid, uid, "the old file keeps its id")
+
+    def testSaveKeepsTheId(self):
+        self._freshFolder()
+        doc = self._open(self.path)
+        uid = doc.Uid
+        doc.getObject("Marker").Integer = 5
+        doc.save()
+        self.assertEqual(doc.Uid, uid)
+        self._close(doc)
+        self.assertEqual(self._open(self.path).Uid, uid)
+
+    def testFirstSaveKeepsTheId(self):
+        # A document with no file yet gives no other file its id: its first Save As keeps it
+        os.makedirs(self.folder)
+        doc = FreeCAD.newDocument("SafeSaveFirst")
+        self.opened.append(doc.Name)
+        uid = doc.Uid
+        doc.saveAs(self.path)
+        self.assertEqual(doc.Uid, uid)
+
+    def testSaveAsOntoOwnFileKeepsTheId(self):
+        # Review A11: the same file under another spelling is still this document's file
+        self._freshFolder()
+        doc = self._open(self.path)
+        uid = doc.Uid
+        spellings = [os.path.join(self.folder, "..", "team", self.NAME)]
+        if sys.platform == "win32":
+            spellings += [self.path.replace("/", "\\"), os.path.join(self.folder, "plate.FCStd")]
+        for spelling in spellings:
+            with self.subTest(spelling=spelling):
+                doc.saveAs(spelling)
+                self.assertEqual(doc.Uid, uid)
+
+    def testRestoreBackupKeepsTheId(self):
+        # Review A15: a backup opened and saved onto the document's name is the document again
+        self._freshFolder()
+        doc = self._open(self.path)
+        uid = doc.Uid
+        doc.getObject("Marker").Integer = 2
+        doc.save()
+        self._close(doc)
+        backups = [n for n in os.listdir(self.folder) if n.endswith(".FCBak")]
+        self.assertEqual(len(backups), 1, backups)
+        restored = self._open(os.path.join(self.folder, backups[0]))
+        self.assertEqual(restored.getObject("Marker").Integer, 1)
+        restored.saveAs(self.path)
+        self.assertEqual(restored.Uid, uid)
+        self._close(restored)
+        self.assertEqual(self._marker(self.path), 1)
+
+    @unittest.skipUnless(sys.platform == "win32", "the path limit is Windows'")
+    def testLongPathSaves(self):
+        # Review A13: the temporary and backup names stay short, so a path of 236 characters
+        # saves twice (a backup then exists) under the system's limit of 260
+        os.makedirs(self.folder)
+        pad = 236 - len(os.path.join(self.folder, "")) - len(".FCStd")
+        self.assertGreater(pad, 0)
+        path = os.path.join(self.folder, "p" * pad + ".FCStd")
+        doc = FreeCAD.newDocument("SafeSaveLong")
+        self.opened.append(doc.Name)
+        doc.addObject("App::FeatureTest", "Marker").Integer = 1
+        doc.saveAs(path)
+        doc.getObject("Marker").Integer = 2
+        doc.save()
+        self._close(doc)
+        self.assertEqual(self._marker(path), 2)
+
+    def testAuthorIsAlwaysWritten(self):
+        self._freshFolder()
+        self.group.SetBool("prefSetAuthorOnSave", False)
+        self.group.SetString("prefAuthor", "")
+        user = os.environ.get("USERNAME" if sys.platform == "win32" else "USER", "")
+        self.assertNotEqual(user, "", "the test needs the system's user name")
+        doc = self._open(self.path)
+        doc.save()
+        self.assertEqual(doc.LastModifiedBy, user)
+        self.group.SetString("prefAuthor", "Designer")
+        doc.save()
+        self.assertEqual(doc.LastModifiedBy, "Designer")
+        self._close(doc)
+        self.assertEqual(self._open(self.path).LastModifiedBy, "Designer")
+
+    def _child(self, code, fault):
+        """Runs `code` in a child FreeCADCmd with FREECAD_CH_SAVE_FAULT set to `fault`"""
+        script = os.path.join(self.scratch, "child.py")
+        with open(script, "w", encoding="utf-8") as fh:
+            fh.write("import os, sys, FreeCAD\n" + code + "sys.stdout.flush()\nos._exit(0)\n")
+        env = dict(os.environ)
+        env["FREECAD_CH_SAVE_FAULT"] = fault
+        run = subprocess.run([_freecadCmd(), script], cwd=self.scratch, env=env, timeout=300,
+                             check=False, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        return run.stdout.decode("utf-8", "replace")
+
+    def testLostTemporaryFileFailsTheSave(self):
+        # A1 fix review 3: a save whose temporary file is gone before the rename (quarantined)
+        # fails: the document's name keeps the old file (the backup made for it goes)
+        self._freshFolder()
+        self._faultedSave("kept", "cut")
+        self._checkFolder("kept", "cut")
+
+    def testShortWriteIsRefused(self):
+        # A1 fix review 2: a stream that went bad while writing (a short write) fails the save
+        self._freshFolder()
+        self._faultedSave("write", "cut")
+        self._checkFolder("write", "cut")
+
+    def testSaveAsFailingAfterItsFileKeepsIt(self):
+        # A1 fix review 2: an error after the new file is in place (managing the backups) leaves
+        # the document on its new file and id: the Save As happened
+        self._freshFolder()
+        other = os.path.join(self.folder, "Other.FCStd")
+        out = self._child(
+            "doc = FreeCAD.openDocument({path!r})\n"
+            "uid = doc.Uid\n"
+            "doc.saveAs({other!r})\n"
+            "print('SAFESAVE file ' + str(os.path.samefile(doc.FileName, {other!r})))\n"
+            "print('SAFESAVE newid ' + str(doc.Uid != uid))\n"
+            "print('SAFESAVE uid ' + doc.Uid)\n".format(path=self.path, other=other),
+            "replaced:throw")
+        self.assertIn("SAFESAVE file True", out, out[-2000:])
+        self.assertIn("SAFESAVE newid True", out)
+        uid = out.split("SAFESAVE uid ")[1].split()[0]
+        self.assertEqual(self._open(other).Uid, uid)
+
+    def testFailedSaveAsKeepingTheIdLeavesTheTarget(self):
+        # A1 fix review 2: a Save As that keeps the id (a backup restored onto the document's
+        # name) and fails leaves the transient directory to the old file: the target, opened
+        # next, keeps the id its file holds
+        self._freshFolder()
+        doc = self._open(self.path)
+        uid = doc.Uid
+        doc.getObject("Marker").Integer = 2
+        doc.save()
+        self._close(doc)
+        backups = [n for n in os.listdir(self.folder) if n.endswith(".FCBak")]
+        self.assertEqual(len(backups), 1, backups)
+        out = self._child(
+            "doc = FreeCAD.openDocument({backup!r})\n"
+            "try:\n"
+            "    doc.saveAs({path!r})\n"
+            "    print('SAFESAVE saved')\n"
+            "except Exception:\n"
+            "    print('SAFESAVE raised')\n"
+            "target = FreeCAD.openDocument({path!r})\n"
+            "print('SAFESAVE target ' + target.Uid)\n".format(
+                backup=os.path.join(self.folder, backups[0]), path=self.path),
+            "kept:throw")
+        self.assertIn("SAFESAVE raised", out, out[-2000:])
+        self.assertIn("SAFESAVE target " + uid, out, out[-2000:])
+        self.assertEqual(self._marker(self.path), 2)
+
+    def testCutShortFileIsRefused(self):
+        # A1 fix review: a temporary file that lost its end (a short write zipios never reports)
+        # never replaces the document's file
+        self._freshFolder()
+        self._faultedSave("written", "cut")
+        self._checkFolder("written", "cut")
+
+    def testFailedSaveAsLeavesTheDocument(self):
+        # A1 fix review: a Save As that fails keeps the document's file, name and id, so the next
+        # save goes to its own file under its own id
+        self._freshFolder()
+        other = os.path.join(self.folder, "Other.FCStd")
+        script = os.path.join(self.scratch, "child.py")
+        with open(script, "w", encoding="utf-8") as fh:
+            fh.write(
+                "import os, sys, FreeCAD\n"
+                "doc = FreeCAD.openDocument({path!r})\n"
+                "before = (doc.Uid, doc.FileName, doc.Label)\n"
+                "try:\n"
+                "    doc.saveAs({other!r})\n"
+                "    print('SAFESAVE saved')\n"
+                "except Exception as error:\n"
+                "    print('SAFESAVE raised')\n"
+                "after = (doc.Uid, doc.FileName, doc.Label)\n"
+                "print('SAFESAVE same ' + str(before == after))\n"
+                "sys.stdout.flush()\n"
+                "os._exit(0)\n".format(path=self.path, other=other))
+        env = dict(os.environ)
+        env["FREECAD_CH_SAVE_FAULT"] = "kept:throw"
+        run = subprocess.run([_freecadCmd(), script], cwd=self.scratch, env=env, timeout=300,
+                             check=False, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        out = run.stdout.decode("utf-8", "replace")
+        self.assertIn("SAFESAVE raised", out)
+        self.assertIn("SAFESAVE same True", out, out[-2000:])
+        self.assertFalse(os.path.exists(other))
+        self.assertEqual(sorted(os.listdir(self.folder)), [self.NAME])
+
+    def testBackupThatCannotBeKeptLeavesTheOthers(self):
+        # A1 fix review: the new backup is kept before the extra ones go, so a save refused for
+        # want of its backup leaves the earlier backup (one backup wanted: it would be the one
+        # removed) and the document's file
+        self._freshFolder()
+        names = ("CreateBackupFiles", "UseFCBakExtension", "CountBackupFiles",
+                 "SaveBackupDateFormat")
+        saved = (self.group.GetBool(names[0], True), self.group.GetBool(names[1], True),
+                 self.group.GetInt(names[2], 1), self.group.GetString(names[3], "%Y%m%d-%H%M%S"))
+        self.group.SetBool(names[0], True)
+        self.group.SetBool(names[1], True)
+        self.group.SetInt(names[2], 1)
+        self.group.SetString(names[3], "%Y%m%d-%H%M%S")
+        try:
+            past = time.time() - 7200
+            os.utime(self.path, (past, past))
+            doc = self._open(self.path)
+            doc.getObject("Marker").Integer = 2
+            doc.save()
+            first = [n for n in os.listdir(self.folder) if n.endswith(".FCBak")]
+            self.assertEqual(len(first), 1, first)
+            # Every name the next backup could take is a folder: it can't be kept
+            later = past + 3600
+            os.utime(self.path, (later, later))
+            stem = os.path.join(self.folder, "Plate." + time.strftime("%Y%m%d-%H%M%S",
+                                                                       time.localtime(later)))
+            os.makedirs(stem + ".FCBak")
+            for n in range(1, 11):
+                os.makedirs("{}-{}.FCBak".format(stem, n))
+            doc.getObject("Marker").Integer = 3
+            with self.assertRaises(Exception):
+                doc.save()
+            self._close(doc)
+            self.assertTrue(os.path.isfile(os.path.join(self.folder, first[0])))
+            self.assertEqual(self._marker(os.path.join(self.folder, first[0])), 1)
+            self.assertEqual(self._marker(self.path), 2)
+            self.assertEqual([n for n in os.listdir(self.folder) if n.endswith(".fctmp")], [])
+        finally:
+            self.group.SetBool(names[0], saved[0])
+            self.group.SetBool(names[1], saved[1])
+            self.group.SetInt(names[2], saved[2])
+            self.group.SetString(names[3], saved[3])
+
+
+class DocumentSaveGuardCases(unittest.TestCase):
+    """FreeCAD-CH ops#640, slice A2 (notes/files-saving-history-design.md, sections 3 item 3 and 4).
+
+    The save guard: a document's file replaced on disk after the document was opened or last saved
+    (the other computer's save, carried by the sync) makes the save refuse, and each of the three
+    choices keeps both versions. A sibling with a sync tool's conflict-copy name is found, and each
+    of its choices keeps both versions too.
+
+    Designed documents: one App::FeatureTest, "Marker", whose Integer tells the versions apart (1 at
+    the first save, 2 for this computer's edit, 9 for the other computer's save, which is written by
+    a second document saved elsewhere and copied over the file, as the sync tool's rename would)."""
+
+    NAME = "Plate.FCStd"
+    IGNORED = ("*.fctmp", "*.FCBak", ".DS_Store", "._*", "Thumbs.db", "desktop.ini")
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix="fcch_saveguard_")
+        self.folder = os.path.join(self.root, "team")
+        self.scratch = os.path.join(self.root, "scratch")
+        os.makedirs(self.folder)
+        os.makedirs(self.scratch)
+        self.path = os.path.join(self.folder, self.NAME)
+        self.group = FreeCAD.ParamGet("User parameter:BaseApp/Preferences/Document")
+        self.author = self.group.GetString("prefAuthor", "")
+        self.group.SetString("prefAuthor", "Ward")
+        self.opened = []
+
+    def tearDown(self):
+        for name in self.opened:
+            if name in FreeCAD.listDocuments():
+                FreeCAD.closeDocument(name)
+        self.group.SetString("prefAuthor", self.author)
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def _new(self, name, value, path):
+        doc = FreeCAD.newDocument(name)
+        self.opened.append(doc.Name)
+        doc.addObject("App::FeatureTest", "Marker").Integer = value
+        doc.saveAs(path)
+        return doc
+
+    def _close(self, doc):
+        name = doc.Name
+        FreeCAD.closeDocument(name)
+        self.opened.remove(name)
+
+    def _marker(self, path):
+        probe = os.path.join(self.scratch, "probe.FCStd")
+        if os.path.exists(probe):
+            os.remove(probe)
+        shutil.copyfile(path, probe)
+        doc = FreeCAD.openDocument(probe)
+        self.opened.append(doc.Name)
+        try:
+            return doc.getObject("Marker").Integer
+        finally:
+            self._close(doc)
+
+    def _theirSave(self, target=None, value=9):
+        """The other computer's save arrives: a file by "Sean" replaces `target`"""
+        theirs = os.path.join(self.scratch, "theirs.FCStd")
+        self.group.SetString("prefAuthor", "Sean")
+        try:
+            doc = self._new("SaveGuardTheirs", value, theirs)
+            self._close(doc)
+        finally:
+            self.group.SetString("prefAuthor", "Ward")
+        shutil.copyfile(theirs, target or self.path)
+
+    def _opened(self):
+        """Plate.FCStd saved (marker 1) and open, with this computer's edit (marker 2)"""
+        doc = self._new("SaveGuardMine", 1, self.path)
+        doc.getObject("Marker").Integer = 2
+        return doc
+
+    def _documents(self):
+        """The documents in the team folder (what the sync carries)"""
+        return sorted(n for n in os.listdir(self.folder)
+                      if not any(fnmatch.fnmatchcase(n, p) for p in self.IGNORED))
+
+    # The guard
+
+    def testReplacedFileRefusesTheSave(self):
+        doc = self._opened()
+        self._theirSave()
+        with self.assertRaises(Exception) as caught:
+            doc.save()
+        self.assertIn("Sean", str(caught.exception))
+        self.assertEqual(self._marker(self.path), 9, "the other computer's save is untouched")
+
+    def testFileChangeSaysWhoAndWhen(self):
+        doc = self._opened()
+        self.assertFalse(doc.fileChangeOnDisk()["changed"])
+        self._theirSave()
+        change = doc.fileChangeOnDisk()
+        self.assertTrue(change["changed"])
+        self.assertEqual(change["by"], "Sean")
+        self.assertNotEqual(change["when"], "")
+
+    def testOwnSavesPass(self):
+        doc = self._opened()
+        doc.save()
+        doc.getObject("Marker").Integer = 3
+        doc.save()
+        self.assertFalse(doc.fileChangeOnDisk()["changed"])
+        self.assertEqual(self._marker(self.path), 3)
+
+    def testReopenedDocumentPasses(self):
+        doc = self._opened()
+        self._theirSave()
+        self._close(doc)
+        doc = FreeCAD.openDocument(self.path)
+        self.opened.append(doc.Name)
+        doc.getObject("Marker").Integer = 4
+        doc.save()
+        self.assertEqual(self._marker(self.path), 4)
+
+    def testRemovedFileIsSavedAgain(self):
+        # Nothing to overwrite: the save makes the file again
+        doc = self._opened()
+        os.remove(self.path)
+        doc.save()
+        self.assertEqual(self._marker(self.path), 2)
+
+    def testKeepMineAsCopy(self):
+        doc = self._opened()
+        self._theirSave()
+        uid = doc.Uid
+        copy = doc.resolveFileChange("KeepMineAsCopy")
+        self.assertTrue(os.path.basename(copy).startswith("Plate (Ward "), copy)
+        self.assertTrue(os.path.samefile(doc.FileName, copy))
+        self.assertNotEqual(doc.Uid, uid, "the copy is a document of its own")
+        self.assertEqual(self._marker(copy), 2)
+        self.assertEqual(self._marker(self.path), 9)
+        self.assertEqual(self._documents(), sorted([self.NAME, os.path.basename(copy)]))
+
+    def testTakeTheirs(self):
+        doc = self._opened()
+        self._theirSave()
+        copy = doc.resolveFileChange("TakeTheirs")
+        self.assertTrue(os.path.basename(copy).startswith("Plate (Ward "), copy)
+        self.assertEqual(self._marker(copy), 2, "mine is kept")
+        self.assertTrue(os.path.samefile(doc.FileName, self.path))
+        self.assertEqual(doc.getObject("Marker").Integer, 9, "the document is theirs now")
+        doc.getObject("Marker").Integer = 5
+        doc.save()
+        self.assertEqual(self._marker(self.path), 5)
+
+    def testSaveMineOver(self):
+        doc = self._opened()
+        self._theirSave()
+        kept = doc.resolveFileChange("SaveMineOver")
+        self.assertTrue(os.path.basename(kept).startswith("Plate (Sean "), kept)
+        self.assertEqual(self._marker(kept), 9, "theirs is kept")
+        self.assertEqual(self._marker(self.path), 2)
+        doc.getObject("Marker").Integer = 6
+        doc.save()
+        self.assertEqual(self._marker(self.path), 6)
+
+    def testNoChangeNoChoice(self):
+        doc = self._opened()
+        with self.assertRaises(Exception):
+            doc.resolveFileChange("SaveMineOver")
+        self.assertEqual(self._documents(), [self.NAME])
+
+    def testCopyNamesDoNotClash(self):
+        doc = self._opened()
+        self._theirSave()
+        first = doc.resolveFileChange("SaveMineOver")
+        self._theirSave(value=8)
+        second = doc.resolveFileChange("SaveMineOver")
+        self.assertNotEqual(first, second)
+        self.assertEqual(self._marker(first), 9)
+        self.assertEqual(self._marker(second), 8)
+
+    def testFailedReadKeepsTheGuard(self):
+        # A2 persistence review P1: theirs can't be read, so TakeTheirs fails; the emptied
+        # document's save then asks instead of overwriting their file
+        doc = self._opened()
+        garbage = b"not a zip archive, though longer than an empty one"
+        with open(self.path, "wb") as fh:
+            fh.write(garbage)
+        with self.assertRaises(Exception):
+            doc.resolveFileChange("TakeTheirs")
+        kept = [n for n in self._documents() if n.startswith("Plate (Ward ")]
+        self.assertEqual(len(kept), 1, "mine is kept before theirs is read")
+        change = doc.fileChangeOnDisk()
+        self.assertTrue(change["changed"])
+        self.assertFalse(change["known"])
+        with self.assertRaises(Exception):
+            doc.save()
+        with open(self.path, "rb") as fh:
+            self.assertEqual(fh.read(), garbage)
+
+    def testArrivalDuringSaveRefuses(self):
+        # A2 review R1: their save arrives while this one is being written: not overwritten
+        doc = self._opened()
+        test = self
+
+        class Arrival:
+            done = False
+
+            def slotStartSaveDocument(self, document, filename):
+                if not self.done and document.Name == doc.Name:
+                    self.done = True
+                    test._theirSave()
+
+        arrival = Arrival()
+        FreeCAD.addDocumentObserver(arrival)
+        try:
+            with self.assertRaises(Exception) as caught:
+                doc.save()
+        finally:
+            FreeCAD.removeDocumentObserver(arrival)
+        self.assertTrue(arrival.done)
+        self.assertIn("while it was being saved here", str(caught.exception))
+        self.assertEqual(self._marker(self.path), 9)
+        self.assertEqual(self._documents(), [self.NAME])
+
+    def testKeepOtherKeepsUnsavedEdits(self):
+        # A2 review R2: this version is kept as the document holds it, its unsaved edit too
+        doc = self._opened()
+        doc.save()
+        doc.getObject("Marker").Integer = 3
+        other = os.path.join(self.folder, self.CONFLICTS[0])
+        self._theirSave(other)
+        kept = doc.resolveConflictCopy(other, "KeepOther")
+        self.assertEqual(self._marker(kept), 3)
+        self.assertEqual(self._marker(self.path), 9)
+
+    def testSaveMineOverThirdArrivalRefused(self):
+        # A2 fix review f2: a third version arriving while SaveMineOver writes is not overwritten
+        doc = self._opened()
+        self._theirSave()
+        test = self
+
+        class Arrival:
+            done = False
+
+            def slotStartSaveDocument(self, document, filename):
+                if not self.done and document.Name == doc.Name:
+                    self.done = True
+                    test._theirSave(value=8)
+
+        arrival = Arrival()
+        FreeCAD.addDocumentObserver(arrival)
+        try:
+            with self.assertRaises(Exception):
+                doc.resolveFileChange("SaveMineOver")
+        finally:
+            FreeCAD.removeDocumentObserver(arrival)
+        self.assertTrue(arrival.done)
+        self.assertEqual(self._marker(self.path), 8)
+        kept = [n for n in self._documents() if n.startswith("Plate (Sean ")]
+        self.assertEqual(len(kept), 1, self._documents())
+        self.assertEqual(self._marker(os.path.join(self.folder, kept[0])), 9)
+
+    def testCleanReadAfterAFailedOneIsKnown(self):
+        # A2 fix review f6b: a good file read after a damaged one: its save asks nothing
+        doc = self._opened()
+        with open(self.path, "wb") as fh:
+            fh.write(b"not a zip archive, though longer than an empty one")
+        with self.assertRaises(Exception):
+            doc.resolveFileChange("TakeTheirs")
+        self._theirSave(value=7)
+        doc.restore()
+        self.assertTrue(doc.fileChangeOnDisk()["known"])
+        doc.getObject("Marker").Integer = 4
+        doc.save()
+        self.assertEqual(self._marker(self.path), 4)
+
+    def testKeepOtherKeepsAChangedFileToo(self):
+        # A2 persistence review N1: the file under the name changed since it was read (the sync's
+        # winner) and a conflict copy is beside it: KeepOther keeps all three versions
+        doc = self._opened()
+        doc.save()
+        other = os.path.join(self.folder, self.CONFLICTS[0])
+        self._theirSave(other, value=5)
+        self._theirSave(value=9)
+        doc.resolveConflictCopy(other, "KeepOther")
+        markers = sorted(self._marker(os.path.join(self.folder, n)) for n in self._documents())
+        self.assertEqual(markers, [2, 5, 9], self._documents())
+        self.assertEqual(self._marker(self.path), 5)
+
+    @unittest.skipUnless(sys.platform == "win32", "case-insensitive names")
+    def testSaveCopyOntoOwnFileIsRefused(self):
+        # A2 review R3: the document's own file under another spelling is no copy's target
+        doc = self._opened()
+        self._theirSave()
+        doc.saveCopy(self.path.upper())
+        self.assertEqual(self._marker(self.path), 9)
+
+    # Conflict copies
+
+    CONFLICTS = ("Plate.sync-conflict-20261112-140200-ABCDEF7.FCStd",
+                 "Plate (Sean's conflicted copy 2026-11-12).FCStd",
+                 "Plate (conflicted copy 2026-11-12 140200).FCStd")
+    NOT_CONFLICTS = ("Plate 2.FCStd", "Plates.sync-conflict-20261112-140200-ABCDEF7.FCStd",
+                     "Other.sync-conflict-20261112-140200-ABCDEF7.FCStd", "Plate (Sean 2026-11-12 14-02).FCStd",
+                     "Plate (conflicted copy notes).FCStd")
+
+    def testConflictCopiesAreFound(self):
+        doc = self._opened()
+        doc.save()
+        for name in self.CONFLICTS + self.NOT_CONFLICTS:
+            self._theirSave(os.path.join(self.folder, name))
+        found = sorted(os.path.basename(p) for p in doc.conflictCopies())
+        self.assertEqual(found, sorted(self.CONFLICTS))
+
+    def testKeepThisNamesTheOther(self):
+        doc = self._opened()
+        doc.save()
+        other = os.path.join(self.folder, self.CONFLICTS[0])
+        self._theirSave(other)
+        kept = doc.resolveConflictCopy(other, "KeepThis")
+        self.assertTrue(os.path.basename(kept).startswith("Plate (Sean "), kept)
+        self.assertFalse(os.path.exists(other))
+        self.assertEqual(doc.conflictCopies(), [])
+        self.assertEqual(self._marker(kept), 9)
+        self.assertEqual(self._marker(self.path), 2)
+
+    def testKeepOtherTakesItsPlace(self):
+        doc = self._opened()
+        doc.save()
+        other = os.path.join(self.folder, self.CONFLICTS[1])
+        self._theirSave(other)
+        kept = doc.resolveConflictCopy(other, "KeepOther")
+        self.assertTrue(os.path.basename(kept).startswith("Plate (Ward "), kept)
+        self.assertFalse(os.path.exists(other))
+        self.assertEqual(doc.conflictCopies(), [])
+        self.assertEqual(self._marker(kept), 2, "this one is kept")
+        self.assertEqual(self._marker(self.path), 9)
+        self.assertEqual(doc.getObject("Marker").Integer, 9, "the document is the other now")
+        doc.getObject("Marker").Integer = 7
+        doc.save()
+        self.assertEqual(self._marker(self.path), 7)
+
+
+class DocumentTeamFolderCases(unittest.TestCase):
+    """FreeCAD-CH ops#640, folder sync item 2 (notes/folder-sync.md section 3; design A4; ops#705).
+
+    The team folder setting: setting the preference writes the shared ignore list into the folder
+    (`.stglobalignore`) and makes the folder's `.stignore` include it; the list matches the names
+    the safe save and the backup policy really make, and not the documents or their conflict
+    copies; documents saved inside the folder keep five local backups; the Start page's sentence
+    says when the setup is missing or was trimmed.
+
+    Designed documents: one App::FeatureTest, "Marker", saved under a temporary team folder."""
+
+    def setUp(self):
+        import shutil
+
+        self.shutil = shutil
+        self.root = tempfile.mkdtemp(prefix="fcch_teamfolder_")
+        self.team = os.path.join(self.root, "team")
+        self.outside = os.path.join(self.root, "outside")
+        os.makedirs(self.team)
+        os.makedirs(self.outside)
+        self.group = FreeCAD.ParamGet("User parameter:BaseApp/Preferences/Document")
+        self.saved = {
+            "TeamFolder": self.group.GetString("TeamFolder", ""),
+            "UseFCBakExtension": self.group.GetBool("UseFCBakExtension", True),
+            "CountBackupFiles": self.group.GetInt("CountBackupFiles", 1),
+            "CreateBackupFiles": self.group.GetBool("CreateBackupFiles", True),
+        }
+        self.opened = []
+
+    def tearDown(self):
+        for name in self.opened:
+            if name in FreeCAD.listDocuments():
+                FreeCAD.closeDocument(name)
+        self.group.SetString("TeamFolder", self.saved["TeamFolder"])
+        self.group.SetBool("UseFCBakExtension", self.saved["UseFCBakExtension"])
+        self.group.SetInt("CountBackupFiles", self.saved["CountBackupFiles"])
+        self.group.SetBool("CreateBackupFiles", self.saved["CreateBackupFiles"])
+        self.shutil.rmtree(self.root, ignore_errors=True)
+
+    def _lines(self, name):
+        with open(os.path.join(self.team, name), encoding="utf-8") as f:
+            return [line.strip() for line in f]
+
+    def _patterns(self):
+        """The list's patterns as (glob, case-insensitive) pairs, Syncthing's prefixes read."""
+        result = []
+        for line in self._lines(".stglobalignore"):
+            if not line or line.startswith("//") or line.startswith("#"):
+                continue
+            insensitive = False
+            while line.startswith("(?"):
+                insensitive = insensitive or line.startswith("(?i)")
+                line = line[line.index(")") + 1 :]
+            result.append((line, insensitive))
+        return result
+
+    def _ignored(self, name):
+        import fnmatch
+
+        for glob, insensitive in self._patterns():
+            if insensitive and fnmatch.fnmatchcase(name.lower(), glob.lower()):
+                return True
+            if fnmatch.fnmatchcase(name, glob):
+                return True
+        return False
+
+    def _saves(self, folder, count):
+        doc = FreeCAD.newDocument("TeamFolderDoc")
+        self.opened.append(doc.Name)
+        marker = doc.addObject("App::FeatureTest", "Marker")
+        path = os.path.join(folder, "Frame.FCStd")
+        for value in range(count):
+            marker.Integer = value
+            if value == 0:
+                doc.saveAs(path)
+            else:
+                doc.save()
+        name = doc.Name
+        FreeCAD.closeDocument(name)
+        self.opened.remove(name)
+
+    def testSettingWritesTheIgnoreList(self):
+        self.group.SetString("TeamFolder", self.team)
+        self.assertIn("#include .stglobalignore", self._lines(".stignore"))
+        globs = [glob for glob, _ in self._patterns()]
+        for wanted in ("*.fctmp", "*.FCBak", "*.FCStd[0-9]*", ".DS_Store", "._*", "Thumbs.db", "desktop.ini"):
+            self.assertIn(wanted, globs)
+        self.assertNotIn("*.fcch", globs, "design A's history and presence must travel")
+        self.assertEqual(FreeCAD.teamFolderProblem(), "")
+
+    def testSettingAgainAddsNothingAndKeepsTheUsersLines(self):
+        with open(os.path.join(self.team, ".stignore"), "w", encoding="utf-8") as f:
+            f.write("renders")  # the user's own line, with no newline at its end
+        self.group.SetString("TeamFolder", self.team)
+        self.group.SetString("TeamFolder", "")
+        self.group.SetString("TeamFolder", self.team)
+        lines = self._lines(".stignore")
+        self.assertEqual(lines.count("#include .stglobalignore"), 1)
+        self.assertIn("renders", lines)
+        globals_ = [line for line in self._lines(".stglobalignore") if line]
+        self.assertEqual(len(globals_), len(set(globals_)), "no pattern twice")
+
+    def testTheListMatchesWhatSavesMake(self):
+        self.group.SetString("TeamFolder", self.team)
+        self.group.SetBool("UseFCBakExtension", True)
+        self._saves(self.team, 2)
+        self.group.SetBool("UseFCBakExtension", False)
+        self._saves(self.team, 3)
+        # .fcch is design A's folder, which syncs on purpose: presence writes its markers to
+        # .fcch/open while a document is open (B5); it is checked below as one that travels
+        made = [name for name in os.listdir(self.team)
+                if not name.startswith(".st") and name != ".fcch"]
+        backups = [name for name in made if name != "Frame.FCStd"]
+        self.assertTrue(any(name.endswith(".FCBak") for name in backups), made)
+        self.assertTrue(any(name.endswith(".FCStd1") for name in backups), made)
+        for name in backups:
+            self.assertTrue(self._ignored(name), name + " would sync")
+        # The safe save's temporary file (A1: <name>.FCStd.<8 hex>.fctmp), in either case
+        self.assertTrue(self._ignored("Frame.FCStd.0a1b2c3d.fctmp"))
+        self.assertTrue(self._ignored("Frame.FCSTD.0A1B2C3D.FCTMP"))
+        # What must travel: the document, a conflict copy (A2 reads it), design A's .fcch folder
+        for name in ("Frame.FCStd", "frame.fcstd",
+                     "Frame.sync-conflict-20261115-101010-ABCDEFG.FCStd", ".fcch"):
+            self.assertFalse(self._ignored(name), name + " would not sync")
+        # and the presence markers inside it (B5: who has a document open, on every computer)
+        for name in (".fcch/open", ".fcch/open/Frame.FCStd-host-1234.json"):
+            self.assertFalse(self._ignored(name), name + " would not sync")
+
+    def testFiveLocalBackupsInsideTheFolder(self):
+        self.group.SetString("TeamFolder", self.team)
+        self.group.SetBool("UseFCBakExtension", False)
+        self.group.SetBool("CreateBackupFiles", True)
+        self.group.SetInt("CountBackupFiles", 1)
+        self._saves(self.team, 7)
+        inside = sorted(n for n in os.listdir(self.team) if n.startswith("Frame.FCStd") and n != "Frame.FCStd")
+        self.assertEqual(len(inside), 5, inside)
+        self._saves(self.outside, 7)
+        outside = [n for n in os.listdir(self.outside) if n != "Frame.FCStd"]
+        self.assertEqual(len(outside), 1, "outside the folder the preference stands: " + str(outside))
+
+    def testNoBackupsStaysNoBackups(self):
+        self.group.SetString("TeamFolder", self.team)
+        self.group.SetBool("UseFCBakExtension", False)
+        self.group.SetBool("CreateBackupFiles", False)
+        self._saves(self.team, 3)
+        self.assertEqual([n for n in os.listdir(self.team) if n.startswith("Frame.FCStd") and n != "Frame.FCStd"], [])
+
+    def testProblemSentences(self):
+        self.group.SetString("TeamFolder", "")
+        self.assertIn("not set", FreeCAD.teamFolderProblem())
+        self.group.SetString("TeamFolder", os.path.join(self.root, "missing"))
+        self.assertIn("does not exist", FreeCAD.teamFolderProblem())
+        self.group.SetString("TeamFolder", self.team)
+        self.assertEqual(FreeCAD.teamFolderProblem(), "")
+        with open(os.path.join(self.team, ".stignore"), "w", encoding="utf-8") as f:
+            f.write("// someone trimmed it\n")
+        self.assertIn(".stignore", FreeCAD.teamFolderProblem())
+        self.group.SetString("TeamFolder", "")
+        self.group.SetString("TeamFolder", self.team)
+        self.assertEqual(FreeCAD.teamFolderProblem(), "", "setting it again restores it")
+
+    def testRelativeOrFileIsRefused(self):
+        """Review F1, F3: a relative path would follow the working directory; a file is no folder."""
+        self.group.SetString("TeamFolder", "team")
+        self.assertIn("not an absolute", FreeCAD.teamFolderProblem())
+        afile = os.path.join(self.root, "afile.txt")
+        with open(afile, "w", encoding="utf-8") as f:
+            f.write("x")
+        self.group.SetString("TeamFolder", afile)
+        self.assertIn("not a folder", FreeCAD.teamFolderProblem())
+        self.assertFalse(os.path.exists(os.path.join(self.root, ".stignore")))
+
+    # Folder sync item 3 (ops#640): the files a document uses from outside the team folder
+
+    def _new(self, name):
+        doc = FreeCAD.newDocument(name)
+        self.opened.append(doc.Name)
+        return doc
+
+    def _using(self, part_folder):
+        """A part document "Plate" saved in part_folder, and "Frame" in the team folder using it
+        three ways: an App::Link to its marker, an expression reading it, and a FeaturePython
+        holding a PropertyFile and a PropertyPath in the outside folder."""
+        plate = self._new("Plate")
+        marker = plate.addObject("App::FeatureTest", "Marker")
+        marker.Integer = 7
+        marker.Path = ""  # FeatureTest's default, c:	emp, is a path outside the folder
+        plate.saveAs(os.path.join(part_folder, "Plate.FCStd"))
+        frame = self._new("Frame")
+        frame.saveAs(os.path.join(self.team, "Frame.FCStd"))  # an XLink needs its owner saved
+        link = frame.addObject("App::Link", "Link")
+        link.LinkedObject = marker
+        reader = frame.addObject("App::FeatureTest", "Reader")
+        reader.Path = ""
+        reader.setExpression("Integer", "Plate#Marker.Integer")
+        holder = frame.addObject("App::FeaturePython", "Holder")
+        holder.addProperty("App::PropertyFile", "Template")
+        holder.addProperty("App::PropertyPath", "Folder")
+        template = os.path.join(self.outside, "Template.svg")
+        with open(template, "w", encoding="utf-8") as f:
+            f.write("<svg/>")
+        holder.Template = template
+        holder.Folder = os.path.join(self.outside, "renders")
+        frame.recompute()
+        self.assertEqual(reader.Integer, 7)
+        frame.saveAs(os.path.join(self.team, "Frame.FCStd"))
+        return plate, frame, holder
+
+    def testOutsideFilesAreNamed(self):
+        self.group.SetString("TeamFolder", self.team)
+        _, frame, _ = self._using(self.outside)
+        self.assertEqual(FreeCAD.teamFolderOutside(frame.Name), ["Plate.FCStd", "Template.svg", "renders"])
+        frame.removeObject("Link")  # the expression alone still reads Plate
+        self.assertIn("Plate.FCStd", FreeCAD.teamFolderOutside(frame.Name))
+
+    def testNothingOutsideNamesNothing(self):
+        self.group.SetString("TeamFolder", self.team)
+        _, frame, holder = self._using(self.team)
+        self.assertEqual(FreeCAD.teamFolderOutside(frame.Name), ["Template.svg", "renders"])
+        holder.Template = os.path.join(self.team, "Template.svg")
+        holder.Folder = "renders"  # relative: saved as written, the same on every computer
+        self.assertEqual(FreeCAD.teamFolderOutside(frame.Name), [])
+
+    def testInstallationFilesAreExempt(self):
+        """TechDraw's Template points into the resources on every drawing; that file is on every computer."""
+        self.group.SetString("TeamFolder", self.team)
+        _, frame, holder = self._using(self.team)
+        holder.Template = os.path.join(FreeCAD.getResourceDir(), "Mod", "TechDraw", "Templates", "A4.svg")
+        holder.Folder = FreeCAD.getUserAppDataDir()
+        self.assertEqual(FreeCAD.teamFolderOutside(frame.Name), [])
+
+    def testOnlyDocumentsInsideTheFolderAreChecked(self):
+        self.group.SetString("TeamFolder", self.team)
+        _, frame, _ = self._using(self.outside)
+        self.assertEqual(FreeCAD.teamFolderOutside(frame.Name, os.path.join(self.outside, "Frame.FCStd")), [])
+        self.group.SetString("TeamFolder", "")
+        self.assertEqual(FreeCAD.teamFolderOutside(frame.Name), [])

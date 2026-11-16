@@ -66,6 +66,9 @@ public:
     void onChanged(const App::Property* prop) override;
 
     Gui::ViewProvider* startEditing(int ModNum) override;
+    /// FreeCAD-CH (ops#640): a feature dialog (the default edit) holds one undo step until its
+    /// OK or Cancel, as in Onshape: Gui::Document locks the step while it is open
+    bool editHoldsOneStep(int ModNum) const override;
 
     void setTipIcon(bool onoff);
 
@@ -133,6 +136,10 @@ protected:
     App::DocumentObjectWeakPtrT previouslyShownFeature {nullptr};
     /// The body showed a feature when the edit began (it may be gone since)
     bool hadShownFeature {false};
+    /// FreeCAD-CH (gaps3 row 7, Onshape G3-6): the Body this edit showed because the user had
+    /// hidden it. Onshape shows a hidden part as the dialog's preview and hides it again after
+    /// OK; unsetEdit hides it again
+    App::DocumentObjectWeakPtrT bodyShownForEdit {nullptr};
 
     bool isSetTipIcon {false};
 

@@ -99,6 +99,12 @@ public:
         // later open, or the rebuild that finds its element again, matches it). A freeze, a park
         // or a drop keeps it; only a decision of the type clears it
         TypeUndecided = 8,
+        // FreeCAD-CH (ops#656 D4 row 2, ops#131 RO11f): a parked projection whose object was
+        // deleted while it was parked, given the dead link's reference when its park line was
+        // dropped (markExternalGeometryMissing). It took no part in the compute while parked, so
+        // it warns as a missing reference, not the error of a geometry whose link went with its
+        // object. A link formed again, or a park, clears it
+        ParkDropped = 9,
         NumFlags       // Must be the last type
     };
     // END_CREDIT_BLOCK: Credit under LGPL for this block to Zheng, Lei (realthunder)
@@ -106,7 +112,7 @@ public:
 
     constexpr static std::array<const char*, NumFlags> flag2str {
         {"Defining", "Frozen", "Detached", "Missing", "Sync", "Projection", "Intersection",
-         "TypeGuessed", "TypeUndecided"}
+         "TypeGuessed", "TypeUndecided", "ParkDropped"}
     };
 
 public:

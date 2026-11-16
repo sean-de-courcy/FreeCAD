@@ -24,6 +24,7 @@
 
 
 #include <algorithm>
+#include <cmath>
 
 #include <Precision.hxx>
 
@@ -129,6 +130,48 @@ bool isShownThroughALink(const BodyBase* body)
     }
     return false;
 }
+
+// Whether two objects are placed alike in the document (one origin). The turn is measured as an
+// angle, to Precision::Angular (as ShapeBinder::samePlace): Placement::isSame compares quaternions
+// to Confusion, which let a turn of 0.01 degrees through, 0.017 mm off at 100 mm (ops#640)
+bool samePlace(const App::DocumentObject* one, const App::DocumentObject* other)
+{
+    try {
+        const Base::Placement onePlacement = App::GeoFeature::getGlobalPlacement(one);
+        const Base::Placement otherPlacement = App::GeoFeature::getGlobalPlacement(other);
+        if (!onePlacement.getPosition().IsEqual(otherPlacement.getPosition(),
+                                                Precision::Confusion())) {
+            return false;
+        }
+        double x = 0;
+        double y = 0;
+        double z = 0;
+        double w = 0;
+        (onePlacement.getRotation().inverse() * otherPlacement.getRotation()).getValue(x, y, z, w);
+        return 2 * std::sqrt(x * x + y * y + z * z) <= Precision::Angular();
+    }
+    catch (const Base::Exception&) {
+        // A container recomputing has no global placement yet: not known to be one origin
+        return false;
+    }
+}
+
+// The App::Part (not an assembly) whose own Origin is @p lcs: a Part Studio's Top, Front, Right
+App::Part* partOfOrigin(const App::DocumentObject* lcs)
+{
+    if (!lcs) {
+        return nullptr;
+    }
+    const Base::Type assembly = assemblyType();
+    for (auto user : lcs->getInList()) {
+        auto part = freecad_cast<App::Part*>(user);
+        if (part && part->Origin.getValue() == lcs
+            && !(!assembly.isBad() && part->isDerivedFrom(assembly))) {
+            return part;
+        }
+    }
+    return nullptr;
+}
 }  // namespace
 
 BodyBase* BodyBase::bodyOfObject(const App::DocumentObject* obj)
@@ -201,17 +244,7 @@ bool BodyBase::areStudioSiblings(const BodyBase* one, const BodyBase* other)
     // Bodies placed apart don't share an origin: every reader takes the target's geometry in the
     // owner's frame, so the reference would land elsewhere, silently. Until the one-origin check
     // (session 1b), such a pick goes through the copy, which places it right (ops#325)
-    try {
-        if (!App::GeoFeature::getGlobalPlacement(one)
-                 .isSame(App::GeoFeature::getGlobalPlacement(other), Precision::Confusion())) {
-            return false;
-        }
-    }
-    catch (const Base::Exception&) {
-        // A container recomputing has no global placement yet: not known to be one origin
-        return false;
-    }
-    return !isShownThroughALink(other);
+    return samePlace(one, other) && !isShownThroughALink(other);
 }
 
 bool BodyBase::isStudioPick(
@@ -245,14 +278,28 @@ App::DocumentObject* BodyBase::studioOriginFeature(
 {
     auto datum = freecad_cast<const App::DatumElement*>(feature);
     BodyBase* ownerBody = bodyOfObject(owner);
-    BodyBase* featureBody = bodyOfObject(feature);
-    if (!datum || !datum->getLCS() || !ownerBody || !featureBody
-        || !areStudioSiblings(ownerBody, featureBody)) {
+    if (!datum || !datum->getLCS() || !ownerBody) {
         return nullptr;
     }
     auto origin = freecad_cast<App::LocalCoordinateSystem*>(ownerBody->Origin.getValue());
-    if (!origin || datum->getLCS() != featureBody->Origin.getValue()) {
+    if (!origin || datum->getLCS() == origin) {
         return nullptr;
+    }
+    BodyBase* featureBody = bodyOfObject(feature);
+    if (featureBody) {
+        if (!areStudioSiblings(ownerBody, featureBody)
+            || datum->getLCS() != featureBody->Origin.getValue()) {
+            return nullptr;
+        }
+    }
+    else {
+        // FreeCAD-CH (ops#640, J1T A): the Part Studio's own origin (the Features list's Top,
+        // Front and Right) stands for the Body's own when the Body sits at the studio's origin,
+        // as Onshape's Top is a sketch plane of every part of the studio
+        App::Part* studio = partOfOrigin(datum->getLCS());
+        if (!studio || !studio->hasObject(ownerBody, true) || !samePlace(ownerBody, studio)) {
+            return nullptr;
+        }
     }
     try {
         return origin->getDatumElement(datum->Role.getValue());

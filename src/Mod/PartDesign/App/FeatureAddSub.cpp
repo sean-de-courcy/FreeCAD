@@ -49,6 +49,9 @@
 #include "FeatureAddSub.h"
 #include "FeaturePy.h"
 #include "FeatureSketchBased.h"
+#include "Pieces.h"
+#include "StudioList.h"
+#include "StudioOwner.h"
 
 #include <Mod/Part/App/Tools.h>
 
@@ -59,6 +62,8 @@ namespace PartDesign
 {
 
 extern bool getPDRefineModelParameter();
+// StudioList.cpp (FreeCAD-CH ops#654 10.13; declared where used)
+PartDesignExport std::string studioMergedAwayWhy(const App::DocumentObject* owner);
 
 namespace
 {
@@ -79,6 +84,23 @@ FeatureAddSub::FeatureAddSub()
         "Part Design",
         App::Prop_None,
         "The cut this one follows: its parameters by expression, its links by copy (ops#325)"
+    );
+    // Hidden: the Result box sets them; hidden ones are each feature's own, never bound to a
+    // primary's (isOwn)
+    ADD_PROPERTY_TYPE(
+        MergeWithAll,
+        (false),
+        "Part Design",
+        App::Prop_Hidden,
+        "Merge with all: the dialog merges every part the tool touches (ops#640)"
+    );
+    ADD_PROPERTY_TYPE(
+        EmptyMergeScope,
+        (false),
+        "Part Design",
+        App::Prop_Hidden,
+        "An Add with no merge scope: with nothing before it in its part and Merge with all off, "
+        "it fails 'No merge scope selected' (ops#640)"
     );
 }
 
@@ -107,6 +129,24 @@ void FeatureAddSub::defineSubtractive()
     Operation.setStatus(App::Property::Status::Hidden, false);
     Operation.setEnums({"Subtraction", "Common"});
     Operation.setValue("Subtraction");
+}
+
+void FeatureAddSub::allowAllOperations()
+{
+    allOperations = true;
+    Operation.setStatus(App::Property::Status::Hidden, false);
+    // setEnums keeps the value by name
+    Operation.setEnums({"Union", "Subtraction", "Common"});
+}
+
+void FeatureAddSub::onDocumentRestored()
+{
+    // The file's own list came back with the value (a custom enumeration is saved with its list);
+    // the restore's purge clears what this touches
+    if (allOperations && Operation.getEnum().maxValue() != 2) {
+        allowAllOperations();
+    }
+    FeatureRefine::onDocumentRestored();
 }
 
 const char* FeatureAddSub::getBooleanMaker() const
@@ -175,24 +215,71 @@ App::DocumentObjectExecReturn* FeatureAddSub::recompute()
             return new App::DocumentObjectExecReturn(why, this);
         }
     }
+    // FreeCAD-CH ops#654 S2: a studio feature outside every Body computes only its tool, and
+    // fails when its scope resolves to no part at its place, as Onshape's (F2, F3: a pick of a
+    // part gone or absorbed resolves to nothing, ignored beside a valid one)
+    const bool owner = runsAsStudioOwner(this);
+    if (owner && runs && studioScopeOf(this).empty()) {
+        purgeTouched();  // as a failure that ran (Feature::recompute())
+        // 10.13: a scope of parts merged away says by what (F3: it does not follow them)
+        const std::string merged = studioMergedAwayWhy(this);
+        return new App::DocumentObjectExecReturn(
+            merged.empty() ? std::string("No merge scope selected")
+                           : "No merge scope selected: " + merged,
+            this
+        );
+    }
     App::DocumentObjectExecReturn* result = FeatureRefine::recompute();
     if (result == StdReturn && runs) {
         warnIfMissing();
+    }
+    // FreeCAD-CH ops#654 S2: an Add owner's region that touches none of its parts would be dropped
+    // by every step. Onshape makes it a new part (H1a); until P6p it fails the whole feature
+    if (result == StdReturn && runs && owner && addSubType == Type::Additive) {
+        if (std::string why = studioAddLeftover(this); !why.empty()) {
+            AddSubShape.setValue(TopoShape());  // no step applies a part of it
+            purgeTouched();
+            return new App::DocumentObjectExecReturn(why, this);
+        }
     }
     // A subtractive feature with nothing before it cut nothing and returned its tool as material
     // (FreeCAD-CH ops#308 F8: a Body's first Pocket, e.g. on another Body's face, which T1 no
     // longer takes as a base). Checked after the run, so an input's error is reported first; the
     // failure passes the (empty) base through. Not when suppressed or held: those pass their
     // base through already.
-    if (result == StdReturn && addSubType == Type::Subtractive && !Suppressed.getValue()
-        && !(body && body->holds(this)) && getBaseTopoShape(true).isNull()) {
-        return new App::DocumentObjectExecReturn(
-            "Nothing to cut: a subtractive feature needs a solid before it in its Body, or a "
-            "BaseFeature",
-            this
-        );
+    // An Add, Remove or Intersect with an empty merge scope and Merge with all off fails, as
+    // Onshape's does: "No merge scope selected" (ops#640 rank 3a, hands-on checks R7(a) and R8).
+    // A cut's scope is empty when nothing comes before it; an Add's only when it says so
+    // (EmptyMergeScope), as otherwise it is a new part. The cut keeps F8's words after Onshape's.
+    // An Add's empty scope is said before its run's failure for want of a solid to reach (round
+    // 8, J20: an "Up to next" with nothing before it read "No faces found in this direction");
+    // any other failure of the run keeps its words (review R8-4)
+    const bool emptyAdd = EmptyMergeScope.getValue() && !MergeWithAll.getValue();
+    const bool nothingToReach = result != StdReturn && result
+        && (result->Why.find("No faces found in this direction") != std::string::npos
+            || result->Why.find("Up to face: No face found") != std::string::npos);
+    // A piece step (P6p) has nothing before it by design: it takes its piece as is
+    const bool pieceStep = body && isPieceBody(body)
+        && body->StudioMadeBy.getValue() == StudioOwner.getValue();
+    if ((result == StdReturn || (emptyAdd && nothingToReach)) && runs && !owner && !pieceStep
+        && (addSubType == Type::Subtractive || emptyAdd) && getBaseTopoShape(true).isNull()) {
+        if (result != StdReturn) {
+            delete result;
+        }
+        constexpr const char* noScope = "No merge scope selected";
+        if (addSubType == Type::Subtractive) {
+            const std::string nothing =
+                "Nothing to cut: a subtractive feature needs a solid before it in its Body, or a "
+                "BaseFeature";
+            return new App::DocumentObjectExecReturn(
+                MergeWithAll.getValue() ? nothing : std::string(noScope) + ". " + nothing,
+                this
+            );
+        }
+        return new App::DocumentObjectExecReturn(noScope, this);
     }
-    if (result != StdReturn || booleanOperation != BooleanOperation::Common || Suppressed.getValue()
+    if (result != StdReturn || owner || booleanOperation != BooleanOperation::Common
+        || Suppressed.getValue()
         || (body && body->holds(this))) {
         return result;
     }

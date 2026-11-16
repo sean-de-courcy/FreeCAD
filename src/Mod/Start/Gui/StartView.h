@@ -109,6 +109,7 @@ private Q_SLOTS:
 private:
     void retranslateUi();
     void setListViewUpdatesEnabled(bool enabled);
+    void closeIfOnshape();
 
     QStackedWidget* _contents = nullptr;
     Start::RecentFilesModel _recentFilesModel;
@@ -118,8 +119,14 @@ private:
     QLabel* _examplesLabel;
     QLabel* _recentFilesLabel;
     QLabel* _customFolderLabel;
+    // FreeCAD-CH (ops#640, folder sync item 2): what is wrong with the team folder, if anything
+    QLabel* _teamFolderLabel = nullptr;
+    void updateTeamFolderLabel();
     QPushButton* _openFirstStart;
     QCheckBox* _showOnStartupCheckBox;
+    // FreeCAD-CH: the Onshape keymap's Documents page (New, Open, recent documents), ops#640 P11
+    bool _onshape = false;
+    fastsignals::scoped_connection _newdoc;
     fastsignals::scoped_connection _saveddoc;
 
     bool isInitialized = false;

@@ -75,6 +75,7 @@
 #include <Base/Console.h>
 
 #include "Attacher.h"
+#include "MassProperties.h"
 #include "AttachExtension.h"
 #include "BodyBase.h"
 #include "DatumFeature.h"
@@ -341,7 +342,7 @@ PlanarFaceInfo getPlanarFaceInfo(const TopoShape& shape, double precision)
     PlanarFaceInfo result {plane, normal.Direction(), plane.Location()};
     if (!face.IsNull() && !face.Infinite()) {
         GProp_GProps properties;
-        BRepGProp::SurfaceProperties(face, properties);
+        MassProperties::readoutSurfaceProperties(face, properties);
         result.center = properties.CentreOfMass();
     }
     return result;
@@ -790,12 +791,21 @@ Base::Placement AttachEngine::placementFactory(
         double cosNX = ZAxis.Dot(dirX);
         double cosNY = ZAxis.Dot(dirY);
         double cosNZ = ZAxis.Dot(dirZ);
-        std::vector<double> cosXYZ;
-        cosXYZ.push_back(fabs(cosNX));
-        cosXYZ.push_back(fabs(cosNY));
-        cosXYZ.push_back(fabs(cosNZ));
-
-        int pos = std::max_element(cosXYZ.begin(), cosXYZ.end()) - cosXYZ.begin();
+        // Onshape's rule (ops#692, fact GS12c in the ops notes): X against Y is a plain
+        // comparison, but Z wins over X or Y only when |cos| with Z exceeds theirs by a
+        // fixed margin. Onshape hands a face over from Z at 44.76132 deg from Z toward X
+        // and at 44.72423 deg toward Y, so an exact 45-degree face never goes to Z,
+        // whichever way the last bit of its normal falls.
+        constexpr double zOverX = 1.008366404477815;  // 1 / tan(44.76132 deg)
+        constexpr double zOverY = 1.009672819845475;  // 1 / tan(44.72423 deg)
+        const double aX = fabs(cosNX);
+        const double aY = fabs(cosNY);
+        const double aZ = fabs(cosNZ);
+        int pos = aY > aX ? 1 : 0;
+        const double margin = pos == 0 ? zOverX : zOverY;
+        if (aZ > margin * (pos == 0 ? aX : aY)) {
+            pos = 2;
+        }
 
         // +X/-X
         if (pos == 0) {
@@ -1308,7 +1318,9 @@ GProp_GProps AttachEngine::getInertialPropsOfShape(const std::vector<const TopoS
                         "AttachEngine::getInertialPropsOfShape: infinite shape provided"
                     );
                 }
-                BRepGProp::SurfaceProperties(sh, gpr);
+                // As Face.CenterOfMass reads it (SC7, ops#640): OCCT's default put a datum point
+                // at a B-spline cap's centre 2e-5 off, the adaptive one within 1.4e-9
+                MassProperties::readoutSurfaceProperties(sh, gpr);
                 gpr_acc.Add(gpr);
             }
             return gpr_acc;
@@ -1330,7 +1342,7 @@ GProp_GProps AttachEngine::getInertialPropsOfShape(const std::vector<const TopoS
                         "AttachEngine::getInertialPropsOfShape: infinite shape provided"
                     );
                 }
-                BRepGProp::VolumeProperties(sh, gpr);
+                MassProperties::readoutVolumeProperties(sh, gpr);
                 gpr_acc.Add(gpr);
             }
             return gpr_acc;
@@ -1657,6 +1669,11 @@ AttachEngine3D::AttachEngine3D()
 
     modeRefTypes[mmParallelPlane].push_back(cat(eRefType(rtFlatFace | rtFlagHasPlacement), rtVertex));
     modeRefTypes[mmParallelPlane].push_back(cat(eRefType(rtAnything | rtFlagHasPlacement), rtVertex));
+    // FreeCAD-CH (ops#640): a model's planar face and a vertex, in either order, as Onshape's
+    // Plane point (hands-on check B3-5). The planar face scores above Tangent's any face, so this
+    // is the mode suggested for the pair; Tangent stays as it was
+    modeRefTypes[mmParallelPlane].push_back(cat(rtFlatFace, rtVertex));
+    modeRefTypes[mmParallelPlane].push_back(cat(rtVertex, rtFlatFace));
 
     modeRefTypes[mmInertialCS].push_back(cat(rtAnything));
     modeRefTypes[mmInertialCS].push_back(cat(rtAnything, rtAnything));
@@ -1825,6 +1842,32 @@ Base::Placement AttachEngine3D::_calculateAttachedPlacement(
         case mmObjectXZ:
         case mmObjectYZ:
         case mmParallelPlane: {
+            // FreeCAD-CH (ops#640): a planar face of a model (a sub-element, which has no
+            // placement of its own) and a vertex, in either order: the plane through the vertex,
+            // parallel to the face and facing as it does (Onshape's Plane point). The vertex may be
+            // a datum point; a datum plane picked first keeps the placement path below
+            const std::size_t faceIndex
+                = shapes.size() == 2 && shapes[0]->shapeType(/*silent=*/true) == TopAbs_VERTEX ? 1
+                                                                                               : 0;
+            if (mmode == mmParallelPlane && shapes.size() == 2
+                && (faceIndex == 1 || !(types[0] & rtFlagHasPlacement))
+                && shapes[faceIndex]->shapeType(/*silent=*/true) == TopAbs_FACE) {
+                TopoDS_Vertex vertex;
+                try {
+                    vertex = TopoDS::Vertex(shapes[1 - faceIndex]->getShape());
+                }
+                catch (...) {
+                }
+                if (vertex.IsNull()) {
+                    throw Base::ValueError(
+                        "Null vertex in AttachEngine3D::calculateAttachedPlacement()!"
+                    );
+                }
+                const PlanarFaceInfo faceInfo = getPlanarFaceInfo(*shapes[faceIndex], precision);
+                SketchNormal = faceInfo.normal;
+                SketchBasePoint = BRep_Tool::Pnt(vertex);
+                break;
+            }
             // DeepSOIC: could have been done much more efficiently, but I'm lazy...
             gp_Dir dirX, dirY, dirZ;
             if (types[0] & rtFlagHasPlacement) {

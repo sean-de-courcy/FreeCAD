@@ -1,0 +1,16 @@
+{
+"entries": {
+"HoleMovedOutOfOverlap|a_left|V2s": {"axes": ["M1", "E1", "X4:600"], "classes": ["all"], "expect": "CORRECT", "expected": "quiet", "found_by": "review prline-b2-r1", "issue": "ops#640", "tier": "F"},
+"HoleMovedOutOfOverlap|a_right|V2s": {"axes": ["M1", "E1", "X4:600"], "classes": ["all"], "expect": "CORRECT", "expected": "quiet", "found_by": "review prline-b2-r1", "issue": "ops#640", "tier": "F"},
+"HoleMovedOutOfOverlap|b_left|V2s": {"axes": ["M1", "E1", "X4:600"], "classes": ["all"], "expect": "CORRECT", "expected": "broken", "found_by": "review prline-b2-r1", "issue": "ops#640", "tier": "F"},
+"HoleMovedOutOfOverlap|b_right|V2s": {"axes": ["M1", "E1", "X4:600"], "classes": ["all"], "expect": "CORRECT", "expected": "broken", "found_by": "review prline-b2-r1", "issue": "ops#640", "tier": "F"},
+"HoleMovedToOverlapInAir|a_left|V2s": {"axes": ["M1", "E1", "X4:600"], "classes": ["all"], "expect": "CORRECT", "expected": "quiet", "found_by": "review prline-b2-r1", "issue": "ops#640", "tier": "F"},
+"HoleMovedToOverlapInAir|a_right|V2s": {"axes": ["M1", "E1", "X4:600"], "classes": ["all"], "expect": "CORRECT", "expected": "quiet", "found_by": "review prline-b2-r1", "issue": "ops#640", "tier": "F"},
+"HoleMovedToOverlapInAir|b_left|V2s": {"axes": ["M1", "E1", "X4:600"], "classes": ["all"], "expect": "CORRECT", "expected": "broken", "found_by": "review prline-b2-r1", "issue": "ops#640", "tier": "F"},
+"HoleMovedToOverlapInAir|b_right|V2s": {"axes": ["M1", "E1", "X4:600"], "classes": ["all"], "expect": "CORRECT", "expected": "broken", "found_by": "review prline-b2-r1", "issue": "ops#640", "tier": "F"},
+"HoleMovedWithinOverlap|a_left|V2s": {"axes": ["M1", "E1", "X4:600"], "classes": ["all"], "expect": "CORRECT", "expected": "correct", "found_by": "review prline-b2-r1", "issue": "ops#640", "tier": "F"},
+"HoleMovedWithinOverlap|a_right|V2s": {"axes": ["M1", "E1", "X4:600"], "classes": ["all"], "expect": "CORRECT", "expected": "correct", "found_by": "review prline-b2-r1", "issue": "ops#640", "tier": "F"},
+"HoleMovedWithinOverlap|b_left|V2s": {"axes": ["M1", "E1", "X4:600"], "classes": ["all"], "expect": "CORRECT", "expected": "correct", "found_by": "review prline-b2-r1", "issue": "ops#640", "tier": "F"},
+"HoleMovedWithinOverlap|b_right|V2s": {"axes": ["M1", "E1", "X4:600"], "classes": ["all"], "expect": "CORRECT", "expected": "correct", "found_by": "review prline-b2-r1", "issue": "ops#640", "tier": "F"}
+}
+}

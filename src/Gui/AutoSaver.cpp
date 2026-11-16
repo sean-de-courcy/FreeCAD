@@ -20,7 +20,12 @@
  *                                                                         *
  ***************************************************************************/
 
+#include <algorithm>
+#include <memory>
+
 #include <QApplication>
+#include <QEvent>
+#include <QMouseEvent>
 #include <QTimer>
 #include <QThread>
 
@@ -65,6 +70,15 @@ bool isGuiDocumentStableForAutoSave(const App::Document* doc)
 
 AutoSaver* AutoSaver::self = nullptr;
 const int AutoSaveTimeout = 900000;
+// FreeCAD-CH (ops#711): the soon pass follows a change by at least this, and by ten times the last
+// snapshot's time, so a heavy document spends at most a tenth of its time in snapshots
+const int SoonPassMinimum = 2000;
+const int SoonPassFactor = 10;
+// A soon pass expected to block the window longer than this (seconds; preference
+// AutoSaveSoonIdleAbove) waits until the user has given no input for IdleWindow ms, so the freeze
+// falls in a pause and not in a drag or a typed value
+const double SlowSoonPass = 0.3;
+const int IdleWindow = 3000;
 
 AutoSaver::AutoSaver(QObject* parent)
     : QObject(parent)
@@ -77,6 +91,32 @@ AutoSaver::AutoSaver(QObject* parent)
     App::GetApplication().signalDeleteDocument.connect([this](const App::Document& doc) {
         slotDeleteDocument(doc);
     });
+    sinceInput.start();
+    if (QCoreApplication* app = QCoreApplication::instance()) {
+        app->installEventFilter(this);
+    }
+}
+
+bool AutoSaver::eventFilter(QObject* watched, QEvent* event)
+{
+    switch (event->type()) {
+        case QEvent::KeyPress:
+        case QEvent::MouseButtonPress:
+        case QEvent::MouseButtonRelease:
+        case QEvent::Wheel:
+        case QEvent::TouchBegin:
+        case QEvent::TouchUpdate:
+            sinceInput.restart();
+            break;
+        case QEvent::MouseMove:
+            if (static_cast<QMouseEvent*>(event)->buttons() != Qt::NoButton) {
+                sinceInput.restart();
+            }
+            break;
+        default:
+            break;
+    }
+    return QObject::eventFilter(watched, event);
 }
 
 AutoSaver::~AutoSaver() = default;
@@ -98,6 +138,10 @@ void AutoSaver::flushPendingSave(const QString& documentName)
     if (it == saverMap.end()) {
         return;
     }
+    // ops#769: a slow retry after a transaction waits for the user's pause like the timer's
+    if (it->second->dirty && postponeUntilPause(*it->second)) {
+        return;
+    }
 
     try {
         saveDocument(it->first, *it->second);
@@ -115,6 +159,12 @@ void AutoSaver::setTimeout(int ms)
     for (auto& it : saverMap) {
         if (it.second->timerId > 0) {
             killTimer(it.second->timerId);
+        }
+        if (it.second->soonTimerId > 0 && timeout == 0) {
+            killTimer(it.second->soonTimerId);
+            it.second->soonTimerId = 0;
+            it.second->soonPending = false;
+            it.second->waitingForPause.invalidate();
         }
         int id = timeout > 0 ? startTimer(timeout) : 0;
         it.second->timerId = id;
@@ -135,6 +185,89 @@ void AutoSaver::slotCreateDocument(const App::Document& Doc)
     saverMap.insert(std::make_pair(name, as));
 }
 
+void AutoSaver::documentChanged(const std::string& name)
+{
+    if (QThread::currentThread() != thread()) {
+        // A timer starts on its object's thread only
+        const QString qName = QString::fromStdString(name);
+        QTimer::singleShot(0, this, [this, qName]() { startSoonPass(qName.toStdString()); });
+        return;
+    }
+    startSoonPass(name);
+}
+
+double AutoSaver::expectedSeconds(const AutoSaveProperty& saver) const
+{
+    if (saver.lastSaveSeconds >= 0.0) {
+        return saver.lastSaveSeconds;
+    }
+    // Before the first snapshot: about 25 ms per object (notes/files-saving-history-design.md
+    // section 2: 2.5 s per hundred features), so a heavy file just opened isn't frozen at once
+    const App::Document* doc = App::GetApplication().getDocument(saver.documentName.c_str());
+    return doc ? 0.025 * doc->countObjects() : 0.0;
+}
+
+int AutoSaver::soonDelay(const AutoSaveProperty& saver) const
+{
+    const double seconds = expectedSeconds(saver);
+    const double scaled = seconds * 1000.0 * SoonPassFactor;
+    const int delay = scaled > SoonPassMinimum ? static_cast<int>(scaled) : SoonPassMinimum;
+    return std::min(delay, timeout);
+}
+
+bool AutoSaver::postponeUntilPause(AutoSaveProperty& saver)
+{
+    const double slowAbove = App::GetApplication()
+                                 .GetParameterGroupByPath(
+                                     "User parameter:BaseApp/Preferences/Document"
+                                 )
+                                 ->GetFloat("AutoSaveSoonIdleAbove", SlowSoonPass);
+    const qint64 idle = sinceInput.elapsed();
+    // A pass that has waited a whole timeout saves anyway: a user who never pauses still gets
+    // a snapshot at worst every two timeouts
+    const bool waitedEnough = saver.waitingForPause.isValid()
+        && saver.waitingForPause.elapsed() >= std::max<qint64>(timeout, IdleWindow);
+    if (expectedSeconds(saver) < slowAbove || idle >= IdleWindow || waitedEnough) {
+        saver.waitingForPause.invalidate();
+        return false;
+    }
+    if (!saver.waitingForPause.isValid()) {
+        saver.waitingForPause.start();
+    }
+    // The user is at work: once they pause
+    if (saver.soonTimerId > 0) {
+        killTimer(saver.soonTimerId);
+    }
+    saver.soonTimerId = startTimer(static_cast<int>(IdleWindow - idle) + 50);
+    saver.soonPending = saver.soonTimerId > 0;
+    if (!saver.soonPending) {
+        saver.waitingForPause.invalidate();
+    }
+    return saver.soonPending;
+}
+
+void AutoSaver::startSoonPass(const std::string& name)
+{
+    auto it = saverMap.find(name);
+    if (it == saverMap.end()) {
+        return;
+    }
+    AutoSaveProperty& saver = *it->second;
+    const App::Document* doc = App::GetApplication().getDocument(name.c_str());
+    if (doc && doc->testStatus(App::Document::Restoring)) {
+        // An open's own changes: nothing to recover, and the document's size isn't known yet
+        saver.soonPending = false;
+        return;
+    }
+    if (timeout <= 0 || saver.soonTimerId > 0) {
+        // Auto-recovery off, or a pass already on its way: it saves the latest state
+        saver.soonPending = saver.soonTimerId > 0;
+        return;
+    }
+    saver.soonTimerId = startTimer(soonDelay(saver));
+    saver.soonPending = saver.soonTimerId > 0;
+}
+
 void AutoSaver::slotDeleteDocument(const App::Document& Doc)
 {
     std::string name = Doc.getName();
@@ -142,6 +275,9 @@ void AutoSaver::slotDeleteDocument(const App::Document& Doc)
     if (it != saverMap.end()) {
         if (it->second->timerId > 0) {
             killTimer(it->second->timerId);
+        }
+        if (it->second->soonTimerId > 0) {
+            killTimer(it->second->soonTimerId);
         }
         delete it->second;
         saverMap.erase(it);
@@ -183,9 +319,14 @@ void AutoSaver::saveDocument(const std::string& name, AutoSaveProperty& saver)
     options.saveBinaryBrep = !this->compressed || hGrp->GetBool("SaveBinaryBrep", true);
     options.saveThumbnail = false;
 
-    Gui::WaitCursor wc;
-    getMainWindow()->showMessage(tr("Wait until the auto-recovery file has been saved…"), 5000);
-    // qApp->processEvents();
+    // A snapshot that takes a moment says so; the soon pass of a small document passes unnoticed
+    const bool slow = saver.lastSaveSeconds >= 0.5
+        || (saver.lastSaveSeconds < 0.0 && doc->countObjects() > 100);
+    std::unique_ptr<Gui::WaitCursor> wc;
+    if (slow) {
+        wc = std::make_unique<Gui::WaitCursor>();
+        getMainWindow()->showMessage(tr("Wait until the auto-recovery file has been saved…"), 5000);
+    }
 
     Base::TimeElapsed startTime;
     try {
@@ -196,10 +337,8 @@ void AutoSaver::saveDocument(const std::string& name, AutoSaveProperty& saver)
         throw;
     }
 
-    Base::Console().log(
-        "Save auto-recovery file in %fs\n",
-        Base::TimeElapsed::diffTimeF(startTime, Base::TimeElapsed())
-    );
+    saver.lastSaveSeconds = Base::TimeElapsed::diffTimeF(startTime, Base::TimeElapsed());
+    Base::Console().log("Save auto-recovery file in %fs\n", saver.lastSaveSeconds);
     saver.scheduleQueuedRetry();
 }
 
@@ -207,7 +346,38 @@ void AutoSaver::timerEvent(QTimerEvent* event)
 {
     int id = event->timerId();
     for (auto& it : saverMap) {
+        if (it.second->soonTimerId == id) {
+            // A single shot. Only a document with unsaved changes needs it: a new document's
+            // studio, an open or a save leave nothing to recover
+            killTimer(id);
+            it.second->soonTimerId = 0;
+            it.second->soonPending = false;
+            auto* gdoc = Gui::Application::Instance
+                ? Gui::Application::Instance->getDocument(it.first.c_str())
+                : nullptr;
+            // A timer pass waiting for a pause (ops#769) saves what the timer would have
+            const bool timerPass = it.second->waitingForPause.isValid();
+            if (!it.second->dirty || (!timerPass && (!gdoc || !gdoc->isModified()))) {
+                it.second->waitingForPause.invalidate();
+                break;
+            }
+            if (postponeUntilPause(*it.second)) {
+                break;
+            }
+            try {
+                saveDocument(it.first, *it.second);
+            }
+            catch (...) {
+                Base::Console().error("Failed to auto-save document '%s'\n", it.first.c_str());
+            }
+            break;
+        }
         if (it.second->timerId == id) {
+            // ops#769: the timer's pass of a large document waits for a pause in the user's input
+            // too, and then runs as the soon pass
+            if (it.second->dirty && postponeUntilPause(*it.second)) {
+                break;
+            }
             try {
                 saveDocument(it.first, *it.second);
                 break;
@@ -263,9 +433,13 @@ AutoSaveProperty::~AutoSaveProperty()
 
 void AutoSaveProperty::markDirtyForAutosave()
 {
-    // Ordinary document changes are saved by the next timer pass. They do not
-    // start a save attempt by themselves.
+    // Ordinary document changes are saved by the next timer pass, and (FreeCAD-CH, ops#711) by a
+    // soon pass a moment later, at most one on its way per document
     dirty = true;
+    if (!soonPending) {
+        soonPending = true;
+        AutoSaver::instance()->documentChanged(documentName);
+    }
 }
 
 bool AutoSaveProperty::beginSaveAttempt()

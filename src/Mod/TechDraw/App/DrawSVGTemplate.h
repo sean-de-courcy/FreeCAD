@@ -64,6 +64,11 @@ public:
 
     void translateLabel(std::string context, std::string baseName, std::string uniqueName);
 
+    /// The projection the template's standard uses, as Onshape's templates carry theirs: "First
+    /// angle" for ISO, "Third angle" for ANSI (ASME), named by the file or its folder; null when
+    /// neither names one (FreeCAD-CH ops#640, rank 11).
+    const char* projectionAngle() const;
+
 
 protected:
     void onSettingDocument() override;

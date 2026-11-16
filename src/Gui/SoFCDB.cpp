@@ -80,6 +80,8 @@
 #include "Inventor/SoFCScreenSpaceGroup.h"
 #include "Inventor/SoFCBackgroundGradient.h"
 #include "Inventor/SoFCBoundingBox.h"
+#include "Inventor/SoSectionCap.h"
+#include "Inventor/SoFCDelayedGroup.h"
 #include "Inventor/SoNaviCube.h"
 #include "Inventor/SoMouseWheelEvent.h"
 #include "Inventor/SoFCTransform.h"
@@ -113,6 +115,8 @@ void Gui::SoFCDB::init()
     SoFCScreenSpaceGroup::initClass();
     SoFCBackgroundGradient::initClass();
     SoFCBoundingBox::initClass();
+    SoSectionCap::initClass();
+    SoFCDelayedGroup::initClass();
     SoFCSelection::initClass();
     SoFCUnifiedSelection::initClass();
     SoFCPreselectionAction::initClass();
@@ -221,6 +225,7 @@ void Gui::SoFCDB::init()
     SiemensNXNavigationStyle::init();
     SolidWorksNavigationStyle::init();
     TinkerCADNavigationStyle::init();
+    OnshapeNavigationStyle::init();
     TouchpadNavigationStyle::init();
 
     GLGraphicsItem::init();

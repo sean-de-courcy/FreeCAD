@@ -37,6 +37,7 @@
 #include <App/PropertyLinks.h>
 #include <App/ReferenceReport.h>
 #include <App/ReferenceRepair.h>
+#include <Base/Vector3D.h>
 #include <Gui/Selection/Selection.h>
 
 #include "EnumFlags.h"
@@ -56,6 +57,11 @@ namespace PartDesignGui
 
 class ReferenceFieldGroup;
 
+/// The edge at  vertex of  obj's shape nearest  click (document coordinates): `Edge7`;
+/// empty when the vertex has no edge. Onshape's Fillet takes a vertex click as its adjacent
+/// edge (selection parity P6b, oracle 8 SQ13).
+std::string nearestEdgeAt(App::DocumentObject* obj, const std::string& vertex, const Base::Vector3d& click);
+
 /** One reference property of a feature's dialog, as a list of entries (FreeCAD-CH, ops#150;
  * notes/reference-list-widget.md).
  *
@@ -64,8 +70,12 @@ class ReferenceFieldGroup;
  * picks come from. While it is armed, its gate lets through only what it takes, its target is
  * shown, and its entries are coloured on the target (the current one in a second colour, never
  * through the selection). A pick of an element that is in the list removes it, one that isn't
- * adds it. Esc, another input of the dialog, the References panel's selection and a gate put in
- * its place disarm it.
+ * adds it. Another input of the dialog, the References panel's selection and a gate put in its
+ * place disarm it. Esc doesn't: armed or not, it cancels the dialog at once, as Onshape's (ops#640
+ * rank 25; decision 23 Q1 (a) had the first Esc disarm).
+ *
+ * Each removable entry shows an x after its text, which removes it; the pointer over an entry
+ * preselects its element in the 3D view (ops#640 rank 26).
  *
  * Each entry shows its state: exact, guessed (yellow) or broken (red), from the owner's slots and
  * reference rows (App::ReferenceReport::slotsOf, App::referenceRows). Its context menu has Remove
@@ -168,6 +178,13 @@ public:
         /// or a hole's positions (circles, arcs, points) has no regions to make, and the menu
         /// and messages speak of edges or positions.
         ProfileUse use = ProfileUse::Profile;
+        /// SingleElement: an element reads in Onshape's words, "Face of Pad", not "Pad:Face6"
+        /// (the Sketch plane field, ops#640 round 6).
+        bool elementWords = false;
+        /// Elements: a vertex of the target takes the adjacent edge nearest the click (Onshape's
+        /// Fillet filters vertices and picks the nearest allowed entity: selection parity P6b,
+        /// oracle 8 SQ13).
+        bool vertexToEdge = false;
     };
     /// Writes the property: the target and the subs, in the stored style.
     using Writer =
@@ -260,6 +277,9 @@ public:
 
     /// Removes the selected entries.
     void removeSelected();
+    /// Shows \a text in red in the field's status until the next pick, as a refused pick's
+    /// message does (a new feature's left-out preselection, ops#640 rank 13).
+    Q_INVOKABLE void setNote(const QString& text);
     /// Kind::Sections: moves the current section up (\a step -1) or down (+1), one write.
     void moveCurrent(int step);
     /// The field's own undo and redo of its changes.
@@ -268,6 +288,9 @@ public:
 
     /// The field armed now, if any: the selection has one gate, so there is at most one.
     static ReferenceField* armedField();
+    /// Whether a section or a profile of a loft or pipe keeps this element of a sketch: a point
+    /// (a point section) or a region (InternalFace<n>); the sketch is taken whole for any other
+    static bool keepsSketchElement(const std::string& sub);
     /// Called by the field's gate when it goes, whoever removed it.
     void gateGone();
 
@@ -390,6 +413,8 @@ private:
     /// A profile of a solid's faces whose last element \a stored would take out: refused, with
     /// a message (the solid whole is no profile).
     bool refusesLastElement(const std::vector<std::string>& stored);
+    /// Whether \a stored would take out such a profile's last element (no message).
+    bool keepsLastElement(const std::vector<std::string>& stored) const;
 
     void updateLook();
     void highlight(bool on, const std::string& extra = std::string());
@@ -405,6 +430,19 @@ private:
     void fillUseMenu(QMenu* menu, const App::ReferenceRow& row);
     void runAction(const std::string& command);
     void startRepick(int index);
+    /// Whether the entry of \a index (its IndexRole) can be removed, so it shows an x: not a
+    /// required profile's whole object, nor a single reference that can't be empty.
+    bool isRemovable(int index) const;
+    /// Removes the entries of \a indexes (by slot; a list of sections' by position).
+    void removeEntries(std::vector<int> indexes);
+    /// The object and element (empty: the object whole) the entry \a item stands for; false for
+    /// none (a missing element).
+    bool entryElement(const QListWidgetItem* item,
+                      App::DocumentObject*& obj,
+                      std::string& sub) const;
+    /// The entry under the pointer, preselected in the 3D view as Onshape highlights a hovered
+    /// pick (ops#640 rank 26); null takes this field's preselection away.
+    void hoverEntry(const QListWidgetItem* item);
 
     App::DocumentObjectT ownerT;
     std::string propertyNameStr;
@@ -441,6 +479,10 @@ private:
     /// The objects whose elements are coloured (a list of sections colours several).
     std::vector<App::DocumentObjectT> highlightedTargets;
     QString message;
+    /// What hoverEntry() preselected, while hovering.
+    App::DocumentObjectT hoverObject;
+    std::string hoverSub;
+    bool hovering = false;
 };
 
 /** The reference fields of one dialog (TaskDlgFeatureParameters): one armed at a time; a field
@@ -466,8 +508,9 @@ public:
     /// One of the dialog's panels.
     bool isPanel(const QWidget* widget) const;
 
-    /// Arms the first empty required field (Q2), once the dialog shows.
-    void armFirstEmpty();
+    /// Arms the first empty required field (Q2), once the dialog shows; the field of
+    /// \a preferred instead, when one is enabled and not hidden (selection parity P1).
+    void armFirstEmpty(const std::string& preferred = {});
     void disarm();
     /// Called by a field about to arm: the others disarm.
     void fieldArming(ReferenceField* field);

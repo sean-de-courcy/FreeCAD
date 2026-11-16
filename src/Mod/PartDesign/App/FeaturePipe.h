@@ -25,12 +25,16 @@
 
 #pragma once
 
+#include <optional>
 #include <string>
 #include <vector>
 
 #include "FeatureSketchBased.h"
+#include <App/PropertyUnits.h>
 #include <BRepOffsetAPI_MakePipeShell.hxx>
 #include <TopoDS_Wire.hxx>
+#include <gp_Dir.hxx>
+#include <Law_Function.hxx>
 
 namespace PartDesign
 {
@@ -52,6 +56,50 @@ public:
     App::PropertyEnumeration Transition;
     App::PropertyEnumeration Transformation;
     App::PropertyLinkSubList Sections;
+    /// How the profile is carried along the path, in Onshape's terms (notes\sweep-design.md):
+    /// "None" (its frame turns with the path), "Keep orientation" (Mode "Fixed"), or "Advanced"
+    /// (Mode decides, as in files from before it, and when Mode is set directly)
+    App::PropertyEnumeration ProfileControl;
+    /// A profile in the middle of the path sweeps both ways along all of it (on), or from the
+    /// profile one way (off)
+    App::PropertyBool ExtendToFullPath;
+    /// The other way along the path from the profile, with ExtendToFullPath off (Onshape's
+    /// opposite direction, SW1)
+    App::PropertyBool PathReversed;
+    /// More path edges, from other objects than Spine's: joined with Spine's in any order
+    App::PropertyLinkSubList SpineMore;
+    /// Onshape's Sweep, slice 3 (notes\sweep-design.md 3, onshape-facts SW11-SW14)
+    /// Faces the path lies on, for ProfileControl "Lock faces": the profile keeps its angle to
+    /// their normal along the path
+    App::PropertyLinkSubList LockFaces;
+    /// A plane, planar face or straight edge, for ProfileControl "Lock direction": the profile's
+    /// plane keeps containing its direction (a plane's or face's normal, an edge's direction)
+    App::PropertyLinkSub LockDirection;
+    /// The profile turns about the path, linearly in the path's length (SW11)
+    App::PropertyBool HasTwist;
+    /// How the twist is given: Turns, Angle (over the path), or Pitch (the length of one turn)
+    App::PropertyEnumeration TwistType;
+    App::PropertyFloat Turns;
+    App::PropertyAngle TwistAngle;
+    App::PropertyLength TwistPitch;
+    /// Counter-clockwise about the path's direction (off: clockwise, Onshape's default)
+    App::PropertyBool TwistCCW;
+    /// The profile scales linearly in the path's length to ScaleFactor at the path's end (SW12)
+    App::PropertyBool HasScale;
+    App::PropertyFloat ScaleFactor;
+    /// Solid, or Thin: a wall of Thickness1 (and Thickness2 on the other side) around the
+    /// profile's curves, swept (SW14)
+    App::PropertyEnumeration BodyType;
+    App::PropertyLength Thickness1;
+    App::PropertyLength Thickness2;
+    // The wall centred on the profile's curves, Thickness1 in all: ProfileBased's Midplane. Not
+    // a Midplane of Pipe's own: of two static properties of one name only the derived class's
+    // is in the property list, so the inherited one was never purged, stayed touched from its
+    // construction, and ProfileBased::mustExecute() ran every pipe in every recompute (ops#640)
+    /// The wall on the other side of the profile's curves
+    App::PropertyBool FlipWall;
+    /// Onshape's Thin option; no effect, as in Onshape (SW14: on and off gave the same in every case)
+    App::PropertyBool TrimEnds;
     /// Where the spine started and ended at the last successful recompute, the end that carried
     /// the profile's names first, where they lie in the body (ops#379). Read for the input they
     /// were stored for, or where they still are the spine's ends (ops#435)
@@ -83,6 +131,9 @@ public:
 
     App::DocumentObjectExecReturn* execute() override;
     short mustExecute() const override;
+    /// A file without ProfileControl reads as "Advanced" (its Mode decides, as before), without
+    /// ExtendToFullPath as on (it swept the whole path)
+    void Restore(Base::XMLReader& reader) override;
     /// returns the type name of the view provider
     const char* getViewProviderName() const override
     {
@@ -112,6 +163,19 @@ protected:
         Part::TopoShape& result
     );
     void setupAlgorithm(BRepOffsetAPI_MakePipeShell& mkPipeShell, const TopoDS_Shape& auxshape);
+    /// ProfileControl sets Mode; Mode set directly makes ProfileControl "Advanced"
+    void onChanged(const App::Property* prop) override;
+    /// Slice 3's checks and the guide and scale law for one profile along  path (in the pipe's
+    /// frame  invObjLoc): sets frameGuide and  scale. An error's text, or nothing
+    std::optional<std::string> prepareSlice3(
+        const Part::TopoShape& path,
+        const std::vector<TopoDS_Shape>& profileWires,
+        const TopLoc_Location& invObjLoc,
+        Handle(Law_Function)& scale
+    );
+    /// The profile's plane normal in the pipe's frame (\a invObjLoc): a sketch's placement Z, a
+    /// planar face's normal; none for another profile
+    std::optional<gp_Dir> profileNormal(const TopLoc_Location& invObjLoc) const;
     /// handle changed property
     void handleChangedPropertyType(
         Base::XMLReader& reader,
@@ -129,6 +193,21 @@ private:
     static const char* TransitionEnums[];
     static const char* ModeEnums[];
     static const char* TransformEnums[];
+    static const char* ProfileControlEnums[];
+    static const char* TwistTypeEnums[];
+    static const char* BodyTypeEnums[];
+    /// Set while ProfileControl sets Mode, or the constructor or Restore set either
+    bool settingMode = false;
+    /// ProfileControl "None" along a path that isn't planar, where OCCT's Frenet frame neither
+    /// turns over nor jumps: the sweep in Mode "Standard" takes Frenet's frame (a helix keeps its
+    /// profile square to its axis). Set by execute for setupAlgorithm
+    bool frenetForNone = false;
+    /// A guide curve that orients the profile (twist, lock faces): the sweep's normal points from
+    /// the path to it in each plane square to the path. Set by execute for setupAlgorithm
+    TopoDS_Wire frameGuide;
+    /// The binormal of Mode "Binormal" in the Body's coordinates: Binormal, or LockDirection's
+    /// direction for ProfileControl "Lock direction". Set by execute
+    Base::Vector3d binormalInBody;
 };
 
 class PartDesignExport AdditivePipe: public Pipe

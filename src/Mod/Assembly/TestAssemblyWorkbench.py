@@ -28,6 +28,8 @@ from AssemblyTests.TestCommandInsertLink import TestCommandInsertLink
 from AssemblyTests.TestCommandCreateView import TestCommandCreateView
 from AssemblyTests.TestSimulationExport import TestSimulationExport
 from AssemblyTests.TestJointRecords import TestJointRecords  # FreeCAD-CH, ops#504
+from AssemblyTests.TestFloatingSolve import TestFloatingSolve  # FreeCAD-CH, ops#640
+from AssemblyTests.TestGroundedUndo import TestGroundedUndo  # FreeCAD-CH, ops#787
 from AssemblyTests.TestVariantLinks import (
     TestLinkRetargetJoints,
     TestLinkRetargetProperties,
@@ -36,6 +38,21 @@ from AssemblyTests.TestVariantLinks import (
     TestVariantTopologyChanged,
     TestRetargetCheckSaved,
 )
+from AssemblyTests.TestOnshapeAssemblies import (  # FreeCAD-CH, ops#640
+    TestSeveralAssemblies,
+    TestJointErrors,
+)
+from AssemblyTests.TestAssemblyPatterns import TestAssemblyPatterns  # FreeCAD-CH (asm-patterns)
+from AssemblyTests.TestFreeInstances import TestFreeInstances  # FreeCAD-CH, ops#683 C4
+from AssemblyTests.TestMateAfterEdits import (  # FreeCAD-CH, ops#683 C5
+    TestMateAfterEdits,
+    TestMateFaceGone,
+    TestMateOffsetPickOrder,  # ops#826
+    TestMateOffsetUIPose,  # ops#826 (AR6)
+    TestRedMateOffset,  # ops#827
+    TestMateSeatsAsOnshapeUI,  # ops#838
+)
+from AssemblyTests.TestOnshapeConnectors import TestOnshapeConnectors  # FreeCAD-CH, ops#683
 
 # Use the modules so that code checkers don't complain (flake8)
 True if TestCore else False
@@ -43,9 +60,33 @@ True if TestCommandInsertLink else False
 True if TestCommandCreateView else False
 True if TestSimulationExport else False
 True if TestJointRecords else False
+True if TestFloatingSolve else False
 True if TestLinkRetargetJoints else False
 True if TestLinkRetargetProperties else False
 True if TestLinkTargetReopened else False
 True if TestVariantLinkRecompute else False
 True if TestVariantTopologyChanged else False
 True if TestRetargetCheckSaved else False
+True if TestSeveralAssemblies else False
+True if TestJointErrors else False
+True if TestAssemblyPatterns else False
+True if TestFreeInstances else False
+True if TestMateAfterEdits else False
+True if TestMateFaceGone else False
+True if TestMateOffsetPickOrder else False
+True if TestMateOffsetUIPose else False
+True if TestRedMateOffset else False
+True if TestMateSeatsAsOnshapeUI else False
+True if TestOnshapeConnectors else False
+
+from AssemblyTests.TestRigidCachePointers import (  # FreeCAD-CH, ops#778
+    TestRigidCachePointers,
+    TestRigidCacheUndo,
+    TestRigidCacheInputs,  # FreeCAD-CH, ops#789
+    TestRigidCachePatternInputs,
+)
+
+True if TestRigidCachePointers else False
+True if TestRigidCacheUndo else False
+True if TestRigidCacheInputs else False
+True if TestRigidCachePatternInputs else False

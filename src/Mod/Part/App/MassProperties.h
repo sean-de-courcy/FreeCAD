@@ -33,7 +33,7 @@ class gp_Pnt;
  * solid makers' orientation, FilletFallback, TopoShapeRepair, the face makers, PartDesign's
  * up-to faces, Revolution's checks, Scaled; ops#428). A comparison of two shapes integrates both
  * the same way: the overloads taking forceAdaptive, with needsAdaptive() of either shape. The
- * reported Shape.Volume, Shape.Area and centres stay OCCT's default for now (PLAN decision 106).
+ * reported Shape.Volume, Shape.Area and centres use the readout functions (ops#640, SC7).
  * Lengths need no screen: OCCT's linear integration follows the knot spans (1e-14 on a curved
  * B-spline of 1000 spans, ops#428). */
 namespace Part::MassProperties
@@ -78,6 +78,22 @@ PartExport double area(const TopoDS_Shape& shape, bool forceAdaptive);
 /// of its vertices, as TopoShape::getCenterOfGravity() chooses; false for an empty or infinite
 /// shape
 PartExport bool centreOfMass(const TopoDS_Shape& shape, gp_Pnt& centre);
+
+/// Whether a face of the shape has a free-form surface (a B-spline or a Bezier surface, inside its
+/// trimmed and offset wrappers), of any number of spans: OCCT's default integration is off there
+/// too (oracle 7's SC7, a sphere scaled by (1, 1, 1.6), a rational B-spline of few spans: area
+/// +3.4e-3 relative; Onshape's is exact)
+PartExport bool hasFreeForm(const TopoDS_Shape& shape);
+
+/// The readouts (Shape.Area and Volume, a solid's mass; a shell's or face's mass, centre of mass
+/// and inertia): adaptive where needsAdaptive() or hasFreeForm(), OCCT's default elsewhere, where
+/// it is exact (planes, quadrics, tori and their extrusions). A solid's centre of mass and inertia,
+/// and the centre of gravity, likewise, integrated about a point off the centre: about the centre
+/// a scaled sphere's took 92 s (ops#680)
+PartExport void readoutVolumeProperties(const TopoDS_Shape& shape, GProp_GProps& props);
+PartExport void readoutSurfaceProperties(const TopoDS_Shape& shape, GProp_GProps& props);
+PartExport double readoutVolume(const TopoDS_Shape& shape);
+PartExport double readoutArea(const TopoDS_Shape& shape);
 
 /// Orients a closed solid outwards, as BRepLib::OrientClosedSolid(solid) does, and returns what it
 /// returns. When needsAdaptive(), by the sign of the adaptive volume instead: OCCT's classifier

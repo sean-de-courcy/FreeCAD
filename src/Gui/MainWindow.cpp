@@ -88,6 +88,7 @@
 #include <DAGView/DAGView.h>
 #include <TaskView/TaskView.h>
 
+#include "DocumentPresenceGui.h"
 #include "MainWindow.h"
 #include "Action.h"
 #include "Assistant.h"
@@ -97,6 +98,7 @@
 #include "DockWindowManager.h"
 #include "DownloadManager.h"
 #include "FileDialog.h"
+#include "DocumentTabBar.h"  // FreeCAD-CH (ops#640, rank 59)
 #include "InputHintWidget.h"
 #include "MenuManager.h"
 #include "ModuleIO.h"
@@ -511,6 +513,9 @@ MainWindow::MainWindow(QWidget* parent, Qt::WindowFlags f)
          .persistentVisibility = true}
     );
 
+    // FreeCAD-CH (ops#640, folder sync item 6): who else has the active document open
+    DocumentPresenceGui::start(this);
+
     d->sizeLabel = new DimensionWidget(statusBar());
     addStatusBarItem(
         d->sizeLabel,
@@ -721,6 +726,7 @@ void MainWindow::setupDockWindows()
     setupSelectionView();
     setupVariablesView(this, d->hiddenDockWindows);  // FreeCAD-CH (ops#152)
     setupTaskView();
+    DocumentTabs::setup(this);  // FreeCAD-CH (ops#640, rank 59): the typed tabs, made once here
 
     initDockWindows(false);
 
@@ -1003,6 +1009,19 @@ void MainWindow::cascade()
 
 void MainWindow::closeActiveWindow()
 {
+    // FreeCAD-CH (ops#802): with the typed tabs a document's views are its tabs' views; closing
+    // one (an assembly's, the studio's) left the document open on another with no question.
+    // Close closes the document, asking to save it as the document strip's X does
+    if (DocumentTabs::isOn()) {
+        MDIView* view = activeWindow();
+        Gui::Document* gdoc = view ? view->getGuiDocument() : nullptr;
+        if (gdoc && gdoc->getDocument()) {
+            if (gdoc->canClose()) {
+                App::GetApplication().closeDocument(gdoc->getDocument()->getName());
+            }
+            return;
+        }
+    }
     d->mdiArea->closeActiveSubWindow();
 }
 

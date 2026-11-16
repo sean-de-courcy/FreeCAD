@@ -107,6 +107,12 @@ bool isWalked(const App::DocumentObject* owner, const App::Property* prop)
     return isInputLink(owner, prop) && !followsBase(owner, prop);
 }
 
+bool isDressUpBase(const App::DocumentObject* owner, const App::Property* prop)
+{
+    auto dressUp = freecad_cast<const PartDesign::DressUp*>(owner);
+    return dressUp && prop == &dressUp->Base;
+}
+
 bool isFeatureBase(const App::DocumentObject* obj)
 {
     return obj && obj->isDerivedFrom<PartDesign::FeatureBase>();
@@ -712,6 +718,16 @@ public:
                 solids.push_back(obj);
             }
         }
+        // The first solid after each other member's place
+        App::DocumentObject* after = nullptr;
+        for (auto it = group.rbegin(); it != group.rend(); ++it) {
+            if (Body::isSolidFeature(*it)) {
+                after = *it;
+            }
+            else if (after) {
+                nextSolid[*it] = after;
+            }
+        }
         computeEarliest();
     }
 
@@ -854,6 +870,21 @@ public:
         return it == earliest.end() ? nullptr : it->second;
     }
 
+    /// The solid whose place obj's references must come before: its earliest user (N1 3.1), or,
+    /// for a sketch, datum or binder, the first solid after its own place when that comes first.
+    /// Onshape regenerates its list in order, so a sketch dropped above the feature whose face it
+    /// is on fails at its new place, also before the feature that uses it (round 8, J5); or null
+    App::DocumentObject* bound(const App::DocumentObject* obj) const
+    {
+        auto x = earliestUser(obj);
+        auto it = nextSolid.find(obj);
+        if (it == nextSolid.end() || x == obj) {
+            return x;
+        }
+        auto y = it->second;
+        return !x || chainPos.at(y) < chainPos.at(x) ? y : x;
+    }
+
 private:
     struct RestoredExpression
     {
@@ -923,7 +954,7 @@ private:
 
     void planLinks(App::DocumentObject* owner)
     {
-        auto x = earliestUser(owner);
+        auto x = bound(owner);
         auto doc = owner->getDocument();
         std::vector<ParkedItem> items;
         std::vector<std::string> lines = parkedLines(owner);
@@ -939,7 +970,8 @@ private:
         std::vector<App::Property*> props;
         owner->getPropertyList(props);
         for (auto prop : props) {
-            if (!isWalked(owner, prop)) {
+            const bool dressUpBase = isDressUpBase(owner, prop);
+            if (!isWalked(owner, prop) && !(dressUpBase && walksDressUpBase(owner, items))) {
                 continue;
             }
             auto state = readState(owner, prop);
@@ -955,7 +987,27 @@ private:
                 if (target && x && atOrAfter(target, x)) {
                     continue;  // still after the feature that uses it
                 }
-                if (target) {
+                if (target && !chainPos.count(target)) {
+                    // Parked by a part studio's drop (parkReadsOf(): a reorder parks only
+                    // references into solids of its own Body, decide()): the drop that puts the
+                    // order right gives it back, not this reorder. That holds for a sketch or
+                    // datum of this Body too, no solid of the chain (ops#853: an unrelated
+                    // reorder gave a Pocket dragged above its sketch its Profile back)
+                    continue;
+                }
+                if (target && dressUpBase) {
+                    // A dress-up's Base follows its base (ops#784): back onto the base it has now,
+                    // the parked names looked up on it as moved references are
+                    auto base = plannedBase(owner);
+                    if (!base) {
+                        continue;  // still the first solid: stays parked
+                    }
+                    putBack(*state, items[i], target);
+                    if (base != target) {
+                        retargetOnto(*state, target, base);
+                    }
+                }
+                else if (target) {
                     putBack(*state, items[i], target);
                 }
                 else if (items[i].extgeo) {
@@ -1030,26 +1082,7 @@ private:
             // that feature's base, or parked without one
             auto base = plannedBase(x);
             if (!unit.subs.empty() && base) {
-                std::vector<SubEntry> moved;
-                std::set<std::string> keys;
-                std::string first;
-                for (const auto& s : unit.subs) {
-                    auto record = recordFor(s, unit.obj);
-                    if (!keys.insert(recordKey(record)).second) {
-                        continue;
-                    }
-                    if (first.empty()) {
-                        first = recordKey(record);
-                    }
-                    SubEntry entry =
-                        missingForm(record.origName, record.origIndex, record.origFp, false);
-                    entry.record = record;
-                    moved.push_back(std::move(entry));
-                }
-                unit.obj = base;
-                unit.subs = std::move(moved);
-                unit.edited = state.changed = true;
-                state.solveOn.insert(base);
+                auto first = moveUnit(state, unit, base);
                 if (list && !first.empty() && !seen.insert(first).second) {
                     unit.dropped = true;
                 }
@@ -1061,6 +1094,166 @@ private:
         }
     }
 
+    /// Moves unit onto base with its references missing, each carrying its re-target record (N1
+    /// 3.2); returns the first record's key
+    std::string moveUnit(PropertyState& state, Unit& unit, App::DocumentObject* base)
+    {
+        std::vector<SubEntry> moved;
+        std::set<std::string> keys;
+        std::string first;
+        for (const auto& s : unit.subs) {
+            auto record = recordFor(s, unit.obj);
+            if (!keys.insert(recordKey(record)).second) {
+                continue;
+            }
+            if (first.empty()) {
+                first = recordKey(record);
+            }
+            SubEntry entry = missingForm(record.origName, record.origIndex, record.origFp, false);
+            entry.record = record;
+            moved.push_back(std::move(entry));
+        }
+        unit.obj = base;
+        unit.subs = std::move(moved);
+        unit.edited = state.changed = true;
+        state.solveOn.insert(base);
+        return first;
+    }
+
+    /// The units just put back on target go on to base instead (ops#784: a dress-up's Base is on
+    /// its base, which needn't be the solid its edges were parked from)
+    void retargetOnto(PropertyState& state, App::DocumentObject* target, App::DocumentObject* base)
+    {
+        for (auto& unit : state.units) {
+            if (!unit.dropped && unit.obj == target && !unit.subs.empty()) {
+                moveUnit(state, unit, base);
+            }
+        }
+        state.solveOn.erase(target);
+    }
+
+    /// A dress-up's Base, which follows its base and is rerouted with it (N1 2.2), is walked by
+    /// the rule only where the reroute can't carry it (ops#784): the dress-up becomes the first
+    /// solid (no base: it is parked, as a reference with nowhere to go), or it has a parked Base
+    /// and is given a base again (put back)
+    bool walksDressUpBase(App::DocumentObject* owner, const std::vector<ParkedItem>& items) const
+    {
+        auto it = newBase.find(owner);
+        if (it == newBase.end()) {
+            return false;  // its base doesn't change
+        }
+        if (!it->second) {
+            return true;
+        }
+        auto dressUp = static_cast<PartDesign::DressUp*>(owner);
+        return !dressUp->Base.getValue()
+            && std::any_of(items.begin(), items.end(), [&](const ParkedItem& item) {
+                   return !item.expression && item.property == dressUp->Base.getName();
+               });
+    }
+
+public:
+    /// A part studio's drop (ops#647, RO1: a drag is never refused): owner's link entries on an
+    /// object match() names are parked as a reorder parks them, so owner fails alone until a drop
+    /// puts it back (putBackReadsOf()). Writes; false when nothing was parked
+    bool parkReadsOf(App::DocumentObject* owner, const std::function<bool(App::DocumentObject*)>& match)
+    {
+        std::vector<std::string> lines = parkedLines(owner);
+        bool any = false;
+        std::vector<App::Property*> props;
+        owner->getPropertyList(props);
+        for (auto prop : props) {
+            if (!isWalked(owner, prop)) {
+                continue;
+            }
+            auto state = readState(owner, prop);
+            if (!state) {
+                continue;
+            }
+            std::vector<std::string> newLines;
+            for (auto& unit : state->units) {
+                if (!unit.dropped && unit.obj && !unit.frozen && match(unit.obj)) {
+                    park(*state, unit, newLines);
+                }
+            }
+            if (state->changed) {
+                write(*state);
+                lines.insert(lines.end(), newLines.begin(), newLines.end());
+                any = true;
+            }
+        }
+        if (any) {
+            writeParkedLines(owner, lines);
+        }
+        return any;
+    }
+
+    /// The parked link entries of owner whose object earlier() takes are put back (N1 3.4 b), the
+    /// moved references found again on them; a parked projection goes back onto its geometries
+    /// as a reorder puts it back (putBack(), ops#131), since nothing else gives back a studio
+    /// drop's park on a sketch or datum (ops#853). Writes; false when nothing was put back
+    bool putBackReadsOf(App::DocumentObject* owner, const std::function<bool(App::DocumentObject*)>& earlier)
+    {
+        auto lines = parkedLines(owner);
+        if (lines.empty()) {
+            return false;
+        }
+        auto doc = owner->getDocument();
+        std::vector<ParkedItem> items;
+        for (const auto& line : lines) {
+            auto item = ParkedItem::parse(line);
+            items.push_back(item ? *item : ParkedItem());
+        }
+        std::vector<bool> keep(lines.size(), true);
+        bool any = false;
+        std::vector<App::Property*> props;
+        owner->getPropertyList(props);
+        for (auto prop : props) {
+            if (!isWalked(owner, prop)) {
+                continue;
+            }
+            std::optional<PropertyState> state;
+            for (std::size_t i = 0; i < items.size(); ++i) {
+                if (items[i].expression || items[i].property != prop->getName()) {
+                    continue;
+                }
+                auto target = parkedTarget(doc, items[i]);
+                if (!target || !earlier(target)) {
+                    continue;
+                }
+                if (!state) {
+                    state = readState(owner, prop);
+                    if (!state) {
+                        break;
+                    }
+                }
+                putBack(*state, items[i], target);
+                keep[i] = false;
+            }
+            if (state && state->changed) {
+                write(*state);
+                for (auto target : state->solveOn) {
+                    solve(*state->prop, target);
+                }
+                any = true;
+            }
+        }
+        // A line putBack() ends without a write (its geometries linked again, or the element
+        // projected again) goes too, as planLinks() drops it, or every drop meets it again
+        if (any || std::ranges::find(keep, false) != keep.end()) {
+            std::vector<std::string> kept;
+            for (std::size_t i = 0; i < lines.size(); ++i) {
+                if (keep[i]) {
+                    kept.push_back(lines[i]);
+                }
+            }
+            writeParkedLines(owner, kept);
+            any = true;
+        }
+        return any;
+    }
+
+private:
     void park(PropertyState& state, Unit& unit, std::vector<std::string>& newLines)
     {
         ParkedItem item;
@@ -1313,7 +1506,7 @@ private:
 
     void planExpressions(App::DocumentObject* owner)
     {
-        auto x = earliestUser(owner);
+        auto x = bound(owner);
         auto doc = owner->getDocument();
         auto& plan = owners[owner];
         if (x) {
@@ -1627,9 +1820,13 @@ private:
     Objects solids;
     std::map<const App::DocumentObject*, std::size_t> chainPos;
     std::map<const App::DocumentObject*, App::DocumentObject*> earliest;
+    std::map<const App::DocumentObject*, App::DocumentObject*> nextSolid;
     std::map<std::pair<const App::DocumentObject*, const App::Property*>, PropertyState> states;
     std::map<const App::DocumentObject*, OwnerPlan> owners;
 };
+
+/// The OnlyGivenObjects alive on this thread
+thread_local int onlyGiven = 0;
 
 /// The planned state of a reorder: the new Group and each solid's new base
 struct Plan
@@ -1657,6 +1854,12 @@ struct Plan
         for (auto prop : props) {
             auto link = freecad_cast<App::PropertyLinkBase*>(prop);
             if (!link || link->getScope() == App::LinkScope::Hidden) {
+                continue;
+            }
+            // FreeCAD-CH ops#654 slice 9: a studio list's reconcile places each member
+            // (OnlyGivenObjects) and then writes the owners' StudioBases from the list's order:
+            // their old values aren't the planned graph (a stale one made a false cycle)
+            if (onlyGiven > 0 && std::strcmp(prop->getName(), "StudioBases") == 0) {
                 continue;
             }
             if (planned != newBase.end() && followsBase(obj, prop)) {
@@ -1725,7 +1928,18 @@ struct Plan
 /// The reorders writing their plan on this thread (reorderWriting())
 thread_local int reorderWrites = 0;
 
+
 }  // namespace
+
+OnlyGivenObjects::OnlyGivenObjects()
+{
+    ++onlyGiven;
+}
+
+OnlyGivenObjects::~OnlyGivenObjects()
+{
+    --onlyGiven;
+}
 
 bool reorderWriting()
 {
@@ -1774,10 +1988,10 @@ void reorderBody(Body& body,
     }
 
     // 2. Carried inputs: the non-solid members before a moved solid, up to the previous solid,
-    // that only it (or another carried member) uses
+    // that only it (or another carried member) uses; none under OnlyGivenObjects
     std::set<App::DocumentObject*> movedSet(requested);
     for (auto obj : objs) {
-        if (!Body::isSolidFeature(obj)) {
+        if (onlyGiven > 0 || !Body::isSolidFeature(obj)) {
             continue;
         }
         std::size_t pos = position(obj);
@@ -1945,13 +2159,15 @@ bool parkedReason(const App::DocumentObject* obj, std::string& why)
     }
     auto target = parkedTarget(doc, *item);
     std::string targetLabel = target ? target->Label.getValue() : item->target;
-    // The feature it now comes after: the earliest solid whose inputs include obj
+    // The feature it now comes after: the earliest solid whose inputs include obj, unless the
+    // object's own place is what it comes after (Rule::bound(): "which a reorder put after it")
     std::string userLabel;
     if (auto body = Body::findBodyOf(obj)) {
         Objects group = body->Group.getValues();
         std::map<App::DocumentObject*, App::DocumentObject*> none;
         Rule rule(*body, group, none);
-        if (auto user = rule.earliestUser(obj)) {
+        auto user = rule.earliestUser(obj);
+        if (user && rule.bound(obj) == user) {
             userLabel = user->Label.getValue();
         }
     }
@@ -2014,6 +2230,27 @@ bool parkedReason(const App::DocumentObject* obj, std::string& why)
 bool hasParkedReferences(const App::DocumentObject* obj)
 {
     return !parkedLines(obj).empty();
+}
+
+bool parkReadsOf(App::DocumentObject* owner, const std::function<bool(App::DocumentObject*)>& match)
+{
+    auto body = Body::findBodyOf(owner);
+    if (!body) {
+        return false;
+    }
+    Rule rule(*body, {}, {});
+    return rule.parkReadsOf(owner, match);
+}
+
+bool putBackReadsOf(App::DocumentObject* owner,
+                    const std::function<bool(App::DocumentObject*)>& earlier)
+{
+    auto body = Body::findBodyOf(owner);
+    if (!body || !hasParkedReferences(owner)) {
+        return false;
+    }
+    Rule rule(*body, {}, {});
+    return rule.putBackReadsOf(owner, earlier);
 }
 
 bool parkedAbove(const App::DocumentObject* feature,

@@ -96,10 +96,14 @@
 #include <Mod/Part/App/TopoShapeVertexPy.h>
 #include <Mod/Part/App/TopoShapeWirePy.h>
 
+#include <StdFail_NotDone.hxx>
+
+#include "FilletFallback.h"
 #include "OCCError.h"
 #include "PartPyCXX.h"
 #include "ShapeMapHasher.h"
 #include "TopoShapeMapper.h"
+#include "MassProperties.h"
 
 
 using namespace Part;
@@ -1267,6 +1271,21 @@ PyObject* TopoShapePy::scaled(PyObject* args) const
     return static_cast<TopoShapePy*>(pyobj.ptr())->scale(args);
 }
 
+namespace
+{
+/// Raises OCCT's error type if the dress-up just made on this thread returned OCCT's invalid
+/// result (FilletFallback::noteInvalidResult()), as where the maker fails
+void raiseInvalidDressUp(const char* what)
+{
+    const std::string reason = Part::FilletFallback::takeInvalidResult();
+    if (!reason.empty()) {
+        const std::string message = std::string(what)
+            + " as OCCT builds it is not a valid shape (exact construction refused: " + reason + ")";
+        throw StdFail_NotDone(message.c_str());
+    }
+}
+}  // namespace
+
 PyObject* TopoShapePy::makeFillet(PyObject* args) const
 {
     // use two radii for all edges
@@ -1287,9 +1306,11 @@ PyObject* TopoShapePy::makeFillet(PyObject* args) const
     }
     PY_TRY
     {
-        return Py::new_reference_to(
-            shape2pyshape(getTopoShapePtr()->makeElementFillet(getPyShapes(obj), radius1, radius2))
-        );
+        // Never an invalid shape (decision 418, ops#640): where OCCT built one and the exact
+        // construction refused, an error with its reason
+        TopoShape result = getTopoShapePtr()->makeElementFillet(getPyShapes(obj), radius1, radius2);
+        raiseInvalidDressUp("The fillet");
+        return Py::new_reference_to(shape2pyshape(result));
     }
     PY_CATCH_OCC
     PyErr_Clear();
@@ -1350,10 +1371,15 @@ PyObject* TopoShapePy::makeChamfer(PyObject* args) const
     }
     PY_TRY
     {
-        return Py::new_reference_to(shape2pyshape(
-            getTopoShapePtr()
-                ->makeElementChamfer(getPyShapes(obj), Part::ChamferType::twoDistances, radius1, radius2)
-        ));
+        TopoShape result = getTopoShapePtr()
+                               ->makeElementChamfer(
+                                   getPyShapes(obj),
+                                   Part::ChamferType::twoDistances,
+                                   radius1,
+                                   radius2
+                               );
+        raiseInvalidDressUp("The chamfer");
+        return Py::new_reference_to(shape2pyshape(result));
     }
     PY_CATCH_OCC
     PyErr_Clear();
@@ -2923,9 +2949,7 @@ Py::Float TopoShapePy::getArea() const
     if (shape.IsNull()) {
         throw Py::RuntimeError("shape is invalid");
     }
-    GProp_GProps props;
-    BRepGProp::SurfaceProperties(shape, props);
-    return Py::Float(props.Mass());
+    return Py::Float(MassProperties::readoutArea(shape));
 }
 
 Py::Float TopoShapePy::getVolume() const
@@ -2934,9 +2958,7 @@ Py::Float TopoShapePy::getVolume() const
     if (shape.IsNull()) {
         throw Py::RuntimeError("shape is invalid");
     }
-    GProp_GProps props;
-    BRepGProp::VolumeProperties(shape, props);
-    return Py::Float(props.Mass());
+    return Py::Float(MassProperties::readoutVolume(shape));
 }
 
 Py::String TopoShapePy::getHistoryAlgorithm() const
