@@ -2863,6 +2863,9 @@ void Application::runApplication()
     Application app(true);
     StartupProcess::applyFirstStartPack();
     StartupProcess::reapplyPackColours();
+    if (StartupProcess::migrateForkSettings(App::GetApplication().GetUserParameter())) {
+        Base::Console().log("Settings: reset toolbars left by an earlier FreeCAD-CH build (ops#882)\n");
+    }
     MainWindow mw;
     mw.setProperty("QuitOnClosed", true);
 

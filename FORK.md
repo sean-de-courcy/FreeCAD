@@ -467,7 +467,8 @@ names it.
 | `infra/628-gen2` | infra | ops#628 | - | `integration` `0c4c64265d` | `43f1c1ba26` (fork PR 438), 2026-11-06 | never |
 | `fix/629-merge-sketches-mln` | fix | ops#629 | - | `integration` `43f1c1ba26` | `a476b0725c` (fork PR 439), 2026-11-07 | never (fork fix) |
 | `feat/634-sketch-picks` | feat | ops#634 | - | `integration` `43f1c1ba26` | `1afe3b9190` (fork PR 440), 2026-11-07 | never (fork feature) |
-| `fix/i863-release-baseline` | fix | ops#863, ops#874 | - | `fix/lx12-candidate` `91f12f266e` (fork-1.0.0; the lx12 line, supersedes fork PRs 465 and 458) | (fork PR 466) | never (the first release's line) |
+| `fix/i863-release-baseline` | fix | ops#863, ops#874 | - | `fix/lx12-candidate` `91f12f266e` (fork-1.0.0; the lx12 line, supersedes fork PRs 465 and 458) | `c72e39d8bd` (fork PR 466), 2026-11-16 | never (the first release's line) |
+| `fix/i882-toolbar-dups` | fix | ops#882 | - | `integration` `c72e39d8bd` | (fork PR 467) | never (fork fix): one-time reset of PartDesign toolbars left visible by earlier fork builds (ForkSettingsVersion 1) |
 
 ## Fork-only commits in carried topics
 
