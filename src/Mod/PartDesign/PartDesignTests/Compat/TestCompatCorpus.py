@@ -94,8 +94,8 @@ import FreeCAD as App
 import CompatRecord
 
 # Size budget of the committed corpus (3.1): raising it is the coordinator's call.
-GENERATION_BUDGET = 3 * 1024 * 1024
-CORPUS_BUDGET = 24 * 1024 * 1024  # 10 MB until gen2, 16 MB until gen4 (decision 292, ops#628; ops#640)
+GENERATION_BUDGET = 4 * 1024 * 1024  # 3 MB until gen5 (48 models, 3.8 MB; ops#855)
+CORPUS_BUDGET = 32 * 1024 * 1024  # 10 MB until gen2, 16 MB until gen4, 24 MB until gen5 (decision 292, ops#628; ops#640; ops#855)
 
 # Console lines that say a reference or a link was lost.
 BAD_LINES = (
@@ -118,6 +118,13 @@ CHILD_TIMEOUT = 600
 # A generation's two halves (make_generation.HALVES, ops#538): gen<k> saved on Windows,
 # gen<k>-macos on macOS, each its own generation in every pass.
 HALVES = {"": "win32", "-macos": "darwin"}
+# Reading the other platform's half (ops#855): the open pass reads the same BRep and stays at the
+# open tolerance, but a recompute here computes this platform's geometry, which differs from the
+# saving platform's for free-form shapes (gen5: 2e-9 relative in a fillet's volume, and the
+# optimal box's 1e-7 face-tolerance gap of ops#785). The recompute, round trip, rehearsal and
+# roll-forward passes over that half compare at this tolerance; the platform's own half keeps
+# CompatRecord.TOLERANCE, so code changes are still judged at 1e-11.
+CROSS_PLATFORM_TOLERANCE = (1e-8, 1e-6)
 GENERATION_FOLDER = re.compile(r"gen(\d+)(-macos)?")
 
 
@@ -186,6 +193,8 @@ class _Step:
     def __init__(self, label, genFolder, model, stems, order, work, report, older=False):
         self.label = label
         self.older = older
+        saved = manifest(genFolder).get("platform", sys.platform)
+        self.crossPlatform = CROSS_PLATFORM_TOLERANCE if saved != sys.platform else None
         self.toOpen = stems if order == "ordered" else stems[-1:]
         self.folder = os.path.join(work, label.replace("/", "-"))
         self.report = report
@@ -237,6 +246,7 @@ class _Step:
                 compared[0],
                 compared[1],
                 stage,
+                tolerance=self.crossPlatform if passName != "open" else None,
                 names=names,
                 touched=touched,
                 deltas=CompatRecord.deltasFor(self.intended.get(stem), passName),
@@ -321,6 +331,7 @@ class _Step:
                 compared[0],
                 compared[1],
                 "recompute",
+                tolerance=self.crossPlatform,
                 names=names,
                 deltas=CompatRecord.deltasFor(self.intended.get(stem), "recompute"),
                 allDeltas=False,
@@ -898,7 +909,7 @@ class TestCompatCorpus(unittest.TestCase):
         self.assertEqual(found["gen0/A/ordered/recompute"], [])
 
     def testSizeBudget(self):
-        """A generation stays under 3 MB, the corpus under 24 MB (3.1, decision 292; gen4)."""
+        """A generation stays under 4 MB, the corpus under 32 MB (3.1, decision 292; gen4, gen5)."""
         total = 0
         for gen, folder in generations().items():
             size = sum(os.path.getsize(os.path.join(folder, f)) for f in os.listdir(folder))
