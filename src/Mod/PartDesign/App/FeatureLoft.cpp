@@ -99,6 +99,10 @@ double tangentLength(const gp_Pnt& p, const gp_Pnt& q, const gp_Dir& normal)
     return 0.9 * rail.Dot(gp_Vec(normal)) + 0.1 * rail.Magnitude();
 }
 
+/// fork-1.0.0's rule (TangentRule "Legacy", ops#855): k per unit magnitude as a multiple of the
+/// distance between the profiles, from oracle fact GB12 (e) (k = 30.138 for profiles 30 apart)
+constexpr double legacyTangentPerDistance = 30.138 / 30.0;
+
 gp_Pnt wireCentre(const TopoDS_Shape& wire)
 {
     GProp_GProps props;
@@ -179,7 +183,8 @@ Part::TopoShape withProfileConditions(
     bool start,
     double startMagnitude,
     bool end,
-    double endMagnitude
+    double endMagnitude,
+    bool legacy
 )
 {
     gp_Pln plane0;
@@ -274,7 +279,7 @@ Part::TopoShape withProfileConditions(
         // an open profile edge's matched ends are the ends of one rail, the side edge joining the
         // two profile edges: a flat side made canonical (`makeLoftCanonical`) is a plane whose frame
         // can be oblique to its edges, so its UV box doesn't pair the ends (ops#883)
-        if (!BRep_Tool::IsClosed(edge0)) {
+        if (!legacy && !BRep_Tool::IsClosed(edge0)) {  // fork-1.0.0 paired by the UV box
             const TopoDS_Vertex first0 = TopExp::FirstVertex(edge0);
             TopoDS_Vertex partner;
             for (TopExp_Explorer e(face, TopAbs_EDGE); e.More() && partner.IsNull(); e.Next()) {
@@ -353,6 +358,10 @@ Part::TopoShape withProfileConditions(
                 const gp_Pnt q = curve1->Value(fraction);
                 kStart = startMagnitude * tangentLength(p, q, normal0);
                 kEnd = endMagnitude * tangentLength(p, q, normal1);
+            }
+            if (legacy) {
+                kStart = startMagnitude * distance0 * legacyTangentPerDistance;
+                kEnd = endMagnitude * distance1 * legacyTangentPerDistance;
             }
             const gp_XYZ tangent0 = gp_Vec(normal0).XYZ() * kStart;
             const gp_XYZ tangent1 = gp_Vec(normal1).XYZ() * kEnd;
@@ -1344,7 +1353,8 @@ Loft::Loft()
         (1.0),
         "Loft",
         App::Prop_None,
-        "Scale of the start condition's tangent (0: no condition, as Onshape)"
+        "Scale of the start condition's tangent (0: no condition, as Onshape; a Legacy loft: a "
+        "tangent of length 0)"
     );
     ADD_PROPERTY_TYPE(
         EndCondition,
@@ -1359,7 +1369,8 @@ Loft::Loft()
         (1.0),
         "Loft",
         App::Prop_None,
-        "Scale of the end condition's tangent (0: no condition, as Onshape)"
+        "Scale of the end condition's tangent (0: no condition, as Onshape; a Legacy loft: a tangent "
+        "of length 0)"
     );
     ADD_PROPERTY_TYPE(
         Connections,
@@ -1369,9 +1380,27 @@ Loft::Loft()
         "Vertex pairs the loft joins, one vertex on the profile and one on the section (two profiles)"
     );
     Connections.setValue(nullptr);
+    ADD_PROPERTY_TYPE(
+        TangentRule,
+        (0L),
+        "Loft",
+        App::Prop_Hidden,
+        "Normal to profile's tangent length: Onshape (per rail), or Legacy (fork-1.0.0's k * distance, "
+        "kept for lofts from files saved by fork-1.0.0 and older)"
+    );
+    TangentRule.setEnums(TangentRuleEnums);
 }
 
 const char* Loft::ConditionEnums[] = {"None", "Normal to profile", nullptr};
+const char* Loft::TangentRuleEnums[] = {"Onshape", "Legacy", nullptr};
+
+void Loft::Restore(Base::XMLReader& reader)
+{
+    // ops#855 (R3): a file without TangentRule was saved before fork-1.0.1 (ForkRelease 12 or older),
+    // whose Normal to profile took fork-1.0.0's tangent rule; a file that has it overwrites this
+    TangentRule.setValue(1L);
+    ProfileBased::Restore(reader);
+}
 
 short Loft::mustExecute() const
 {
@@ -1382,7 +1411,8 @@ short Loft::mustExecute() const
         return 1;
     }
     if (Closed.isTouched() || StartCondition.isTouched() || StartMagnitude.isTouched()
-        || EndCondition.isTouched() || EndMagnitude.isTouched() || Connections.isTouched()) {
+        || EndCondition.isTouched() || EndMagnitude.isTouched() || Connections.isTouched()
+        || TangentRule.isTouched()) {
         return 1;
     }
 
@@ -1629,8 +1659,11 @@ App::DocumentObjectExecReturn* Loft::execute()
 
         // ops#655: Onshape's profile conditions. A magnitude of 0 is no condition at that end:
         // Onshape builds the plain loft for it (oracle 17 LE3), never a tangent of length 0
-        const bool startSet = StartCondition.getValue() != 0 && StartMagnitude.getValue() != 0.0;
-        const bool endSet = EndCondition.getValue() != 0 && EndMagnitude.getValue() != 0.0;
+        // fork-1.0.0's rule (Legacy, ops#855) took a magnitude of 0 as a tangent of length 0
+        const bool legacy = TangentRule.getValue() == 1;
+        const bool startSet = StartCondition.getValue() != 0
+            && (legacy || StartMagnitude.getValue() != 0.0);
+        const bool endSet = EndCondition.getValue() != 0 && (legacy || EndMagnitude.getValue() != 0.0);
 
         // build all shells
         std::vector<TopoShape> shells;
@@ -1708,7 +1741,8 @@ App::DocumentObjectExecReturn* Loft::execute()
                     startSet,
                     StartMagnitude.getValue(),
                     endSet,
-                    EndMagnitude.getValue()
+                    EndMagnitude.getValue(),
+                    legacy
                 );
             }
             shells.push_back(shell);
@@ -1818,7 +1852,7 @@ App::DocumentObjectExecReturn* Loft::execute()
             if (SC.State() == TopAbs_IN) {
                 s.setShape(s.getShape().Reversed(), false);
             }
-            if ((startSet || endSet)
+            if ((startSet || endSet) && !legacy  // fork-1.0.0 built these
                 && crossesACap(
                     s.getShape(),
                     wiresections.front().front().getShape(),

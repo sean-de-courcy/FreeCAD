@@ -5,7 +5,11 @@
 # are closed forms where the loft is ruled: the frustum, the cone frustum and the pyramid.
 
 import math
+import os
+import re
+import tempfile
 import unittest
+import zipfile
 
 import FreeCAD
 import Part
@@ -543,6 +547,122 @@ class TestLoftEndConditions(LoftCase):
         after = TestLoftOnshapeConditions.places(loft.Shape)
         for mapped, place in plain.items():
             self.assertEqual(after.get(mapped), place, mapped)
+
+
+class TestLoftTangentRule(LoftCase):
+    """ops#855 (R3): a Normal-to-profile loft from a fork-1.0.0 file keeps fork-1.0.0's tangent rule
+    (k = 30.138 / 30 of the distance), a new loft takes Onshape's per-rail rule (fork PR 468).
+    Squares of half-widths 20 and 5, 10 apart, both ends Normal to profile at magnitude 1: every row is
+    the cubic X(s) = 20 (B0 + B1) + 5 (B2 + B3), z(s) = k/3 B1 + (10 - k/3) B2 + 10 B3, so the volume is
+    the integral of (2 X)^2 dz, with k uniform under both rules (by symmetry every corner rail has the
+    same k). fork-1.0.0's own package gives 7344.4342857 for this loft."""
+
+    @staticmethod
+    def volume(k, kEnd=None):
+        """k at the start, kEnd (default k) at the end: z(s) = k/3 B1 + (10 - kEnd/3) B2 + 10 B3."""
+        kEnd = k if kEnd is None else kEnd
+        n = 2000
+        total = 0.0
+        for i in range(n + 1):
+            s = i / n
+            t = 1 - s
+            x = 20 * (t**3 + 3 * s * t * t) + 5 * (3 * s * s * t + s**3)
+            dz = t * t * k + 6 * s * t * (10 - k / 3 - kEnd / 3) + s * s * kEnd
+            total += (1 if i in (0, n) else (4 if i % 2 else 2)) * 4 * x * x * dz
+        return total / (3 * n)
+
+    LEGACY = 10 * 30.138 / 30
+    ONSHAPE = 0.9 * 10 + 0.1 * math.sqrt(2 * 15**2 + 10**2)
+
+    def conditioned(self):
+        return self.loft(
+            square(40),
+            square(10),
+            height=10,
+            StartCondition="Normal to profile",
+            EndCondition="Normal to profile",
+        )
+
+    def reopen(self, strip):
+        """Saves the document, optionally without the loft's TangentRule (as fork-1.0.0 wrote it), and
+        reopens it with every object recomputed."""
+        folder = tempfile.mkdtemp()
+        path = os.path.join(folder, "loft.FCStd")
+        self.doc.saveAs(path)
+        App.closeDocument(self.doc.Name)
+        if strip:
+            stripped = os.path.join(folder, "old.FCStd")
+            with zipfile.ZipFile(path) as src, zipfile.ZipFile(stripped, "w", zipfile.ZIP_DEFLATED) as dst:
+                for item in src.infolist():
+                    data = src.read(item.filename)
+                    if item.filename == "Document.xml":
+                        xml, count = re.subn(
+                            r'<Property name="TangentRule"[^>]*>.*?</Property>\s*',
+                            "",
+                            data.decode("utf-8"),
+                            flags=re.S,
+                        )
+                        self.assertEqual(count, 1)
+                        data = xml.encode("utf-8")
+                    dst.writestr(item, data)
+            path = stripped
+        self.doc = App.openDocument(path)
+        loft = self.doc.getObject("Loft")
+        for obj in self.doc.Objects:
+            obj.touch()
+        self.doc.recompute()
+        return loft
+
+    def testNewLoftTakesOnshapesRule(self):
+        loft = self.conditioned()
+        self.assertEqual(loft.TangentRule, "Onshape")
+        self.assertIn("Hidden", loft.getTypeOfProperty("TangentRule"))
+        self.assertLoft(loft, self.volume(self.ONSHAPE), loft.Shape.Area, 6, delta=1e-4)
+        self.assertGreater(abs(self.volume(self.ONSHAPE) - self.volume(self.LEGACY)), 40)
+
+    def testLegacyRuleIsForkOneZeroZeros(self):
+        loft = self.conditioned()
+        loft.TangentRule = "Legacy"
+        self.doc.recompute()
+        self.assertLoft(loft, self.volume(self.LEGACY), loft.Shape.Area, 6, delta=1e-4)
+        self.assertAlmostEqual(loft.Shape.Volume, 7344.4342857, delta=1e-4)
+
+    def testFileWithoutTheRuleKeepsForkOneZeroZerosShape(self):
+        loft = self.conditioned()
+        loft.TangentRule = "Legacy"  # the shape fork-1.0.0 saved
+        self.doc.recompute()
+        loft = self.reopen(strip=True)
+        self.assertEqual(loft.TangentRule, "Legacy")
+        self.assertLoft(loft, self.volume(self.LEGACY), loft.Shape.Area, 6, delta=1e-4)
+        # saved again by this build, it keeps the rule; a user's choice of Onshape's rule is kept too
+        loft = self.reopen(strip=False)
+        self.assertEqual(loft.TangentRule, "Legacy")
+        loft.TangentRule = "Onshape"
+        self.doc.recompute()
+        loft = self.reopen(strip=False)
+        self.assertEqual(loft.TangentRule, "Onshape")
+        self.assertLoft(loft, self.volume(self.ONSHAPE), loft.Shape.Area, 6, delta=1e-4)
+
+    def testNewLoftSavedKeepsOnshapesRule(self):
+        self.conditioned()
+        loft = self.reopen(strip=False)
+        self.assertEqual(loft.TangentRule, "Onshape")
+        self.assertLoft(loft, self.volume(self.ONSHAPE), loft.Shape.Area, 6, delta=1e-4)
+
+    def testLegacyMagnitudeZeroIsAZeroTangent(self):
+        """fork-1.0.0 built a magnitude of 0 as a tangent of length 0: with 0 at the start and 1 at the
+        end, the rows' start poles coincide (k 0 there), 5665.317 by the integral (fork-1.0.0's package
+        gives the same). Onshape's rule takes 0 as no start condition: an end-only loft, another shape."""
+        loft = self.conditioned()
+        loft.TangentRule = "Legacy"
+        loft.StartMagnitude = 0.0
+        self.doc.recompute()
+        self.assertLoft(loft, self.volume(0.0, self.LEGACY), loft.Shape.Area, 6, delta=1e-4)
+        self.assertAlmostEqual(loft.Shape.Volume, 5665.3171429, delta=1e-4)
+        loft.TangentRule = "Onshape"
+        self.doc.recompute()
+        self.assertTrue(loft.isValid(), loft.getStatusString())
+        self.assertGreater(abs(loft.Shape.Volume - 5665.3171429), 100)
 
 
 if __name__ == "__main__":

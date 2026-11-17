@@ -87,6 +87,7 @@ from PartDesignTests.TestLoftOnshape import (  # FreeCAD-CH, ops#655
     TestLoftOnshapeConditions,
     TestLoftOnshapeThreeSections,
     TestLoftEndConditions,  # ops#640
+    TestLoftTangentRule,  # ops#855
 )
 from PartDesignTests.TestLoftConnections import (  # FreeCAD-CH, ops#640
     TestLoftConnectionsTwist,
@@ -246,3 +247,4 @@ from PartDesignTests.Compat.TestCompatCorpus import TestCompatCorpus
 from PartDesignTests.Compat.TestCompatRecord import TestCompatRecord  # ops#343
 from PartDesignTests.Compat.TestCompatRecord import TestCompatDeltas, TestCompatNamesMeasure  # ops#640
 from PartDesignTests.Compat.TestCompatRecord import TestCompatReopenBoxGap  # ops#785
+from PartDesignTests.Compat.TestCompatRecord import TestCompatBoxExplained  # ops#855

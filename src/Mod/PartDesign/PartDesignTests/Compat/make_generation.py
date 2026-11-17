@@ -182,7 +182,9 @@ def optimalBoxGapOnly(saved, reopened):
         return False
     if saved.keys() != reopened.keys() or "box" not in saved:
         return False
-    if not all(_sameValue(saved[k], reopened[k]) for k in saved if k != "box"):
+    # (the box's explanation, CompatRecord.BOX_EXPLANATION, is never compared itself: ops#855)
+    explained = ("box",) + CompatRecord.BOX_EXPLANATION
+    if not all(_sameValue(saved[k], reopened[k]) for k in saved if k not in explained):
         return False
     old, new = saved["box"], reopened["box"]
     return len(old) == len(new) == 6 and all(abs(x - y) <= OPTIMAL_BOX_GAP for x, y in zip(old, new))

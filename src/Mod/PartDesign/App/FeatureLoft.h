@@ -49,6 +49,10 @@ public:
     /// Onshape's connections (ops#640, notes/loft-connections.md): entries 2k and 2k+1 are one
     /// vertex of the Profile and one of the Section that the loft joins
     App::PropertyLinkSubList Connections;
+    /// How "Normal to profile" sizes its tangents (ops#855, R3): "Onshape", the per-rail rule of
+    /// fork-1.0.1 (fork PR 468), or "Legacy", fork-1.0.0's k * distance, which a loft read from a
+    /// file without this property (saved by ForkRelease 12 or older) keeps. Hidden.
+    App::PropertyEnumeration TangentRule;
 
     /** @name methods override feature */
     //@{
@@ -68,6 +72,8 @@ public:
         size_t expected_size = 0
     );
 
+    void Restore(Base::XMLReader& reader) override;
+
 protected:
     // handle changed property
     void handleChangedPropertyType(
@@ -78,6 +84,7 @@ protected:
 
 private:
     static const char* ConditionEnums[];
+    static const char* TangentRuleEnums[];
     // static const char* TypeEnums[];
     // static const char* SideEnums[];
 };

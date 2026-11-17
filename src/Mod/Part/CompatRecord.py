@@ -558,7 +558,78 @@ def _shapeEntry(shape):
     }
     if unbounded:
         entry["unbounded"] = unbounded
+    entry.update(_boxExplanation(bounded, entry["box"]))
     return entry
+
+
+# FreeCAD-CH (ops#855, ops#785): OCCT's optimal box (`box` above) of a curved face lands, on some
+# sides, exactly OPTIMAL_BOX_GAP (Precision::Confusion, 1e-7 mm, whatever the face's tolerance)
+# beyond the surface, and which sides do depends on the platform and on how the same shape is
+# held: macOS reads gen5's Windows-saved RevolveFreeFormProfile with the Revolution's xmax at 7
+# where Windows reads 7.0000001 from the same BRep. So a live record also carries each side's exact
+# extremum (`boxExact`); `compare` takes a box coordinate that differs as the same only when both
+# values are that exact extremum, or it plus exactly the gap outward, at the stage's tolerance. The
+# key explains the box and is never compared itself (records without it, every saved one until
+# gen5, compare as before).
+BOX_EXPLANATION = ("boxExact",)
+OPTIMAL_BOX_GAP = 1e-7
+_SIDES = ((0, -1), (1, -1), (2, -1), (0, 1), (1, 1), (2, 1))
+# Edges whose optimal box is exact (no gap): other curves' boxes (a B-spline's, a degenerated
+# edge's) can carry the gap themselves, so a side only those reach is measured on the faces
+_EXACT_CURVES = ("Line", "LineSegment", "Circle", "ArcOfCircle", "Ellipse", "ArcOfEllipse")
+
+
+def _sides(b):
+    return [b.XMin, b.YMin, b.ZMin, b.XMax, b.YMax, b.ZMax]
+
+
+def _boxExplanation(shape, box):
+    """{"boxExact": the six exact extrema, None where unknown}, or {} for a shape without faces. A
+    side a line, circle or ellipse edge reaches takes that edge's optimal box, which has no gap; any
+    other side the distance to a slab 10 mm beyond it of the faces whose box comes near it
+    (BRepExtrema). A failure leaves the side None, which compares strictly."""
+    import Part
+
+    faces = shape.Faces
+    if not faces:
+        return {}
+    reach = None
+    try:
+        for edge in shape.Edges:
+            if edge.Degenerated or type(edge.Curve).__name__ not in _EXACT_CURVES:
+                continue
+            b = _sides(edge.optimalBoundingBox(False, False))
+            reach = b if reach is None else [min(x, y) if k < 3 else max(x, y)
+                                             for k, (x, y) in enumerate(zip(reach, b))]
+    except Exception:
+        reach = None
+    try:
+        faceBoxes = [_sides(f.optimalBoundingBox(False, False)) for f in faces]
+    except Exception:
+        faceBoxes = None
+    size = max(box[3] - box[0], box[4] - box[1], box[5] - box[2]) + 40.0
+    exact = []
+    for i, (axis, side) in enumerate(_SIDES):
+        if reach is not None and abs(reach[i] - box[i]) <= 2.0 * OPTIMAL_BOX_GAP:
+            exact.append(float(reach[i]))
+            continue
+        try:
+            close = [f for f, b in zip(faces, faceBoxes) if abs(b[i] - box[i]) <= 2.0 * OPTIMAL_BOX_GAP]
+            corner = [box[k] - 20.0 for k in range(3)]
+            corner[axis] = box[i] + 10.0 if side > 0 else box[i] - 11.0
+            extent = [size if k != axis else 1.0 for k in range(3)]
+            slab = Part.makeBox(extent[0], extent[1], extent[2], _Vector(*corner))
+            d = min(f.distToShape(slab)[0] for f in close)
+            exact.append(float(box[i] + side * (10.0 - d)))
+        except Exception:
+            exact.append(None)
+    return {"boxExact": exact}
+
+
+def _Vector(x, y, z):
+    import FreeCAD
+
+    return FreeCAD.Vector(x, y, z)
 
 
 def _sketchGeometry(sketch, geometry):
@@ -811,7 +882,13 @@ class _Comparison:
                 self.value(f"{where}[{i}]", e, a)
             return
         if isinstance(expected, dict) and isinstance(actual, dict):
+            explained = "box" in expected and "box" in actual and "boxExact" in actual
             for k in sorted(set(expected) | set(actual)):
+                if k in BOX_EXPLANATION:
+                    continue
+                if k == "box" and explained:
+                    self.box(f"{where}.box", expected["box"], actual["box"], actual)
+                    continue
                 if k not in actual:
                     self.differ(f"{where}.{k}", expected[k], "(missing)")
                 elif k not in expected:
@@ -821,6 +898,43 @@ class _Comparison:
             return
         if expected != actual:
             self.differ(where, expected, actual)
+
+
+    def box(self, where, expected, actual, entry):
+        """A box (BOX_EXPLANATION): a coordinate that differs is the same when both values are the
+        side's exact extremum, or it plus exactly OPTIMAL_BOX_GAP outward, at this tolerance."""
+        exact = entry.get("boxExact")
+        if not (isinstance(expected, list) and isinstance(actual, list)) or len(expected) != len(actual):
+            self.value(where, expected, actual)
+            return
+        if not isinstance(exact, list) or len(exact) != len(actual):
+            self.value(where, expected, actual)
+            return
+        for i, (e, a) in enumerate(zip(expected, actual)):
+            w = f"{where}[{i}]"
+            if (
+                w in self.deltas
+                or not isinstance(e, (int, float))
+                or isinstance(e, bool)
+                or not isinstance(a, (int, float))
+                or isinstance(a, bool)
+                or abs(float(e) - float(a)) <= max(self.abs, self.rel * max(abs(e), abs(a)))
+                or exact[i] is None
+                or i >= len(_SIDES)
+            ):
+                self.value(w, e, a)
+                continue
+            side = _SIDES[i][1]
+
+            def onSide(v):
+                return any(
+                    abs(float(v) - (exact[i] + side * g))
+                    <= max(self.abs, self.rel * max(abs(v), abs(exact[i])))
+                    for g in (0.0, OPTIMAL_BOX_GAP)
+                )
+
+            if not (onSide(e) and onSide(a)):
+                self.differ(w, e, a)
 
 
 def _short(value, limit=160):
