@@ -321,8 +321,19 @@ class KernelBudgetTest(unittest.TestCase):
         self.assertAlmostEqual(cut.Shape.Volume, 1000 - math.pi * 4 * 10 / 4, places=6)
 
     def testAbandonedWorkersDoNotDisturbLaterWork(self):
-        # Five fillets stopped at the limit and abandoned, then ordinary modelling in the same
-        # process. The limits climb so that on a slow machine the later ones still start
+        # A worker that never reads the cancel, abandoned at its stop and still running, then five
+        # fillets stopped at the limit, then ordinary modelling in the same process. The fillets
+        # alone don't make an abandoned worker on every machine: on a fast one each reads the
+        # cancel within the 0.3 s grace and ends, so abandonedTotal stayed 0 (macOS CI, ops#855).
+        # The deaf trial sleeps, so it stops by the clock's backstop (4 x 0.3 s) whatever the load,
+        # 1.5 s before it would end. The fillets' limits climb so that on a slow machine the later
+        # ones still start
+        self.setLimit(0.3)
+        error = Part.kernelBudgetTrial(3.0, False, True)
+        self.assertIn("took longer than", error)
+        # (Only the total: a worker an earlier test abandoned may end meanwhile, so the running
+        # count can stay where it was)
+        self.assertGreaterEqual(Part.kernelBudget()["abandonedTotal"], self.totalBefore + 1)
         doc, body = self.lid(4000)
         names = outer_top_edges(body.BaseFeature.Shape)
         fillets = []
@@ -335,7 +346,6 @@ class KernelBudgetTest(unittest.TestCase):
             self.assertFalse(f.isValid())
             self.assertIn("took longer than", f.getStatusString())
             fillets.append(f)
-        self.assertGreaterEqual(Part.kernelBudget()["abandonedTotal"], self.totalBefore + 1)
         self.setLimit(60)
         doc2 = FreeCAD.newDocument("KernelBudgetAfter")
         self.docs.append(doc2)
