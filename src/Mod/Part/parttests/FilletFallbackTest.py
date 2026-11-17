@@ -6012,3 +6012,56 @@ class KeyholeBossCornerTest(unittest.TestCase):
         body, edges = self.body(0.9662, step=10)
         with self.assertRaises(Exception):
             body.makeChamfer(1.0, edges)
+
+    def testEndLinePickedTooIsRefused(self):
+        # The slot's end line x 14 picked too (skeptic A3b-R2-1): the end corner's miter belongs to
+        # the end line's tool, clipped only over its own wall, and half of it would stand above the
+        # boss top (zmax 4.0 at h 0.5). No Onshape fact: refused
+        body, edges = self.body(0.5)
+        end = [
+            e
+            for e in body.Edges
+            if e.Curve.TypeId == "Part::GeomLine"
+            and all(abs(v.Point.z - 3) < 1e-9 and abs(v.Point.x - 14) < 1e-9 for v in e.Vertexes)
+        ]
+        self.assertEqual(len(end), 1)
+        for dress in (body.makeChamfer, body.makeFillet):
+            with self.assertRaises(Exception):
+                dress(1.0, edges + end)
+
+
+class DPocketCornerTest(unittest.TestCase):
+    """ops#888 A3b, designed (skeptic A3b-R2-2): a block 24 x 24 x 5 with a D-shaped pocket of depth
+    h, the disk r 6 about the z axis cut by the chord y = w, its seam turned away from the arc's
+    ends. The floor's arc and chord meet at two concave corners reflex in the material, the same
+    pair of fills at both. A chamfer or fillet c on both, with walls lower than c: the fills,
+    clipped by the block top, meet along their intersection at each corner, and the pair's overlap
+    outside the base is counted once. The reference: the base united with the arc's fill (its
+    section revolved a whole turn) and the chord's (extruded past both corners), clipped by the top
+    z 5."""
+
+    def body(self, w, h):
+        V = FreeCAD.Vector
+        disk = Part.makeCylinder(6, h, V(0, 0, 5 - h))
+        disk.rotate(V(0, 0, 0), V(0, 0, 1), 90)
+        air = disk.common(Part.makeBox(40, 20 + w, 10, V(-20, -20, 0)))
+        body = Part.makeBox(24, 24, 5, V(-12, -12, 0)).cut(air).removeSplitter()
+        floor = [e for e in body.Edges if all(abs(v.Point.z - (5 - h)) < 1e-9 for v in e.Vertexes)]
+        self.assertEqual(len(floor), 2)
+        return body, floor
+
+    def check(self, result, body, added):
+        self.assertTrue(result.isValid())
+        self.assertEqual(len(result.Solids), 1)
+        self.assertAlmostEqual(result.Volume - body.Volume, added, delta=5e-5)
+        self.assertLess(result.optimalBoundingBox().ZMax, 5 + 1e-6)
+        self.assertEqual(len(result.Faces), 9)
+
+    def testChamfer(self):
+        body, floor = self.body(2, 0.5)
+        # The reference adds 11.865546; the two fills overlap by 0.609584 outside the base
+        self.check(body.makeChamfer(1.0, floor), body, 11.865546)
+
+    def testFillet(self):
+        body, floor = self.body(4, 0.5)
+        self.check(body.makeFillet(1.0, floor), body, 6.749786)

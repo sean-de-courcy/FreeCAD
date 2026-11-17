@@ -8745,6 +8745,37 @@ TopoDS_Shape constructShape(
                     // wall too)
                     BRepAdaptor_Curve source(TopoDS::Edge(tool.source));
                     if (source.GetType() == GeomAbs_Line) {
+                        // At its other end the line's tool meets no other fill: a miter there is
+                        // that fill's tool and is clipped only over its own wall's top edge, so
+                        // half of it would stand above the plane (skeptic A3b-R2-1: the slot's
+                        // end line picked too). Literal rule: refuse
+                        TopoDS_Vertex ends[2];
+                        TopExp::Vertices(TopoDS::Edge(tool.source), ends[0], ends[1]);
+                        for (const auto& end : ends) {
+                            const bool atOverlap = std::any_of(
+                                overlapCorners.begin(),
+                                overlapCorners.end(),
+                                [&](const auto& corner) { return corner.vertex.IsSame(end); }
+                            );
+                            if (atOverlap) {
+                                continue;
+                            }
+                            for (const auto& other : tools) {
+                                if (&other == &tool || other.source.ShapeType() != TopAbs_EDGE) {
+                                    continue;
+                                }
+                                TopoDS_Vertex otherEnds[2];
+                                TopExp::Vertices(
+                                    TopoDS::Edge(other.source),
+                                    otherEnds[0],
+                                    otherEnds[1]
+                                );
+                                if (end.IsSame(otherEnds[0]) || end.IsSame(otherEnds[1])) {
+                                    refuse("a line's fill at a concave corner reflex in the material "
+                                           "meets another fill at its other end");
+                                }
+                            }
+                        }
                         const TrimPlane& plane = known->planes.front();
                         checkWallLeadsTo(run.face, tool.source, plane, base.getShape());
                         const double size = 4 * std::sqrt(squareSize(tool.solid)) + 1
@@ -8815,6 +8846,9 @@ TopoDS_Shape constructShape(
         return cut.Shape();
     };
     std::vector<const Tool*> partners;
+    // Each pair of fills counted once: a D pocket's arc and chord meet at two corners (skeptic
+    // A3b-R2-2)
+    std::vector<std::pair<const Tool*, const Tool*>> counted;
     for (const auto& corner : overlapCorners) {
         const Tool* pair[2] = {nullptr, nullptr};
         const EdgeData* sides[2] = {nullptr, nullptr};
@@ -8897,7 +8931,11 @@ TopoDS_Shape constructShape(
         if (overlap <= volumeTolerance * std::min(pair[0]->volume, pair[1]->volume)) {
             refuse("the fills at a concave corner reflex in the material do not overlap");
         }
-        fusedOverlap += overlap;
+        const std::pair<const Tool*, const Tool*> key = std::minmax(pair[0], pair[1]);
+        if (std::find(counted.begin(), counted.end(), key) == counted.end()) {
+            counted.emplace_back(key);
+            fusedOverlap += overlap;
+        }
     }
     // No other two fused tools overlap outside the base: the sum above is the union's
     for (size_t i = 0; i < partners.size(); ++i) {
