@@ -558,14 +558,16 @@ class TestLoftTangentRule(LoftCase):
     same k). fork-1.0.0's own package gives 7344.4342857 for this loft."""
 
     @staticmethod
-    def volume(k):
+    def volume(k, kEnd=None):
+        """k at the start, kEnd (default k) at the end: z(s) = k/3 B1 + (10 - kEnd/3) B2 + 10 B3."""
+        kEnd = k if kEnd is None else kEnd
         n = 2000
         total = 0.0
         for i in range(n + 1):
             s = i / n
             t = 1 - s
             x = 20 * (t**3 + 3 * s * t * t) + 5 * (3 * s * s * t + s**3)
-            dz = t * t * k + 6 * s * t * (10 - 2 * k / 3) + s * s * k
+            dz = t * t * k + 6 * s * t * (10 - k / 3 - kEnd / 3) + s * s * kEnd
             total += (1 if i in (0, n) else (4 if i % 2 else 2)) * 4 * x * x * dz
         return total / (3 * n)
 
@@ -648,14 +650,19 @@ class TestLoftTangentRule(LoftCase):
         self.assertLoft(loft, self.volume(self.ONSHAPE), loft.Shape.Area, 6, delta=1e-4)
 
     def testLegacyMagnitudeZeroIsAZeroTangent(self):
-        """fork-1.0.0 built a magnitude of 0 as a tangent of length 0 (the rows' inner poles on the
-        ends: the ruled frustum, 10/3 (1600 + 100 + 400) = 7000); Onshape's rule builds the plain loft
-        (the same frustum here, with the plain loft's faces)."""
+        """fork-1.0.0 built a magnitude of 0 as a tangent of length 0: with 0 at the start and 1 at the
+        end, the rows' start poles coincide (k 0 there), 5665.317 by the integral (fork-1.0.0's package
+        gives the same). Onshape's rule takes 0 as no start condition: an end-only loft, another shape."""
         loft = self.conditioned()
         loft.TangentRule = "Legacy"
-        loft.StartMagnitude = loft.EndMagnitude = 0.0
+        loft.StartMagnitude = 0.0
         self.doc.recompute()
-        self.assertLoft(loft, 7000.0, loft.Shape.Area, 6, delta=1e-4)
+        self.assertLoft(loft, self.volume(0.0, self.LEGACY), loft.Shape.Area, 6, delta=1e-4)
+        self.assertAlmostEqual(loft.Shape.Volume, 5665.3171429, delta=1e-4)
+        loft.TangentRule = "Onshape"
+        self.doc.recompute()
+        self.assertTrue(loft.isValid(), loft.getStatusString())
+        self.assertGreater(abs(loft.Shape.Volume - 5665.3171429), 100)
 
 
 if __name__ == "__main__":

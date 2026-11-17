@@ -1353,7 +1353,8 @@ Loft::Loft()
         (1.0),
         "Loft",
         App::Prop_None,
-        "Scale of the start condition's tangent (0: no condition, as Onshape)"
+        "Scale of the start condition's tangent (0: no condition, as Onshape; a Legacy loft: a "
+        "tangent of length 0)"
     );
     ADD_PROPERTY_TYPE(
         EndCondition,
@@ -1368,7 +1369,8 @@ Loft::Loft()
         (1.0),
         "Loft",
         App::Prop_None,
-        "Scale of the end condition's tangent (0: no condition, as Onshape)"
+        "Scale of the end condition's tangent (0: no condition, as Onshape; a Legacy loft: a tangent "
+        "of length 0)"
     );
     ADD_PROPERTY_TYPE(
         Connections,
