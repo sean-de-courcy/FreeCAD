@@ -477,7 +477,8 @@ names it.
 | `fix/i888-a2b-ring-not-occt` | fix | ops#888 | - | `fix/i888-a2-arc-end` (fork PR 473) | `f14f204eac` (fork PR 474), 2026-11-17 | never (fork fix): an arc's dress-up closing into a ring past its end plane or two walls is built, never OCCT's (A2b) |
 | `fix/i888-a1-runoff-both` | fix | ops#888 | - | `fix/i888-a2b-ring-not-occt` (fork PR 474) | `9ed1aa5aac` (fork PR 476), 2026-11-17 | never (fork fix): a chamfer or round past both faces of a rail, trimmed by the wall it runs into (Onshape DU1, DU4) |
 | `fix/i855-compat-loft-onshape-rule` | fix | ops#855 | - | `integration` `155c405a7a` | `aa0f95f2a0` (fork PR 478), 2026-11-17 | never (fork test): compat model of a Normal-to-profile loft saved with Onshape's tangent rule |
-| `fix/i889-thicken` | fix | ops#889 | - | `integration` `96579d3cf2` | (fork PR 475) | never (fork feature) |
+| `fix/i889-thicken` | fix | ops#889 | - | `integration` `96579d3cf2` | `ac14419632` (fork PR 475), 2026-11-17 | never (fork feature) |
+| `fix/i888-a3-line-arc-corner` | fix | ops#888 | - | `fix/i888-a1-runoff-both` (fork PR 476, on fork PR 474) | (fork PR 477) | never (fork fix): a concave arc-and-line chamfer on walls lower than it is clipped by the face beyond, as Onshape's (A3) |
 
 ## Fork-only commits in carried topics
 
