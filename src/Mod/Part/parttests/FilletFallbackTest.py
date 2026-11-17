@@ -5930,6 +5930,43 @@ class KeyholePocketChamferTest(unittest.TestCase):
                         body.makeFillet(1.0, arc)
                 self.assertIn("exact construction refused", str(caught.exception))
 
+    def testSmoothBorderOfARoundIsNotRebuiltLarger(self):
+        # A 20 x 20 x 10 block with a round of radius 2 on its top edge at x = 0 (convex), and an
+        # L whose inside corner carries one (concave). The round's borders with the flat faces are
+        # smooth: the faces are tangent along them, with nothing to round, and OCCT throws "There
+        # are no suitable edges for chamfer or fillet". A fillet of a border alone, or of both, at
+        # R 2.5 or 4 is refused, as before ops#888's catch of OCCT's other errors; the construction
+        # never rebuilds the round larger (review prerr-r1f F1)
+        V = FreeCAD.Vector
+        box = Part.makeBox(20, 20, 10)
+        top = [e for e in box.Edges if abs(e.BoundBox.ZMin - 10) < 1e-9 and e.BoundBox.XMax < 1e-9]
+        el = Part.makeBox(20, 20, 10).cut(Part.makeBox(10, 20, 5, V(10, 0, 5)))
+        corner = [
+            e
+            for e in el.Edges
+            if abs(e.BoundBox.XMin - 10) < 1e-9
+            and abs(e.BoundBox.XMax - 10) < 1e-9
+            and abs(e.BoundBox.ZMin - 5) < 1e-9
+            and abs(e.BoundBox.ZMax - 5) < 1e-9
+        ]
+        self.assertEqual((len(top), len(corner)), (1, 1))
+        for name, body in (("convex", box.makeFillet(2, top)), ("concave", el.makeFillet(2, corner))):
+            borders = []
+            for e in body.Edges:
+                faces = body.ancestorsOfType(e, Part.Face)
+                if len(faces) != 2 or e.Curve.TypeId != "Part::GeomLine":
+                    continue
+                p = e.valueAt((e.FirstParameter + e.LastParameter) / 2)
+                n = [f.normalAt(*f.Surface.parameter(p)) for f in faces]
+                if abs(abs(n[0].dot(n[1])) - 1) < 1e-9:
+                    borders.append(e)
+            self.assertEqual(len(borders), 2, name)
+            for selection in ([borders[0]], [borders[1]], borders):
+                for radius in (2.5, 4.0):
+                    with self.subTest(body=name, edges=len(selection), radius=radius):
+                        with self.assertRaises(Exception):
+                            body.makeFillet(radius, selection)
+
     def testSteppedTopOverGroovedFloorIsRefused(self):
         # The same pocket with a groove 1 wide, 0.3 deep, across its floor, the slab over x < -2:
         # the floor circle in three arcs, the wall one face. The left arc's tool runs under the
