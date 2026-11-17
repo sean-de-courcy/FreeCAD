@@ -218,6 +218,7 @@ from PartDesignTests.TestVariableHistoryPosition import TestVariableHistoryPosit
 from PartDesignTests.TestSolidOps import TestThicken, TestThickenOnshapeOptions, TestScale, TestOffsetSurface, TestSolidOpsExpressions, TestThickenBend, TestThickenPipe  # FreeCAD-CH, lane solid-ops
 # TestThickenObliqueLeg fails on Windows at its fixture (5 tests, known: tests/known-failures, ops#753)
 from PartDesignTests.TestSolidOps import TestThickenObliqueLeg, TestThickenSeamLeg, TestThickenPlanarCaps  # FreeCAD-CH (ops#640)
+from PartDesignTests.TestSolidOps import TestThickenSheetCaps  # FreeCAD-CH (ops#889)
 
 # Studio features (FreeCAD-CH, ops#654, ops#655)
 from PartDesignTests.TestStudioList import (

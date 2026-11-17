@@ -491,11 +491,23 @@ def _fused(pieces, probes, pinched=False, disjoint=False):
     raise SolidOpsError("Thicken failed: the thickened bend is not one valid solid")
 
 
-def _sheet_piece(surf, t1, t2):
-    """OCC's thick piece of a whole smooth sheet: offset by -t2, then filled through t1 + t2, checked."""
+def _sheet_join(surf):
+    """OCC's offset join for a sheet: 2 (intersection: the offset faces extended to meet, a mitre, as Onshape)
+    when two of its faces meet at a sharp edge, else 0 (arc). The arc join puts a round face at a sharp edge's
+    convex side, and the fill's cap wire is then open ("ThruSections failed", ops#889)."""
+    if len(surf.Faces) < 2:
+        return 0
     try:
-        start = surf.makeOffsetShape(-t2, TOL) if t2 > TOL else surf
-        solid = start.makeOffsetShape(t1 + t2, TOL, False, False, 0, 0, True)
+        return 0 if _tangent_joins(surf.Faces) else 2
+    except Exception:
+        return 0
+
+
+def _filled_offset(surf, t1, t2, join):
+    """The sheet offset by -t2 (start), then filled through t1 + t2 (solid), checked: (solid, start)."""
+    try:
+        start = surf.makeOffsetShape(-t2, TOL, False, False, 0, join) if t2 > TOL else surf
+        solid = start.makeOffsetShape(t1 + t2, TOL, False, False, 0, join, True)
     except Exception as e:
         raise SolidOpsError("Thicken failed: %s" % e)
     _check_offset(surf, solid, "Thicken")
@@ -503,7 +515,87 @@ def _sheet_piece(surf, t1, t2):
         raise SolidOpsError("Thicken failed: the result has no solid")
     if solid.Volume <= TOL:
         raise SolidOpsError("Thicken failed: the result has no volume")
-    return solid
+    return solid, start
+
+
+def _no_join_faces(surf, solid, start):
+    """True when the filled offset has only the sheet's two offsets and one cap strip per free boundary edge:
+    no round face was put at a sharp edge (the arc join's, where Onshape mitres)."""
+    if len(start.Faces) != len(surf.Faces):
+        return False
+    free = Part.Shell(start.Faces).getFreeEdges()
+    return len(solid.Faces) == 2 * len(start.Faces) + len(free.Edges)
+
+
+def _sheet_piece(surf, t1, t2):
+    """OCC's thick piece of a whole sheet: offset by -t2, then filled through t1 + t2, checked; its planar
+    caps rebuilt on planes and merged (_merge_caps). A sheet with a sharp edge takes the arc join where that
+    gives the mitred solid anyway (no round join face: today's result and names), else the intersection join."""
+    join = _sheet_join(surf)
+    if join == 0:
+        solid, start = _filled_offset(surf, t1, t2, 0)
+    else:
+        try:
+            solid, start = _filled_offset(surf, t1, t2, 0)
+            ok = _no_join_faces(surf, solid, start)
+        except Exception:
+            ok = False
+        if ok:
+            join = 0
+        else:
+            solid, start = _filled_offset(surf, t1, t2, 2)
+    return _merge_caps(_plane_caps(solid), start, t1 + t2, join)
+
+
+def _same_face(f, g):
+    """f and g are the same face as geometry: area and centre of mass (two offsets of one sheet give
+    bitwise-close faces; a merged face differs in area and centre). Not the surface kind: _plane_caps
+    rebuilds a planar B-spline lateral on a Plane (ops#889 skeptic 2, finding 1)."""
+    size = max(1.0, f.Area)
+    return abs(f.Area - g.Area) <= 1e-6 * size and (f.CenterOfMass - g.CenterOfMass).Length <= 1e-6 * max(1.0, math.sqrt(size))
+
+
+def _lateral_match(laterals, shape):
+    """For each lateral face, the edge count of the one face of the shape it matches (each a different
+    face), or None when one matches none or several."""
+    used, counts = set(), []
+    for f in laterals:
+        hits = [k for k, g in enumerate(shape.Faces) if _same_face(f, g)]
+        if len(hits) != 1 or hits[0] in used:
+            return None
+        used.add(hits[0])
+        counts.append(len(shape.Faces[hits[0]].Edges))
+    return counts
+
+
+def _laterals_kept(laterals, piece, res):
+    """Every lateral face is in the piece and in the merged result, with the same edges count in both: the
+    merge touched only the caps (a lateral whose collinear rim edges merge keeps the piece: skeptic 2, 4)."""
+    before = _lateral_match(laterals, piece)
+    return before is not None and before == _lateral_match(laterals, res)
+
+
+def _merge_caps(piece, start, t, join):
+    """The piece with its cap strips merged into one face per planar end (the fill lofts one strip per
+    boundary edge; Onshape has one cap), whatever Refine says. Taken only when the merge leaves every
+    lateral face untouched (the faces of start and of its unfilled offset by t, found by geometry: isSame
+    does not survive removeSplitter), keeps one valid solid of the same volume; else the piece as it was.
+    A sheet whose own faces lie on one surface (a circle drawn as two arcs) keeps split caps, since the
+    merge would join its laterals too and a later rim fillet fails there (ops#889 skeptic finding 1)."""
+    try:
+        res = piece.removeSplitter()
+        if len(res.Faces) >= len(piece.Faces):
+            return piece
+        if (res.isNull() or not res.isValid() or len(res.Solids) != len(piece.Solids)
+                or abs(res.Volume - piece.Volume) > TOL * max(1.0, abs(piece.Volume))):
+            return piece
+        far = start.makeOffsetShape(t, TOL, False, False, 0, join)
+        laterals = list(start.Faces) + list(far.Faces)
+        if len(far.Faces) != len(start.Faces) or not _laterals_kept(laterals, piece, res):
+            return piece
+    except Exception:
+        return piece
+    return res
 
 
 def _has_full_cylinder(group):
