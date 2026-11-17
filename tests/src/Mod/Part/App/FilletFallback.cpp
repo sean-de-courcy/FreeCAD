@@ -4275,4 +4275,18 @@ TEST_F(FilletFallbackTest, aChamferPastBothFacesIntoTheAirIsRefused)
     EXPECT_NE(reason.find("runs past both its faces"), std::string::npos) << reason;
 }
 
+TEST_F(FilletFallbackTest, aRoundPastBothFacesOfARailIsRefused)
+{
+    // The A1 rail's edge rounded 1.5: the round would run off both faces as the chamfer does, but no
+    // Onshape fact records what Onshape builds there (DU1 is a chamfer): refused, flag or not
+    TopoShape base(plateWithARail(1.056), 1L);
+    TopoShape edge = edgeBetween(base, {0, 9.528, 4}, {40, 9.528, 4});
+    ASSERT_FALSE(edge.isNull());
+    FF::Request request = fillet(1.5);
+    request.pastBothFaces = true;
+    std::string reason;
+    EXPECT_TRUE(forced(base, {edge}, request, &reason).isNull());
+    EXPECT_NE(reason.find("runs past both its faces"), std::string::npos) << reason;
+}
+
 // NOLINTEND(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)
