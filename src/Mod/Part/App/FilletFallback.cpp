@@ -583,6 +583,12 @@ enum class VertexClass
     /// reach. Each tool runs on past the vertex (VertexEnd::runOn) and ends on the mitre, the
     /// vertical cylinder over the two walls' bisector. No face of the corner's own
     Corner2Reflex,
+    /// Concave edges, a line and a circle, at a vertex reflex in the material (ops#888 A3b, the
+    /// oracle's DU6: a keyhole boss's foot at its outline's concave corner): Onshape's fills meet
+    /// along their intersection. Each fused tool runs on past the vertex (VertexEnd::runOn) until
+    /// its section lies on the material side of the other edge's wall, where the base and the
+    /// other tool absorb it, and the two overlap. Only where OCCT failed (Request::widerScope)
+    Corner2Overlap,
     /// All three edges at the vertex are selected (a three-edge corner): the edge tools end
     /// where a corner tool (a sphere patch, or a chamfer's corner triangle) begins
     Corner3,
@@ -1467,8 +1473,9 @@ struct VertexEnd
     TopoDS_Edge continuation;  // TangentContinuation: the other selected edge
     TopoDS_Face beyond;        // Overflow: the face whose surface trims the end round
     std::string reason;
-    /// Corner2Reflex: the other selected edge, and how far the tool runs on past the vertex (an
-    /// angle about a circle's axis, a length along a line), set before the tool is built
+    /// Corner2Reflex, Corner2Overlap: the other selected edge, and how far the tool runs on past
+    /// the vertex (an angle about a circle's axis, a length along a line), set before the tool is
+    /// built
     TopoDS_Edge other;
     double runOn = 0.0;
 };
@@ -1584,10 +1591,6 @@ VertexEnd classifyUnionCorner(
     // Concave edges (ops#640, #15): a chamfer's, at a corner convex in the material (oracle 9d's
     // keyhole groove: a sharp miter); Onshape's concave fillets there are not known yet
     const bool concave = !data.convex;
-    if (concave && ctx.request.kind != Kind::Chamfer) {
-        end.reason = "a concave fillet at a corner with a circle";
-        return end;
-    }
     if (ctx.request.kind == Kind::Chamfer && !equalDistances(ctx.request)) {
         end.reason = "a two-distance or distance-angle chamfer at a corner";
         return end;
@@ -1618,6 +1621,22 @@ VertexEnd classifyUnionCorner(
     // leaves it away from the face's side of the other, and the tools, fused, leave a wedge of air
     // between their end planes that the miter piece fills (miterTool)
     double sign = concave ? -1.0 : 1.0;
+    // Concave edges at a vertex reflex in the material (convex in the shared face): each edge
+    // leaves the vertex into the face's side of the other, and the fills overlap there (ops#888
+    // A3b, DU6: Onshape's meet along their intersection). A line and a circle, chamfer or fillet
+    if (concave && ctx.request.widerScope && data.line != other->line
+        && inwardIn(shared, data.edge, here).Dot(otherAway) > angularTolerance
+        && inwardIn(shared, other->edge, there).Dot(away) > angularTolerance) {
+        end.kind = VertexClass::Corner2Overlap;
+        end.other = other->edge;
+        end.trims = {{BRepAdaptor_Curve(data.edge).Value(here), away.Reversed()}};
+        return end;
+    }
+    // Onshape's concave fillets at a corner convex in the material are not known yet
+    if (concave && ctx.request.kind != Kind::Chamfer) {
+        end.reason = "a concave fillet at a corner with a circle";
+        return end;
+    }
     // Convex edges at a vertex reflex in the shared face: each edge leaves the vertex away from
     // the face's side of the other (FSLC #50): Onshape's mitre (Corner2Reflex)
     if (!concave && inwardIn(shared, data.edge, here).Dot(otherAway) < -angularTolerance
@@ -3970,6 +3989,10 @@ std::optional<Tool> lineTool(const Context& ctx, const EdgeData& data, const Ver
         else if (ends[i].kind == VertexClass::Corner2Union) {
             tool.unionEnds.push_back(ends[i].trims.front());
         }
+        else if (ends[i].kind == VertexClass::Corner2Overlap) {
+            // Its end face run on lies in the base's material: nothing of it may be left
+            tool.unionEnds.push_back(ends[i].trims.front());
+        }
     }
     return tool;
 }
@@ -4507,7 +4530,18 @@ Tool circleTool(const Context& ctx, const EdgeData& data, const VertexEnd ends[2
         runAfter = 0.0;
         turn = 2 * pi;
     }
-    else if (endTrim[0] || endTrim[1]) {
+    // Run on past a concave corner reflex in the material (Corner2Overlap, ops#888 A3b), beside
+    // whatever the other end does but a ring
+    double overlapRun[2] = {0.0, 0.0};
+    for (int i = 0; i < 2 && !data.closed; ++i) {
+        if (ends[i].kind == VertexClass::Corner2Overlap) {
+            if (ring || pre + post > 0.0 || runBefore + runAfter > 0.0) {
+                refuse("an arc run on past a concave corner whose other end runs on too");
+            }
+            overlapRun[i] = ends[i].runOn;
+        }
+    }
+    if (!ring && (endTrim[0] || endTrim[1])) {
         // Each end is trimmed within its sector, from where the section first reaches beyond the
         // plane before the end to past where the tool ends (below): less than half a turn, and
         // the two sectors apart
@@ -4530,6 +4564,14 @@ Tool circleTool(const Context& ctx, const EdgeData& data, const VertexEnd ends[2
         runBefore = pastEnd[0];
         runAfter = pastEnd[1];
         turn = span + runBefore + runAfter;
+    }
+    if (overlapRun[0] + overlapRun[1] > 0.0) {
+        runBefore += overlapRun[0];
+        runAfter += overlapRun[1];
+        turn += overlapRun[0] + overlapRun[1];
+        if (turn + 0.15 > 2 * pi) {
+            refuse("an arc's tool run on past a concave corner reaches its other end");
+        }
     }
     gp_Trsf startTurn;
     startTurn.SetRotation(axis, -pre - ringLead);
@@ -4580,7 +4622,13 @@ Tool circleTool(const Context& ctx, const EdgeData& data, const VertexEnd ends[2
         // pieces). The turn is short of a whole one (above), so the seam is outside it
         gp_Dir seam = circle.XAxis().Direction();
         if (!data.closed) {
-            seam.Rotate(axis, (data.first - pre - pastEnd[0] + data.last + post + pastEnd[1]) / 2 + pi);
+            seam.Rotate(
+                axis,
+                (data.first - pre - pastEnd[0] - overlapRun[0] + data.last + post + pastEnd[1]
+                 + overlapRun[1])
+                        / 2
+                    + pi
+            );
         }
         gp_Ax2 frame(axisPoint, z, seam);
         TopoDS_Shape round;
@@ -4814,6 +4862,15 @@ Tool circleTool(const Context& ctx, const EdgeData& data, const VertexEnd ends[2
         }
         else if (ends[i].kind == VertexClass::Corner2Union) {
             tool.unionEnds.push_back(ends[i].trims.front());
+        }
+        else if (ends[i].kind == VertexClass::Corner2Overlap) {
+            // The meridian plane where its run on ends, inside the base's material: nothing of
+            // its end face there may be left
+            const double at = i == 1 ? data.last + overlapRun[1] : data.first - overlapRun[0];
+            gp_Pnt point;
+            gp_Vec tangent;
+            ElCLib::D1(at, circle, point, tangent);
+            tool.unionEnds.push_back({point, gp_Dir(i == 1 ? tangent : -tangent)});
         }
     }
     return tool;
@@ -5945,10 +6002,19 @@ bool checkStrips(
     std::vector<TopoDS_Face>& wallFaces,
     std::vector<FusedRun>& fusedRuns,
     std::vector<SurfaceWall>& surfaceWalls,
-    bool pastBothFaces
+    bool pastBothFaces,
+    const std::vector<std::pair<TopoDS_Shape, TopoDS_Shape>>& overlapPairs = {}
 )
 {
     bool trimmed = false;
+    // The fused tools of a concave corner reflex in the material (Corner2Overlap), which overlap
+    // by construction: their union is measured
+    auto overlapPair = [&](const Tool* a, const Tool* b) {
+        return std::any_of(overlapPairs.begin(), overlapPairs.end(), [&](const auto& pair) {
+            return (pair.first.IsSame(a->source) && pair.second.IsSame(b->source))
+                || (pair.first.IsSame(b->source) && pair.second.IsSame(a->source));
+        });
+    };
     struct OnFace
     {
         TopoDS_Face face;
@@ -6089,7 +6155,9 @@ bool checkStrips(
                         );
                         double area = areaOf(commonOf(mine, theirs));
                         if (expected == 0.0 && area > tolerance) {
-                            if (!group.owners[i]->cut || !group.owners[j]->cut) {
+                            if ((!group.owners[i]->cut || !group.owners[j]->cut)
+                                && !(!group.owners[i]->cut && !group.owners[j]->cut
+                                     && overlapPair(group.owners[i], group.owners[j]))) {
                                 refuse("two tangent strips of a concave dress-up overlap");
                             }
                             trimmed = true;
@@ -6152,7 +6220,14 @@ bool checkStrips(
         });
     };
     for (const auto& tool : tools) {
-        bool onAFace = tool.strips.empty();
+        // A fill at a concave corner reflex in the material (Corner2Overlap, ops#888 A3b) runs
+        // off both faces past its vertex, into the material and the other fill, which the caller
+        // checks absorb it once both are clipped
+        const bool overlapFill = !tool.cut
+            && std::any_of(overlapPairs.begin(), overlapPairs.end(), [&](const auto& pair) {
+                   return pair.first.IsSame(tool.source) || pair.second.IsSame(tool.source);
+               });
+        bool onAFace = tool.strips.empty() || overlapFill;
         for (const auto& strip : tool.strips) {
             onAFace = onAFace
                 || std::find(offTheFace.begin(), offTheFace.end(), &strip) == offTheFace.end();
@@ -6326,6 +6401,52 @@ void clipTool(Tool& tool, const TopoDS_Shape& behind)
     }
     tool.solid = solid;
     tool.volume = volumeOf(solid);
+}
+
+/** A line's wall under the plane that clips its fused tool as a whole (ops#888 A3b): every edge
+ * of the wall other than the line is a line along it whose other face lies in the plane, or a
+ * line along the plane's normal. Then the wall's top is that plane all along the line, and the
+ * half-space beyond it clips the tool nowhere under a taller wall
+ */
+void checkWallLeadsTo(
+    const TopoDS_Face& wall,
+    const TopoDS_Shape& source,
+    const TrimPlane& plane,
+    const TopoDS_Shape& base
+)
+{
+    const gp_Dir along = BRepAdaptor_Curve(TopoDS::Edge(source)).Line().Direction();
+    TopTools_IndexedDataMapOfShapeListOfShape faceOfEdge;
+    TopExp::MapShapesAndUniqueAncestors(base, TopAbs_EDGE, TopAbs_FACE, faceOfEdge);
+    for (TopExp_Explorer it(wall, TopAbs_EDGE); it.More(); it.Next()) {
+        const TopoDS_Edge& edge = TopoDS::Edge(it.Current());
+        if (edge.IsSame(source) || BRep_Tool::Degenerated(edge)) {
+            continue;
+        }
+        BRepAdaptor_Curve curve(edge);
+        if (curve.GetType() == GeomAbs_Line && parallel(curve.Line().Direction(), plane.normal)) {
+            continue;
+        }
+        bool leads = false;
+        if (curve.GetType() == GeomAbs_Line && parallel(curve.Line().Direction(), along)) {
+            if (const auto* faces = faceOfEdge.Seek(edge)) {
+                for (const auto& next : *faces) {
+                    if (next.IsSame(wall)) {
+                        continue;
+                    }
+                    BRepAdaptor_Surface surface(TopoDS::Face(next), Standard_False);
+                    leads = surface.GetType() == GeomAbs_Plane
+                        && parallel(surface.Plane().Axis().Direction(), plane.normal)
+                        && std::abs(gp_Vec(plane.point, surface.Plane().Location())
+                                        .Dot(gp_Vec(plane.normal)))
+                            <= linearTolerance;
+                }
+            }
+        }
+        if (!leads) {
+            refuse("a line's fused tool clipped by a plane its wall does not lead to all along");
+        }
+    }
 }
 
 /** A fused tool whose strip runs off its face (ops#640, the native replica's Case Base #46):
@@ -7273,6 +7394,111 @@ void prepareReflexEnd(
     }
 }
 
+/** How far a fused tool runs on past a concave corner reflex in the material (Corner2Overlap;
+ * ops#888 A3b): until its section, seen in the shared face (the edge's point and its strip's far
+ * side there), lies on the material side of the other edge's wall, and a quarter as far again so
+ * that its end face lies inside the material. An angle for a circle, a length for a line. Whether
+ * the base and the other tool absorb the run on is checked once the tools are built and clipped
+ */
+double overlapRunOnOf(
+    const Context& ctx,
+    const EdgeData& data,
+    const TopoDS_Vertex& vertex,
+    const EdgeData& other
+)
+{
+    const double c = ctx.request.size1;
+    const TopoDS_Face shared = sharedFace(data, other);
+    const gp_Pnt v = BRep_Tool::Pnt(vertex);
+    double here = 0.0;
+    const gp_Dir away = awayFrom(data.edge, vertex, &here);
+    double there = 0.0;
+    awayFrom(other.edge, vertex, &there);
+    const gp_Dir air = inwardIn(shared, data.edge, here);
+    const gp_Dir otherAir = inwardIn(shared, other.edge, there);
+    // How far the point lies on the air side of the other edge's wall (< 0: its material side)
+    auto airSide = [&](const gp_Pnt& p) {
+        if (other.line) {
+            return gp_Vec(v, p).Dot(gp_Vec(otherAir));
+        }
+        const gp_Dir z = other.circle.Axis().Direction();
+        auto radial = [&](const gp_Pnt& q) {
+            gp_Vec r(other.circle.Location(), q);
+            return r - gp_Vec(z) * r.Dot(gp_Vec(z));
+        };
+        const double outward = otherAir.Dot(gp_Dir(radial(v))) > 0 ? 1.0 : -1.0;
+        return outward * (radial(p).Magnitude() - other.circle.Radius());
+    };
+    // The section's footprint run on that far past the vertex
+    gp_Ax1 axis;
+    if (!data.line) {
+        axis = data.circle.Axis();
+        gp_Vec cv(data.circle.Location(), v);
+        if (gp_Vec(axis.Direction()).Crossed(cv).Dot(gp_Vec(away)) > 0) {
+            axis.Reverse();
+        }
+    }
+    auto inside = [&](double run) {
+        gp_Pnt point;
+        gp_Vec reach;
+        if (data.line) {
+            point = v.Translated(-gp_Vec(away) * run);
+            reach = gp_Vec(air) * c;
+        }
+        else {
+            gp_Trsf turn;
+            turn.SetRotation(axis, run);
+            point = v.Transformed(turn);
+            reach = gp_Vec(air).Transformed(turn) * c;
+        }
+        return airSide(point) < -linearTolerance && airSide(point.Translated(reach)) < -linearTolerance;
+    };
+    const double limit = data.line ? 2 * (other.circle.Radius() + 2 * c) : pi / 2;
+    const int steps = 400;
+    double low = 0.0;
+    double high = -1.0;
+    for (int k = 1; k <= steps; ++k) {
+        double run = limit * k / steps;
+        if (inside(run)) {
+            high = run;
+            break;
+        }
+        low = run;
+    }
+    if (high < 0.0) {
+        refuse("a concave corner whose fills never reach the other wall's material side");
+    }
+    for (int k = 0; k < 50; ++k) {
+        double middle = (low + high) / 2;
+        (inside(middle) ? high : low) = middle;
+    }
+    const double run = 1.25 * high;
+    if (!inside(run)) {
+        refuse("a concave corner whose fills leave the other wall's material side again");
+    }
+    return run;
+}
+
+/// Sets up an overlapping end (Corner2Overlap) before its tool is built: its run on, and for a
+/// line its end plane
+void prepareOverlapEnd(
+    const Context& ctx,
+    const std::vector<EdgeData>& all,
+    const EdgeData& data,
+    VertexEnd ends[2],
+    int slot
+)
+{
+    TopoDS_Vertex vertex = vertexAt(data, slot);
+    const EdgeData& other = edgeDataOf(all, ends[slot].other);
+    ends[slot].runOn = overlapRunOnOf(ctx, data, vertex, other);
+    if (data.line) {
+        gp_Dir away = awayFrom(data.edge, vertex);
+        gp_Pnt v = BRep_Tool::Pnt(vertex);
+        ends[slot].trims = {{v.Translated(-gp_Vec(away) * ends[slot].runOn), away.Reversed()}};
+    }
+}
+
 /// The sweep of a tool built by circleTool or lineTool with these ends
 Sweep sweepOf(const Context& ctx, const EdgeData& data, const VertexEnd ends[2])
 {
@@ -8051,6 +8277,13 @@ TopoDS_Shape constructShape(
     bool unionCorners = false;
     // The concave ones, each with its miter piece
     std::vector<TopoDS_Vertex> miterCorners;
+    // The concave corners reflex in the material (Corner2Overlap), each with its two edges
+    struct OverlapCorner
+    {
+        TopoDS_Vertex vertex;
+        TopoDS_Shape edges[2];
+    };
+    std::vector<OverlapCorner> overlapCorners;
     // The two-edge corners of convex edges at a vertex convex in the material (Corner2,
     // Corner2Union), and the selected edges that continue one another tangentially
     std::vector<TopoDS_Vertex> convexCorners;
@@ -8090,6 +8323,16 @@ TopoDS_Shape constructShape(
                 auto known = [&](const TopoDS_Vertex& v) {
                     return v.IsSame(vertices[i]);
                 };
+                // (overlapping fused tools: their volumes are measured)
+                if (kind == VertexClass::Corner2Overlap) {
+                    cornerVertices.Add(vertices[i]);
+                    unionCorners = true;
+                    if (std::none_of(overlapCorners.begin(), overlapCorners.end(), [&](const auto& c) {
+                            return c.vertex.IsSame(vertices[i]);
+                        })) {
+                        overlapCorners.push_back({vertices[i], {edgeData.edge, ends[slot].other}});
+                    }
+                }
                 if (edgeData.convex
                     && (kind == VertexClass::Corner2Union || kind == VertexClass::Corner2)
                     && std::none_of(convexCorners.begin(), convexCorners.end(), known)) {
@@ -8156,6 +8399,16 @@ TopoDS_Shape constructShape(
                 reflexEnd = true;
                 prepareReflexEnd(ctx, data, edgeData, ends, slot);
             }
+        }
+        bool overlapEnd = false;
+        for (int slot = 0; slot < 2 && !edgeData.closed; ++slot) {
+            if (ends[slot].kind == VertexClass::Corner2Overlap) {
+                overlapEnd = true;
+                prepareOverlapEnd(ctx, data, edgeData, ends, slot);
+            }
+        }
+        if (overlapEnd && (reflexEnd || edgeData.ruled || tightArc(ctx, edgeData))) {
+            refuse("a concave corner reflex in the material beside another run on");
         }
         if (edgeData.ruled) {
             if (reflexEnd) {
@@ -8315,6 +8568,10 @@ TopoDS_Shape constructShape(
     const bool limitOnly = request.limitOnly
         && !(!data.empty() && std::all_of(data.begin(), data.end(), betweenCylinders));
     std::vector<SurfaceWall> surfaceWalls;
+    std::vector<std::pair<TopoDS_Shape, TopoDS_Shape>> overlapPairs;
+    for (const auto& corner : overlapCorners) {
+        overlapPairs.emplace_back(corner.edges[0], corner.edges[1]);
+    }
     const bool trimmed = checkStrips(
                              tools,
                              overlaps,
@@ -8330,7 +8587,8 @@ TopoDS_Shape constructShape(
                              surfaceWalls,
                              // Chamfers (Onshape's DU1) and rounds (DU4: the DU1a rail rounded
                              // r 1.2, 1.5 and 2.5 builds, the same clipped construction)
-                             request.pastBothFaces
+                             request.pastBothFaces,
+                             overlapPairs
                          )
         || unionCorners;
     // The faces beyond overflowing ends grow by the tools' faces on their surfaces (Onshape's
@@ -8431,6 +8689,20 @@ TopoDS_Shape constructShape(
     });
     std::vector<TrimPlane> fusedPlanes;  // the planes the fused tools were clipped by
     std::vector<const Tool*> planeClipped;  // the fused tools clipped by planes only
+    // The tools of concave corners reflex in the material (Corner2Overlap), with what clipped
+    // them: their planes, and whether anything else did
+    struct OverlapClip
+    {
+        const Tool* tool = nullptr;
+        std::vector<TrimPlane> planes;
+        bool other = false;
+    };
+    std::vector<OverlapClip> overlapClips;
+    auto overlapPartner = [&](const Tool& tool) {
+        return std::any_of(overlapCorners.begin(), overlapCorners.end(), [&](const auto& corner) {
+            return corner.edges[0].IsSame(tool.source) || corner.edges[1].IsSame(tool.source);
+        });
+    };
     for (const auto& run : fusedRuns) {
         for (auto& tool : tools) {
             if (&tool != run.tool) {
@@ -8438,6 +8710,95 @@ TopoDS_Shape constructShape(
             }
             const size_t planesBefore = fusedPlanes.size();
             bool otherClip = false;
+            if (overlapPartner(tool)) {
+                if (trimFusedTool(
+                        tool,
+                        run,
+                        base.getShape(),
+                        wallFaces,
+                        true,
+                        fusedPlanes,
+                        otherClip
+                    )) {
+                    auto known = std::find_if(overlapClips.begin(), overlapClips.end(), [&](const auto& c) {
+                        return c.tool == &tool;
+                    });
+                    if (known == overlapClips.end()) {
+                        overlapClips.push_back({&tool, {}, false});
+                        known = std::prev(overlapClips.end());
+                    }
+                    known->other = known->other || otherClip || fusedPlanes.size() == planesBefore;
+                    known->planes.insert(
+                        known->planes.end(),
+                        fusedPlanes.begin() + static_cast<std::ptrdiff_t>(planesBefore),
+                        fusedPlanes.end()
+                    );
+                    if (known->other || known->planes.size() != 1) {
+                        refuse("a fused tool at a concave corner reflex in the material clipped by "
+                               "other than one plane");
+                    }
+                    // A line's tool was clipped over its wall's top edges only: past the corner it
+                    // runs on under the same plane, so the whole half-space clips it, as an arc's
+                    // (ops#888 A3b, DU6: the boss top clips both fills). Every edge of its wall
+                    // must then lead to that plane or run along its normal (the literal rule of
+                    // the arc's clip: a stepped or ramped top would be clipped under the taller
+                    // wall too)
+                    BRepAdaptor_Curve source(TopoDS::Edge(tool.source));
+                    if (source.GetType() == GeomAbs_Line) {
+                        // At its other end the line's tool meets no other fill: a miter there is
+                        // that fill's tool and is clipped only over its own wall's top edge, so
+                        // half of it would stand above the plane (skeptic A3b-R2-1: the slot's
+                        // end line picked too). Literal rule: refuse
+                        TopoDS_Vertex ends[2];
+                        TopExp::Vertices(TopoDS::Edge(tool.source), ends[0], ends[1]);
+                        for (const auto& end : ends) {
+                            const bool atOverlap = std::any_of(
+                                overlapCorners.begin(),
+                                overlapCorners.end(),
+                                [&](const auto& corner) { return corner.vertex.IsSame(end); }
+                            );
+                            if (atOverlap) {
+                                continue;
+                            }
+                            for (const auto& other : tools) {
+                                if (&other == &tool || other.source.ShapeType() != TopAbs_EDGE) {
+                                    continue;
+                                }
+                                TopoDS_Vertex otherEnds[2];
+                                TopExp::Vertices(
+                                    TopoDS::Edge(other.source),
+                                    otherEnds[0],
+                                    otherEnds[1]
+                                );
+                                if (end.IsSame(otherEnds[0]) || end.IsSame(otherEnds[1])) {
+                                    refuse("a line's fill at a concave corner reflex in the material "
+                                           "meets another fill at its other end");
+                                }
+                            }
+                        }
+                        const TrimPlane& plane = known->planes.front();
+                        checkWallLeadsTo(run.face, tool.source, plane, base.getShape());
+                        const double size = 4 * std::sqrt(squareSize(tool.solid)) + 1
+                            + plane.point.Distance(source.Value(source.FirstParameter()));
+                        clipTool(tool, halfSpaceBeyond(plane, size));
+                        const double inBase = volumeOf(commonOf(base.getShape(), tool.solid));
+                        tool.inBase = inBase > volumeTolerance * tool.volume ? inBase : 0.0;
+                    }
+                }
+                // What is still off its face must run into the material, which absorbs it
+                for (const auto& strip : tool.strips) {
+                    if (!strip.face.IsSame(run.face)) {
+                        continue;
+                    }
+                    for (const auto& contact : strip.contacts) {
+                        if (areaOf(contact) - areaOf(commonOf(run.face, contact))
+                            > areaToleranceOf(contact, strip)) {
+                            checkFusedRunOff(run.face, contact, base.getShape());
+                        }
+                    }
+                }
+                continue;
+            }
             // A miter piece continues its tools' faces past the corner: it has no strips to trim.
             // Where OCCT failed (ops#888 A3, DU3: the keyhole pocket's floor under walls lower
             // than the chamfer), a tool clipped by a plane leaves the miter to be clipped by the
@@ -8469,6 +8830,130 @@ TopoDS_Shape constructShape(
                         checkFusedRunOff(run.face, contact, base.getShape());
                     }
                 }
+            }
+        }
+    }
+    // The concave corners reflex in the material (ops#888 A3b, DU6): both tools clipped by one
+    // plane, or neither; each tool's run on past the vertex absorbed by the base and the other
+    // tool, so that their union is the fills meeting along their intersection; and their overlap
+    // outside the base, which the fuse adds once
+    double fusedOverlap = 0.0;
+    auto cutAway = [](const TopoDS_Shape& shape, const TopoDS_Shape& away) {
+        BRepAlgoAPI_Cut cut(shape, away);
+        if (!cut.IsDone() || cut.HasErrors()) {
+            refuse("checking the fills at a concave corner reflex in the material failed");
+        }
+        return cut.Shape();
+    };
+    std::vector<const Tool*> partners;
+    // Each pair of fills counted once: a D pocket's arc and chord meet at two corners (skeptic
+    // A3b-R2-2)
+    std::vector<std::pair<const Tool*, const Tool*>> counted;
+    for (const auto& corner : overlapCorners) {
+        const Tool* pair[2] = {nullptr, nullptr};
+        const EdgeData* sides[2] = {nullptr, nullptr};
+        const OverlapClip* clips[2] = {nullptr, nullptr};
+        for (int k = 0; k < 2; ++k) {
+            for (const auto& tool : tools) {
+                if (!tool.cut && tool.source.IsSame(corner.edges[k])) {
+                    pair[k] = &tool;
+                }
+            }
+            for (const auto& d : data) {
+                if (d.edge.IsSame(corner.edges[k])) {
+                    sides[k] = &d;
+                }
+            }
+            if (!pair[k] || !sides[k]) {
+                refuse("a fill at a concave corner reflex in the material has no tool");
+            }
+            for (const auto& clip : overlapClips) {
+                if (clip.tool == pair[k]) {
+                    clips[k] = &clip;
+                }
+            }
+            if (std::find(partners.begin(), partners.end(), pair[k]) == partners.end()) {
+                partners.push_back(pair[k]);
+            }
+        }
+        if (!clips[0] != !clips[1]) {
+            refuse("a fill at a concave corner reflex in the material clipped by the face beyond, "
+                   "beside one that is not");
+        }
+        if (clips[0]) {
+            const TrimPlane& a = clips[0]->planes.front();
+            const TrimPlane& b = clips[1]->planes.front();
+            if (!parallel(a.normal, b.normal)
+                || std::abs(gp_Vec(a.point, b.point).Dot(gp_Vec(a.normal))) > linearTolerance) {
+                refuse("the fills at a concave corner reflex in the material are clipped by "
+                       "different planes");
+            }
+        }
+        const gp_Pnt v = BRep_Tool::Pnt(corner.vertex);
+        for (int k = 0; k < 2; ++k) {
+            const EdgeData& d = *sides[k];
+            const Tool& tool = *pair[k];
+            const gp_Dir away = awayFrom(d.edge, corner.vertex);
+            double size = 4 * std::sqrt(squareSize(tool.solid)) + 1;
+            TopoDS_Shape region;
+            if (d.line) {
+                region = halfSpaceBeyond({v, away.Reversed()}, size);
+            }
+            else {
+                // The wedge between the meridian planes at the vertex and where the run on ends
+                const gp_Pnt centre = d.circle.Location();
+                gp_Ax1 axis = d.circle.Axis();
+                if (gp_Vec(axis.Direction()).Crossed(gp_Vec(centre, v)).Dot(gp_Vec(away)) > 0) {
+                    axis.Reverse();
+                }
+                gp_Trsf turn;
+                turn.SetRotation(axis, overlapRunOnOf(ctx, d, corner.vertex, *sides[1 - k]));
+                const gp_Dir past = away.Reversed();
+                size += centre.Distance(v);
+                region = commonOf(
+                    halfSpaceBeyond({centre, past}, size),
+                    halfSpaceBeyond({centre, past.Transformed(turn).Reversed()}, size)
+                );
+            }
+            const TopoDS_Shape runOn = commonOf(tool.solid, region);
+            if (volumeOf(runOn) <= volumeTolerance * tool.volume) {
+                refuse("a fill at a concave corner reflex in the material does not run on");
+            }
+            const double left
+                = volumeOf(cutAway(cutAway(runOn, base.getShape()), pair[1 - k]->solid));
+            if (left > volumeTolerance * tool.volume) {
+                refuse("a fill run on past a concave corner reflex in the material reaches past "
+                       "the other fill by " + describe(left));
+            }
+        }
+        const TopoDS_Shape both = commonOf(pair[0]->solid, pair[1]->solid);
+        const double overlap = volumeOf(both) - volumeOf(commonOf(both, base.getShape()));
+        if (overlap <= volumeTolerance * std::min(pair[0]->volume, pair[1]->volume)) {
+            refuse("the fills at a concave corner reflex in the material do not overlap");
+        }
+        const std::pair<const Tool*, const Tool*> key = std::minmax(pair[0], pair[1]);
+        if (std::find(counted.begin(), counted.end(), key) == counted.end()) {
+            counted.emplace_back(key);
+            fusedOverlap += overlap;
+        }
+    }
+    // No other two fused tools overlap outside the base: the sum above is the union's
+    for (size_t i = 0; i < partners.size(); ++i) {
+        for (const auto& tool : tools) {
+            if (tool.cut || &tool == partners[i]) {
+                continue;
+            }
+            const bool paired = std::any_of(overlapCorners.begin(), overlapCorners.end(), [&](const auto& c) {
+                return (c.edges[0].IsSame(partners[i]->source) && c.edges[1].IsSame(tool.source))
+                    || (c.edges[1].IsSame(partners[i]->source) && c.edges[0].IsSame(tool.source));
+            });
+            if (paired) {
+                continue;
+            }
+            const TopoDS_Shape both = commonOf(partners[i]->solid, tool.solid);
+            if (volumeOf(both) - volumeOf(commonOf(both, base.getShape()))
+                > volumeTolerance * std::min(partners[i]->volume, tool.volume)) {
+                refuse("a fill at a concave corner reflex in the material overlaps a third");
             }
         }
     }
@@ -8789,6 +9274,11 @@ TopoDS_Shape constructShape(
                 expected += tools[i].volume - tools[i].inBase;
             }
         }
+        if (!cut) {
+            // Overlapping fills at concave corners reflex in the material add their common part
+            // once
+            expected -= fusedOverlap;
+        }
         if (!group.empty()) {
             shape = applyTools(shape, group, expected, cut, stages);
         }
@@ -8982,6 +9472,33 @@ TopoDS_Shape constructShape(
                 }
             }
         }
+        // The fills at a concave corner reflex in the material (ops#888 A3b), clipped by the face
+        // beyond and run on under it into the base: their faces on that face's surface, pieces of
+        // it or not, merge into it (Onshape's boss top grows over both, DU6). The edges their
+        // outlines cut into it are new, and must not keep the pieces apart
+        for (size_t i = 0; i < tools.size(); ++i) {
+            if (tools[i].cut
+                || std::none_of(overlapCorners.begin(), overlapCorners.end(), [&](const auto& c) {
+                       return c.edges[0].IsSame(tools[i].source) || c.edges[1].IsSame(tools[i].source);
+                   })) {
+                continue;
+            }
+            for (TopExp_Explorer it(tools[i].solid, TopAbs_FACE); it.More(); it.Next()) {
+                for (const auto& image : imagesThrough(stages, toolStage[i], it.Current())) {
+                    if (image.ShapeType() != TopAbs_FACE
+                        || std::none_of(wallFaces.begin(), wallFaces.end(), [&](const TopoDS_Face& wall) {
+                               return sameDomain(TopoDS::Face(image), wall);
+                           })) {
+                        continue;
+                    }
+                    for (TopExp_Explorer edge(image, TopAbs_EDGE); edge.More(); edge.Next()) {
+                        if (!baseImages.Contains(image) || !baseImages.Contains(edge.Current())) {
+                            unlocked.Add(edge.Current());
+                        }
+                    }
+                }
+            }
+        }
         for (TopExp_Explorer it(shape, TopAbs_FACE); it.More(); it.Next()) {
             const TopoDS_Shape& face = it.Current();
             if (baseImages.Contains(face)) {
@@ -9096,6 +9613,7 @@ TopoDS_Shape constructShape(
     for (const auto& tool : tools) {
         fusedVolume -= tool.inBase;  // what the material absorbs (none for a cut tool)
     }
+    fusedVolume -= fusedOverlap;  // what two fills at a concave corner reflex in it share
     cutVolume = trimmed ? trimmedVolume : cutVolume - overlapVolume;
     double expected = baseVolume - cutVolume + fusedVolume;
     double measured = volumeOf(shape);

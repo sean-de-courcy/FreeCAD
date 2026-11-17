@@ -5899,3 +5899,169 @@ class KeyholePocketChamferTest(unittest.TestCase):
         self.assertAlmostEqual(result.Volume, 5583.57887, delta=2e-4)
         self.assertAlmostEqual(result.Area, 2337.43788, delta=2e-4)
         self.assertEqual(len(result.Faces), 13)
+
+
+class KeyholeBossCornerTest(unittest.TestCase):
+    """ops#888 A3b, designed (the oracle's DU6, notes/onshape-facts.md): a plate x -10..20,
+    y -10..10, z 0..3, with a keyhole boss on it, the circle r 6 about the origin and the slot
+    x 0..14, |y| < 2, of height h. The boss's foot arc and its foot line y = +2 meet at
+    (sqrt(32), 2), the outline's concave corner: concave edges at a vertex reflex in the material.
+    A chamfer or fillet of 1.0 on both. Below h = 1 the walls are lower than the dress-up: OCCT
+    fails, and Onshape's fills, clipped by the boss top, which grows over them, meet along their
+    intersection, from (sqrt(40), 3, 3) at the foot to (5.6807, 2.0338, 3 + h) at the top. The
+    cone runs on along the unpicked wall y = -2 and ends on it (from x sqrt(45) at the foot), and
+    the line's fill ends flush with the slot's end wall x 14."""
+
+    def body(self, height, step=None):
+        V = FreeCAD.Vector
+        plate = Part.makeBox(30, 20, 3, V(-10, -10, 0))
+        boss = Part.makeCylinder(6, height, V(0, 0, 3)).fuse(Part.makeBox(14, 4, height, V(0, -2, 3)))
+        if step is not None:
+            # The slot taller from x = step on
+            boss = boss.fuse(Part.makeBox(14 - step, 4, height + 1, V(step, -2, 3)))
+        body = plate.fuse(boss.removeSplitter()).removeSplitter()
+        foot = [e for e in body.Edges if all(abs(v.Point.z - 3) < 1e-9 for v in e.Vertexes)]
+        arc = [e for e in foot if e.Curve.TypeId == "Part::GeomCircle"]
+        line = [
+            e
+            for e in foot
+            if e.Curve.TypeId == "Part::GeomLine" and all(abs(v.Point.y - 2) < 1e-9 for v in e.Vertexes)
+        ]
+        self.assertEqual((len(arc), len(line)), (1, 1))
+        return body, arc + line
+
+    def faces(self, shape, type_id, test=lambda f: True):
+        return [f for f in shape.Faces if f.Surface.TypeId == type_id and test(f)]
+
+    def check(self, result, volume, area, top):
+        self.assertTrue(result.isValid())
+        self.assertEqual(len(result.Solids), 1)
+        self.assertAlmostEqual(result.Volume, volume, delta=2e-4)
+        self.assertAlmostEqual(result.Area, area, delta=2e-4)
+        self.assertEqual(len(result.Faces), 11)
+        # Nothing above the boss top, which grows over the fills; the walls they run up are gone
+        self.assertLess(result.optimalBoundingBox().ZMax, 3.9662 + 1e-6)
+        tops = self.faces(result, "Part::GeomPlane", lambda f: abs(f.CenterOfMass.z - 3.9662) < 1e-9)
+        self.assertEqual(len(tops), 1)
+        self.assertAlmostEqual(tops[0].Area, top, delta=2e-4)
+        self.assertEqual(self.faces(result, "Part::GeomCylinder", lambda f: abs(f.Surface.Radius - 6) < 1e-9), [])
+        # The plate top shrinks under both fills, as Onshape's
+        plate = self.faces(result, "Part::GeomPlane", lambda f: abs(f.CenterOfMass.z - 3) < 1e-9)
+        self.assertEqual(len(plate), 1)
+
+    def testChamferOnWallsLowerThanIt(self):
+        body, edges = self.body(0.9662)
+        self.assertAlmostEqual(body.Volume, 1940.62993, delta=1e-4)
+        result = body.makeChamfer(1.0, edges)
+        # Onshape: 1962.34713 mm3, 1529.63646 mm2, 11 faces; the top 146.97048
+        self.check(result, 1962.34713, 1529.63646, 146.97048)
+        cones = self.faces(result, "Part::GeomCone")
+        self.assertEqual(len(cones), 1)
+        self.assertAlmostEqual(cones[0].Area, 49.64000, delta=2e-4)
+        sloped = self.faces(result, "Part::GeomPlane", lambda f: abs(abs(f.normalAt(0, 0).z) - 0.5**0.5) < 1e-6)
+        self.assertEqual(len(sloped), 1)
+        self.assertAlmostEqual(sloped[0].Area, 10.91985, delta=2e-4)
+        # The fills meet along their intersection: the plane from x sqrt(40) at the foot
+        self.assertAlmostEqual(sloped[0].BoundBox.XMin, 5.6807, delta=1e-4)
+        self.assertAlmostEqual(
+            min(v.Point.x for v in sloped[0].Vertexes if abs(v.Point.z - 3) < 1e-9), math.sqrt(40), delta=1e-6
+        )
+        self.assertAlmostEqual(self.faces(result, "Part::GeomPlane", lambda f: abs(f.CenterOfMass.z - 3) < 1e-9)[0].Area, 410.20723, delta=2e-4)
+        # The unpicked wall y = -2 from where the cone ends on it, x sqrt(45) at the foot
+        wall = self.faces(result, "Part::GeomPlane", lambda f: abs(f.CenterOfMass.y + 2) < 1e-9)
+        self.assertEqual(len(wall), 1)
+        self.assertAlmostEqual(wall[0].Area, 7.53466, delta=2e-4)
+        self.assertAlmostEqual(
+            min(v.Point.x for v in wall[0].Vertexes if abs(v.Point.z - 3) < 1e-9), math.sqrt(45), delta=1e-6
+        )
+        # The slot's end wall over the chamfer's section, y -2..3
+        end = self.faces(result, "Part::GeomPlane", lambda f: abs(f.CenterOfMass.x - 14) < 1e-9)
+        self.assertEqual(len(end), 1)
+        self.assertAlmostEqual(end[0].Area, 4.36423, delta=2e-4)
+
+    def testFilletOnWallsLowerThanIt(self):
+        body, edges = self.body(0.9662)
+        result = body.makeFillet(1.0, edges)
+        # Onshape: 1949.85345 mm3, 1534.79436 mm2, 11 faces; the top 145.57348
+        self.check(result, 1949.85345, 1534.79436, 145.57348)
+        tori = self.faces(result, "Part::GeomToroid")
+        self.assertEqual(len(tori), 1)
+        self.assertAlmostEqual(tori[0].Area, 54.66558, delta=2e-4)
+        rounds = self.faces(result, "Part::GeomCylinder")
+        self.assertEqual(len(rounds), 1)
+        self.assertAlmostEqual(rounds[0].Area, 12.43418, delta=2e-4)
+        wall = self.faces(result, "Part::GeomPlane", lambda f: abs(f.CenterOfMass.y + 2) < 1e-9)
+        self.assertEqual(len(wall), 1)
+        self.assertAlmostEqual(wall[0].Area, 7.83449, delta=2e-4)
+        end = self.faces(result, "Part::GeomPlane", lambda f: abs(f.CenterOfMass.x - 14) < 1e-9)
+        self.assertEqual(len(end), 1)
+        self.assertAlmostEqual(end[0].Area, 4.07940, delta=2e-4)
+
+    def testTallWallsStayOccts(self):
+        # Walls 3 high: OCCT builds it, as Onshape's (2258.38970, 13 faces)
+        body, edges = self.body(3.0)
+        result = body.makeChamfer(1.0, edges)
+        self.assertTrue(result.isValid())
+        self.assertAlmostEqual(result.Volume, 2258.38970, delta=2e-4)
+        self.assertAlmostEqual(result.Area, 1639.25693, delta=2e-4)
+        self.assertEqual(len(result.Faces), 13)
+
+    def testSteppedSlotIsRefused(self):
+        # The slot 1 taller from x 10 on: the line's wall steps, and the low top's plane would clip
+        # its fill under the taller wall too. No Onshape fact: refused
+        body, edges = self.body(0.9662, step=10)
+        with self.assertRaises(Exception):
+            body.makeChamfer(1.0, edges)
+
+    def testEndLinePickedTooIsRefused(self):
+        # The slot's end line x 14 picked too (skeptic A3b-R2-1): the end corner's miter belongs to
+        # the end line's tool, clipped only over its own wall, and half of it would stand above the
+        # boss top (zmax 4.0 at h 0.5). No Onshape fact: refused
+        body, edges = self.body(0.5)
+        end = [
+            e
+            for e in body.Edges
+            if e.Curve.TypeId == "Part::GeomLine"
+            and all(abs(v.Point.z - 3) < 1e-9 and abs(v.Point.x - 14) < 1e-9 for v in e.Vertexes)
+        ]
+        self.assertEqual(len(end), 1)
+        for dress in (body.makeChamfer, body.makeFillet):
+            with self.assertRaises(Exception):
+                dress(1.0, edges + end)
+
+
+class DPocketCornerTest(unittest.TestCase):
+    """ops#888 A3b, designed (skeptic A3b-R2-2): a block 24 x 24 x 5 with a D-shaped pocket of depth
+    h, the disk r 6 about the z axis cut by the chord y = w, its seam turned away from the arc's
+    ends. The floor's arc and chord meet at two concave corners reflex in the material, the same
+    pair of fills at both. A chamfer or fillet c on both, with walls lower than c: the fills,
+    clipped by the block top, meet along their intersection at each corner, and the pair's overlap
+    outside the base is counted once. The reference: the base united with the arc's fill (its
+    section revolved a whole turn) and the chord's (extruded past both corners), clipped by the top
+    z 5."""
+
+    def body(self, w, h):
+        V = FreeCAD.Vector
+        disk = Part.makeCylinder(6, h, V(0, 0, 5 - h))
+        disk.rotate(V(0, 0, 0), V(0, 0, 1), 90)
+        air = disk.common(Part.makeBox(40, 20 + w, 10, V(-20, -20, 0)))
+        body = Part.makeBox(24, 24, 5, V(-12, -12, 0)).cut(air).removeSplitter()
+        floor = [e for e in body.Edges if all(abs(v.Point.z - (5 - h)) < 1e-9 for v in e.Vertexes)]
+        self.assertEqual(len(floor), 2)
+        return body, floor
+
+    def check(self, result, body, added):
+        self.assertTrue(result.isValid())
+        self.assertEqual(len(result.Solids), 1)
+        self.assertAlmostEqual(result.Volume - body.Volume, added, delta=5e-5)
+        self.assertLess(result.optimalBoundingBox().ZMax, 5 + 1e-6)
+        self.assertEqual(len(result.Faces), 9)
+
+    def testChamfer(self):
+        body, floor = self.body(2, 0.5)
+        # The reference adds 11.865546; the two fills overlap by 0.609584 outside the base
+        self.check(body.makeChamfer(1.0, floor), body, 11.865546)
+
+    def testFillet(self):
+        body, floor = self.body(4, 0.5)
+        self.check(body.makeFillet(1.0, floor), body, 6.749786)
