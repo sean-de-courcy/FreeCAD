@@ -497,9 +497,10 @@ public:
         add_varargs_method(
             "kernelBudgetTrial",
             &Module::kernelBudgetTrial,
-            "kernelBudgetTrial(seconds, busy) -- For tests (FreeCAD-CH kernel safety, ops#743): under a "
-            "feature's time limit, one call on a worker that computes (busy) or sleeps for `seconds` on "
-            "the clock. Returns the limit's error, or an empty string when the call ended."
+            "kernelBudgetTrial(seconds, busy, deaf) -- For tests (FreeCAD-CH kernel safety, ops#743): "
+            "under a feature's time limit, one call on a worker that computes (busy) or sleeps for "
+            "`seconds` on the clock. A deaf worker never reads the cancel, so a stop abandons it "
+            "(ops#855). Returns the limit's error, or an empty string when the call ended."
         );
         add_varargs_method(
             "kernelBudgetCutPolls",
@@ -1037,20 +1038,31 @@ private:
     {
         double seconds = 0.0;
         PyObject* busy = Py_False;
-        if (!PyArg_ParseTuple(args.ptr(), "d|O!", &seconds, &PyBool_Type, &busy)) {
+        PyObject* deaf = Py_False;
+        if (!PyArg_ParseTuple(
+                args.ptr(),
+                "d|O!O!",
+                &seconds,
+                &PyBool_Type,
+                &busy,
+                &PyBool_Type,
+                &deaf
+            )) {
             throw Py::Exception();
         }
         const bool compute = busy == Py_True;
+        const bool listens = deaf != Py_True;
         KernelBudget::Scope scope(true);
         try {
-            KernelBudget::run("The trial", [seconds, compute](const Message_ProgressRange& range) {
+            KernelBudget::run("The trial", [seconds, compute, listens](const Message_ProgressRange& range) {
                 Message_ProgressScope progress(range, "The trial", 1);
                 const auto until = std::chrono::steady_clock::now()
                     + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
                                        std::chrono::duration<double>(seconds)
                     );
                 volatile double sum = 0.0;
-                while (std::chrono::steady_clock::now() < until && !progress.UserBreak()) {
+                while (std::chrono::steady_clock::now() < until
+                       && !(listens && progress.UserBreak())) {
                     if (compute) {
                         for (int i = 0; i < 100000; ++i) {
                             sum = sum + i;
