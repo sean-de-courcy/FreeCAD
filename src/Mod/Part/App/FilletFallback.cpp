@@ -6420,25 +6420,45 @@ bool trimFusedTool(
             if (across < 0) {
                 normal.Reverse();
             }
-            // The whole half-space clips the tool all the way round: the arc must run under this
-            // plane's edges along its whole span (a block top stepped over part of the wall would
-            // clip the tool under the taller wall too: review r1 of A3)
+            // The whole half-space clips the tool all the way round, so every other circle of the
+            // wall face about the axis must lead to this plane, and they must span the arc: a block
+            // top stepped over part of the wall would clip the tool under the taller wall too
+            // (review r1 of A3, and its fix's review: a second silent find here, so the literal
+            // rule, no bounded patch)
+            TopTools_IndexedDataMapOfShapeListOfShape faceOfEdge;
+            TopExp::MapShapesAndUniqueAncestors(base, TopAbs_EDGE, TopAbs_FACE, faceOfEdge);
             double covered = 0.0;
-            for (const auto& [other, otherBeyond] : run.edges) {
-                BRepAdaptor_Curve otherCurve(other);
-                BRepAdaptor_Surface otherSurface(otherBeyond, Standard_False);
-                if (otherCurve.GetType() == GeomAbs_Circle && otherSurface.GetType() == GeomAbs_Plane
-                    && parallel(otherCurve.Circle().Axis().Direction(), along)
-                    && gp_Vec(origin, otherCurve.Circle().Location())
-                            .Crossed(gp_Vec(along))
-                            .Magnitude()
-                        <= linearTolerance
-                    && parallel(otherSurface.Plane().Axis().Direction(), along)
-                    && std::abs(gp_Vec(surface.Plane().Location(), otherSurface.Plane().Location())
-                                    .Dot(gp_Vec(normal)))
-                        <= linearTolerance) {
-                    covered += otherCurve.LastParameter() - otherCurve.FirstParameter();
+            for (TopExp_Explorer it(run.face, TopAbs_EDGE); it.More(); it.Next()) {
+                const TopoDS_Edge& other = TopoDS::Edge(it.Current());
+                if (other.IsSame(tool.source) || BRep_Tool::Degenerated(other)) {
+                    continue;
                 }
+                BRepAdaptor_Curve otherCurve(other);
+                if (otherCurve.GetType() != GeomAbs_Circle
+                    || !parallel(otherCurve.Circle().Axis().Direction(), along)
+                    || gp_Vec(origin, otherCurve.Circle().Location()).Crossed(gp_Vec(along)).Magnitude()
+                        > linearTolerance) {
+                    continue;
+                }
+                bool samePlane = false;
+                if (const auto* faces = faceOfEdge.Seek(other)) {
+                    for (const auto& next : *faces) {
+                        if (next.IsSame(run.face)) {
+                            continue;
+                        }
+                        BRepAdaptor_Surface nextSurface(TopoDS::Face(next), Standard_False);
+                        samePlane = nextSurface.GetType() == GeomAbs_Plane
+                            && parallel(nextSurface.Plane().Axis().Direction(), along)
+                            && std::abs(gp_Vec(surface.Plane().Location(), nextSurface.Plane().Location())
+                                            .Dot(gp_Vec(normal)))
+                                <= linearTolerance;
+                    }
+                }
+                if (!samePlane) {
+                    refuse("an arc's fused tool runs off its face under faces beyond at different "
+                           "heights");
+                }
+                covered += otherCurve.LastParameter() - otherCurve.FirstParameter();
             }
             if (covered < line.LastParameter() - line.FirstParameter() - angularTolerance) {
                 refuse("an arc's fused tool runs off its face under faces beyond at different "

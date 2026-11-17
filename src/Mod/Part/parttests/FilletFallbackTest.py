@@ -5837,6 +5837,28 @@ class KeyholePocketChamferTest(unittest.TestCase):
         with self.assertRaises(Exception):
             body.makeChamfer(1.0, floor)
 
+    def testSteppedTopOverGroovedFloorIsRefused(self):
+        # The same pocket with a groove 1 wide, 0.3 deep, across its floor, the slab over x < -2:
+        # the floor circle in three arcs, the wall one face. The left arc's tool runs under the
+        # low top only, yet part of it is under the slab (its fix's review: 1.78 too little)
+        V = FreeCAD.Vector
+        block = Part.makeBox(20, 20, 10, V(-10, -10, 0)).fuse(Part.makeBox(8, 20, 2, V(-10, -10, 10)))
+        body = (
+            block.cut(Part.makeCylinder(6, 3, V(0, 0, 9.5)))
+            .cut(Part.makeBox(1, 12, 0.3, V(-0.5, -6, 9.2)))
+            .removeSplitter()
+        )
+        floor = [
+            e
+            for e in body.Edges
+            if e.Curve.TypeId == "Part::GeomCircle"
+            and abs(e.Curve.Radius - 6) < 1e-9
+            and all(abs(v.Point.z - 9.5) < 1e-9 for v in e.Vertexes)
+        ]
+        self.assertTrue(floor)
+        with self.assertRaises(Exception):
+            body.makeChamfer(1.0, floor)
+
     def testTallWallsStayOccts(self):
         # Walls 3 high: OCCT builds it, as Onshape's (5583.57887, 13 faces)
         body, edges = self.body(3.0)
