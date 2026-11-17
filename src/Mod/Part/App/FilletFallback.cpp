@@ -9898,11 +9898,11 @@ bool endsInRing(
                 try {
                     // Along the chain of tangent arcs of one circle to its other free end
                     const Arc* at = &start;
-                    int far = 1 - from;
+                    int farSlot = 1 - from;
                     double span = start.data->last - start.data->first;
                     std::vector<const Arc*> visited {at};
-                    while (at->ends[far].kind == VertexClass::TangentContinuation) {
-                        const TopoDS_Edge& next = at->ends[far].continuation;
+                    while (at->ends[farSlot].kind == VertexClass::TangentContinuation) {
+                        const TopoDS_Edge& next = at->ends[farSlot].continuation;
                         auto found = std::find_if(arcs.begin(), arcs.end(), [&](const Arc& c) {
                             return c.data->edge.IsSame(next);
                         });
@@ -9911,20 +9911,20 @@ bool endsInRing(
                             || !sameCircle(found->data->circle, start.data->circle)) {
                             break;
                         }
-                        const TopoDS_Vertex shared = at->vertices[far];
+                        const TopoDS_Vertex shared = at->vertices[farSlot];
                         at = &*found;
                         visited.push_back(at);
-                        far = at->vertices[0].IsSame(shared) ? 1 : 0;
+                        farSlot = at->vertices[0].IsSame(shared) ? 1 : 0;
                         span += at->data->last - at->data->first;
                     }
-                    if (at->ends[far].kind != VertexClass::FreeEnd || (at == &start && far == from)) {
+                    if (at->ends[farSlot].kind != VertexClass::FreeEnd || (at == &start && farSlot == from)) {
                         continue;
                     }
                     const gp_Ax1 axis = start.data->circle.Axis();
                     Section sections[2];
                     TrimPlane planes[2];
                     bool forward[2];
-                    const std::pair<const Arc*, int> freeEnds[2] = {{&start, from}, {at, far}};
+                    const std::pair<const Arc*, int> freeEnds[2] = {{&start, from}, {at, farSlot}};
                     bool usable = true;
                     for (int i = 0; i < 2 && usable; ++i) {
                         const auto& [arc, slot] = freeEnds[i];
