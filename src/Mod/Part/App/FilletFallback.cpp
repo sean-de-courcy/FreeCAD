@@ -4160,7 +4160,8 @@ double arcRunPast(
     const Section& section,
     const TrimPlane& plane,
     bool forward,
-    double& back
+    double& back,
+    bool* tangent
 )
 {
     const gp_Dir& z = axis.Direction();
@@ -4212,8 +4213,17 @@ double arcRunPast(
             refuse("an arc's tool before its end stays beyond the end plane all the way round");
         }
         const double k = -wave.e / amplitude;
-        if (k > 1 - 1e-9 && !beyondHere) {
+        if (k > 1 + 1e-9 && !beyondHere) {
             return -1.0;  // never: the caller may close the tool into a ring (circleTool)
+        }
+        // Touching the plane at one point (d = R - c: the section's inner circle tangent to it):
+        // Onshape's fill stops at the tangent point, not the ring (oracle 888b, DU5), which the
+        // run on can't end at
+        if (k > 1 - 1e-9 && !beyondHere) {
+            if (tangent) {
+                *tangent = true;
+            }
+            refuse("an arc's tool run on past its end only touches the end plane");
         }
         if (k < -1 + 1e-9) {
             refuse("an arc's tool before its end stays beyond the end plane all the way round");
@@ -4301,21 +4311,54 @@ bool missesAxis(const TrimPlane& plane, const gp_Circ& circle)
         || gp_Pln(plane.point, plane.normal).Distance(circle.Location()) > linearTolerance;
 }
 
+/** Whether two end planes of an arc meet inside its circle (ops#888, oracle 888b DU4: walls x = c
+ * and y = c of a boss): the line where they meet is nearer the axis than the radius, so no other
+ * arc of the circle lies between them
+ */
+bool planesMeetInside(const TrimPlane& a, const TrimPlane& b, const gp_Circ& circle)
+{
+    const gp_Vec line = gp_Vec(a.normal).Crossed(gp_Vec(b.normal));
+    if (line.Magnitude() <= angularTolerance
+        || std::abs(line.Normalized().Dot(gp_Vec(circle.Axis().Direction()))) < 1 - angularTolerance) {
+        return false;
+    }
+    // In the circle's plane: the point on both planes, n_a . p = n_a . a, n_b . p = n_b . b
+    const gp_Ax2 frame(circle.Location(), circle.Axis().Direction());
+    const gp_Vec x(frame.XDirection());
+    const gp_Vec y(frame.YDirection());
+    const gp_Vec na(a.normal);
+    const gp_Vec nb(b.normal);
+    const double ra = gp_Vec(circle.Location(), a.point).Dot(na);
+    const double rb = gp_Vec(circle.Location(), b.point).Dot(nb);
+    const double a11 = na.Dot(x), a12 = na.Dot(y), a21 = nb.Dot(x), a22 = nb.Dot(y);
+    const double det = a11 * a22 - a12 * a21;
+    if (std::abs(det) <= angularTolerance) {
+        return false;
+    }
+    const double u = (ra * a22 - a12 * rb) / det;
+    const double v = (a11 * rb - a21 * ra) / det;
+    return std::hypot(u, v) < circle.Radius() - linearTolerance;
+}
+
 /** Whether an arc's tool, turned on past its two free ends on one plane that misses its axis,
  * closes into a ring (circleTool): the section reaches inside the plane's distance from the axis.
+ * On two planes that meet inside the circle (planesMeetInside), where the section reaches inside
+ * both: the ring cut by both (oracle 888b, DU4). Where it only touches one of them (DU5), true as
+ * well: the construction refuses there, and OCCT's result (not Onshape's) is never returned
  * The arc is a chain of selected arcs of one circle (a circle split by a seam), span long in all;
  * at each free end, its section, its end plane and whether running on past it turns forward about
  * the axis
  */
 bool closesIntoRing(
     const gp_Ax1& axis,
+    double radius,
     double span,
     const Section sections[2],
     const TrimPlane planes[2],
     const bool forward[2]
 )
 {
-    const gp_Circ probe(gp_Ax2(axis.Location(), axis.Direction()), 1.0);
+    const gp_Circ probe(gp_Ax2(axis.Location(), axis.Direction()), radius);
     for (int i = 0; i < 2; ++i) {
         if (!missesAxis(planes[i], probe)) {
             return false;
@@ -4323,12 +4366,30 @@ bool closesIntoRing(
     }
     if (planes[0].normal.Dot(planes[1].normal) < 1 - angularTolerance
         || gp_Pln(planes[0].point, planes[0].normal).Distance(planes[1].point) > linearTolerance) {
-        return false;
+        if (!planesMeetInside(planes[0], planes[1], probe)) {
+            return false;
+        }
+        bool never = true;
+        for (int i = 0; i < 2; ++i) {
+            double back = 0.0;
+            bool tangent = false;
+            try {
+                never = arcRunPast(axis, sections[i], planes[i], forward[i], back, &tangent) < 0.0
+                    && never;
+            }
+            catch (const Refusal&) {
+                if (tangent) {
+                    return true;
+                }
+                throw;
+            }
+        }
+        return never;
     }
     double past[2];
     for (int i = 0; i < 2; ++i) {
         double back = 0.0;
-        past[i] = arcRunPast(axis, sections[i], planes[i], forward[i], back);
+        past[i] = arcRunPast(axis, sections[i], planes[i], forward[i], back, nullptr);
     }
     return past[0] < 0.0 || past[1] < 0.0 || span + past[0] + past[1] > 2 * pi - 0.15;
 }
@@ -4397,7 +4458,8 @@ Tool circleTool(const Context& ctx, const EdgeData& data, const VertexEnd ends[2
             snappedAt(i == 0 ? data.first : data.last, radialAtEnd),
             plane,
             i == 1,
-            backEnd[i]
+            backEnd[i],
+            nullptr
         );
         endTrim[i] = true;
     }
@@ -4406,13 +4468,19 @@ Tool circleTool(const Context& ctx, const EdgeData& data, const VertexEnd ends[2
     // is the whole ring cut by that plane: one chamfer or round face across the chord, as the
     // dress-up's surface carried on to the end face is
     bool ring = false;
+    bool twoPlanes = false;  // a ring cut by both end planes (oracle 888b, DU4)
     if (endTrim[0] && endTrim[1]
         && (pastEnd[0] < 0.0 || pastEnd[1] < 0.0 || span + pastEnd[0] + pastEnd[1] > 2 * pi - 0.15)) {
         const TrimPlane& a = ends[0].trims.front();
         const TrimPlane& b = ends[1].trims.front();
         if (a.normal.Dot(b.normal) < 1 - angularTolerance
             || gp_Pln(a.point, a.normal).Distance(b.point) > linearTolerance) {
-            refuse("the tools turned on past an arc's two end planes meet");
+            // Two walls meeting inside the circle (x = c and y = c on a boss), the section reaching
+            // inside both: Onshape's ring runs on across both, which cut it
+            if (pastEnd[0] >= 0.0 || pastEnd[1] >= 0.0 || !planesMeetInside(a, b, circle)) {
+                refuse("the tools turned on past an arc's two end planes meet");
+            }
+            twoPlanes = true;
         }
         ring = true;
         pastEnd[0] = 0.0;
@@ -4625,7 +4693,7 @@ Tool circleTool(const Context& ctx, const EdgeData& data, const VertexEnd ends[2
         };
         double removed = 0.0;
         for (int i = 0; i < 2; ++i) {
-            if (!endTrim[i] || (ring && i == 1)) {
+            if (!endTrim[i] || (ring && !twoPlanes && i == 1)) {
                 continue;
             }
             // The sector's back side, before the end, and its front, past the tool's end
@@ -4728,7 +4796,7 @@ Tool circleTool(const Context& ctx, const EdgeData& data, const VertexEnd ends[2
         tool.volume = volumeOf(tool.solid);
     }
     for (int i = 0; i < 2 && !data.closed; ++i) {
-        if (ends[i].kind == VertexClass::FreeEnd && !(ring && i == 1)) {
+        if (ends[i].kind == VertexClass::FreeEnd && !(ring && !twoPlanes && i == 1)) {
             tool.caps.push_back(ends[i].trims.front());
         }
         else if (ends[i].kind == VertexClass::Corner2Union) {
@@ -9948,7 +10016,14 @@ bool endsInRing(
                             = gp_Vec(axis.Direction()).Crossed(gp_Vec(axis.Location(), point));
                         forward[i] = turning.Dot(out) > 0;
                     }
-                    if (usable && closesIntoRing(axis, span, sections, planes, forward)) {
+                    if (usable && closesIntoRing(
+                                       axis,
+                                       start.data->circle.Radius(),
+                                       span,
+                                       sections,
+                                       planes,
+                                       forward
+                                   )) {
                         return true;
                     }
                 }

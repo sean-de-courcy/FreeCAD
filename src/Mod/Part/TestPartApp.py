@@ -41,6 +41,7 @@ from parttests.FilletFallbackTest import (
     ArcEndPlaneTest,
     ArcEndPlaneAt600Test,
     ArcEndRingTest,
+    ArcEndTwoWallsTest,
     BaseToleranceTest,
     BridgedRecessTest,
     CornerWithACircleTest,
