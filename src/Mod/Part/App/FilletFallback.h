@@ -396,6 +396,20 @@ PartExport bool endsInOverflow(
     const Request& request
 );
 
+/** Whether one of a dress-up's edges is an arc whose two ends lie on one plane that misses its
+ * axis, with a section that reaches inside the plane's distance from the axis (ops#888 A2: a boss
+ * cut by a chord plane, its top arc chamfered or rounded by at least R - c). Onshape's cone or
+ * torus runs on across the plane, which cuts it (oracle s8ecd DU2: the top a whole disc); OCCT's
+ * ends there are not that (a valid solid, 3 faces too many, 17.9 mm3 short on DU2's chamfer 4), so
+ * the exact construction builds it, or the dress-up fails. The edges of OCCT's contours
+ * (request.contour) count with the selected ones.
+ */
+PartExport bool endsInRing(
+    const TopoDS_Shape& base,
+    const std::vector<TopoDS_Shape>& edges,
+    const Request& request
+);
+
 /** A point well inside the solid `region` that `result` holds, found without integrating a face:
  * the midpoints of the intervals that lines across region's box (9 x 9 along each axis) spend
  * inside it, kept when longer than 20 times the shapes' largest tolerance and classified IN
