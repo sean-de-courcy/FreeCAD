@@ -4100,4 +4100,73 @@ TEST_F(FilletFallbackTest, aRimVertexBesideItsEdgesCrossingWithinItsToleranceIsF
         << third.rimRefusal;
 }
 
+namespace
+{
+
+/// Oracle s8ecd's A2 (notes/onshape-facts.md DU2, ops#888): a plate 30 x 30 x 3 under a boss of
+/// radius 10, z 3..9, cut by the plane y = 8; its top arc, with its end points on that plane
+TopoShape chordBoss(std::vector<TopoShape>& arcs)
+{
+    TopoDS_Shape plate = box(30, 30, 3, gp_Pnt(-15, -15, 0));
+    TopoDS_Shape cylinder
+        = BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(0, 0, 3), gp::DZ()), 10, 6).Shape();
+    TopoDS_Shape boss
+        = BRepAlgoAPI_Common(cylinder, box(40, 40, 20, gp_Pnt(-20, 8 - 40, 0))).Shape();
+    ShapeUpgrade_UnifySameDomain unify(BRepAlgoAPI_Fuse(plate, boss).Shape());
+    unify.Build();
+    TopoShape base(unify.Shape(), 1L);
+    for (const auto& edge : edgesAtHeight(base.getShape(), 9)) {
+        if (BRepAdaptor_Curve(TopoDS::Edge(edge)).GetType() == GeomAbs_Circle) {
+            arcs.emplace_back(edge);
+        }
+    }
+    return base;
+}
+
+}  // namespace
+
+TEST_F(FilletFallbackTest, arcEndPlaneAsOnshape)
+{
+    // The section reaches in to radius 6, inside the plane's distance 8: the cone or torus runs on
+    // across the plane, which cuts it (the top a whole disc of r 6, 10 faces). OCCT builds this one,
+    // so the construction is forced with the wider scope; Onshape's values, evVolume HIGH
+    std::vector<TopoShape> arcs;
+    TopoShape base = chordBoss(arcs);
+    ASSERT_EQ(arcs.size(), 1U);
+    EXPECT_NEAR(volume(base.getShape()), 4486.85493, 1e-4);
+    struct Case
+    {
+        FF::Request request;
+        double volume;
+        double area;
+        double tolerance;
+    };
+    // GProp's default integration of a trimmed torus is good to about 1e-7 of it here (Python's
+    // Shape.Volume and Area, to 3e-8 and 1e-9)
+    for (Case c :
+         {Case {chamfer(4), 4103.82368, 2376.07238, 1e-4}, Case {fillet(4), 4320.18881, 2429.58734, 1e-3}}) {
+        c.request.limitOnly = false;
+        c.request.widerScope = true;
+        TopoShape built = forced(base, arcs, c.request);
+        ASSERT_FALSE(built.isNull());
+        EXPECT_TRUE(BRepCheck_Analyzer(built.getShape()).IsValid());
+        EXPECT_NEAR(volume(built.getShape()), c.volume, c.tolerance);
+        EXPECT_NEAR(area(built.getShape()), c.area, c.tolerance);
+        EXPECT_EQ(count(built.getShape(), TopAbs_FACE), 10);
+    }
+}
+
+TEST_F(FilletFallbackTest, arcEndPlaneOnlyInTheWiderScope)
+{
+    // Without the wider scope (OCCT built something) the end plane stays outside the construction
+    std::vector<TopoShape> arcs;
+    TopoShape base = chordBoss(arcs);
+    ASSERT_EQ(arcs.size(), 1U);
+    FF::Request request = chamfer(4);
+    request.limitOnly = false;
+    std::string reason;
+    EXPECT_TRUE(forced(base, arcs, request, &reason).isNull());
+    EXPECT_NE(reason.find("does not contain its axis"), std::string::npos) << reason;
+}
+
 // NOLINTEND(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)

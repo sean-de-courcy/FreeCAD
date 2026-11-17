@@ -472,7 +472,8 @@ names it.
 | `feat/i883-loft-normal` | feat | ops#883 | - | `fix/i863-release-baseline` `28580024c9` (fork PR 466) | `1f1d3dd89e` (fork PR 468), 2026-11-16 | never (fork feature) |
 | `fix/i855-ladder-step` | fix | ops#855 | - | `fork-1.0.0` `91f12f266e` | `fec8c88582` (fork PR 469), 2026-11-16 | never (fork fix) |
 | `fix/i855-loft-tangent-rule` | fix | ops#855 | - | `fix/i855-gen5-forkrelease` (fork PR 470) | `59134551a2` (fork PR 471), 2026-11-17 | never (fork fix) |
-| `fix/i855-macos-flakes` | fix | ops#855 | - | `integration` `fec8c88582` | (fork PR 472) | never (fork fix): kernel budget's abandoned-workers test made deterministic with a deaf trial |
+| `fix/i855-macos-flakes` | fix | ops#855 | - | `integration` `fec8c88582` | `96579d3cf2` (fork PR 472), 2026-11-17 | never (fork fix): kernel budget's abandoned-workers test made deterministic with a deaf trial |
+| `fix/i888-a2-arc-end` | fix | ops#888 | - | `integration` `96579d3cf2` | (fork PR 473) | never (fork fix): an arc's dress-up ends on an end plane that misses its axis, run on and trimmed (A2) |
 
 ## Fork-only commits in carried topics
 

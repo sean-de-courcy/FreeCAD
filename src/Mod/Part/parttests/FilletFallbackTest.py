@@ -3450,9 +3450,11 @@ class CornerWithACircleTest(unittest.TestCase):
                 self.assertTrue(shape.isValid())
                 self.assertEqual(len(shape.Solids), 1)
                 self.assertAlmostEqual(shape.Volume, volume, delta=5e-4)
-        # The arc's chamfer alone is refused where Onshape builds it (V 133.1013, ops#676)
-        with self.assertRaises(Part.OCCError):
-            wall.makeChamfer(1.05, arc)
+        # The arc's chamfer alone, as Onshape's (V 133.1013, ops#676): its ends on the slot's sides,
+        # planes that miss the arc's axis, trim it past the corners (ops#888 A2)
+        alone = wall.makeChamfer(1.05, arc)
+        self.assertTrue(alone.isValid())
+        self.assertAlmostEqual(alone.Volume, 133.1013, delta=1e-4)
         # The arc and one leg: Onshape fails (CHAMFER_FAILED)
         with self.assertRaises(Part.OCCError):
             wall.makeChamfer(1.05, arc + left)
@@ -5398,3 +5400,161 @@ class KinkedContourTest(unittest.TestCase):
             )
         finally:
             FreeCAD.closeDocument(doc.Name)
+
+
+def graded_integral(f, a, b, at_b=True, levels=40):
+    """The integral of f over [a, b], graded towards an end point where f has a square root's kink"""
+    total = 0.0
+    for k in range(levels):
+        lo, hi = 1 - 2.0**-k, 1 - 2.0 ** -(k + 1)
+        if at_b:
+            total += gauss_legendre(f, a + (b - a) * lo, a + (b - a) * hi)
+        else:
+            total += gauss_legendre(f, b - (b - a) * hi, b - (b - a) * lo)
+    return total
+
+
+class ArcEndPlaneTest(unittest.TestCase):
+    """ops#888 A2, designed: a boss of radius R = 10 and height H = 2, cut by the chord plane x = c = 5
+    (the material x <= c), its top arc chamfered or rounded. OCCT fails from the limit (the size H) up,
+    and the arc's ends lie on the chord plane, which does not contain the axis. Onshape's dress-up
+    surface (the cone or torus) runs on to the chord face, which trims it: the result is the boss
+    minus the ring of the section revolved about the axis, cut by the chord's half-space. Past
+    R - c = 5 the section reaches in past the chord's distance from the axis, and the face runs on
+    across the chord in one piece. With a second plane through the axis, y >= 0, only one end is on
+    the chord: half the boss and half of what goes.
+
+    In a slice at the depth z below the top the section spans the radii rho1(z)..R (the chamfer's
+    rho1 = R - d + z, the round's R - d + sqrt(d^2 - (d - z)^2)); the ring takes pi (R^2 - rho1^2)
+    of it, less the part beyond the chord, F(R) - F(max(c, rho1)) with
+    F(rho) = rho^2 acos(c / rho) - c sqrt(rho^2 - c^2), the integral of 2 rho acos(c / rho)."""
+
+    R, H, c = 10.0, 2.0, 5.0
+    unit = 1.0  # the sizes below are in units of R / 10 (ArcEndPlaneAt600Test)
+
+    def body(self, half=False):
+        R, H, c = self.R, self.H, self.c
+        keep = Part.makeBox(4 * R, 4 * R, 4 * H, V(c - 4 * R, -2 * R, -H))
+        if half:
+            keep = keep.common(Part.makeBox(4 * R, 4 * R, 4 * H, V(-2 * R, 0, -H)))
+        body = Part.makeCylinder(R, H).common(keep).removeSplitter()
+        arcs = [
+            e
+            for e in body.Edges
+            if e.Curve.TypeId == "Part::GeomCircle"
+            and abs(e.Curve.Radius - R) < 1e-9
+            and all(abs(v.Point.z - H) < 1e-9 for v in e.Vertexes)
+        ]
+        self.assertEqual(len(arcs), 1)
+        return body, arcs[0]
+
+    def removed(self, kind, d, half=False):
+        R, c = self.R, self.c
+        top = min(self.H, d)
+
+        def F(rho):
+            return rho * rho * math.acos(c / rho) - c * math.sqrt(rho * rho - c * c)
+
+        def slice_area(rho1):
+            return math.pi * (R * R - rho1 * rho1) - (F(R) - F(max(c, rho1)))
+
+        if kind == "chamfer":
+            rho = lambda z: R - d + z
+            f = lambda z: slice_area(rho(z))
+            a, b = 0.0, top
+            split = d - (R - c)  # where rho1 = c
+        else:
+            # z = d (1 - cos t): rho1 = R - d + d sin t, dz = d sin t dt
+            f = lambda t: slice_area(R - d + d * math.sin(t)) * d * math.sin(t)
+            a, b = 0.0, math.acos(1 - top / d)
+            s = 1 - (R - c) / d
+            split = math.asin(s) if 0 < s < 1 else -1.0
+        if a < split < b:
+            total = graded_integral(f, a, split) + graded_integral(f, split, b, at_b=False)
+        else:
+            total = graded_integral(f, a, b)
+        return total / 2 if half else total
+
+    def ring(self, kind, d):
+        """The section at the rim in the half-plane y = 0, x > 0, revolved a whole turn"""
+        R, H = self.R, self.H
+        if kind == "chamfer":
+            section = Part.Face(Part.makePolygon([V(R, 0, H), V(R - d, 0, H), V(R, 0, H - d), V(R, 0, H)]))
+        else:
+            square = Part.makePolygon(
+                [V(R, 0, H), V(R - d, 0, H), V(R - d, 0, H - d), V(R, 0, H - d), V(R, 0, H)]
+            )
+            ball = Part.Face(Part.Wire(Part.makeCircle(d, V(R - d, 0, H - d), V(0, 1, 0))))
+            section = Part.Face(square).cut(ball)
+        return section.revolve(V(0, 0, 0), V(0, 0, 1), 360)
+
+    def check(self, kind, d, half=False, faces=None):
+        d *= self.unit
+        body, arc = self.body(half)
+        result = body.makeChamfer(d, [arc]) if kind == "chamfer" else body.makeFillet(d, [arc])
+        self.assertTrue(result.isValid())
+        self.assertEqual(len(result.Solids), 1)
+        # The shape: the boss less the ring, which the boss's own faces cut
+        expected = body.cut(self.ring(kind, d))
+        cube = self.unit**3
+        self.assertLess(result.cut(expected).Volume, 1e-6 * cube)
+        self.assertLess(expected.cut(result).Volume, 1e-6 * cube)
+        # The volume in closed form; OCCT integrates a trimmed torus's volume only to about 5e-6
+        removed = self.removed(kind, d, half)
+        tolerance = 1e-6 * cube if kind == "chamfer" else 1e-5 * removed
+        self.assertAlmostEqual(body.Volume - result.Volume, removed, delta=tolerance)
+        if faces is not None:
+            self.assertEqual(len(result.Faces), faces)
+        # Nothing beyond the chord, whose face is one: the tool's end there merged into it
+        chord = [
+            f
+            for f in result.Faces
+            if f.Surface.TypeId == "Part::GeomPlane" and abs(f.normalAt(0, 0).x - 1) < 1e-9
+        ]
+        self.assertEqual(len(chord), 1)
+        self.assertLessEqual(result.optimalBoundingBox().XMax, self.c + 1e-6 * self.unit)
+        return result
+
+    def testChamferToTheLimit(self):
+        # the cone takes the whole wall: top, bottom, chord and cone
+        self.check("chamfer", 2.0, faces=4)
+
+    def testChamferPastItsStrip(self):
+        # 4 on a strip 2 wide: the cone runs out through the bottom, past the vertex to the chord
+        self.check("chamfer", 4.0, faces=4)
+
+    def testChamferAcrossTheChord(self):
+        # 6: the cone reaches in to radius 4 at the top, inside the chord's distance 5: one face across it
+        result = self.check("chamfer", 6.0, faces=4)
+        cones = [f for f in result.Faces if f.Surface.TypeId == "Part::GeomCone"]
+        self.assertEqual(len(cones), 1)
+
+    def testRoundToTheLimit(self):
+        self.check("fillet", 2.0, faces=4)
+
+    def testRoundPastItsStrip(self):
+        self.check("fillet", 4.0, faces=4)
+
+    def testRoundAcrossTheChord(self):
+        self.check("fillet", 6.0, faces=4)
+
+    def testOneEndOnTheChord(self):
+        # half the boss: one end on the plane y = 0 through the axis, the other on the chord
+        for kind in ("chamfer", "fillet"):
+            with self.subTest(kind=kind):
+                self.check(kind, 4.0, half=True, faces=5)
+
+    def testOneEndOnTheChordAcrossItIsRefused(self):
+        # 6 with one end on the chord: the turn on past it never reaches the chord's far side
+        body, arc = self.body(half=True)
+        with self.assertRaises(Exception) as caught:
+            body.makeChamfer(6.0 * self.unit, [arc])
+        self.assertIn("never reaches the end plane", str(caught.exception))
+
+
+class ArcEndPlaneAt600Test(ArcEndPlaneTest):
+    """ArcEndPlaneTest at 30 times the size (R 300 mm): a trimmed torus's volume integrates to about
+    2e-6 of it there, which the construction's balance check allows (review of ops#888 A2)"""
+
+    R, H, c = 300.0, 60.0, 150.0
+    unit = 30.0

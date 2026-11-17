@@ -79,6 +79,10 @@ struct Request
     /// ChamferType::equalDistance: each edge's setback on both faces, in the order of the edges
     /// passed in (chainSetbacks()). Empty: size1 on every edge
     std::vector<double> setbacks;
+    /// The scope that builds only what OCCT refuses (ops#888): set by the dress-up only where OCCT
+    /// failed or left a face of zero width, so that nothing OCCT builds today, valid or not, moves.
+    /// It lets an arc's tool run on past an end plane that does not contain its axis
+    bool widerScope = false;
 };
 
 /// Each face's largest tolerance, with its edges and vertices: Request::faceTolerances
