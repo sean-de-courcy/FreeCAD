@@ -559,3 +559,85 @@ class TestCompatReopenBoxGap(unittest.TestCase):
         infinite = {"type": "Face", "infinite": True, "counts": [0, 1, 0, 0]}
         self.assertFalse(make_generation.optimalBoxGapOnly(infinite, self.reopened(box=box)))
         self.assertFalse(make_generation.optimalBoxGapOnly(None, self.reopened(box=box)))
+
+
+class TestCompatBoxExplained(unittest.TestCase):
+    """The optimal box's gap (ops#855, ops#785): a live record carries each side's exact extremum,
+    and a box coordinate that differs is the same only when both values are that extremum or it
+    plus exactly OPTIMAL_BOX_GAP (1e-7) outward. Designed shapes: a torus (major radius 5, minor 2,
+    axis z: x, y in [-7, 7], z in [-2, 2], every side reached by a circle edge) and a sphere of
+    radius 3 (its poles are degenerated edges, and y and -x are reached inside the face, so those
+    sides are measured with BRepExtrema)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.entry = CompatRecord._shapeEntry(Part.makeTorus(5, 2))
+
+    def compared(self, box, actual=None):
+        actual = actual or self.entry
+        expected = {k: v for k, v in actual.items() if k not in CompatRecord.BOX_EXPLANATION}
+        expected["box"] = box
+        lines, _ = CompatRecord.compare(
+            {"objects": {"T": {"type": "Part::Feature", "id": 1, "shape": expected}}},
+            {"objects": {"T": {"type": "Part::Feature", "id": 1, "shape": actual}}},
+            "open",
+        )
+        return lines
+
+    def assertExact(self, entry, values):
+        for i, (value, expected) in enumerate(zip(entry["boxExact"], values)):
+            self.assertIsNotNone(value, i)
+            self.assertAlmostEqual(value, expected, delta=1e-11, msg=i)
+
+    def testTheExactExtremaAreTheTorusOwn(self):
+        self.assertExact(self.entry, [-7, -7, -2, 7, 7, 2])
+
+    def testASphereIsMeasuredOnItsFace(self):
+        sphere = CompatRecord._shapeEntry(Part.makeSphere(3))
+        self.assertExact(sphere, [-3, -3, -3, 3, 3, 3])
+        box = [-3.0, -3.0, -3.0, 3.0, 3.0, 3.0]
+        box[4] += 1e-7
+        self.assertEqual(self.compared(box, sphere), [])
+        box[4] += 1e-7
+        self.assertEqual(len(self.compared(box, sphere)), 1)
+
+    def testTheExplanationIsNeverComparedItself(self):
+        self.assertEqual(self.compared(list(self.entry["box"])), [])
+
+    def testTheGapOutwardOnAnySideIsTheSameShape(self):
+        exact = [-7.0, -7.0, -2.0, 7.0, 7.0, 2.0]
+        for i, side in enumerate([-1, -1, -1, 1, 1, 1]):
+            box = list(exact)
+            box[i] += side * 1e-7
+            self.assertEqual(self.compared(box), [], i)
+
+    def testAnythingButTheGapIsRed(self):
+        exact = [-7.0, -7.0, -2.0, 7.0, 7.0, 2.0]
+        for change in (0.5e-7, 2e-7, -1e-7, 1e-6):
+            box = list(exact)
+            box[3] += change
+            self.assertEqual(len(self.compared(box)), 1, change)
+            self.assertIn("shape.box[3]", self.compared(box)[0])
+
+    def testALooseFaceToleranceOpensNoWiderWindow(self):
+        """The gap is 1e-7 whatever the face's tolerance: a torus whose faces hold 1e-4 still takes
+        the 1e-7 gap, and 1e-4 is red."""
+        torus = Part.makeTorus(5, 2)
+        torus.fixTolerance(1e-4, Part.Face)
+        entry = CompatRecord._shapeEntry(torus)
+        exact = [-7.0, -7.0, -2.0, 7.0, 7.0, 2.0]
+        box = list(exact)
+        box[4] += 1e-7
+        self.assertEqual(self.compared(box, entry), [])
+        box[4] = 7.0 + 1e-4
+        self.assertEqual(len(self.compared(box, entry)), 1)
+
+    def testWithoutTheExplanationTheBoxIsStrict(self):
+        plain = {k: v for k, v in self.entry.items() if k not in CompatRecord.BOX_EXPLANATION}
+        box = list(plain["box"])
+        box[4] += 1e-7
+        self.assertEqual(len(self.compared(box, plain)), 1)
+
+    def testAShapeWithoutFacesHasNoExplanation(self):
+        entry = CompatRecord._shapeEntry(Part.makeCircle(3))
+        self.assertNotIn("boxExact", entry)
