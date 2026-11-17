@@ -91,6 +91,11 @@ public:
     static App::DocumentObject* siblingUser(const FeatureAddSub* sibling);
     /// Whether @p tool and @p part touch: bounding boxes, then the distance (FreeCAD-CH ops#325)
     static bool shapesTouch(const TopoDS_Shape& tool, const TopoDS_Shape& part);
+    /// Whether BRepExtrema_DistShapeShape of @p one and @p other is done and at most
+    /// Precision::Confusion(), with the same answer: an edge of one within Confusion() of a face
+    /// of the other says yes at once, and only without such a pair is the whole distance
+    /// computed (FreeCAD-CH ops#870)
+    static bool distanceWithinConfusion(const TopoDS_Shape& one, const TopoDS_Shape& other);
     //@}
 
     Part::PropertyPartShape AddSubShape;

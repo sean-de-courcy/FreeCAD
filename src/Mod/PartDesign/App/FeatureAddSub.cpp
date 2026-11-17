@@ -29,6 +29,9 @@
 
 #include <BRepExtrema_DistShapeShape.hxx>
 #include <Precision.hxx>
+#include <TopExp_Explorer.hxx>
+#include <utility>
+#include <vector>
 #include <Standard_Failure.hxx>
 
 
@@ -805,7 +808,56 @@ bool FeatureAddSub::shapesTouch(const TopoDS_Shape& tool, const TopoDS_Shape& pa
     if (toolBox.IsOut(partBox)) {
         return false;
     }
-    BRepExtrema_DistShapeShape distance(tool, part);
+    return distanceWithinConfusion(tool, part);
+}
+
+namespace
+{
+// Whether an edge of @p edges comes within Precision::Confusion() of a face of @p faces, pair by
+// pair (boxes first), stopping at the first such pair. A pair's distance is one of the terms whose
+// minimum BRepExtrema_DistShapeShape of the whole shapes returns, so a hit means the whole
+// distance is within Confusion() too; no hit decides nothing (ops#870: the whole distance of a
+// part with thousands of faces took minutes, its first contact pair a few milliseconds)
+bool edgeMeetsFace(const TopoDS_Shape& edges, const TopoDS_Shape& faces)
+{
+    std::vector<std::pair<TopoDS_Shape, Bnd_Box>> faceBoxes;
+    for (TopExp_Explorer face(faces, TopAbs_FACE); face.More(); face.Next()) {
+        Bnd_Box box;
+        BRepBndLib::Add(face.Current(), box, /*useTriangulation=*/false);
+        box.Enlarge(Precision::Confusion());
+        faceBoxes.emplace_back(face.Current(), box);
+    }
+    for (TopExp_Explorer edge(edges, TopAbs_EDGE); edge.More(); edge.Next()) {
+        Bnd_Box box;
+        BRepBndLib::Add(edge.Current(), box, /*useTriangulation=*/false);
+        for (const auto& [face, faceBox] : faceBoxes) {
+            if (faceBox.IsOut(box)) {
+                continue;
+            }
+            BRepExtrema_DistShapeShape distance(edge.Current(), face);
+            if (distance.IsDone() && distance.Value() <= Precision::Confusion()) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+}  // namespace
+
+bool FeatureAddSub::distanceWithinConfusion(const TopoDS_Shape& one, const TopoDS_Shape& other)
+{
+    if (one.IsNull() || other.IsNull()) {
+        return false;
+    }
+    Bnd_Box oneBox;
+    Bnd_Box otherBox;
+    BRepBndLib::Add(one, oneBox, /*useTriangulation=*/false);
+    BRepBndLib::Add(other, otherBox, /*useTriangulation=*/false);
+    oneBox.Enlarge(Precision::Confusion());
+    if (!oneBox.IsOut(otherBox) && (edgeMeetsFace(one, other) || edgeMeetsFace(other, one))) {
+        return true;
+    }
+    BRepExtrema_DistShapeShape distance(one, other);
     return distance.IsDone() && distance.Value() <= Precision::Confusion();
 }
 
