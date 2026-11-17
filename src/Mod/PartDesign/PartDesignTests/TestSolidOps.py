@@ -1383,3 +1383,382 @@ class TestThickenPlanarCaps(unittest.TestCase):
         self.assertNamesKept(s)
         # the side faces in y = 0 were planes already: every planar face is a Plane
         self.assertEqual([f.Surface.__class__.__name__ for f in s.Faces if f.findPlane() is not None], ["Plane"] * 4)
+
+
+H = 15.0  # the sheets' height (extruded along z)
+TAN = math.tan(math.radians(22.5))
+
+
+def _arcs(specs):
+    return [Part.ArcOfCircle(Part.Circle(App.Vector(cx, cy, 0), App.Vector(0, 0, 1), r), math.radians(a), math.radians(b)).toShape()
+            for cx, cy, r, a, b in specs]
+
+
+def _line(a, b):
+    return Part.LineSegment(App.Vector(a[0], a[1], 0), App.Vector(b[0], b[1], 0)).toShape()
+
+
+def _poly(pts, closed=False, cw=False):
+    pts = [App.Vector(x, y, 0) for x, y in (pts[::-1] if cw else pts)]
+    if closed:
+        pts.append(pts[0])
+    return Part.makePolygon(pts)
+
+
+def rounded_rectangle(w, h, r):
+    p = [(r, 0), (w - r, 0), (w, r), (w, h - r), (w - r, h), (r, h), (0, h - r), (0, r)]
+    c = [(w - r, r), (w - r, h - r), (r, h - r), (r, r)]
+    es = []
+    for k in range(4):
+        es.append(_line(p[2 * k], p[2 * k + 1]))
+        es += _arcs([(c[k][0], c[k][1], r, -90 + 90 * k, 90 * k)])
+    return Part.Wire(Part.__sortEdges__(es))
+
+
+def octagon(w, h, c, cw=False):
+    return _poly([(c, 0), (w - c, 0), (w, c), (w, h - c), (w - c, h), (c, h), (0, h - c), (0, c)], True, cw)
+
+
+class TestThickenSheetCaps(unittest.TestCase):
+    """A thickened sheet has one cap per planar end and mitred sharp edges, as in Onshape (ops#889).
+    OCC's fill lofts one cap strip per boundary edge (32 faces for Onshape's 18 on a rounded rectangle), and
+    its arc join at a sharp edge's convex side left the cap wire open ("ThruSections failed").
+    Models: a profile in z = 0 extruded 15 along z as a sheet. The cross-section of the thick piece is the
+    profile's band: for a closed convex profile of perimeter P offset d outward (d < 0 inward) its area is
+    A(d) = A0 + P d + c d^2, c = pi for tangent arcs (radius > -d), sum tan(turn / 2) at mitred corners."""
+
+    def setUp(self):
+        self.doc = App.newDocument("ThickenSheetCaps")
+
+    def tearDown(self):
+        App.closeDocument(self.doc.Name)
+
+    def sheet(self, wire_or_shape):
+        a = self.doc.addObject("Part::Feature", "Sheet")
+        a.Shape = wire_or_shape.extrude(App.Vector(0, 0, H)) if wire_or_shape.ShapeType == "Wire" else wire_or_shape
+        self.body = self.doc.addObject("PartDesign::Body", "T")
+        return a
+
+    def thicken(self, src, t1=0.0, t2=0.0, midplane=None):
+        t = S.make_thicken(self.body, [(src, "")], t1, t2, name="Thk")
+        if midplane is not None:
+            t.Midplane, t.Thickness = True, midplane
+        self.doc.recompute()
+        self.assertEqual(t.State, ["Up-to-date"], t.getStatusString())
+        s = t.Shape
+        self.assertTrue(s.isValid())
+        self.assertEqual(len(s.Solids), 1)
+        s.check(True)
+        self.feat = t
+        return s
+
+    def kinds(self, s):
+        d = {}
+        for f in s.Faces:
+            k = f.Surface.__class__.__name__
+            d[k] = d.get(k, 0) + 1
+        return d
+
+    def capsAt(self, s, z):
+        return [f for f in s.Faces if abs(f.BoundBox.ZMin - z) < 1e-6 and abs(f.BoundBox.ZMax - z) < 1e-6]
+
+    def assertOneCapPerEnd(self, s):
+        for z in (s.BoundBox.ZMin, s.BoundBox.ZMax):
+            caps = self.capsAt(s, z)
+            self.assertEqual(len(caps), 1, "caps at z = %g" % z)
+            self.assertEqual(caps[0].Surface.__class__.__name__, "Plane")
+
+    def outward(self, s, w):
+        return s.BoundBox.XLength > w + 1e-6
+
+    def band(self, P, c, out, inn):
+        """The band's area between the offsets at +out and -inn."""
+        return P * (out + inn) + c * (out * out - inn * inn)
+
+    def rimFillet(self, r):
+        s = self.feat.Shape
+        z = s.BoundBox.ZMax
+        rim = ["Edge%d" % (i + 1) for i, e in enumerate(s.Edges)
+               if abs(e.BoundBox.ZMin - z) < 1e-6 and abs(e.BoundBox.ZMax - z) < 1e-6]
+        fl = self.body.newObject("PartDesign::Fillet", "Fil")
+        fl.Base = (self.feat, rim)
+        fl.Radius = r
+        self.doc.recompute()
+        self.assertEqual(fl.State, ["Up-to-date"], fl.getStatusString())
+        self.assertTrue(fl.Shape.isValid())
+        self.assertLess(fl.Shape.Volume, s.Volume)
+        return fl
+
+    # ---- closed profiles
+
+    def testRoundedRectangleHasOneCapPerEnd(self):
+        P = 2 * 30 + 2 * 10 + 2 * math.pi * 5  # 40 x 20, corners r 5
+        for t1, t2, mid in ((2, 0, None), (0, 2, None), (0, 0, 3.0)):
+            with self.subTest(t1=t1, t2=t2, midplane=mid):
+                s = self.thicken(self.sheet(rounded_rectangle(40, 20, 5)), t1, t2, mid)
+                self.assertEqual(len(s.Faces), 18)
+                self.assertEqual(self.kinds(s), {"Cylinder": 8, "Plane": 10})
+                self.assertEqual(len(s.Edges), 48)
+                self.assertOneCapPerEnd(s)
+                if mid:
+                    want = self.band(P, math.pi, 1.5, 1.5)
+                elif self.outward(s, 40):
+                    want = self.band(P, math.pi, 2, 0)
+                else:
+                    want = self.band(P, math.pi, 0, 2)  # 3153.982237
+                self.assertAlmostEqual(s.Volume, H * want, delta=1e-6)
+
+    def testOctagonIsMitredBothWaysRound(self):
+        # 40 x 20 with corners cut by 4: eight 45-degree corners
+        P = 2 * 32 + 2 * 12 + 4 * 4 * math.sqrt(2)
+        for cw in (False, True):
+            for t1, t2, mid in ((2, 0, None), (0, 2, None), (0, 0, 3.0)):
+                with self.subTest(cw=cw, t1=t1, t2=t2, midplane=mid):
+                    s = self.thicken(self.sheet(octagon(40, 20, 4, cw)), t1, t2, mid)
+                    self.assertEqual(self.kinds(s), {"Plane": 18})
+                    self.assertEqual(len(s.Edges), 48)
+                    self.assertOneCapPerEnd(s)
+                    if mid:
+                        want = self.band(P, 8 * TAN, 1.5, 1.5)
+                    elif self.outward(s, 40):
+                        want = self.band(P, 8 * TAN, 2, 0)  # the mitre: 3517.645020
+                    else:
+                        want = self.band(P, 8 * TAN, 0, 2)  # 3120
+                    self.assertAlmostEqual(s.Volume, H * want, delta=1e-6)
+
+    def testRimFilletAtHalfTheThickness(self):
+        # the transfer studios' next feature: a full round on one end's rim; on split caps it fails
+        for wire in (rounded_rectangle(40, 20, 5), octagon(40, 20, 4)):
+            with self.subTest(edges=len(wire.Edges)):
+                self.thicken(self.sheet(wire), 2.0, 0.0)
+                self.rimFillet(1.0)
+
+    def testFaceVanishingFailsLoudly(self):
+        # inward past 6.83 the octagon's chamfer faces vanish: an error, never a wrong solid
+        src = self.sheet(octagon(40, 20, 4))
+        P = 2 * 32 + 2 * 12 + 4 * 4 * math.sqrt(2)
+        seen = set()
+        for t1, t2 in ((8, 0), (0, 8)):
+            t = S.make_thicken(self.body, [(src, "")], t1, t2, name="Thk")
+            self.doc.recompute()
+            if "Invalid" in t.State:
+                self.assertIn("thicken failed", t.getStatusString().lower())
+                seen.add("in")
+            else:  # the other side: outward, mitred
+                self.assertEqual(len(t.Shape.Faces), 18)
+                self.assertAlmostEqual(t.Shape.Volume, H * self.band(P, 8 * TAN, 8, 0), delta=1e-6)
+                seen.add("out")
+            self.body.removeObject(t)
+            self.doc.removeObject(t.Name)
+        self.assertEqual(seen, {"in", "out"})
+
+    # ---- open profiles
+
+    def testOpenL(self):
+        for t1, t2 in ((2, 0), (0, 2)):
+            with self.subTest(t1=t1, t2=t2):
+                s = self.thicken(self.sheet(_poly([(0, 0), (40, 0), (40, 20)])), t1, t2)
+                self.assertEqual(self.kinds(s), {"Plane": 8})
+                self.assertOneCapPerEnd(s)
+                outer = s.BoundBox.XMax > 40 + 1e-6
+                self.assertAlmostEqual(s.Volume, H * (60 * 2 + (4 if outer else -4)), delta=1e-6)
+
+    def testOpenZ(self):
+        # one corner each way: the mitre's gain and the inner corner's loss cancel
+        for t1, t2, mid in ((2, 0, None), (0, 2, None), (0, 0, 3.0)):
+            with self.subTest(t1=t1, t2=t2, midplane=mid):
+                s = self.thicken(self.sheet(_poly([(0, 0), (40, 0), (40, 20), (80, 20)])), t1, t2, mid)
+                self.assertEqual(self.kinds(s), {"Plane": 10})
+                self.assertOneCapPerEnd(s)
+                self.assertAlmostEqual(s.Volume, H * 100 * (3 if mid else 2), delta=1e-6)
+
+    # ---- sheets the merge refuses: the lateral faces would merge too
+
+    def testTwoArcTubeKeepsItsLaterals(self):
+        # a circle drawn as two half arcs: the merge would join the half cylinders into full turns, and a rim
+        # fillet that builds today would then fail. The piece stays as before: split caps, 4 half cylinders
+        s = self.thicken(self.sheet(Part.Wire(_arcs([(0, 0, 10, 0, 180), (0, 0, 10, 180, 360)]))), 2.0, 0.0)
+        self.assertEqual(self.kinds(s), {"Cylinder": 4, "Plane": 4})
+        r = 12 if s.BoundBox.XLength > 20 + 1e-6 else 8
+        self.assertAlmostEqual(s.Volume, H * math.pi * abs(r * r - 100), delta=1e-6)
+        self.rimFillet(0.5)
+
+    def testCollinearSplitKeepsSplitCaps(self):
+        s = self.thicken(self.sheet(_poly([(0, 0), (20, 0), (40, 0), (40, 20)])), 2.0, 0.0)
+        self.assertEqual(self.kinds(s), {"Plane": 14})
+        outer = s.BoundBox.XMax > 40 + 1e-6
+        self.assertAlmostEqual(s.Volume, H * (120 + (4 if outer else -4)), delta=1e-6)
+
+    def testGuardRefusedKeepsTheSplitPiece(self):
+        from unittest import mock
+
+        with mock.patch.object(S, "_laterals_kept", lambda laterals, piece, res: False):
+            s = self.thicken(self.sheet(rounded_rectangle(40, 20, 5)), 2.0, 0.0)
+        # 8 + 8 laterals and one cap strip per boundary edge: the result before ops#889
+        self.assertEqual(self.kinds(s), {"Cylinder": 8, "Plane": 24})
+
+    # ---- sharp sheets of other kinds (step 1: the intersection join)
+
+    def testMixedRoundedAndSharpCorners(self):
+        # 40 x 20, one corner rounded r 5, three square: c = 3 tan 45 + pi / 4
+        wire = Part.Wire(Part.__sortEdges__([_line((0, 0), (35, 0)), _arcs([(35, 5, 5, -90, 0)])[0],
+                                             _line((40, 5), (40, 20)), _line((40, 20), (0, 20)), _line((0, 20), (0, 0))]))
+        P, c = 35 + 15 + 40 + 20 + math.pi * 5 / 2, 3 + math.pi / 4
+        for t1, t2, mid in ((2, 0, None), (0, 2, None), (0, 0, 3.0)):
+            with self.subTest(t1=t1, t2=t2, midplane=mid):
+                s = self.thicken(self.sheet(wire), t1, t2, mid)
+                self.assertEqual(self.kinds(s), {"Plane": 10, "Cylinder": 2})
+                self.assertOneCapPerEnd(s)
+                if mid:
+                    want = self.band(P, c, 1.5, 1.5)
+                else:
+                    want = self.band(P, c, 2, 0) if self.outward(s, 40) else self.band(P, c, 0, 2)
+                self.assertAlmostEqual(s.Volume, H * want, delta=1e-6)
+
+    def testCylinderMeetingAPlane(self):
+        wire = Part.Wire(Part.__sortEdges__([_line((0, 0), (20, 0)), _arcs([(30, 0, 10, 90, 180)])[0]]))
+        for t1, t2 in ((2, 0), (0, 2), (2, 2)):
+            with self.subTest(t1=t1, t2=t2):
+                s = self.thicken(self.sheet(wire), t1, t2)
+                self.assertEqual(self.kinds(s), {"Plane": 6, "Cylinder": 2})
+                cut = s.cut(Part.makeBox(60, 60, 5, App.Vector(-10, -20, 5)))
+                self.assertTrue(cut.isValid())
+                self.assertAlmostEqual(cut.Volume, s.Volume * 2 / 3, delta=1e-6)
+
+    def boxFaces(self, normals):
+        box = Part.makeBox(40, 20, 15).cut(Part.makeCylinder(3, 15, App.Vector(20, 10, 0)))
+        return Part.Shell([[f for f in box.Faces if isinstance(f.Surface, Part.Plane)
+                            and abs(f.normalAt(0, 0).dot(App.Vector(*n)) - 1) < 1e-9][0] for n in normals])
+
+    def testShellWithAHole(self):
+        # the box's bottom (40 x 20, a hole of radius 3) and front (40 x 15): two slabs, the 40-long edge
+        # mitred outward (+ 40 t^2) or overlapping inward (- 40 t^2)
+        hole = math.pi * 9
+        for t1, t2, mid in ((2, 0, None), (0, 2, None), (0, 0, 3.0)):
+            with self.subTest(t1=t1, t2=t2, midplane=mid):
+                s = self.thicken(self.sheet(self.boxFaces([(0, 0, -1), (0, -1, 0)])), t1, t2, mid)
+                self.assertEqual(self.kinds(s), {"Plane": 8, "Cylinder": 1})
+                if mid:
+                    want = (800 - hole + 600) * 3
+                else:
+                    out = s.BoundBox.ZMin < -1e-6
+                    want = (800 - hole + 600) * 2 + (160 if out else -160)
+                self.assertAlmostEqual(s.Volume, want, delta=1e-6)
+
+    def testThreeFaceCorner(self):
+        hole = math.pi * 9
+        for t1, t2 in ((2, 0), (0, 2)):
+            with self.subTest(t1=t1, t2=t2):
+                s = self.thicken(self.sheet(self.boxFaces([(0, 0, -1), (0, -1, 0), (-1, 0, 0)])), t1, t2)
+                self.assertEqual(self.kinds(s), {"Plane": 9, "Cylinder": 1})
+                slabs = (800 - hole + 600 + 300) * 2
+                out = s.BoundBox.ZMin < -1e-6
+                # outward: edge prisms (40 + 20 + 15) t^2 and the corner cube; inward: their overlaps, the cube back
+                want = slabs + 75 * 4 + 8 if out else slabs - 75 * 4 + 8
+                self.assertAlmostEqual(s.Volume, want, delta=1e-6)
+
+    def testCupIsMitred(self):
+        # a cylinder r 10, h 15 and its bottom disk: the crease never reaches the free boundary, so the arc join
+        # builds, but rounds the bottom edge (6 faces); Onshape mitres: outward the slab of radius 12 under the
+        # tube, 948 pi; inward the tube r 8..10 plus the disk r 8 two deep, 668 pi (ops#889 skeptic 2, finding 2)
+        cyl = Part.makeCylinder(10, 15)
+        lat = [f for f in cyl.Faces if isinstance(f.Surface, Part.Cylinder)][0]
+        bottom = [f for f in cyl.Faces if isinstance(f.Surface, Part.Plane) and f.CenterOfMass.z < 1e-9][0]
+        for t1, t2 in ((2, 0), (0, 2)):
+            with self.subTest(t1=t1, t2=t2):
+                s = self.thicken(self.sheet(Part.Shell([lat, bottom])), t1, t2)
+                self.assertEqual(len(s.Faces), 5)
+                self.assertNotIn("Toroid", self.kinds(s))
+                out = s.BoundBox.XLength > 20 + 1e-6
+                self.assertAlmostEqual(s.Volume, math.pi * (948 if out else 668), delta=1e-6)
+
+    def testPlanarBSplineSheetMerges(self):
+        # the octagon sheet as NURBS: _plane_caps turns its laterals into planes too; they still match
+        P = 2 * 32 + 2 * 12 + 4 * 4 * math.sqrt(2)
+        s = self.thicken(self.sheet(octagon(40, 20, 4).extrude(App.Vector(0, 0, H)).toNurbs()), 2.0, 0.0)
+        self.assertEqual(len(s.Faces), 18)
+        self.assertEqual(len(s.Edges), 48)
+        self.assertOneCapPerEnd(s)
+        want = self.band(P, 8 * TAN, 2, 0) if self.outward(s, 40) else self.band(P, 8 * TAN, 0, 2)
+        self.assertAlmostEqual(s.Volume, H * want, delta=1e-6)
+
+    def testCollinearRimEdgesKeepTheirLateral(self):
+        # a plate whose one side is two collinear edges: the merge would join them on both laterals (their
+        # edges change), so the piece stays as it was: 2 laterals and 5 strips (ops#889 skeptic 2, finding 4)
+        plate = Part.Face(_poly([(0, 0), (20, 0), (40, 0), (40, 20), (0, 20)], True))
+        s = self.thicken(self.sheet(plate), 2.0, 0.0)
+        self.assertEqual(len(s.Faces), 7)
+        self.assertEqual(len(s.Edges), 15)
+        self.assertAlmostEqual(s.Volume, 1600, delta=1e-6)
+
+    def testConcaveSharpSheetKeepsTodaysNames(self):
+        # toward its concave side the octagon builds with the arc join and no round face: the same solid as the
+        # mitre, so the arc join's result and names are kept (the intersection join renames the far corner edges)
+        from unittest import mock
+
+        for cw in (False, True):
+            src = self.sheet(octagon(40, 20, 4, cw))
+            s = self.thicken(src, 2.0, 0.0)
+            if self.outward(s, 40):
+                continue  # the convex side: the arc join fails there
+            names = [s.getElementMappedName("Edge%d" % (k + 1)) for k in range(len(s.Edges))]
+            with mock.patch.object(S, "_sheet_join", lambda surf: 0):
+                self.feat.touch()
+                self.doc.recompute()
+                ref = self.feat.Shape
+            self.assertEqual([ref.getElementMappedName("Edge%d" % (k + 1)) for k in range(len(ref.Edges))], names)
+            return
+        self.fail("no octagon went to its concave side")
+
+    # ---- names and smooth sheets
+
+    def testReferencesMadeBeforeTheMergeResolve(self):
+        # a chamfer of a rim edge and a thicken of a lateral face, made on the split result, keep building
+        # the same on the merged one
+        from unittest import mock
+
+        src = self.sheet(rounded_rectangle(40, 20, 5))
+        with mock.patch.object(S, "_merge_caps", lambda piece, *a: piece):
+            s0 = self.thicken(src, 2.0, 0.0)
+            self.assertEqual(len(s0.Faces), 32)
+            z, y = s0.BoundBox.ZMax, s0.BoundBox.YMin
+            edge = next("Edge%d" % (i + 1) for i, e in enumerate(s0.Edges)
+                        if abs(e.BoundBox.ZMin - z) < 1e-6 and abs(e.BoundBox.ZMax - z) < 1e-6
+                        and abs(e.BoundBox.YMax - y) < 1e-6)
+            face = next("Face%d" % (i + 1) for i, f in enumerate(s0.Faces)
+                        if isinstance(f.Surface, Part.Plane) and abs(f.BoundBox.YMax - y) < 1e-6
+                        and f.BoundBox.ZLength > H - 1e-6)
+            cha = self.body.newObject("PartDesign::Chamfer", "Cha")
+            cha.Base = (self.feat, [edge])
+            cha.Size = 0.5
+            slab = S.make_thicken(self.doc.addObject("PartDesign::Body", "U"), [(self.feat, [face])], 1.0, 0.0, name="Slab")
+            self.doc.recompute()
+            self.assertEqual(cha.State, ["Up-to-date"], cha.getStatusString())
+            self.assertEqual(slab.State, ["Up-to-date"], slab.getStatusString())
+            v_cha, v_slab, bb_slab = cha.Shape.Volume, slab.Shape.Volume, slab.Shape.BoundBox
+        self.feat.touch()
+        self.doc.recompute()
+        self.assertEqual(len(self.feat.Shape.Faces), 18)
+        self.assertEqual(cha.State, ["Up-to-date"], cha.getStatusString())
+        self.assertEqual(slab.State, ["Up-to-date"], slab.getStatusString())
+        self.assertAlmostEqual(cha.Shape.Volume, v_cha, delta=1e-6)
+        self.assertAlmostEqual(slab.Shape.Volume, v_slab, delta=1e-6)
+        for got, want in ((slab.Shape.BoundBox.YMin, bb_slab.YMin), (slab.Shape.BoundBox.XMin, bb_slab.XMin),
+                          (slab.Shape.BoundBox.XMax, bb_slab.XMax)):
+            self.assertAlmostEqual(got, want, delta=1e-6)
+
+    def testSmoothSheetUnchanged(self):
+        # one face, nothing to merge: the piece is OCC's, names and all
+        from unittest import mock
+
+        circle = Part.Wire([Part.Circle(App.Vector(), App.Vector(0, 0, 1), 10).toShape()])
+        s = self.thicken(self.sheet(circle), 2.0, 0.0)
+        names = [s.getElementMappedName("Face%d" % (k + 1)) for k in range(len(s.Faces))]
+        with mock.patch.object(S, "_merge_caps", lambda piece, *a: piece):
+            self.feat.touch()
+            self.doc.recompute()
+            ref = self.feat.Shape
+        self.assertEqual(self.kinds(s), {"Cylinder": 2, "Plane": 2})
+        self.assertEqual(len(ref.Faces), len(s.Faces))
+        self.assertAlmostEqual(ref.Volume, s.Volume, delta=1e-9)
+        self.assertEqual([ref.getElementMappedName("Face%d" % (k + 1)) for k in range(len(ref.Faces))], names)
