@@ -1116,6 +1116,42 @@ def RevolveFreeFormProfile(make):
     }
 
 
+def LoftNormalToProfile(make):
+    """A loft with both ends Normal to profile, saved with Onshape's tangent rule (ops#855).
+
+    Body: a loft from a square, side 40, on the XY plane (centred) to a square, side 10, 10 up,
+    StartCondition and EndCondition "Normal to profile" at magnitude 1, TangentRule "Onshape" (fork
+    PR 468, kept per file since fork PR 471). Every row is the cubic X(s) = 20 (B0 + B1) + 5 (B2 +
+    B3), z(s) = k/3 B1 + (10 - k/3) B2 + 10 B3 with k = 0.9 x 10 + 0.1 x |rail| (the corner rail,
+    |rail| = sqrt(2 x 15^2 + 10^2)) at both ends, uniform by symmetry; the volume is the integral of
+    (2 X)^2 dz (`TestLoftOnshape.TestLoftTangentRule`). fork-1.0.0's rule (Legacy, k = 30.138/30 of
+    the distance) gives 7344.4342857 instead, 44.5 below: a file saved with the property must
+    reopen with Onshape's rule (R3)."""
+    doc = make("LoftNormalToProfile")
+    body = newBody(doc, "Body")
+    xy = plane(body, "XY_Plane")
+    bottom = attachedSketch(body, "Bottom", xy, m.rectangle(-20, -20, 20, 20))
+    top = attachedSketch(body, "Top", xy, m.rectangle(-5, -5, 5, 5))
+    top.AttachmentOffset = App.Placement(V(0, 0, 10), App.Rotation())
+    loft = body.newObject("PartDesign::AdditiveLoft", "Loft")
+    loft.Profile = bottom
+    loft.Sections = [top]
+    loft.StartCondition = "Normal to profile"
+    loft.EndCondition = "Normal to profile"
+    loft.TangentRule = "Onshape"
+    doc.recompute()
+    k = 0.9 * 10 + 0.1 * math.sqrt(2 * 15**2 + 10**2)
+    n = 2000
+    total = 0.0
+    for i in range(n + 1):
+        s = i / n
+        t = 1 - s
+        x = 20 * (t**3 + 3 * s * t * t) + 5 * (3 * s * s * t + s**3)
+        dz = t * t * k + 6 * s * t * (10 - 2 * k / 3) + s * s * k
+        total += (1 if i in (0, n) else (4 if i % 2 else 2)) * 4 * x * x * dz
+    return {"volumes": {"Loft": total / (3 * n)}}
+
+
 MODELS = [
     RevolutionGroove,
     SidedVariants,
@@ -1133,4 +1169,5 @@ MODELS = [
     FacePatternCentered,
     RevolveFreeFormProfile,
     RoundUnderLeaningWall,
+    LoftNormalToProfile,
 ]
