@@ -10,5 +10,8 @@ issue: ops#763
 reason: under a forced ID collision the split-piece mark rule keeps a mark it drops otherwise ("expanded names after a recompute" differ)
 cli  PartDesignTests.TestNamingLoad.TestNamingLoadCollision.testLinearPatternAll
 cli  PartDesignTests.TestNamingLoad.TestNamingLoadCollision.testPatternStepsAll
-# testPatternStepsOne and testLinearPatternOne (order-dependent, fork PR 447) pass on both platforms since
-# fork-1.0.0 (scout 1116, fork PR 465's CI): unlisted by ops#863.
+# Order-dependent (fork PR 447): it failed on macOS in fork PR 468's run 43973665858 attempt 1 and passed in attempt 2.
+reason: order-dependent: under a forced ID collision it fails on macOS in some test orders
+cli  PartDesignTests.TestNamingLoad.TestNamingLoadCollision.testLinearPatternOne   macos
+# testPatternStepsOne passes on both platforms since fork-1.0.0 (scout 1116, fork PR 465's CI): unlisted by
+# ops#863, as was testLinearPatternOne until it failed again on macOS (ops#855).
