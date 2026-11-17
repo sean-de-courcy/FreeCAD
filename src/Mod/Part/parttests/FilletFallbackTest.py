@@ -5905,6 +5905,31 @@ class KeyholePocketChamferTest(unittest.TestCase):
         with self.assertRaises(Exception):
             body.makeChamfer(1.0, floor)
 
+    def testSteppedKeyholeArcAloneSaysWhy(self):
+        # DU3's keyhole, 0.5 deep, its block top stepped up by 2 over x < -2, the floor arc alone
+        # chamfered or rounded 1.0: OCCT's own maker throws TopoDS_FrozenShape there. Refused, and
+        # the error says why the exact construction refused, not OCCT's raw error alone (ops#888)
+        V = FreeCAD.Vector
+        block = Part.makeBox(30, 20, 10, V(-10, -10, 0)).fuse(Part.makeBox(8, 20, 2, V(-10, -10, 10)))
+        pocket = (
+            Part.makeCylinder(6, 1.5, V(0, 0, 9.5)).fuse(Part.makeBox(14, 4, 1.5, V(0, -2, 9.5))).removeSplitter()
+        )
+        body = block.cut(pocket).removeSplitter()
+        arc = [
+            e
+            for e in body.Edges
+            if e.Curve.TypeId == "Part::GeomCircle" and all(abs(v.Point.z - 9.5) < 1e-9 for v in e.Vertexes)
+        ]
+        self.assertEqual(len(arc), 1)
+        for kind in ("chamfer", "fillet"):
+            with self.subTest(kind=kind):
+                with self.assertRaises(Exception) as caught:
+                    if kind == "chamfer":
+                        body.makeChamfer(1.0, arc)
+                    else:
+                        body.makeFillet(1.0, arc)
+                self.assertIn("exact construction refused", str(caught.exception))
+
     def testSteppedTopOverGroovedFloorIsRefused(self):
         # The same pocket with a groove 1 wide, 0.3 deep, across its floor, the slab over x < -2:
         # the floor circle in three arcs, the wall one face. The left arc's tool runs under the

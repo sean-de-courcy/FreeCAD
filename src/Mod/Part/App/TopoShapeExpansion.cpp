@@ -8481,6 +8481,13 @@ bool buildDressUpFailed(
         error = std::current_exception();
         return true;
     }
+    catch (const Standard_Failure&) {
+        // Another of OCCT's errors from the build (a stepped DU3 arc alone: TopoDS_FrozenShape
+        // from TopoDS_Builder::Add, ops#888): a failure too, so that the exact construction is
+        // tried and its reason goes with OCCT's error (raiseDressUpError)
+        error = std::current_exception();
+        return true;
+    }
     return !maker.IsDone();
 }
 
@@ -8520,6 +8527,17 @@ bool builtInvalid(BRepFilletAPI_LocalOperation& maker, const TopoDS_Shape& base)
         }
         if (e.GetMessageString() && *e.GetMessageString()) {
             message = e.GetMessageString();
+        }
+    }
+    catch (const Standard_Failure& e) {
+        // Another of OCCT's errors from the maker (a stepped DU3 arc alone: TopoDS_FrozenShape from
+        // TopoDS_Builder::Add, ops#888): its class and text, with the reason too, never without it
+        if (reason.empty()) {
+            throw;
+        }
+        message = e.ExceptionType();
+        if (e.GetMessageString() && *e.GetMessageString()) {
+            message += std::string(" ") + e.GetMessageString();
         }
     }
     if (!reason.empty()) {
