@@ -10,8 +10,11 @@ issue: ops#763
 reason: under a forced ID collision the split-piece mark rule keeps a mark it drops otherwise ("expanded names after a recompute" differ)
 cli  PartDesignTests.TestNamingLoad.TestNamingLoadCollision.testLinearPatternAll
 cli  PartDesignTests.TestNamingLoad.TestNamingLoadCollision.testPatternStepsAll
-# Order-dependent (fork PR 447): it failed on macOS in fork PR 468's run 43973665858 attempt 1 and passed in attempt 2.
-reason: order-dependent: under a forced ID collision it fails on macOS in some test orders
-cli  PartDesignTests.TestNamingLoad.TestNamingLoadCollision.testLinearPatternOne   macos
-# testPatternStepsOne passes on both platforms since fork-1.0.0 (scout 1116, fork PR 465's CI): unlisted by
-# ops#863, as was testLinearPatternOne until it failed again on macOS (ops#855).
+# Order-dependent (fork PR 447): under a forced ID collision the two "One" tests fail in some test orders, on
+# either platform, and pass in others with the same code. 2026-11-17: testLinearPatternOne failed on Windows in
+# fork PR 474's run 44125594746 attempt 1 (green in attempt 2); testPatternStepsOne failed on macOS in fork PR
+# 475's run 44111316102 attempt 2 (green in attempt 5) and on Windows in fork PR 477's run 44157298177. Listed on
+# every platform; a pass shows as a "listed but not failing" warning only.
+reason: order-dependent: under a forced ID collision it fails in some test orders, on Windows and macOS
+cli  PartDesignTests.TestNamingLoad.TestNamingLoadCollision.testLinearPatternOne
+cli  PartDesignTests.TestNamingLoad.TestNamingLoadCollision.testPatternStepsOne
