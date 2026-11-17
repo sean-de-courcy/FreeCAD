@@ -5928,7 +5928,8 @@ Tool miterTool(
  * there in wallsOf (the same index), and every walled face's walls in wallFaces: the caller trims
  * the tools there by the walls' surfaces (clipTool). A wall that does not run straight back is
  * listed in surfaceWalls with its tool: the caller trims that tool by the wall's own surface
- * (trimByWall).
+ * (trimByWall). A tool off both its faces is refused, but for an overflowing end and, with
+ * pastBothFaces (Request::pastBothFaces, ops#888 A1), a cut tool one of whose strips runs into a wall.
  */
 bool checkStrips(
     const std::vector<Tool>& tools,
@@ -5942,7 +5943,8 @@ bool checkStrips(
     std::vector<std::vector<std::pair<const Tool*, std::vector<TopoDS_Face>>>>& wallsOf,
     std::vector<TopoDS_Face>& wallFaces,
     std::vector<FusedRun>& fusedRuns,
-    std::vector<SurfaceWall>& surfaceWalls
+    std::vector<SurfaceWall>& surfaceWalls,
+    bool pastBothFaces
 )
 {
     bool trimmed = false;
@@ -6134,6 +6136,20 @@ bool checkStrips(
             }
         }
     }
+    // Whether a tool's strip runs off its face into a wall that trims it (checkRunOff's walls, straight
+    // back or by their own surface)
+    auto intoAWall = [&](const Tool* tool) {
+        for (const auto& runs : wallsOf) {
+            if (std::any_of(runs.begin(), runs.end(), [&](const auto& run) {
+                    return run.first == tool && !run.second.empty();
+                })) {
+                return true;
+            }
+        }
+        return std::any_of(surfaceWalls.begin(), surfaceWalls.end(), [&](const SurfaceWall& wall) {
+            return wall.tool == tool;
+        });
+    };
     for (const auto& tool : tools) {
         bool onAFace = tool.strips.empty();
         for (const auto& strip : tool.strips) {
@@ -6141,9 +6157,19 @@ bool checkStrips(
                 || std::find(offTheFace.begin(), offTheFace.end(), &strip) == offTheFace.end();
         }
         // An overflowing end's strips run off both faces past its vertex, into the material
-        if (!onAFace && tool.overflowFaces.empty()) {
-            refuse("a dress-up runs past both its faces");
+        if (onAFace || !tool.overflowFaces.empty()) {
+            continue;
         }
+        // A cut tool past both its faces where one run-off goes into a wall (ops#888 A1, Onshape's
+        // DU1: a chamfer 1.5 on a rail 1.056 wide and 1.0 high). Each run-off is one checkRunOff
+        // resolved above (a wall trims the tool; past a convex edge the air does), and the wall
+        // keeps the tool out of the material behind it. Off both faces into the air only (a round
+        // of r 30 on a 10 x 20 pad's edge, an oblique slab's corners) nothing trims it: no round
+        // or chamfer exists there. Only where OCCT built nothing (Request::pastBothFaces)
+        if (pastBothFaces && tool.cut && intoAWall(&tool)) {
+            continue;
+        }
+        refuse("a dress-up runs past both its faces");
     }
     if (limitOnly && !atLimit && !trimmed) {
         refuse("not at the limit: no new edge lands on an existing one, and no face vanishes");
@@ -8194,7 +8220,8 @@ TopoDS_Shape constructShape(
                              wallsOf,
                              wallFaces,
                              fusedRuns,
-                             surfaceWalls
+                             surfaceWalls,
+                             request.pastBothFaces
                          )
         || unionCorners;
     // The faces beyond overflowing ends grow by the tools' faces on their surfaces (Onshape's

@@ -8697,6 +8697,9 @@ std::shared_ptr<DressUpOutcome> buildDressUp(
                 // ops#888: the wider scope only where OCCT built nothing usable, or where its
                 // result is known not to be Onshape's (an arc's tool closing into a ring)
                 request.widerScope = out.failed || out.thin || out.ring;
+                // A cut tool past both its faces (ops#888 A1): only where OCCT built nothing
+                // usable, so that no result OCCT builds today moves
+                request.pastBothFaces = out.failed || out.thin;
                 out.constructed
                     = FilletFallback::construct(base, edges, request, out.construction, &out.reason);
             }
