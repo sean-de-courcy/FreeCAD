@@ -6420,6 +6420,30 @@ bool trimFusedTool(
             if (across < 0) {
                 normal.Reverse();
             }
+            // The whole half-space clips the tool all the way round: the arc must run under this
+            // plane's edges along its whole span (a block top stepped over part of the wall would
+            // clip the tool under the taller wall too: review r1 of A3)
+            double covered = 0.0;
+            for (const auto& [other, otherBeyond] : run.edges) {
+                BRepAdaptor_Curve otherCurve(other);
+                BRepAdaptor_Surface otherSurface(otherBeyond, Standard_False);
+                if (otherCurve.GetType() == GeomAbs_Circle && otherSurface.GetType() == GeomAbs_Plane
+                    && parallel(otherCurve.Circle().Axis().Direction(), along)
+                    && gp_Vec(origin, otherCurve.Circle().Location())
+                            .Crossed(gp_Vec(along))
+                            .Magnitude()
+                        <= linearTolerance
+                    && parallel(otherSurface.Plane().Axis().Direction(), along)
+                    && std::abs(gp_Vec(surface.Plane().Location(), otherSurface.Plane().Location())
+                                    .Dot(gp_Vec(normal)))
+                        <= linearTolerance) {
+                    covered += otherCurve.LastParameter() - otherCurve.FirstParameter();
+                }
+            }
+            if (covered < line.LastParameter() - line.FirstParameter() - angularTolerance) {
+                refuse("an arc's fused tool runs off its face under faces beyond at different "
+                       "heights");
+            }
             // The half-space beyond the plane, about the arc's centre on it
             const gp_Pnt centre = origin.Translated(
                 -gp_Vec(normal)

@@ -5820,6 +5820,23 @@ class KeyholePocketChamferTest(unittest.TestCase):
         self.assertEqual(len(floor), 1)
         self.assertAlmostEqual(floor[0].Area, 105.84682, delta=2e-4)
 
+    def testSteppedTopIsRefused(self):
+        # A round pocket r 6, 0.5 deep, in a block whose top steps up by 2 over x < 0, its floor
+        # circle chamfered 1.0: only the low wall is lower than the chamfer. The block top's plane
+        # would clip the cone all the way round, under the tall wall too (review r1 of A3: 2.29 too
+        # little, silently). No Onshape fact: refused, as before A3
+        V = FreeCAD.Vector
+        block = Part.makeBox(20, 20, 10, V(-10, -10, 0)).fuse(Part.makeBox(10, 20, 2, V(-10, -10, 10)))
+        body = block.cut(Part.makeCylinder(6, 3, V(0, 0, 9.5))).removeSplitter()
+        floor = [
+            e
+            for e in body.Edges
+            if e.Curve.TypeId == "Part::GeomCircle" and all(abs(v.Point.z - 9.5) < 1e-9 for v in e.Vertexes)
+        ]
+        self.assertTrue(floor)
+        with self.assertRaises(Exception):
+            body.makeChamfer(1.0, floor)
+
     def testTallWallsStayOccts(self):
         # Walls 3 high: OCCT builds it, as Onshape's (5583.57887, 13 faces)
         body, edges = self.body(3.0)
