@@ -5859,6 +5859,38 @@ class KeyholePocketChamferTest(unittest.TestCase):
         with self.assertRaises(Exception):
             body.makeChamfer(1.0, floor)
 
+    def testRampTopOverRampFloorIsRefused(self):
+        # A round pocket r 6 whose floor is z 9.5 over x < 0 and falls 0.5 per mm over x > 0 (one
+        # floor arc of 180 deg, one wall face), in a block whose top is z 10 over x > -4 and rises
+        # 0.2 per mm towards -x: the wall meets the ramps in ellipses. The z 10 top circles are
+        # long enough in all, yet over the arc only near its ends, and the half-space would clip
+        # the tool under the ramp too (review r1g of A3: 0.82 too little, silently). Refused
+        V = FreeCAD.Vector
+
+        def above(point, normal):
+            box = Part.makeBox(200, 200, 100, V(-100, -100, 0))
+            box.Placement = FreeCAD.Placement(point, FreeCAD.Rotation(V(0, 0, 1), normal))
+            return box
+
+        up = Part.makeBox(6, 20, 8, V(-10, -10, 10)).cut(above(V(-4, 0, 10), V(0.2, 0, 1).normalize()))
+        block = Part.makeBox(20, 20, 10, V(-10, -10, 0)).fuse(up).removeSplitter()
+        cylinder = Part.makeCylinder(6, 30, V(0, 0, 0))
+        left = cylinder.common(Part.makeBox(20, 40, 30, V(-20, -20, 9.5)))
+        right = cylinder.common(Part.makeBox(20, 40, 30, V(0, -20, 0))).common(
+            above(V(0, 0, 9.5), V(0.5, 0, 1).normalize())
+        )
+        body = block.cut(left.fuse(right).removeSplitter()).removeSplitter()
+        floor = [
+            e
+            for e in body.Edges
+            if e.Curve.TypeId == "Part::GeomCircle"
+            and abs(e.Curve.Radius - 6) < 1e-7
+            and all(abs(v.Point.z - 9.5) < 1e-9 for v in e.Vertexes)
+        ]
+        self.assertEqual(len(floor), 1)
+        with self.assertRaises(Exception):
+            body.makeChamfer(1.0, floor)
+
     def testTallWallsStayOccts(self):
         # Walls 3 high: OCCT builds it, as Onshape's (5583.57887, 13 faces)
         body, edges = self.body(3.0)

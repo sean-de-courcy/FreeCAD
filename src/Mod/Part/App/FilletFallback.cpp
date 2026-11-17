@@ -6434,11 +6434,20 @@ bool trimFusedTool(
                     continue;
                 }
                 BRepAdaptor_Curve otherCurve(other);
+                // A line along the axis (where the wall ends, or its seam) bounds no height. Any
+                // other edge that is not a coaxial circle (an ellipse to a ramped top or floor)
+                // leaves the wall's height there unjudged: refused (review r1g of A3, a third find
+                // in this path: the literal rule)
+                if (otherCurve.GetType() == GeomAbs_Line
+                    && parallel(otherCurve.Line().Direction(), along)) {
+                    continue;
+                }
                 if (otherCurve.GetType() != GeomAbs_Circle
                     || !parallel(otherCurve.Circle().Axis().Direction(), along)
                     || gp_Vec(origin, otherCurve.Circle().Location()).Crossed(gp_Vec(along)).Magnitude()
                         > linearTolerance) {
-                    continue;
+                    refuse("an arc's fused tool runs off a wall whose edges are not all circles about "
+                           "its axis or lines along it");
                 }
                 bool samePlane = false;
                 if (const auto* faces = faceOfEdge.Seek(other)) {
