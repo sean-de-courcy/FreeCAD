@@ -5636,13 +5636,13 @@ class ArcEndRingTest(unittest.TestCase):
             with self.subTest(kind=kind, size=d):
                 self.assertEqual(len(self.dress(kind, d).Faces), 10)
 
-    def testAtRMinusCIsNoRing(self):
-        # At d = R - c the section's inner circle only touches the chord: Onshape's fill stops at
-        # the tangent point there, not the ring (oracle 888b, DU5, on two walls). OCCT's result
-        body, arcs = self.body()
-        result = body.makeChamfer(2.0, arcs)
-        self.assertTrue(result.isValid())
-        self.assertGreater(abs(result.Volume - body.cut(self.ring("chamfer", 2.0)).Volume), 1e-3)
+    def testAtRMinusC(self):
+        # At d = R - c the section's inner circle touches the chord at one point, where both ends'
+        # tangent points coincide: the ring, as on either side of it (review r2 of fork PR 474;
+        # OCCT's is 0.566 more). On two walls Onshape is not the ring there (ArcEndTwoWallsTest)
+        for kind in ("chamfer", "fillet"):
+            with self.subTest(kind=kind):
+                self.assertEqual(len(self.dress(kind, 2.0).Faces), 10)
 
     def testBelowRMinusCStaysOccts(self):
         # Below it each end's tool ends on the chord: OCCT's result, which is the same shape

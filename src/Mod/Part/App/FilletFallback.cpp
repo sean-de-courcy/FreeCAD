@@ -4161,7 +4161,8 @@ double arcRunPast(
     const TrimPlane& plane,
     bool forward,
     double& back,
-    bool* tangent
+    bool* tangent,
+    bool tangentIsRing
 )
 {
     const gp_Dir& z = axis.Direction();
@@ -4216,9 +4217,13 @@ double arcRunPast(
         if (k > 1 + 1e-9 && !beyondHere) {
             return -1.0;  // never: the caller may close the tool into a ring (circleTool)
         }
-        // Touching the plane at one point (d = R - c: the section's inner circle tangent to it):
-        // Onshape's fill stops at the tangent point, not the ring (oracle 888b, DU5), which the
-        // run on can't end at
+        // Touching the plane at one point (d = R - c: the section's inner circle tangent to it).
+        // On one plane both ends' tangent points coincide: the ring, as on either side of it
+        // (review r2 of fork PR 474). On two, Onshape's fill stops at the tangent points, not the
+        // ring (oracle 888b, DU5), which the run on can't end at
+        if (k > 1 - 1e-9 && !beyondHere && tangentIsRing) {
+            return -1.0;
+        }
         if (k > 1 - 1e-9 && !beyondHere) {
             if (tangent) {
                 *tangent = true;
@@ -4374,7 +4379,8 @@ bool closesIntoRing(
             double back = 0.0;
             bool tangent = false;
             try {
-                never = arcRunPast(axis, sections[i], planes[i], forward[i], back, &tangent) < 0.0
+                never = arcRunPast(axis, sections[i], planes[i], forward[i], back, &tangent, false)
+                        < 0.0
                     && never;
             }
             catch (const Refusal&) {
@@ -4389,7 +4395,7 @@ bool closesIntoRing(
     double past[2];
     for (int i = 0; i < 2; ++i) {
         double back = 0.0;
-        past[i] = arcRunPast(axis, sections[i], planes[i], forward[i], back, nullptr);
+        past[i] = arcRunPast(axis, sections[i], planes[i], forward[i], back, nullptr, true);
     }
     return past[0] < 0.0 || past[1] < 0.0 || span + past[0] + past[1] > 2 * pi - 0.15;
 }
@@ -4437,6 +4443,12 @@ Tool circleTool(const Context& ctx, const EdgeData& data, const VertexEnd ends[2
     double pastEnd[2] = {0.0, 0.0};
     double backEnd[2] = {0.0, 0.0};
     bool endTrim[2] = {false, false};
+    // Both ends on one plane: a tangency there is the ring (arcRunPast)
+    const bool onePlane = !data.closed && ends[0].trims.size() == 1 && ends[1].trims.size() == 1
+        && ends[0].trims.front().normal.Dot(ends[1].trims.front().normal) > 1 - angularTolerance
+        && gp_Pln(ends[0].trims.front().point, ends[0].trims.front().normal)
+                .Distance(ends[1].trims.front().point)
+            <= linearTolerance;
     for (int i = 0; i < 2 && !data.closed; ++i) {
         if (ends[i].kind == VertexClass::Corner2Reflex) {
             continue;
@@ -4459,7 +4471,8 @@ Tool circleTool(const Context& ctx, const EdgeData& data, const VertexEnd ends[2
             plane,
             i == 1,
             backEnd[i],
-            nullptr
+            nullptr,
+            onePlane
         );
         endTrim[i] = true;
     }
