@@ -83,10 +83,11 @@ struct Request
     /// failed or left a face of zero width, so that nothing OCCT builds today, valid or not, moves.
     /// It lets an arc's tool run on past an end plane that does not contain its axis
     bool widerScope = false;
-    /// A chamfer's tool may run off both its faces (ops#888 A1: a chamfer wider than a rail's top and
-    /// taller than its wall), where each run-off is one the construction resolves and one of them
-    /// runs into a wall that trims the tool. Set by the caller only where OCCT failed or left a
-    /// face of zero width, so that nothing OCCT builds changes
+    /// A chamfer's or round's tool may run off both its faces (ops#888 A1: a dress-up wider than a
+    /// rail's top and taller than its wall; Onshape's DU1, DU4), where each run-off is one the
+    /// construction resolves and one of them runs into a wall that trims the tool. Set by the
+    /// caller only where OCCT failed or left a face of zero width, so that nothing OCCT builds
+    /// changes
     bool pastBothFaces = false;
 };
 

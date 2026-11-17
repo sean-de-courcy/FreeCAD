@@ -5929,8 +5929,8 @@ Tool miterTool(
  * the tools there by the walls' surfaces (clipTool). A wall that does not run straight back is
  * listed in surfaceWalls with its tool: the caller trims that tool by the wall's own surface
  * (trimByWall). A tool off both its faces is refused, but for an overflowing end and, with
- * pastBothFaces (Request::pastBothFaces for a chamfer, ops#888 A1), a cut tool one of whose strips
- * runs into a wall.
+ * pastBothFaces (Request::pastBothFaces, ops#888 A1), a cut tool one of whose strips runs into a
+ * wall.
  */
 bool checkStrips(
     const std::vector<Tool>& tools,
@@ -8222,9 +8222,9 @@ TopoDS_Shape constructShape(
                              wallFaces,
                              fusedRuns,
                              surfaceWalls,
-                             // Chamfers only: Onshape's DU1 is a chamfer, and no fact records a round
-                             // past both its faces (review r1)
-                             request.pastBothFaces && request.kind == Kind::Chamfer
+                             // Chamfers (Onshape's DU1) and rounds (DU4: the DU1a rail rounded
+                             // r 1.2, 1.5 and 2.5 builds, the same clipped construction)
+                             request.pastBothFaces
                          )
         || unionCorners;
     // The faces beyond overflowing ends grow by the tools' faces on their surfaces (Onshape's
