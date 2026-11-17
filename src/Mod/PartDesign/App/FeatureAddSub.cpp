@@ -30,6 +30,7 @@
 #include <BRepExtrema_DistShapeShape.hxx>
 #include <Precision.hxx>
 #include <TopExp_Explorer.hxx>
+#include <algorithm>
 #include <utility>
 #include <vector>
 #include <Standard_Failure.hxx>
@@ -813,28 +814,52 @@ bool FeatureAddSub::shapesTouch(const TopoDS_Shape& tool, const TopoDS_Shape& pa
 
 namespace
 {
-// Whether an edge of @p edges comes within Precision::Confusion() of a face of @p faces, pair by
-// pair (boxes first), stopping at the first such pair. A pair's distance is one of the terms whose
-// minimum BRepExtrema_DistShapeShape of the whole shapes returns, so a hit means the whole
-// distance is within Confusion() too; no hit decides nothing (ops#870: the whole distance of a
-// part with thousands of faces took minutes, its first contact pair a few milliseconds)
-bool edgeMeetsFace(const TopoDS_Shape& edges, const TopoDS_Shape& faces)
+// The (edge, face) pairs edgeMeetsFace() computes at most, both directions together: a miss (shapes
+// apart, boxes overlapping) computes them and then the whole distance, so this bounds its extra cost
+// (ops#870 review: tilted pocketed plates 1 mm apart took 17 s instead of 1.6 s without a budget)
+constexpr int contactPairBudget = 256;
+
+// Sub-shapes of @p shape of @p type with their boxes, the largest box first: a contact of two
+// overlapping parts usually crosses their large faces and long edges, so it is met early
+std::vector<std::pair<TopoDS_Shape, Bnd_Box>> boxedLargestFirst(const TopoDS_Shape& shape,
+                                                                TopAbs_ShapeEnum type)
 {
-    std::vector<std::pair<TopoDS_Shape, Bnd_Box>> faceBoxes;
-    for (TopExp_Explorer face(faces, TopAbs_FACE); face.More(); face.Next()) {
+    std::vector<std::pair<TopoDS_Shape, Bnd_Box>> boxed;
+    for (TopExp_Explorer it(shape, type); it.More(); it.Next()) {
         Bnd_Box box;
-        BRepBndLib::Add(face.Current(), box, /*useTriangulation=*/false);
+        BRepBndLib::Add(it.Current(), box, /*useTriangulation=*/false);
         box.Enlarge(Precision::Confusion());
-        faceBoxes.emplace_back(face.Current(), box);
+        boxed.emplace_back(it.Current(), box);
     }
-    for (TopExp_Explorer edge(edges, TopAbs_EDGE); edge.More(); edge.Next()) {
-        Bnd_Box box;
-        BRepBndLib::Add(edge.Current(), box, /*useTriangulation=*/false);
+    std::stable_sort(boxed.begin(), boxed.end(), [](const auto& a, const auto& b) {
+        const bool aVoid = a.second.IsVoid();
+        const bool bVoid = b.second.IsVoid();
+        if (aVoid || bVoid) {
+            return !aVoid && bVoid;
+        }
+        return a.second.SquareExtent() > b.second.SquareExtent();
+    });
+    return boxed;
+}
+
+// Whether an edge of @p edges comes within Precision::Confusion() of a face of @p faces, pair by
+// pair (boxes first), stopping at the first such pair or when @p budget pairs were computed. A
+// pair's distance is one of the terms whose minimum BRepExtrema_DistShapeShape of the whole shapes
+// returns, so a hit means the whole distance is within Confusion() too; no hit decides nothing
+// (ops#870: the whole distance of a part with thousands of faces took minutes, its first contact
+// pair a few milliseconds)
+bool edgeMeetsFace(const TopoDS_Shape& edges, const TopoDS_Shape& faces, int& budget)
+{
+    const auto faceBoxes = boxedLargestFirst(faces, TopAbs_FACE);
+    for (const auto& [edge, edgeBox] : boxedLargestFirst(edges, TopAbs_EDGE)) {
         for (const auto& [face, faceBox] : faceBoxes) {
-            if (faceBox.IsOut(box)) {
+            if (faceBox.IsOut(edgeBox)) {
                 continue;
             }
-            BRepExtrema_DistShapeShape distance(edge.Current(), face);
+            if (budget-- <= 0) {
+                return false;
+            }
+            BRepExtrema_DistShapeShape distance(edge, face);
             if (distance.IsDone() && distance.Value() <= Precision::Confusion()) {
                 return true;
             }
@@ -854,7 +879,9 @@ bool FeatureAddSub::distanceWithinConfusion(const TopoDS_Shape& one, const TopoD
     BRepBndLib::Add(one, oneBox, /*useTriangulation=*/false);
     BRepBndLib::Add(other, otherBox, /*useTriangulation=*/false);
     oneBox.Enlarge(Precision::Confusion());
-    if (!oneBox.IsOut(otherBox) && (edgeMeetsFace(one, other) || edgeMeetsFace(other, one))) {
+    int budget = contactPairBudget;
+    if (!oneBox.IsOut(otherBox)
+        && (edgeMeetsFace(one, other, budget) || edgeMeetsFace(other, one, budget))) {
         return true;
     }
     BRepExtrema_DistShapeShape distance(one, other);
