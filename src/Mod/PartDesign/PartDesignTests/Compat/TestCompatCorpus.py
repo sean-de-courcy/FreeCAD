@@ -73,7 +73,8 @@ Locally: `FreeCADCmd -t PartDesignTests.Compat.TestCompatCorpus`. FREECAD_COMPAT
 the gate at another corpus folder (holding `gen<k>/` folders); FREECAD_COMPAT_REPORT receives
 the records of a failing pass (by default the child's temporary folder, named in the message).
 Each pass prints a `COMPAT-DRIFT` line with the largest float difference it saw, from which the
-tolerances (`CompatRecord.TOLERANCE`) are calibrated on both CI platforms.
+tolerances (`CompatRecord.TOLERANCE`) are calibrated on both CI platforms. From gen5 on, a half
+saved on the other platform is compared after a recompute at `CROSS_PLATFORM_TOLERANCE` (ops#855).
 """
 
 import hashlib
@@ -120,11 +121,13 @@ CHILD_TIMEOUT = 600
 HALVES = {"": "win32", "-macos": "darwin"}
 # Reading the other platform's half (ops#855): the open pass reads the same BRep and stays at the
 # open tolerance, but a recompute here computes this platform's geometry, which differs from the
-# saving platform's for free-form shapes (gen5: 2e-9 relative in a fillet's volume, and the
-# optimal box's 1e-7 face-tolerance gap of ops#785). The recompute, round trip, rehearsal and
-# roll-forward passes over that half compare at this tolerance; the platform's own half keeps
-# CompatRecord.TOLERANCE, so code changes are still judged at 1e-11.
+# saving platform's for free-form shapes (gen5: up to 4.0e-9 relative in RoundUnderLeaningWall's
+# volume and centre, and the optimal box's 1e-7 face-tolerance gap of ops#785). From gen5 on, the
+# recompute, round trip, rehearsal and roll-forward passes over that half compare at this
+# tolerance; the open pass, the platform's own half, and gen1 to gen4 (whose other halves never
+# drifted past 3.6e-12) keep CompatRecord.TOLERANCE.
 CROSS_PLATFORM_TOLERANCE = (1e-8, 1e-6)
+CROSS_PLATFORM_FROM = 5
 GENERATION_FOLDER = re.compile(r"gen(\d+)(-macos)?")
 
 
@@ -194,7 +197,9 @@ class _Step:
         self.label = label
         self.older = older
         saved = manifest(genFolder).get("platform", sys.platform)
-        self.crossPlatform = CROSS_PLATFORM_TOLERANCE if saved != sys.platform else None
+        folder = GENERATION_FOLDER.fullmatch(os.path.basename(os.path.normpath(genFolder)))
+        late = folder is not None and int(folder.group(1)) >= CROSS_PLATFORM_FROM
+        self.crossPlatform = CROSS_PLATFORM_TOLERANCE if saved != sys.platform and late else None
         self.toOpen = stems if order == "ordered" else stems[-1:]
         self.folder = os.path.join(work, label.replace("/", "-"))
         self.report = report

@@ -1,4 +1,4 @@
-# Timing tests on GitHub's fast macOS runner (not product regressions). testAbandonedWorkersDoNotDisturbLaterWork:
+# A timing test on GitHub's fast macOS runner (not a product regression). testAbandonedWorkersDoNotDisturbLaterWork:
 # all five fillets stopped at their limit but abandonedTotal stayed 0 (fork PR 469's macOS run, attempt 1; the
 # rerun passed). Kernel safety 24 fixes the family's tests; remove this file then.
 
