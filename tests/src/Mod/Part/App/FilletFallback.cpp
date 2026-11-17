@@ -4123,6 +4123,16 @@ TopoShape chordBoss(std::vector<TopoShape>& arcs)
     return base;
 }
 
+/// A plate 40 x 20 x 3 with a rail along x on its top: the rail's near wall at y = 9.528, its far
+/// wall at 9.528 + width, its top at z = 4 (ops#888 A1, the oracle's model)
+TopoDS_Shape plateWithARail(double width)
+{
+    const double wall = 9.528;
+    return profileAlongX(
+        {{0, 0}, {20, 0}, {20, 3}, {wall + width, 3}, {wall + width, 4}, {wall, 4}, {wall, 3}, {0, 3}},
+        40
+    );
+}
 }  // namespace
 
 TEST_F(FilletFallbackTest, arcEndPlaneAsOnshape)
@@ -4167,6 +4177,165 @@ TEST_F(FilletFallbackTest, arcEndPlaneOnlyInTheWiderScope)
     std::string reason;
     EXPECT_TRUE(forced(base, arcs, request, &reason).isNull());
     EXPECT_NE(reason.find("does not contain its axis"), std::string::npos) << reason;
+}
+
+TEST_F(FilletFallbackTest, aChamferPastBothFacesOfARailIsTrimmedByThePlateTop)
+{
+    // ops#888 A1: the rail's near top edge chamfered wider than the rail's top and taller than its
+    // wall. Onshape builds it (notes/onshape-facts.md DU1, DU2): the chamfer's plane cuts the rail
+    // and ends on the plate top, which grows under it; the plate is not cut. In the rail's section
+    // (u from the near wall, d down from the top, w wide) the plane is u + d = c, and the rail
+    // keeps u + d >= c, u <= w, d <= 1: (w + 1 - c)^2 / 2 for c > 1, w^2 / 2 + w (1 - c) for
+    // w <= c <= 1
+    struct Case
+    {
+        double width;
+        double size;
+        double volume;  // Onshape's, DU1/DU2
+        double area;
+        int faces;
+        bool pastBoth;  // off both faces: built only with Request::pastBothFaces
+    };
+    // Closed forms. A1: c 1.5, w 1.056: the far wall keeps 1.056 + 1 - 1.5 = 0.556, the rail keeps
+    // 0.556^2 / 2 of its section; the plate top grows to y 10.028. A1b: c 1.0, w 0.9662: the far
+    // wall keeps 0.9662, the rail keeps 0.9662^2 / 2; the plane meets the near wall's foot
+    auto keptVolume = [](double w, double c) {
+        double kept = c > 1 ? std::pow(w + 1 - c, 2) / 2 : w * w / 2 + w * (1 - c);
+        return 2400 + 40 * kept;
+    };
+    auto keptArea = [](double w, double c) {
+        // For w <= c <= w + 1: the plate's bottom, sides and ends, its top less the strip the rail
+        // still stands on, the far wall, the chamfer's plane and the rail's two ends
+        double foot = w - std::max(c - 1, 0.0);         // the rail's width left on the plate top
+        double wall = std::min(1.0, w + 1 - c);         // the far wall's height
+        double slant = std::sqrt(2.0) * std::min(foot, wall);
+        double section = c > 1 ? foot * wall / 2 : w * w / 2 + w * (1 - c);
+        return 800 + 2 * 120 + 2 * 60 + (800 - 40 * foot) + 40 * wall + 40 * slant + 2 * section;
+    };
+    // A1b's strip on the near wall ends exactly on its foot, on its face: built without the flag,
+    // the control that the gate moves nothing that builds today
+    for (const Case& c : {Case {1.056, 1.5, 2406.18272, 1991.76125, 9, true},
+                          Case {0.9662, 1.0, 2418.67085, 2015.59007, 9, false}}) {
+        SCOPED_TRACE(c.width);
+        EXPECT_NEAR(keptVolume(c.width, c.size), c.volume, 1e-5);
+        EXPECT_NEAR(keptArea(c.width, c.size), c.area, 1e-5);
+        TopoShape base(plateWithARail(c.width), 1L);
+        TopoShape edge = edgeBetween(base, {0, 9.528, 4}, {40, 9.528, 4});
+        ASSERT_FALSE(edge.isNull());
+        FF::Request request = chamfer(c.size);
+        // OCCT fails, so the public path sets pastBothFaces; forced without it, the construction
+        // keeps its refusal past both faces (the gate: nothing OCCT builds moves)
+        EXPECT_TRUE(occtFails(base, {edge}, request));
+        std::string reason;
+        TopoShape without = forced(base, {edge}, request, &reason);
+        if (c.pastBoth) {
+            EXPECT_TRUE(without.isNull());
+            EXPECT_NE(reason.find("runs past both its faces"), std::string::npos) << reason;
+        }
+        else {
+            EXPECT_TRUE(exact(without, c.volume)) << reason;
+        }
+        request.pastBothFaces = true;
+        TopoShape result = forced(base, {edge}, request);
+        EXPECT_TRUE(exact(result, c.volume));
+        EXPECT_NEAR(area(result.getShape()), c.area, 1e-6 * c.area);
+        EXPECT_EQ(result.countSubElements("Face"), c.faces);
+        // The plate top in front of the rail: one face at z = 3 from y 0 to where the plane meets
+        // it (A1: 10.028; A1b: the near wall's foot, 9.528)
+        int tops = 0;
+        for (const auto& face : result.getSubTopoShapes(TopAbs_FACE)) {
+            Bnd_Box box;
+            BRepBndLib::Add(face.getShape(), box);
+            double xMin, yMin, zMin, xMax, yMax, zMax;
+            box.Get(xMin, yMin, zMin, xMax, yMax, zMax);
+            if (zMax - zMin < 1e-6 && std::abs(zMin - 3) < 1e-6 && yMin < 1e-6) {
+                ++tops;
+                EXPECT_NEAR(yMax, 9.528 + std::max(c.size - 1, 0.0), 1e-6);
+            }
+        }
+        EXPECT_EQ(tops, 1);
+        // The public path: the same result
+        TopoShape built = dressUp(base, {edge}, chamfer(c.size));
+        EXPECT_TRUE(exact(built, c.volume));
+    }
+}
+
+TEST_F(FilletFallbackTest, aChamferPastBothFacesIntoTheAirIsRefused)
+{
+    // The rail alone (no plate): its strips run off over convex edges on both sides, into the air,
+    // and nothing trims the tool. Onshape's dress-ups past their faces keep a strip on one
+    // (KP1-KP4) or end on a wall (DU1): refused even where OCCT failed
+    TopoShape bar(profileAlongX({{9.528, 3}, {10.584, 3}, {10.584, 4}, {9.528, 4}}, 40), 1L);
+    TopoShape edge = edgeBetween(bar, {0, 9.528, 4}, {40, 9.528, 4});
+    ASSERT_FALSE(edge.isNull());
+    FF::Request request = chamfer(1.5);
+    request.pastBothFaces = true;
+    std::string reason;
+    EXPECT_TRUE(forced(bar, {edge}, request, &reason).isNull());
+    EXPECT_NE(reason.find("runs past both its faces"), std::string::npos) << reason;
+}
+
+TEST_F(FilletFallbackTest, aRoundPastBothFacesOfARailIsTrimmedByThePlateTop)
+{
+    // ops#888 A1, Onshape's DU4: the A1 rail's near top edge rounded r 1.2, 1.5 and 2.5, each larger
+    // than the rail's top and its wall: Onshape builds them with 9 faces, the round clipped by the
+    // far wall and the plate top as the chamfer is. In the rail's section (u from the near wall, d
+    // down from the top, w = 1.056 wide, 1 high) the round's axis is at (r, r) and the rail keeps
+    // the rectangle's part inside its circle: with t = r - u, d >= r - sqrt(r^2 - t^2) and d <= 1,
+    // so t runs from r - w to sqrt(2r - 1) and the section kept is
+    // (1 - r) (b - a) + F(b) - F(a), F(t) = (t sqrt(r^2 - t^2) + r^2 asin(t / r)) / 2
+    struct Case
+    {
+        double radius;
+        double volume;  // Onshape's, DU4
+        double area;
+    };
+    const double w = 1.056;
+    auto keptVolume = [w](double r) {
+        double a = std::max(r - w, 0.0);
+        double b = std::min(std::sqrt(2 * r - 1), r);
+        auto primitive = [r](double t) {
+            return (t * std::sqrt(r * r - t * t) + r * r * std::asin(t / r)) / 2;
+        };
+        return 2400 + 40 * ((1 - r) * (b - a) + primitive(b) - primitive(a));
+    };
+    for (const Case& c : {Case {1.5, 2423.885333, 2015.52443},
+                          Case {1.2, 2429.940191, 2021.16832},
+                          Case {2.5, 2406.640403, 1990.87498}}) {
+        SCOPED_TRACE(c.radius);
+        EXPECT_NEAR(keptVolume(c.radius), c.volume, 1e-6);
+        TopoShape base(plateWithARail(w), 1L);
+        TopoShape edge = edgeBetween(base, {0, 9.528, 4}, {40, 9.528, 4});
+        ASSERT_FALSE(edge.isNull());
+        FF::Request request = fillet(c.radius);
+        EXPECT_TRUE(occtFails(base, {edge}, request));
+        // Without the flag the construction keeps its refusal past both faces
+        std::string reason;
+        EXPECT_TRUE(forced(base, {edge}, request, &reason).isNull());
+        EXPECT_NE(reason.find("runs past both its faces"), std::string::npos) << reason;
+        request.pastBothFaces = true;
+        TopoShape result = forced(base, {edge}, request, &reason);
+        EXPECT_TRUE(exact(result, keptVolume(c.radius))) << reason;
+        EXPECT_NEAR(area(result.getShape()), c.area, 1e-6 * c.area);
+        EXPECT_EQ(result.countSubElements("Face"), 9);
+        // The public path: the same result
+        TopoShape built = dressUp(base, {edge}, fillet(c.radius));
+        EXPECT_TRUE(exact(built, keptVolume(c.radius)));
+    }
+}
+
+TEST_F(FilletFallbackTest, aRoundPastBothFacesIntoTheAirIsRefused)
+{
+    // The rail alone, rounded 1.5: off both faces into the air, nothing trims the tool (as the
+    // chamfer's case above)
+    TopoShape bar(profileAlongX({{9.528, 3}, {10.584, 3}, {10.584, 4}, {9.528, 4}}, 40), 1L);
+    TopoShape edge = edgeBetween(bar, {0, 9.528, 4}, {40, 9.528, 4});
+    ASSERT_FALSE(edge.isNull());
+    FF::Request request = fillet(1.5);
+    request.pastBothFaces = true;
+    std::string reason;
+    EXPECT_TRUE(forced(bar, {edge}, request, &reason).isNull());
+    EXPECT_NE(reason.find("runs past both its faces"), std::string::npos) << reason;
 }
 
 // NOLINTEND(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)
