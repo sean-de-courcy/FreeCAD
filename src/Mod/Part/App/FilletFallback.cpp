@@ -4177,7 +4177,17 @@ double arcRunPast(
         }
     };
     std::vector<Wave> waves;
+    // Each corner's interval beyond the plane, in closed form: f(t) >= 0 where |t - psi| <= gamma
+    // (mod 2 pi), psi = atan2(ny, nx), gamma = acos(-e / amplitude)
+    struct Interval
+    {
+        double entry = 0.0;  // forward: where the corner reaches the far side (0: already there)
+        double exit = 0.0;   // forward: where it leaves it again
+        double back = 0.0;   // backward from 0, for a corner already beyond: where it comes inside
+    };
+    std::vector<Interval> intervals;
     double most = 0.0;
+    double before = 0.0;
     for (const gp_Pnt& q : {section.corner, section.ends[0], section.ends[1]}) {
         gp_Vec v(o, q);
         const double h = v.Dot(gp_Vec(z));
@@ -4191,34 +4201,45 @@ double arcRunPast(
             wave.ny = s * n.Dot(gp_Vec(y));
         }
         waves.push_back(wave);
-        if (wave.at(0.0) >= -linearTolerance) {
-            continue;
-        }
+        const bool beyondHere = wave.at(0.0) >= -linearTolerance;
         const double amplitude = wave.rho * std::hypot(wave.nx, wave.ny);
-        if (amplitude <= linearTolerance || -wave.e / amplitude > 1 - 1e-9) {
+        Interval interval;
+        if (amplitude <= linearTolerance) {
+            // The same side all the way round
+            if (!beyondHere) {
+                return -1.0;
+            }
+            refuse("an arc's tool before its end stays beyond the end plane all the way round");
+        }
+        const double k = -wave.e / amplitude;
+        if (k > 1 - 1e-9 && !beyondHere) {
             return -1.0;  // never: the caller may close the tool into a ring (circleTool)
         }
-        // cos(t - psi) >= k: the next entry into the interval |t - psi| <= gamma, mod 2 pi
-        const double gamma = std::acos(-wave.e / amplitude);
+        if (k < -1 + 1e-9) {
+            refuse("an arc's tool before its end stays beyond the end plane all the way round");
+        }
+        const double gamma = std::acos(std::clamp(k, -1.0, 1.0));
         const double psi = std::atan2(wave.ny, wave.nx);
-        double t = std::remainder(psi - gamma, 2 * pi);
-        if (t < 0) {
-            t += 2 * pi;
+        if (beyondHere) {
+            // 0 lies in [psi - gamma, psi + gamma], to the tolerance
+            interval.exit = psi + gamma;
+            interval.back = std::max(0.0, gamma - psi);
         }
-        most = std::max(most, t);
+        else {
+            interval.entry = std::remainder(psi - gamma, 2 * pi);
+            if (interval.entry < 0) {
+                interval.entry += 2 * pi;
+            }
+            interval.exit = interval.entry + 2 * gamma;
+        }
+        intervals.push_back(interval);
+        most = std::max(most, interval.entry);
+        before = std::max(before, interval.back);
     }
-    // Back from the end: where each corner that is beyond the plane at the end comes inside it
-    double before = 0.0;
-    for (const auto& wave : waves) {
-        double t = 0.0;
-        while (t < pi / 2 && wave.at(-t) >= -linearTolerance) {
-            t += pi / 8192;
-        }
-        if (t >= pi / 2) {
-            refuse("an arc's tool before its end stays beyond the end plane for a quarter turn");
-        }
-        before = std::max(before, t);
+    if (before >= pi / 2) {
+        refuse("an arc's tool before its end stays beyond the end plane for a quarter turn");
     }
+    // Back from the end: from before on back the whole section is on the material's side
     back = -1.0;
     for (double turn : {1.1 * before + 0.02, before + 1e-3}) {
         if (turn <= pi / 2
@@ -4232,21 +4253,15 @@ double arcRunPast(
     if (back < 0.0) {
         refuse("an arc's tool before its end does not come back inside the end plane");
     }
+    // Past the end: every corner has reached the far side by the turn, and none has left it
     for (double turn : {1.1 * most + 0.02, most + 1e-3}) {
         if (turn > pi / 2) {
             continue;
         }
         bool beyond = true;
-        for (const auto& wave : waves) {
-            // From where it first reaches the plane on, the corner's circle stays beyond it
-            double from = 0.0;
-            while (from < turn && wave.at(from) < -linearTolerance) {
-                from += turn / 4096;
-            }
-            for (int k = 0; k <= 64 && beyond; ++k) {
-                beyond = wave.at(from + (turn - from) * k / 64) >= -linearTolerance;
-            }
-            beyond = beyond && wave.at(turn) > linearTolerance;
+        for (size_t i = 0; i < waves.size() && beyond; ++i) {
+            beyond = turn >= intervals[i].entry && turn < intervals[i].exit
+                && waves[i].at(turn) > linearTolerance;
         }
         if (beyond) {
             return turn;
@@ -4346,7 +4361,7 @@ Tool circleTool(const Context& ctx, const EdgeData& data, const VertexEnd ends[2
     // dress-up's surface carried on to the end face is
     bool ring = false;
     if (endTrim[0] && endTrim[1]
-        && (pastEnd[0] < 0.0 || pastEnd[1] < 0.0 || span + pastEnd[0] + pastEnd[1] > 2 * pi - 0.05)) {
+        && (pastEnd[0] < 0.0 || pastEnd[1] < 0.0 || span + pastEnd[0] + pastEnd[1] > 2 * pi - 0.15)) {
         const TrimPlane& a = ends[0].trims.front();
         const TrimPlane& b = ends[1].trims.front();
         if (a.normal.Dot(b.normal) < 1 - angularTolerance
@@ -4379,6 +4394,11 @@ Tool circleTool(const Context& ctx, const EdgeData& data, const VertexEnd ends[2
         }
         if (backEnd[0] + backEnd[1] > span - 0.02) {
             refuse("the planes at an arc's ends cut its tool along its whole length");
+        }
+        // Nor across the gap: each sector runs 0.05 past its tool's end (below), and the turn on
+        // past both ends stays 0.05 short of the whole turn besides (else a ring, above, or refused)
+        if (span + pastEnd[0] + pastEnd[1] + 0.1 > 2 * pi - 0.05) {
+            refuse("an arc's tool turned on past an end plane reaches its other end");
         }
         runBefore = pastEnd[0];
         runAfter = pastEnd[1];
@@ -4611,8 +4631,9 @@ Tool circleTool(const Context& ctx, const EdgeData& data, const VertexEnd ends[2
         }
         measured = volumeOf(solid);
         const double allowance = raisedTolerance(solid, {}) * squareSize(solid);
-        if (std::abs(measured + removed - tool.volume)
-            > volumeTolerance * tool.volume + allowance) {
+        // A trimmed torus's volume integrates to about 2e-6 of it (review: a round at 600 mm)
+        const double relative = section.fillet ? std::max(volumeTolerance, 1e-5) : volumeTolerance;
+        if (std::abs(measured + removed - tool.volume) > relative * tool.volume + allowance) {
             refuse("an arc's tool trimmed by its end plane: " + describe(measured) + " left and "
                    + describe(removed) + " cut away of " + describe(tool.volume));
         }

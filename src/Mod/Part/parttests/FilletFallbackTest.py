@@ -5430,6 +5430,7 @@ class ArcEndPlaneTest(unittest.TestCase):
     F(rho) = rho^2 acos(c / rho) - c sqrt(rho^2 - c^2), the integral of 2 rho acos(c / rho)."""
 
     R, H, c = 10.0, 2.0, 5.0
+    unit = 1.0  # the sizes below are in units of R / 10 (ArcEndPlaneAt600Test)
 
     def body(self, half=False):
         R, H, c = self.R, self.H, self.c
@@ -5488,17 +5489,19 @@ class ArcEndPlaneTest(unittest.TestCase):
         return section.revolve(V(0, 0, 0), V(0, 0, 1), 360)
 
     def check(self, kind, d, half=False, faces=None):
+        d *= self.unit
         body, arc = self.body(half)
         result = body.makeChamfer(d, [arc]) if kind == "chamfer" else body.makeFillet(d, [arc])
         self.assertTrue(result.isValid())
         self.assertEqual(len(result.Solids), 1)
         # The shape: the boss less the ring, which the boss's own faces cut
         expected = body.cut(self.ring(kind, d))
-        self.assertLess(result.cut(expected).Volume, 1e-6)
-        self.assertLess(expected.cut(result).Volume, 1e-6)
+        cube = self.unit**3
+        self.assertLess(result.cut(expected).Volume, 1e-6 * cube)
+        self.assertLess(expected.cut(result).Volume, 1e-6 * cube)
         # The volume in closed form; OCCT integrates a trimmed torus's volume only to about 5e-6
         removed = self.removed(kind, d, half)
-        tolerance = 1e-6 if kind == "chamfer" else 1e-5 * removed
+        tolerance = 1e-6 * cube if kind == "chamfer" else 1e-5 * removed
         self.assertAlmostEqual(body.Volume - result.Volume, removed, delta=tolerance)
         if faces is not None:
             self.assertEqual(len(result.Faces), faces)
@@ -5509,7 +5512,7 @@ class ArcEndPlaneTest(unittest.TestCase):
             if f.Surface.TypeId == "Part::GeomPlane" and abs(f.normalAt(0, 0).x - 1) < 1e-9
         ]
         self.assertEqual(len(chord), 1)
-        self.assertLessEqual(result.optimalBoundingBox().XMax, self.c + 1e-6)
+        self.assertLessEqual(result.optimalBoundingBox().XMax, self.c + 1e-6 * self.unit)
         return result
 
     def testChamferToTheLimit(self):
@@ -5545,5 +5548,13 @@ class ArcEndPlaneTest(unittest.TestCase):
         # 6 with one end on the chord: the turn on past it never reaches the chord's far side
         body, arc = self.body(half=True)
         with self.assertRaises(Exception) as caught:
-            body.makeChamfer(6.0, [arc])
+            body.makeChamfer(6.0 * self.unit, [arc])
         self.assertIn("never reaches the end plane", str(caught.exception))
+
+
+class ArcEndPlaneAt600Test(ArcEndPlaneTest):
+    """ArcEndPlaneTest at 30 times the size (R 300 mm): a trimmed torus's volume integrates to about
+    2e-6 of it there, which the construction's balance check allows (review of ops#888 A2)"""
+
+    R, H, c = 300.0, 60.0, 150.0
+    unit = 30.0
