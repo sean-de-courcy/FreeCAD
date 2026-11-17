@@ -4143,6 +4143,118 @@ TopoDS_Shape trimBeyond(
     return cut.Shape();
 }
 
+/** How far past its end an arc's tool turns before its whole section (at the end) is beyond the
+ * end plane, which does not contain the axis (ops#888 A2), forward along the circle or back. Each
+ * corner of the section's hull (it holds a round's section too) turns on its own circle, on which
+ * the plane's side is the sinusoid f(t) = e + rho (nX cos t + nY sin t), t the turn: the first t
+ * where f reaches 0 is solved, and the turn is the largest, with a margin. -1 where a circle never
+ * reaches the plane; refused where one leaves the far side again before the turn ends (the tool
+ * would come back into the material), or past a quarter turn. back: how far before the end the
+ * section already reaches beyond the plane (a slot's wall across a keyhole's circle, DU3), with a
+ * margin: from there on back the whole section is on the material's side, and the trim is the
+ * sector between the two (circleTool), not the plane's whole far side, which may hold the arc's
+ * own tool further round
+ */
+double arcRunPast(
+    const gp_Ax1& axis,
+    const Section& section,
+    const TrimPlane& plane,
+    bool forward,
+    double& back
+)
+{
+    const gp_Dir& z = axis.Direction();
+    const gp_Pnt& o = axis.Location();
+    const double s = forward ? 1.0 : -1.0;
+    const gp_Vec n(plane.normal);
+    back = 0.0;
+    struct Wave
+    {
+        double e, rho, nx, ny;
+        double at(double t) const
+        {
+            return e + rho * (nx * std::cos(t) + ny * std::sin(t));
+        }
+    };
+    std::vector<Wave> waves;
+    double most = 0.0;
+    for (const gp_Pnt& q : {section.corner, section.ends[0], section.ends[1]}) {
+        gp_Vec v(o, q);
+        const double h = v.Dot(gp_Vec(z));
+        gp_Vec flat = v - gp_Vec(z) * h;
+        Wave wave {gp_Vec(plane.point, o).Dot(n) + h * n.Dot(gp_Vec(z)), flat.Magnitude(), 0.0, 0.0};
+        if (wave.rho > linearTolerance) {
+            gp_Dir x(flat);
+            gp_Dir y = z.Crossed(x);
+            wave.nx = n.Dot(gp_Vec(x));
+            // The turn's sign folded into the wave: t >= 0 runs on past the end
+            wave.ny = s * n.Dot(gp_Vec(y));
+        }
+        waves.push_back(wave);
+        if (wave.at(0.0) >= -linearTolerance) {
+            continue;
+        }
+        const double amplitude = wave.rho * std::hypot(wave.nx, wave.ny);
+        if (amplitude <= linearTolerance || -wave.e / amplitude > 1 - 1e-9) {
+            return -1.0;  // never: the caller may close the tool into a ring (circleTool)
+        }
+        // cos(t - psi) >= k: the next entry into the interval |t - psi| <= gamma, mod 2 pi
+        const double gamma = std::acos(-wave.e / amplitude);
+        const double psi = std::atan2(wave.ny, wave.nx);
+        double t = std::remainder(psi - gamma, 2 * pi);
+        if (t < 0) {
+            t += 2 * pi;
+        }
+        most = std::max(most, t);
+    }
+    // Back from the end: where each corner that is beyond the plane at the end comes inside it
+    double before = 0.0;
+    for (const auto& wave : waves) {
+        double t = 0.0;
+        while (t < pi / 2 && wave.at(-t) >= -linearTolerance) {
+            t += pi / 8192;
+        }
+        if (t >= pi / 2) {
+            refuse("an arc's tool before its end stays beyond the end plane for a quarter turn");
+        }
+        before = std::max(before, t);
+    }
+    back = -1.0;
+    for (double turn : {1.1 * before + 0.02, before + 1e-3}) {
+        if (turn <= pi / 2
+            && std::all_of(waves.begin(), waves.end(), [&](const Wave& wave) {
+                   return wave.at(-turn) < -linearTolerance;
+               })) {
+            back = turn;
+            break;
+        }
+    }
+    if (back < 0.0) {
+        refuse("an arc's tool before its end does not come back inside the end plane");
+    }
+    for (double turn : {1.1 * most + 0.02, most + 1e-3}) {
+        if (turn > pi / 2) {
+            continue;
+        }
+        bool beyond = true;
+        for (const auto& wave : waves) {
+            // From where it first reaches the plane on, the corner's circle stays beyond it
+            double from = 0.0;
+            while (from < turn && wave.at(from) < -linearTolerance) {
+                from += turn / 4096;
+            }
+            for (int k = 0; k <= 64 && beyond; ++k) {
+                beyond = wave.at(from + (turn - from) * k / 64) >= -linearTolerance;
+            }
+            beyond = beyond && wave.at(turn) > linearTolerance;
+        }
+        if (beyond) {
+            return turn;
+        }
+    }
+    refuse("an arc's tool past its end comes back from beyond the end plane, or turns too far");
+}
+
 /// A revolution about the axis of a circular edge, between the meridian planes at its ends
 Tool circleTool(const Context& ctx, const EdgeData& data, const VertexEnd ends[2])
 {
@@ -4176,9 +4288,32 @@ Tool circleTool(const Context& ctx, const EdgeData& data, const VertexEnd ends[2
     if (turn > 2 * pi - angularTolerance) {
         turn = 2 * pi;
     }
-    gp_Trsf startTurn;
-    startTurn.SetRotation(axis, -pre);
-    const TopLoc_Location atStart(startTurn);
+    // The section at a parameter of the circle, its inward directions snapped to radial and axial
+    auto snappedAt = [&](double parameter, gp_Dir& radialThere) {
+        Section at = sectionAt(ctx, data, parameter);
+        radialThere = gp_Dir(gp_Vec(circle.Location(), at.corner));
+        for (auto& d : at.inward) {
+            double r = d.Dot(radialThere);
+            double a = d.Dot(z);
+            if (std::abs(r) > 1 - 1e-6) {
+                d = r > 0 ? radialThere : radialThere.Reversed();
+            }
+            else if (std::abs(a) > 1 - 1e-6) {
+                d = a > 0 ? z : z.Reversed();
+            }
+            else {
+                refuse("the faces at a circular edge are not normal to each other");
+            }
+        }
+        return makeSection(at.corner, at.inward[0], at.inward[1], ctx.request);
+    };
+    // An end plane that does not contain the axis (ops#888 A2: a boss cut by a chord plane, its top
+    // arc chamfered or rounded): the revolution runs on past the vertex until the whole section is
+    // beyond the plane, and is trimmed by it there, as a line's tool is by a slanted end plane
+    // (lineTool). Only where OCCT failed (Request::widerScope): nothing it builds moves
+    double pastEnd[2] = {0.0, 0.0};
+    double backEnd[2] = {0.0, 0.0};
+    bool endTrim[2] = {false, false};
     for (int i = 0; i < 2 && !data.closed; ++i) {
         if (ends[i].kind == VertexClass::Corner2Reflex) {
             continue;
@@ -4187,28 +4322,73 @@ Tool circleTool(const Context& ctx, const EdgeData& data, const VertexEnd ends[2
             refuse("an arc that ends on a face that is not a plane");
         }
         const TrimPlane& plane = ends[i].trims.front();
-        if (std::abs(plane.normal.Dot(z)) > angularTolerance
-            || gp_Pln(plane.point, plane.normal).Distance(circle.Location()) > linearTolerance) {
+        if (std::abs(plane.normal.Dot(z)) <= angularTolerance
+            && gp_Pln(plane.point, plane.normal).Distance(circle.Location()) <= linearTolerance) {
+            continue;
+        }
+        if (!ctx.request.widerScope || ends[i].kind != VertexClass::FreeEnd
+            || ends[i].trims.size() != 1 || pre + post > 0.0 || runBefore + runAfter > 0.0) {
             refuse("the plane at the end of an arc does not contain its axis");
         }
+        gp_Dir radialAtEnd;
+        pastEnd[i] = arcRunPast(
+            axis,
+            snappedAt(i == 0 ? data.first : data.last, radialAtEnd),
+            plane,
+            i == 1,
+            backEnd[i]
+        );
+        endTrim[i] = true;
     }
-    Section section = sectionAt(ctx, data, data.first - runBefore);
-    // The inward directions are radial and axial: snap them
-    gp_Dir radial(gp_Vec(circle.Location(), section.corner));
-    for (auto& d : section.inward) {
-        double r = d.Dot(radial);
-        double a = d.Dot(z);
-        if (std::abs(r) > 1 - 1e-6) {
-            d = r > 0 ? radial : radial.Reversed();
+    // Where the turns on past both ends would meet, and both ends are on one plane (a boss's
+    // chord, the section reaching in to the chord's distance from the axis or past it), the tool
+    // is the whole ring cut by that plane: one chamfer or round face across the chord, as the
+    // dress-up's surface carried on to the end face is
+    bool ring = false;
+    if (endTrim[0] && endTrim[1]
+        && (pastEnd[0] < 0.0 || pastEnd[1] < 0.0 || span + pastEnd[0] + pastEnd[1] > 2 * pi - 0.05)) {
+        const TrimPlane& a = ends[0].trims.front();
+        const TrimPlane& b = ends[1].trims.front();
+        if (a.normal.Dot(b.normal) < 1 - angularTolerance
+            || gp_Pln(a.point, a.normal).Distance(b.point) > linearTolerance) {
+            refuse("the tools turned on past an arc's two end planes meet");
         }
-        else if (std::abs(a) > 1 - 1e-6) {
-            d = a > 0 ? z : z.Reversed();
-        }
-        else {
-            refuse("the faces at a circular edge are not normal to each other");
-        }
+        ring = true;
+        pastEnd[0] = 0.0;
+        pastEnd[1] = 0.0;
     }
-    section = makeSection(section.corner, section.inward[0], section.inward[1], ctx.request);
+    // Before the section is taken: the ring starts opposite the arc's middle, in the part the
+    // plane cuts away, and so does a round's seam (pastEnd is 0 there)
+    const double ringLead = ring ? (2 * pi - span) / 2 : 0.0;
+    if (ring) {
+        runBefore = 0.0;
+        runAfter = 0.0;
+        turn = 2 * pi;
+    }
+    else if (endTrim[0] || endTrim[1]) {
+        // Each end is trimmed within its sector, from where the section first reaches beyond the
+        // plane before the end to past where the tool ends (below): less than half a turn, and
+        // the two sectors apart
+        for (int i = 0; i < 2; ++i) {
+            if (endTrim[i] && pastEnd[i] < 0.0) {
+                refuse("an arc's tool past its end never reaches the end plane");
+            }
+            if (backEnd[i] + pastEnd[i] + 0.05 > pi - 0.05) {
+                refuse("an arc's tool trimmed by an end plane over half a turn");
+            }
+        }
+        if (backEnd[0] + backEnd[1] > span - 0.02) {
+            refuse("the planes at an arc's ends cut its tool along its whole length");
+        }
+        runBefore = pastEnd[0];
+        runAfter = pastEnd[1];
+        turn = span + runBefore + runAfter;
+    }
+    gp_Trsf startTurn;
+    startTurn.SetRotation(axis, -pre - ringLead);
+    const TopLoc_Location atStart(startTurn);
+    gp_Dir radial;
+    Section section = snappedAt(data.first - runBefore, radial);
     gp_Vec toCorner(circle.Location(), section.corner);
     double centroidRadius = toCorner.Dot(gp_Vec(radial)) + section.centroid.Dot(gp_Vec(radial));
     Tool tool;
@@ -4253,7 +4433,7 @@ Tool circleTool(const Context& ctx, const EdgeData& data, const VertexEnd ends[2
         // pieces). The turn is short of a whole one (above), so the seam is outside it
         gp_Dir seam = circle.XAxis().Direction();
         if (!data.closed) {
-            seam.Rotate(axis, (data.first - pre + data.last + post) / 2 + pi);
+            seam.Rotate(axis, (data.first - pre - pastEnd[0] + data.last + post + pastEnd[1]) / 2 + pi);
         }
         gp_Ax2 frame(axisPoint, z, seam);
         TopoDS_Shape round;
@@ -4299,7 +4479,7 @@ Tool circleTool(const Context& ctx, const EdgeData& data, const VertexEnd ends[2
                     );
                 }
                 TopoDS_Shape start = revolved.face();
-                if (pre > 0.0) {
+                if (pre + ringLead > 0.0) {
                     start.Move(atStart);
                 }
                 solid = BRepPrimAPI_MakeRevol(start, axis, turn, Standard_True).Shape();
@@ -4359,6 +4539,86 @@ Tool circleTool(const Context& ctx, const EdgeData& data, const VertexEnd ends[2
         }
     }
     tool.solid = solid;
+    if (endTrim[0] || endTrim[1]) {
+        // Checked against its closed form before the trim; then each end plane cuts away what is
+        // beyond it within the end's sector, whose back side it must not reach (a ring: beyond it
+        // anywhere), and the tool is measured: what is left and what went make up the closed form
+        double measured = volumeOf(solid);
+        if (std::abs(measured - tool.volume) > volumeTolerance * tool.volume) {
+            refuse("an arc's tool run on past its end plane: " + describe(measured)
+                   + " differs from its closed form " + describe(tool.volume));
+        }
+        const double size = 4 * (circle.Radius() + section.length[0] + section.length[1]) + 4;
+        // The meridian half-plane at a parameter of the circle, as the half-space on the side the
+        // parameter grows (or falls) towards
+        auto meridian = [&](double parameter, bool growing) {
+            gp_Pnt point;
+            gp_Vec tangent;
+            ElCLib::D1(parameter, circle, point, tangent);
+            return TrimPlane {circle.Location(), gp_Dir(growing ? tangent : -tangent)};
+        };
+        double removed = 0.0;
+        for (int i = 0; i < 2; ++i) {
+            if (!endTrim[i] || (ring && i == 1)) {
+                continue;
+            }
+            // The sector's back side, before the end, and its front, past the tool's end
+            const double at = i == 1 ? data.last : data.first;
+            const double sign = i == 1 ? 1.0 : -1.0;
+            TrimPlane middle = meridian(at - sign * backEnd[i], i == 1);
+            TrimPlane front = meridian(at + sign * (pastEnd[i] + 0.05), i == 0);
+            // A ring is cut by the whole half-space: its arc must stay (below)
+            TopoDS_Shape region = ring ? halfSpaceBeyond(ends[i].trims.front(), size)
+                                       : commonOf(
+                                             commonOf(
+                                                 halfSpaceBeyond(ends[i].trims.front(), size),
+                                                 halfSpaceBeyond(middle, size)
+                                             ),
+                                             halfSpaceBeyond(front, size)
+                                         );
+            TopoDS_Shape away = commonOf(solid, region);
+            for (TopExp_Explorer it(away, TopAbs_FACE); it.More() && !ring; it.Next()) {
+                if (inPlane(it.Current(), middle)) {
+                    refuse("the plane at the end of an arc crosses its tool away from the end");
+                }
+            }
+            removed += volumeOf(away);
+            BRepAlgoAPI_Cut cut(solid, region);
+            if (!cut.IsDone() || cut.HasErrors()) {
+                refuse("trimming an arc's tool by its end plane failed");
+            }
+            solid = cut.Shape();
+        }
+        if (countSolids(solid) != 1) {
+            refuse("an arc's tool trimmed by its end plane is not one solid");
+        }
+        solid = TopExp_Explorer(solid, TopAbs_SOLID).Current();
+        if (ring) {
+            // The tool is kept beside the arc, at its middle and near each end
+            gp_Pnt inSection = section.corner.Translated(
+                (gp_Vec(section.inward[0]) + gp_Vec(section.inward[1]))
+                * (0.05 * std::min(section.length[0], section.length[1]))
+            );
+            BRepClass3d_SolidClassifier kept(solid);
+            for (double at : {0.01, 0.5, 0.99}) {
+                gp_Trsf there;
+                there.SetRotation(axis, at * span);
+                kept.Perform(inSection.Transformed(there), linearTolerance);
+                if (kept.State() != TopAbs_IN) {
+                    refuse("the plane at the ends of an arc cuts its ring beside the arc");
+                }
+            }
+        }
+        measured = volumeOf(solid);
+        const double allowance = raisedTolerance(solid, {}) * squareSize(solid);
+        if (std::abs(measured + removed - tool.volume)
+            > volumeTolerance * tool.volume + allowance) {
+            refuse("an arc's tool trimmed by its end plane: " + describe(measured) + " left and "
+                   + describe(removed) + " cut away of " + describe(tool.volume));
+        }
+        tool.solid = solid;
+        tool.volume = measured;
+    }
     if (pre + post > 0.0) {
         // Checked against its closed form before the trim, then measured: the trim by the face
         // beyond has none
@@ -4401,7 +4661,7 @@ Tool circleTool(const Context& ctx, const EdgeData& data, const VertexEnd ends[2
         tool.volume = volumeOf(tool.solid);
     }
     for (int i = 0; i < 2 && !data.closed; ++i) {
-        if (ends[i].kind == VertexClass::FreeEnd) {
+        if (ends[i].kind == VertexClass::FreeEnd && !(ring && i == 1)) {
             tool.caps.push_back(ends[i].trims.front());
         }
         else if (ends[i].kind == VertexClass::Corner2Union) {

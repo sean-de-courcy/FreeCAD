@@ -8687,6 +8687,8 @@ std::shared_ptr<DressUpOutcome> buildDressUp(
                 if (reflex) {
                     request.limitOnly = false;
                 }
+                // ops#888: the wider scope only where OCCT built nothing usable
+                request.widerScope = out.failed || out.thin;
                 out.constructed
                     = FilletFallback::construct(base, edges, request, out.construction, &out.reason);
             }
