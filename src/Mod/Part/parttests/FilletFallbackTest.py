@@ -5558,3 +5558,195 @@ class ArcEndPlaneAt600Test(ArcEndPlaneTest):
 
     R, H, c = 300.0, 60.0, 150.0
     unit = 30.0
+
+
+class ArcEndRingTest(unittest.TestCase):
+    """ops#888 A2, where OCCT builds: oracle s8ecd's DU2 (notes/onshape-facts.md), a plate 30 x 30 x 3
+    under a boss of radius 10, z 3..9, whose profile is cut by the chord y = 8 (one arc, as a sketch
+    gives it). From the size R - c = 2 up the section reaches inside the chord's distance from the
+    axis, and Onshape's cone or torus runs on across the chord, which cuts it: the top becomes a disc.
+    OCCT builds a valid shape there that is not that (DU2's chamfer 4: 4121.743 against Onshape's
+    4103.824, 13 faces against 10), so the exact construction builds it (FilletFallback::endsInRing).
+    Below R - c OCCT's result is the ring's already and stays OCCT's."""
+
+    R, top, c = 10.0, 9.0, 8.0
+
+    def body(self, seam=False):
+        R, c = self.R, self.c
+        if seam:
+            # the cylinder's seam splits the top circle into two arcs
+            boss = Part.makeCylinder(R, 6, V(0, 0, 3)).common(Part.makeBox(40, 40, 20, V(-20, c - 40, 0)))
+        else:
+            x = math.sqrt(R * R - c * c)
+            profile = Part.Wire(
+                [
+                    Part.Arc(V(x, c, 3), V(0, -R, 3), V(-x, c, 3)).toShape(),
+                    Part.LineSegment(V(-x, c, 3), V(x, c, 3)).toShape(),
+                ]
+            )
+            boss = Part.Face(profile).extrude(V(0, 0, 6))
+        body = Part.makeBox(30, 30, 3, V(-15, -15, 0)).fuse(boss).removeSplitter()
+        arcs = [
+            e
+            for e in body.Edges
+            if e.Curve.TypeId == "Part::GeomCircle"
+            and all(abs(v.Point.z - self.top) < 1e-9 for v in e.Vertexes)
+        ]
+        self.assertEqual(len(arcs), 2 if seam else 1)
+        self.assertAlmostEqual(body.Volume, 4486.85493, delta=1e-4)
+        return body, arcs
+
+    def ring(self, kind, d):
+        R, H = self.R, self.top
+        if kind == "chamfer":
+            section = Part.Face(Part.makePolygon([V(R, 0, H), V(R - d, 0, H), V(R, 0, H - d), V(R, 0, H)]))
+        else:
+            square = Part.makePolygon(
+                [V(R, 0, H), V(R - d, 0, H), V(R - d, 0, H - d), V(R, 0, H - d), V(R, 0, H)]
+            )
+            ball = Part.Face(Part.Wire(Part.makeCircle(d, V(R - d, 0, H - d), V(0, 1, 0))))
+            section = Part.Face(square).cut(ball)
+        return section.revolve(V(0, 0, 0), V(0, 0, 1), 360)
+
+    def dress(self, kind, d, seam=False):
+        body, arcs = self.body(seam)
+        result = body.makeChamfer(d, arcs) if kind == "chamfer" else body.makeFillet(d, arcs)
+        self.assertTrue(result.isValid())
+        self.assertEqual(len(result.Solids), 1)
+        expected = body.cut(self.ring(kind, d))
+        self.assertLess(result.cut(expected).Volume, 1e-6)
+        self.assertLess(expected.cut(result).Volume, 1e-6)
+        return result
+
+    def testAsOnshape(self):
+        # Onshape's values (evVolume HIGH); a trimmed torus's volume integrates to about 1e-7 here
+        for kind, volume, area, delta in (
+            ("chamfer", 4103.82368, 2376.07238, 1e-4),
+            ("fillet", 4320.18881, 2429.58734, 1e-3),
+        ):
+            with self.subTest(kind=kind):
+                result = self.dress(kind, 4.0)
+                self.assertAlmostEqual(result.Volume, volume, delta=delta)
+                self.assertAlmostEqual(result.Area, area, delta=1e-4)
+                self.assertEqual(len(result.Faces), 10)
+
+    def testFromRMinusC(self):
+        # Past the threshold: the ring cut by the chord, 10 faces (the top a disc)
+        for kind, d in (("chamfer", 2.05), ("chamfer", 3.0), ("fillet", 2.5), ("fillet", 5.0)):
+            with self.subTest(kind=kind, size=d):
+                self.assertEqual(len(self.dress(kind, d).Faces), 10)
+
+    def testAtRMinusC(self):
+        # At d = R - c the section's inner circle touches the chord at one point, where both ends'
+        # tangent points coincide: the ring, as on either side of it (review r2 of fork PR 474;
+        # OCCT's is 0.566 more). On two walls Onshape is not the ring there (ArcEndTwoWallsTest)
+        for kind in ("chamfer", "fillet"):
+            with self.subTest(kind=kind):
+                self.assertEqual(len(self.dress(kind, 2.0).Faces), 10)
+
+    def testBelowRMinusCStaysOccts(self):
+        # Below it each end's tool ends on the chord: OCCT's result, which is the same shape
+        for kind in ("chamfer", "fillet"):
+            with self.subTest(kind=kind):
+                self.dress(kind, 1.5)
+
+    def testSplitBySeamIsRefused(self):
+        # Two arcs of one circle: the ring across two tools isn't built yet; never OCCT's result
+        body, arcs = self.body(seam=True)
+        for kind in ("chamfer", "fillet"):
+            with self.subTest(kind=kind):
+                with self.assertRaises(Exception) as caught:
+                    if kind == "chamfer":
+                        body.makeChamfer(4.0, arcs)
+                    else:
+                        body.makeFillet(4.0, arcs)
+                self.assertIn("runs on across the plane", str(caught.exception))
+
+
+class ArcEndTwoWallsTest(unittest.TestCase):
+    """ops#888 A2b, oracle 888b's DU4-DU5 (notes/onshape-facts.md): DU2's plate and boss of radius
+    R = 10, z 3..9, the boss cut by the walls x = c and y = c, which meet at (c, c) inside the
+    circle. Its top arc runs the long way round from one wall to the other. Where the section
+    reaches inside both walls' distance from the axis (R - d < c), Onshape's surface runs on across
+    both: the result is the body less the section revolved a whole turn, 11 faces, the top a full
+    disc of radius R - d. OCCT builds a valid shape there that is not that (13 faces, 8 to 30 mm3
+    off). At d = R - c the inner circle touches both walls: Onshape leaves the corner zone x > 0,
+    y > 0 at full height (chamfer 3845.33352 against the ring's 3839.50260), which the
+    construction doesn't build: refused, never OCCT's 3847.19886."""
+
+    R = 10.0
+
+    def body(self, c):
+        plate = Part.makeBox(30, 30, 3, V(-15, -15, 0))
+        keep = Part.makeBox(40, 40, 20, V(c - 40, c - 40, 0))
+        body = plate.fuse(Part.makeCylinder(self.R, 6, V(0, 0, 3)).common(keep)).removeSplitter()
+        arcs = [
+            e
+            for e in body.Edges
+            if e.Curve.TypeId == "Part::GeomCircle"
+            and abs(e.Curve.Radius - self.R) < 1e-9
+            and all(abs(v.Point.z - 9) < 1e-9 for v in e.Vertexes)
+        ]
+        self.assertEqual(len(arcs), 1)
+        return body, arcs
+
+    def ring(self, kind, d):
+        R, H = self.R, 9.0
+        if kind == "chamfer":
+            section = Part.Face(Part.makePolygon([V(R, 0, H), V(R - d, 0, H), V(R, 0, H - d), V(R, 0, H)]))
+        else:
+            square = Part.makePolygon(
+                [V(R, 0, H), V(R - d, 0, H), V(R - d, 0, H - d), V(R, 0, H - d), V(R, 0, H)]
+            )
+            ball = Part.Face(Part.Wire(Part.makeCircle(d, V(R - d, 0, H - d), V(0, 1, 0))))
+            section = Part.Face(square).cut(ball)
+        return section.revolve(V(0, 0, 0), V(0, 0, 1), 360)
+
+    def dress(self, kind, c, d):
+        body, arcs = self.body(c)
+        return body, (body.makeChamfer(d, arcs) if kind == "chamfer" else body.makeFillet(d, arcs))
+
+    def testTheRingCutByBothWalls(self):
+        # Onshape: the full ring within 6e-5 mm3, 11 faces, in every case
+        for kind, c, d in (
+            ("chamfer", 7.0, 4.0),
+            ("chamfer", 6.5, 4.0),
+            ("chamfer", 6.0, 5.0),
+            ("chamfer", 6.0, 4.05),
+            ("chamfer", 6.02, 4.0),
+            ("fillet", 7.0, 4.0),
+            ("fillet", 6.5, 4.0),
+            ("fillet", 6.0, 4.05),
+            ("fillet", 6.0, 5.0),
+        ):
+            with self.subTest(kind=kind, c=c, size=d):
+                body, result = self.dress(kind, c, d)
+                self.assertTrue(result.isValid())
+                self.assertEqual(len(result.Solids), 1)
+                expected = body.cut(self.ring(kind, d))
+                self.assertLess(result.cut(expected).Volume, 1e-6)
+                self.assertLess(expected.cut(result).Volume, 1e-6)
+                # OCCT integrates a trimmed torus's volume to about 2e-7 of it (the shapes agree)
+                delta = 6e-5 if kind == "chamfer" else 1e-3
+                self.assertAlmostEqual(result.Volume, expected.Volume, delta=delta)
+                self.assertEqual(len(result.Faces), 11)
+
+    def testRingVolumeAsOnshape(self):
+        # The boundary case's ring, as the oracle measured it: the model is the oracle's
+        body, _ = self.body(6.0)
+        self.assertAlmostEqual(body.cut(self.ring("chamfer", 4.0)).Volume, 3839.50260, delta=1e-4)
+        self.assertAlmostEqual(body.cut(self.ring("fillet", 4.0)).Volume, 3966.13459, delta=1e-3)
+
+    def testTangentToBothWallsIsRefused(self):
+        # d = R - c: Onshape 3845.33352 (chamfer), 3967.04183 (round), OCCT's 3847.19886 and
+        # 3967.37889 are wrong: the dress-up fails
+        for kind in ("chamfer", "fillet"):
+            with self.subTest(kind=kind):
+                with self.assertRaises(Exception):
+                    self.dress(kind, 6.0, 4.0)
+
+    def testWallsBeyondTheSectionStayOccts(self):
+        # c 5, d 2: the section stays outside both walls' distance; OCCT's result, the ring's shape
+        body, result = self.dress("chamfer", 5.0, 2.0)
+        self.assertTrue(result.isValid())
+        self.assertAlmostEqual(result.Volume, body.cut(self.ring("chamfer", 2.0)).Volume, delta=1e-6)

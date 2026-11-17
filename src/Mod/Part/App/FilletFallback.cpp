@@ -4160,7 +4160,9 @@ double arcRunPast(
     const Section& section,
     const TrimPlane& plane,
     bool forward,
-    double& back
+    double& back,
+    bool* tangent,
+    bool tangentIsRing
 )
 {
     const gp_Dir& z = axis.Direction();
@@ -4212,8 +4214,21 @@ double arcRunPast(
             refuse("an arc's tool before its end stays beyond the end plane all the way round");
         }
         const double k = -wave.e / amplitude;
-        if (k > 1 - 1e-9 && !beyondHere) {
+        if (k > 1 + 1e-9 && !beyondHere) {
             return -1.0;  // never: the caller may close the tool into a ring (circleTool)
+        }
+        // Touching the plane at one point (d = R - c: the section's inner circle tangent to it).
+        // On one plane both ends' tangent points coincide: the ring, as on either side of it
+        // (review r2 of fork PR 474). On two, Onshape's fill stops at the tangent points, not the
+        // ring (oracle 888b, DU5), which the run on can't end at
+        if (k > 1 - 1e-9 && !beyondHere && tangentIsRing) {
+            return -1.0;
+        }
+        if (k > 1 - 1e-9 && !beyondHere) {
+            if (tangent) {
+                *tangent = true;
+            }
+            refuse("an arc's tool run on past its end only touches the end plane");
         }
         if (k < -1 + 1e-9) {
             refuse("an arc's tool before its end stays beyond the end plane all the way round");
@@ -4270,6 +4285,121 @@ double arcRunPast(
     refuse("an arc's tool past its end comes back from beyond the end plane, or turns too far");
 }
 
+/// The section of a circular edge at a parameter, its inward directions snapped to radial and
+/// axial (circleTool); radial: the radial direction there
+Section arcSection(const Context& ctx, const EdgeData& data, double parameter, gp_Dir& radial)
+{
+    const gp_Circ& circle = data.circle;
+    const gp_Dir& z = circle.Axis().Direction();
+    Section at = sectionAt(ctx, data, parameter);
+    radial = gp_Dir(gp_Vec(circle.Location(), at.corner));
+    for (auto& d : at.inward) {
+        double r = d.Dot(radial);
+        double a = d.Dot(z);
+        if (std::abs(r) > 1 - 1e-6) {
+            d = r > 0 ? radial : radial.Reversed();
+        }
+        else if (std::abs(a) > 1 - 1e-6) {
+            d = a > 0 ? z : z.Reversed();
+        }
+        else {
+            refuse("the faces at a circular edge are not normal to each other");
+        }
+    }
+    return makeSection(at.corner, at.inward[0], at.inward[1], ctx.request);
+}
+
+/// Whether the plane at an arc's end misses its axis (ops#888 A2): it does not hold the axis
+bool missesAxis(const TrimPlane& plane, const gp_Circ& circle)
+{
+    return std::abs(plane.normal.Dot(circle.Axis().Direction())) > angularTolerance
+        || gp_Pln(plane.point, plane.normal).Distance(circle.Location()) > linearTolerance;
+}
+
+/** Whether two end planes of an arc meet inside its circle (ops#888, oracle 888b DU4: walls x = c
+ * and y = c of a boss): the line where they meet is nearer the axis than the radius, so no other
+ * arc of the circle lies between them
+ */
+bool planesMeetInside(const TrimPlane& a, const TrimPlane& b, const gp_Circ& circle)
+{
+    const gp_Vec line = gp_Vec(a.normal).Crossed(gp_Vec(b.normal));
+    if (line.Magnitude() <= angularTolerance
+        || std::abs(line.Normalized().Dot(gp_Vec(circle.Axis().Direction()))) < 1 - angularTolerance) {
+        return false;
+    }
+    // In the circle's plane: the point on both planes, n_a . p = n_a . a, n_b . p = n_b . b
+    const gp_Ax2 frame(circle.Location(), circle.Axis().Direction());
+    const gp_Vec x(frame.XDirection());
+    const gp_Vec y(frame.YDirection());
+    const gp_Vec na(a.normal);
+    const gp_Vec nb(b.normal);
+    const double ra = gp_Vec(circle.Location(), a.point).Dot(na);
+    const double rb = gp_Vec(circle.Location(), b.point).Dot(nb);
+    const double a11 = na.Dot(x), a12 = na.Dot(y), a21 = nb.Dot(x), a22 = nb.Dot(y);
+    const double det = a11 * a22 - a12 * a21;
+    if (std::abs(det) <= angularTolerance) {
+        return false;
+    }
+    const double u = (ra * a22 - a12 * rb) / det;
+    const double v = (a11 * rb - a21 * ra) / det;
+    return std::hypot(u, v) < circle.Radius() - linearTolerance;
+}
+
+/** Whether an arc's tool, turned on past its two free ends on one plane that misses its axis,
+ * closes into a ring (circleTool): the section reaches inside the plane's distance from the axis.
+ * On two planes that meet inside the circle (planesMeetInside), where the section reaches inside
+ * both: the ring cut by both (oracle 888b, DU4). Where it only touches one of them (DU5), true as
+ * well: the construction refuses there, and OCCT's result (not Onshape's) is never returned
+ * The arc is a chain of selected arcs of one circle (a circle split by a seam), span long in all;
+ * at each free end, its section, its end plane and whether running on past it turns forward about
+ * the axis
+ */
+bool closesIntoRing(
+    const gp_Ax1& axis,
+    double radius,
+    double span,
+    const Section sections[2],
+    const TrimPlane planes[2],
+    const bool forward[2]
+)
+{
+    const gp_Circ probe(gp_Ax2(axis.Location(), axis.Direction()), radius);
+    for (int i = 0; i < 2; ++i) {
+        if (!missesAxis(planes[i], probe)) {
+            return false;
+        }
+    }
+    if (planes[0].normal.Dot(planes[1].normal) < 1 - angularTolerance
+        || gp_Pln(planes[0].point, planes[0].normal).Distance(planes[1].point) > linearTolerance) {
+        if (!planesMeetInside(planes[0], planes[1], probe)) {
+            return false;
+        }
+        bool never = true;
+        for (int i = 0; i < 2; ++i) {
+            double back = 0.0;
+            bool tangent = false;
+            try {
+                never = arcRunPast(axis, sections[i], planes[i], forward[i], back, &tangent, false)
+                        < 0.0
+                    && never;
+            }
+            catch (const Refusal&) {
+                if (tangent) {
+                    return true;
+                }
+                throw;
+            }
+        }
+        return never;
+    }
+    double past[2];
+    for (int i = 0; i < 2; ++i) {
+        double back = 0.0;
+        past[i] = arcRunPast(axis, sections[i], planes[i], forward[i], back, nullptr, true);
+    }
+    return past[0] < 0.0 || past[1] < 0.0 || span + past[0] + past[1] > 2 * pi - 0.15;
+}
+
 /// A revolution about the axis of a circular edge, between the meridian planes at its ends
 Tool circleTool(const Context& ctx, const EdgeData& data, const VertexEnd ends[2])
 {
@@ -4303,24 +4433,8 @@ Tool circleTool(const Context& ctx, const EdgeData& data, const VertexEnd ends[2
     if (turn > 2 * pi - angularTolerance) {
         turn = 2 * pi;
     }
-    // The section at a parameter of the circle, its inward directions snapped to radial and axial
     auto snappedAt = [&](double parameter, gp_Dir& radialThere) {
-        Section at = sectionAt(ctx, data, parameter);
-        radialThere = gp_Dir(gp_Vec(circle.Location(), at.corner));
-        for (auto& d : at.inward) {
-            double r = d.Dot(radialThere);
-            double a = d.Dot(z);
-            if (std::abs(r) > 1 - 1e-6) {
-                d = r > 0 ? radialThere : radialThere.Reversed();
-            }
-            else if (std::abs(a) > 1 - 1e-6) {
-                d = a > 0 ? z : z.Reversed();
-            }
-            else {
-                refuse("the faces at a circular edge are not normal to each other");
-            }
-        }
-        return makeSection(at.corner, at.inward[0], at.inward[1], ctx.request);
+        return arcSection(ctx, data, parameter, radialThere);
     };
     // An end plane that does not contain the axis (ops#888 A2: a boss cut by a chord plane, its top
     // arc chamfered or rounded): the revolution runs on past the vertex until the whole section is
@@ -4329,6 +4443,12 @@ Tool circleTool(const Context& ctx, const EdgeData& data, const VertexEnd ends[2
     double pastEnd[2] = {0.0, 0.0};
     double backEnd[2] = {0.0, 0.0};
     bool endTrim[2] = {false, false};
+    // Both ends on one plane: a tangency there is the ring (arcRunPast)
+    const bool onePlane = !data.closed && ends[0].trims.size() == 1 && ends[1].trims.size() == 1
+        && ends[0].trims.front().normal.Dot(ends[1].trims.front().normal) > 1 - angularTolerance
+        && gp_Pln(ends[0].trims.front().point, ends[0].trims.front().normal)
+                .Distance(ends[1].trims.front().point)
+            <= linearTolerance;
     for (int i = 0; i < 2 && !data.closed; ++i) {
         if (ends[i].kind == VertexClass::Corner2Reflex) {
             continue;
@@ -4337,8 +4457,7 @@ Tool circleTool(const Context& ctx, const EdgeData& data, const VertexEnd ends[2
             refuse("an arc that ends on a face that is not a plane");
         }
         const TrimPlane& plane = ends[i].trims.front();
-        if (std::abs(plane.normal.Dot(z)) <= angularTolerance
-            && gp_Pln(plane.point, plane.normal).Distance(circle.Location()) <= linearTolerance) {
+        if (!missesAxis(plane, circle)) {
             continue;
         }
         if (!ctx.request.widerScope || ends[i].kind != VertexClass::FreeEnd
@@ -4351,7 +4470,9 @@ Tool circleTool(const Context& ctx, const EdgeData& data, const VertexEnd ends[2
             snappedAt(i == 0 ? data.first : data.last, radialAtEnd),
             plane,
             i == 1,
-            backEnd[i]
+            backEnd[i],
+            nullptr,
+            onePlane
         );
         endTrim[i] = true;
     }
@@ -4360,13 +4481,19 @@ Tool circleTool(const Context& ctx, const EdgeData& data, const VertexEnd ends[2
     // is the whole ring cut by that plane: one chamfer or round face across the chord, as the
     // dress-up's surface carried on to the end face is
     bool ring = false;
+    bool twoPlanes = false;  // a ring cut by both end planes (oracle 888b, DU4)
     if (endTrim[0] && endTrim[1]
         && (pastEnd[0] < 0.0 || pastEnd[1] < 0.0 || span + pastEnd[0] + pastEnd[1] > 2 * pi - 0.15)) {
         const TrimPlane& a = ends[0].trims.front();
         const TrimPlane& b = ends[1].trims.front();
         if (a.normal.Dot(b.normal) < 1 - angularTolerance
             || gp_Pln(a.point, a.normal).Distance(b.point) > linearTolerance) {
-            refuse("the tools turned on past an arc's two end planes meet");
+            // Two walls meeting inside the circle (x = c and y = c on a boss), the section reaching
+            // inside both: Onshape's ring runs on across both, which cut it
+            if (pastEnd[0] >= 0.0 || pastEnd[1] >= 0.0 || !planesMeetInside(a, b, circle)) {
+                refuse("the tools turned on past an arc's two end planes meet");
+            }
+            twoPlanes = true;
         }
         ring = true;
         pastEnd[0] = 0.0;
@@ -4579,7 +4706,7 @@ Tool circleTool(const Context& ctx, const EdgeData& data, const VertexEnd ends[2
         };
         double removed = 0.0;
         for (int i = 0; i < 2; ++i) {
-            if (!endTrim[i] || (ring && i == 1)) {
+            if (!endTrim[i] || (ring && !twoPlanes && i == 1)) {
                 continue;
             }
             // The sector's back side, before the end, and its front, past the tool's end
@@ -4682,7 +4809,7 @@ Tool circleTool(const Context& ctx, const EdgeData& data, const VertexEnd ends[2
         tool.volume = volumeOf(tool.solid);
     }
     for (int i = 0; i < 2 && !data.closed; ++i) {
-        if (ends[i].kind == VertexClass::FreeEnd && !(ring && i == 1)) {
+        if (ends[i].kind == VertexClass::FreeEnd && !(ring && !twoPlanes && i == 1)) {
             tool.caps.push_back(ends[i].trims.front());
         }
         else if (ends[i].kind == VertexClass::Corner2Union) {
@@ -9769,6 +9896,160 @@ bool endsInOverflow(
     catch (const Refusal&) {
     }
     catch (const Standard_Failure&) {
+    }
+    return false;
+}
+
+bool endsInRing(
+    const TopoDS_Shape& baseShape,
+    const std::vector<TopoDS_Shape>& edges,
+    const Request& request
+)
+{
+    if (request.size1 <= 0) {
+        return false;
+    }
+    try {
+        const TopoShape base(baseShape);
+        Context ctx(base, request);
+        for (const auto* list : {&edges, &request.contour}) {
+            for (const auto& edge : *list) {
+                if (!edge.IsNull() && edge.ShapeType() == TopAbs_EDGE) {
+                    ctx.selected.Add(edge);
+                }
+            }
+        }
+        std::vector<EdgeData> data;
+        for (int i = 1; i <= ctx.selected.Extent(); ++i) {
+            try {
+                data.push_back(analyse(ctx, TopoDS::Edge(ctx.selected(i))));
+            }
+            catch (const Refusal&) {
+            }
+        }
+        // Each open arc's ends by parameter, ends[0] at the first, as the construction takes them
+        struct Arc
+        {
+            const EdgeData* data = nullptr;
+            TopoDS_Vertex vertices[2];
+            VertexEnd ends[2];
+        };
+        std::vector<Arc> arcs;
+        for (const auto& edgeData : data) {
+            if (edgeData.line || edgeData.ruled || edgeData.closed) {
+                continue;
+            }
+            try {
+                if (tightArc(ctx, edgeData)) {
+                    continue;
+                }
+                Arc arc;
+                arc.data = &edgeData;
+                TopoDS_Vertex vertices[2];
+                TopExp::Vertices(edgeData.edge, vertices[0], vertices[1]);
+                bool classified[2] = {false, false};
+                for (const auto& vertex : vertices) {
+                    double parameter = 0.0;
+                    awayFrom(edgeData.edge, vertex, &parameter);
+                    const int slot = std::abs(parameter - edgeData.first)
+                            < std::abs(parameter - edgeData.last)
+                        ? 0
+                        : 1;
+                    classified[slot] = true;
+                    arc.vertices[slot] = vertex;
+                    arc.ends[slot] = classify(ctx, data, edgeData, vertex);
+                }
+                if (classified[0] && classified[1]) {
+                    arcs.push_back(arc);
+                }
+            }
+            catch (const Refusal&) {
+            }
+        }
+        auto sameCircle = [](const gp_Circ& a, const gp_Circ& b) {
+            return std::abs(a.Radius() - b.Radius()) <= linearTolerance
+                && a.Location().Distance(b.Location()) <= linearTolerance
+                && std::abs(a.Axis().Direction().Dot(b.Axis().Direction())) > 1 - angularTolerance;
+        };
+        for (const auto& start : arcs) {
+            for (int from = 0; from < 2; ++from) {
+                if (start.ends[from].kind != VertexClass::FreeEnd) {
+                    continue;
+                }
+                try {
+                    // Along the chain of tangent arcs of one circle to its other free end
+                    const Arc* at = &start;
+                    int farSlot = 1 - from;
+                    double span = start.data->last - start.data->first;
+                    std::vector<const Arc*> visited {at};
+                    while (at->ends[farSlot].kind == VertexClass::TangentContinuation) {
+                        const TopoDS_Edge& next = at->ends[farSlot].continuation;
+                        auto found = std::find_if(arcs.begin(), arcs.end(), [&](const Arc& c) {
+                            return c.data->edge.IsSame(next);
+                        });
+                        if (found == arcs.end()
+                            || std::find(visited.begin(), visited.end(), &*found) != visited.end()
+                            || !sameCircle(found->data->circle, start.data->circle)) {
+                            break;
+                        }
+                        const TopoDS_Vertex shared = at->vertices[farSlot];
+                        at = &*found;
+                        visited.push_back(at);
+                        farSlot = at->vertices[0].IsSame(shared) ? 1 : 0;
+                        span += at->data->last - at->data->first;
+                    }
+                    if (at->ends[farSlot].kind != VertexClass::FreeEnd || (at == &start && farSlot == from)) {
+                        continue;
+                    }
+                    const gp_Ax1 axis = start.data->circle.Axis();
+                    Section sections[2];
+                    TrimPlane planes[2];
+                    bool forward[2];
+                    const std::pair<const Arc*, int> freeEnds[2] = {{&start, from}, {at, farSlot}};
+                    bool usable = true;
+                    for (int i = 0; i < 2 && usable; ++i) {
+                        const auto& [arc, slot] = freeEnds[i];
+                        const VertexEnd& end = arc->ends[slot];
+                        usable = end.surfaceEnd.IsNull() && end.trims.size() == 1;
+                        if (!usable) {
+                            break;
+                        }
+                        gp_Dir radial;
+                        sections[i] = arcSection(
+                            ctx,
+                            *arc->data,
+                            slot == 0 ? arc->data->first : arc->data->last,
+                            radial
+                        );
+                        planes[i] = end.trims.front();
+                        // Running on past the end: away from the arc, about the start's axis
+                        const gp_Pnt point = BRep_Tool::Pnt(arc->vertices[slot]);
+                        const gp_Vec out = -gp_Vec(awayFrom(arc->data->edge, arc->vertices[slot]));
+                        const gp_Vec turning
+                            = gp_Vec(axis.Direction()).Crossed(gp_Vec(axis.Location(), point));
+                        forward[i] = turning.Dot(out) > 0;
+                    }
+                    if (usable && closesIntoRing(
+                                       axis,
+                                       start.data->circle.Radius(),
+                                       span,
+                                       sections,
+                                       planes,
+                                       forward
+                                   )) {
+                        return true;
+                    }
+                }
+                catch (const Refusal&) {
+                }
+            }
+        }
+    }
+    catch (const Refusal&) {
+    }
+    catch (const Standard_Failure&) {
+    }
+    catch (const Base::Exception&) {
     }
     return false;
 }

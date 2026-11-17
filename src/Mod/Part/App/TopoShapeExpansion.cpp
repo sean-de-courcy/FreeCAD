@@ -8594,6 +8594,10 @@ struct DressUpOutcome
     /// A fillet with a concave arc ending where its tangent chain turns convex at a vertex of 4
     /// edges (FilletFallback::endsInOverflow()): the exact construction, or an error
     bool turns {false};
+    /// An arc whose two ends lie on one plane that misses its axis, its tool closing into a ring
+    /// past them (FilletFallback::endsInRing(), ops#888): OCCT's result, valid or not, is not
+    /// Onshape's; the exact construction, or an error
+    bool ring {false};
     /// OCCT's valid result changes the volume the wrong way (FilletFallback::wrongWay(), ops#762):
     /// the exact construction, or an error with this text
     std::string wrongWay;
@@ -8674,27 +8678,44 @@ std::shared_ptr<DressUpOutcome> buildDressUp(
                 && FilletFallback::endsInCusp(base, edges);
             out.turns = !out.failed && !out.thin && !out.invalid
                 && FilletFallback::endsInOverflow(base, edges, request);
+            out.ring = !out.failed && !out.thin && FilletFallback::endsInRing(base, edges, request);
             // At a reflex corner with a circle OCCT's valid result is wrong (fillet-tight-arc 8: a
             // patch, or a misplaced mitre): the construction builds it, below the limit too. (Where
             // the preferred construction above refused, its reason stands)
             out.reflexFirst = reflex && !out.failed && !out.thin && !out.invalid && !out.turns;
-            if (!out.failed && !out.thin && !out.invalid && !out.cusp && !out.turns) {
+            if (!out.failed && !out.thin && !out.invalid && !out.cusp && !out.turns && !out.ring) {
                 out.wrongWay = FilletFallback::wrongWay(maker->Shape(), base, edges, request);
             }
             if ((out.failed || out.thin || out.invalid || out.cusp || out.turns || out.reflexFirst
-                 || !out.wrongWay.empty())
+                 || out.ring || !out.wrongWay.empty())
                 && !prefer) {
-                if (reflex) {
+                // Below the limit too: OCCT's result there is not Onshape's (a reflex corner with
+                // a circle; an arc's tool closing into a ring, ops#888)
+                if (reflex || out.ring) {
                     request.limitOnly = false;
                 }
-                // ops#888: the wider scope only where OCCT built nothing usable
-                request.widerScope = out.failed || out.thin;
+                // ops#888: the wider scope only where OCCT built nothing usable, or where its
+                // result is known not to be Onshape's (an arc's tool closing into a ring)
+                request.widerScope = out.failed || out.thin || out.ring;
                 out.constructed
                     = FilletFallback::construct(base, edges, request, out.construction, &out.reason);
             }
         }
     );
     return outcome;
+}
+
+/// An arc's dress-up that closes into a ring past its end plane (DressUpOutcome::ring), where the
+/// construction refused: OCCT's result is not Onshape's, and is never returned
+[[noreturn]] void raiseRingError(const char* what, const std::string& reason)
+{
+    FC_THROWM(
+        Base::CADKernelError,
+        what << " runs on across the plane at its arc's ends (the section reaches inside the "
+                "plane's distance from the arc's axis), where Onshape's surface carries on across "
+                "it and OCCT's does not; its exact construction refused: "
+             << reason
+    );
 }
 
 /// Names the exact construction into result: false, with the reason, if that fails
@@ -9700,7 +9721,7 @@ TopoShape& TopoShape::makeElementFillet(
         auto second
             = buildDressUp(again, againInput, againEdges, againRequest, "The fillet", false, reflex);
         if (!second->failed && !second->thin && !second->invalid && !second->turns
-            && !second->reflexFirst && second->wrongWay.empty() && !second->constructed) {
+            && !second->ring && !second->reflexFirst && second->wrongWay.empty() && !second->constructed) {
             mkFillet = again;
             input = againInput;
             inputEdges = againEdges;
@@ -9715,7 +9736,7 @@ TopoShape& TopoShape::makeElementFillet(
         outcome = buildDressUp(mkFillet, input, inputEdges, request, "The fillet", false, reflex);
     }
     if (outcome->failed || outcome->thin || outcome->invalid || outcome->turns
-        || outcome->reflexFirst || !outcome->wrongWay.empty()) {
+        || outcome->reflexFirst || outcome->ring || !outcome->wrongWay.empty()) {
         if (finishConstruction(*this, *outcome, input, op)) {
             return *this;
         }
@@ -9736,6 +9757,9 @@ TopoShape& TopoShape::makeElementFillet(
                 "where OCCT's ends differ from Onshape's; its exact construction refused: "
                     << outcome->reason
             );
+        }
+        if (outcome->ring) {
+            raiseRingError("The fillet", outcome->reason);
         }
         if (outcome->reflexFirst) {
             // OCCT's rounds there are valid and not Onshape's: never returned silently (the
@@ -9885,7 +9909,7 @@ TopoShape& TopoShape::makeElementChamfer(
         }
         FilletFallback::takeInvalidResult();
         auto outcome = buildDressUp(mkChamferPtr, input, inputEdges, request, "The chamfer");
-        if (outcome->failed || outcome->thin || outcome->invalid || outcome->cusp
+        if (outcome->failed || outcome->thin || outcome->invalid || outcome->cusp || outcome->ring
             || !outcome->wrongWay.empty()) {
             if (finishConstruction(*this, *outcome, input, op)) {
                 return *this;
@@ -9907,6 +9931,9 @@ TopoShape& TopoShape::makeElementChamfer(
                 // returned where the construction refuses, valid or not (Sean's ruling of 11-13:
                 // build like Onshape, else refuse loudly; notes/kernel-layer.md P5)
                 raiseCuspError(shape, edges, input, inputEdges, outcome->reason);
+            }
+            if (outcome->ring) {
+                raiseRingError("The chamfer", outcome->reason);
             }
             if (outcome->invalid) {
                 FilletFallback::noteInvalidResult(outcome->reason);

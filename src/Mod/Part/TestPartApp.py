@@ -40,6 +40,8 @@ from parttests.ElementReferenceTest import ElementReferenceTest, ElementReferenc
 from parttests.FilletFallbackTest import (
     ArcEndPlaneTest,
     ArcEndPlaneAt600Test,
+    ArcEndRingTest,
+    ArcEndTwoWallsTest,
     BaseToleranceTest,
     BridgedRecessTest,
     CornerWithACircleTest,
