@@ -9843,11 +9843,9 @@ bool endsInRing(
             try {
                 data.push_back(analyse(ctx, TopoDS::Edge(ctx.selected(i))));
             }
-            catch (const Refusal& r) {
-                Base::Console().message("RINGDBG analyse %s\n", r.reason.c_str());
+            catch (const Refusal&) {
             }
         }
-        Base::Console().message("RINGDBG edges %d\n", int(data.size()));
         // Each open arc's ends by parameter, ends[0] at the first, as the construction takes them
         struct Arc
         {
