@@ -8459,12 +8459,15 @@ TopoShape& TopoShape::removeElementShape(const TopoShape& shape, const std::vect
 namespace
 {
 /** Builds a fillet or chamfer maker: true when OCCT fails with StdFail_NotDone, the failure the
- * exact construction may build instead (ops#300). Other exceptions propagate as before.
+ * exact construction may build instead (ops#300), or with another of OCCT's errors where every
+ * selected edge is in a contour (ops#888). Other exceptions propagate as before.
+ * @param edges The selected edges
  * @param error Receives what OCCT threw, if it threw
  * @param contour Receives the edges of the maker's contours, read before the build
  */
 bool buildDressUpFailed(
     BRepFilletAPI_LocalOperation& maker,
+    const std::vector<TopoDS_Shape>& edges,
     std::exception_ptr& error,
     std::vector<TopoDS_Shape>& contour
 )
@@ -8478,6 +8481,24 @@ bool buildDressUpFailed(
         maker.Build();
     }
     catch (const StdFail_NotDone&) {
+        error = std::current_exception();
+        return true;
+    }
+    catch (const Standard_Failure&) {
+        // Another of OCCT's errors from the build (a stepped DU3 arc alone: TopoDS_FrozenShape
+        // from TopoDS_Builder::Add, ops#888): a failure too, so that the exact construction is
+        // tried and its reason goes with OCCT's error (raiseDressUpError). Only where OCCT took
+        // every selected edge into a contour: an edge it dropped is smooth (its faces tangent
+        // along it), with nothing to round, and the construction would rebuild the round beside
+        // it larger (a round's border alone: "There are no suitable edges for chamfer or fillet",
+        // review prerr-r1f F1). There the error escapes, as before
+        for (const auto& edge : edges) {
+            if (std::none_of(contour.begin(), contour.end(), [&edge](const TopoDS_Shape& taken) {
+                    return taken.IsSame(edge);
+                })) {
+                throw;
+            }
+        }
         error = std::current_exception();
         return true;
     }
@@ -8520,6 +8541,17 @@ bool builtInvalid(BRepFilletAPI_LocalOperation& maker, const TopoDS_Shape& base)
         }
         if (e.GetMessageString() && *e.GetMessageString()) {
             message = e.GetMessageString();
+        }
+    }
+    catch (const Standard_Failure& e) {
+        // Another of OCCT's errors from the maker (a stepped DU3 arc alone: TopoDS_FrozenShape from
+        // TopoDS_Builder::Add, ops#888): its class and text, with the reason too, never without it
+        if (reason.empty()) {
+            throw;
+        }
+        message = e.ExceptionType();
+        if (e.GetMessageString() && *e.GetMessageString()) {
+            message += std::string(" ") + e.GetMessageString();
         }
     }
     if (!reason.empty()) {
@@ -8668,7 +8700,7 @@ std::shared_ptr<DressUpOutcome> buildDressUp(
                 }
                 request.contour.clear();
             }
-            out.failed = buildDressUpFailed(*maker, out.occtError, request.contour);
+            out.failed = buildDressUpFailed(*maker, edges, out.occtError, request.contour);
             // A face of zero width (ops#298): the exact construction builds it at the limit
             out.thin = !out.failed && !FilletFallback::thinFace(maker->Shape(), base).IsNull();
             out.invalid = !out.failed && !out.thin && builtInvalid(*maker, base);
