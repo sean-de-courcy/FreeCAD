@@ -55,6 +55,7 @@ from parttests.FilletFallbackTest import (
     FilledRecessTest,
     FilletFallbackTest,
     InvalidDressUpTest,
+    KeyholeBossCornerTest,
     KeyholePocketChamferTest,
     KinkedContourTest,
     LostStepTest,
