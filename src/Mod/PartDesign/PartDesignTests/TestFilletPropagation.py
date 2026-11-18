@@ -230,6 +230,144 @@ class TestFilletPropagation(unittest.TestCase):
         wall = chamfer.Shape.common(Part.makeBox(4, 16, 20, V(-14, -8, 0)))
         self.assertAlmostEqual(wall.Volume, 4 * 16 * 20, delta=1e-6)
 
+    # ops#883: an arc on a hollow (concave) cylinder, oracle 9k's correction of FB1/FB4 and FGC-NS44 #73: the round
+    # runs on along its own torus, about the arc's axis, until it leaves the body (notes/runout-arc-883.md)
+    NOTCH_R = 5.0
+
+    def notchPad(self):
+        """A plate x -20..20, y -15..15, z 0..10 with a U notch from its left side: walls y = +-5 from x = -20 to 0
+        and a half circle of radius 5 about the origin (x >= 0), hollow. Returns the pad, its volume and the name
+        of the half circle's top edge."""
+        r = self.NOTCH_R
+        outline = [
+            Part.LineSegment(V(-20, -15, 0), V(20, -15, 0)),
+            Part.LineSegment(V(20, -15, 0), V(20, 15, 0)),
+            Part.LineSegment(V(20, 15, 0), V(-20, 15, 0)),
+            Part.LineSegment(V(-20, 15, 0), V(-20, r, 0)),
+            Part.LineSegment(V(-20, r, 0), V(0, r, 0)),
+            Part.ArcOfCircle(Part.Circle(V(0, 0, 0), V(0, 0, 1), r), -math.pi / 2, math.pi / 2),
+            Part.LineSegment(V(0, -r, 0), V(-20, -r, 0)),
+            Part.LineSegment(V(-20, -r, 0), V(-20, -15, 0)),
+        ]
+        pad = models.pad(self.body, models.sketch(self.doc, "Notch", outline, self.body), 10)
+        self.doc.recompute()
+        volume = 10 * (40 * 30 - 20 * 2 * r - math.pi * r * r / 2)
+        self.assertAlmostEqual(pad.Shape.Volume, volume, delta=1e-3)
+
+        def test(edge):
+            return isinstance(edge.Curve, Part.Circle) and edge.BoundBox.ZMin > 9.999
+
+        return pad, volume, self.edgeName(pad.Shape, test)
+
+    def torusRunOn(self, radius, span, ends):
+        """What the round of radius `radius` on the notch's top rim removes: the corner's section (rho R..R+r,
+        depth below the top 0..r, outside the ball's circle) revolved over the arc's `span`, plus at each of `ends`
+        tangent ends the run-on, where a point at rho has left the body once its angle past the tangent vertex
+        exceeds acos(R / rho) (the wall y = R). Pappus over rho, with rho = R + r - r sin(p) so that the section's
+        height r (1 - cos p) is smooth, by the midpoint rule."""
+        R, r, n = self.NOTCH_R, radius, 20000
+        step = (math.pi / 2) / n
+        total = 0.0
+        for i in range(n):
+            p = (i + 0.5) * step
+            rho = R + r - r * math.sin(p)
+            height = r * (1 - math.cos(p))
+            total += height * rho * (span + ends * math.acos(min(1.0, R / rho))) * r * math.cos(p)
+        return total * step
+
+    def testOffOnAHollowArcRunsOnAlongItsTorus(self):
+        pad, volume, arc = self.notchPad()
+        radius = 1.0
+        fillet = self.fillet(pad, [arc], radius=radius, TangentPropagation=False)
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+        shape = fillet.Shape
+        self.assertTrue(shape.isValid())
+        self.assertEqual(len(shape.Solids), 1)
+        removed = self.torusRunOn(radius, math.pi, 2)
+        self.assertAlmostEqual(shape.Volume, volume - removed, delta=1e-4)
+        # the walls' top edges stay sharp past where the run-on leaves them, at x = -sqrt((R + r)^2 - R^2)
+        leave = -math.sqrt((self.NOTCH_R + radius) ** 2 - self.NOTCH_R ** 2)
+        for y in (self.NOTCH_R, -self.NOTCH_R):
+            sharp = [
+                e
+                for e in shape.Edges
+                if isinstance(e.Curve, Part.Line)
+                and abs(e.BoundBox.ZMin - 10) < 1e-6
+                and abs(e.BoundBox.ZMax - 10) < 1e-6
+                and abs(e.BoundBox.YMin - y) < 1e-6
+                and abs(e.BoundBox.YMax - y) < 1e-6
+            ]
+            self.assertEqual(len(sharp), 1, y)
+            self.assertAlmostEqual(sharp[0].BoundBox.XMin, -20, delta=1e-6)
+            self.assertAlmostEqual(sharp[0].BoundBox.XMax, leave, delta=1e-4)
+        # the round is the torus about the arc's axis, R + r from it
+        tori = [f for f in shape.Faces if isinstance(f.Surface, Part.Toroid)]
+        self.assertTrue(tori)
+        for face in tori:
+            self.assertAlmostEqual(face.Surface.MajorRadius, self.NOTCH_R + radius, delta=1e-6)
+            self.assertAlmostEqual(face.Surface.MinorRadius, radius, delta=1e-6)
+
+    def testOffOnAHollowArcSmallRadius(self):
+        """FGC-NS44 #73's radius, 0.4: the same construction, a shorter run-on."""
+        pad, volume, arc = self.notchPad()
+        fillet = self.fillet(pad, [arc], radius=0.4, TangentPropagation=False)
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+        self.assertEqual(len(fillet.Shape.Solids), 1)
+        self.assertAlmostEqual(fillet.Shape.Volume, volume - self.torusRunOn(0.4, math.pi, 2), delta=1e-4)
+
+    def testOffOnAHollowArcOnTheBottomFace(self):
+        """The same rim on the bottom face: the plane's outside looks down the axis."""
+        pad, volume, _ = self.notchPad()
+
+        def test(edge):
+            return isinstance(edge.Curve, Part.Circle) and edge.BoundBox.ZMax < 1e-6
+
+        fillet = self.fillet(pad, [self.edgeName(pad.Shape, test)], radius=1.0, TangentPropagation=False)
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+        self.assertEqual(len(fillet.Shape.Solids), 1)
+        self.assertAlmostEqual(fillet.Shape.Volume, volume - self.torusRunOn(1.0, math.pi, 2), delta=1e-4)
+
+    def testOffOnAHollowArcWithOneSharpEnd(self):
+        """FGC-NS44 #73's kind: the arc goes on tangentially into a wall at one end; at the other the body turns
+        away (the notch's lower part is open, x < 0 and y < 5 removed): one run-on, a plain end."""
+        r = self.NOTCH_R
+        outline = [
+            Part.LineSegment(V(0, -15, 0), V(20, -15, 0)),
+            Part.LineSegment(V(20, -15, 0), V(20, 15, 0)),
+            Part.LineSegment(V(20, 15, 0), V(-20, 15, 0)),
+            Part.LineSegment(V(-20, 15, 0), V(-20, r, 0)),
+            Part.LineSegment(V(-20, r, 0), V(0, r, 0)),
+            Part.ArcOfCircle(Part.Circle(V(0, 0, 0), V(0, 0, 1), r), -math.pi / 2, math.pi / 2),
+            Part.LineSegment(V(0, -r, 0), V(0, -15, 0)),
+        ]
+        pad = models.pad(self.body, models.sketch(self.doc, "Jay", outline, self.body), 10)
+        self.doc.recompute()
+        volume = 10 * (20 * 30 + 20 * (15 - r) - math.pi * r * r / 2)
+        self.assertAlmostEqual(pad.Shape.Volume, volume, delta=1e-3)
+
+        def test(edge):
+            return isinstance(edge.Curve, Part.Circle) and edge.BoundBox.ZMin > 9.999
+
+        fillet = self.fillet(pad, [self.edgeName(pad.Shape, test)], radius=1.0, TangentPropagation=False)
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+        self.assertEqual(len(fillet.Shape.Solids), 1)
+        self.assertAlmostEqual(fillet.Shape.Volume, volume - self.torusRunOn(1.0, math.pi, 1), delta=1e-4)
+
+    def testOffOnAHollowArcWithAPickedTangentLineStops(self):
+        """The arc and one wall's top edge picked, the other wall's not: Onshape blends the arc into the picked
+        line, which the run-out doesn't build (not measured): it stops."""
+        pad, volume, arc = self.notchPad()
+        fillet = self.fillet(pad, [arc, self.topLine(pad.Shape, self.NOTCH_R)], radius=1.0, TangentPropagation=False)
+        self.assertFalse(fillet.isValid(), "expected a stop")
+        self.assertIn("tangent", fillet.getStatusString().lower())
+
+    def testChamferOffOnAHollowArcStops(self):
+        """The chamfer's arc run-out is not measured: it stops."""
+        pad, volume, arc = self.notchPad()
+        chamfer = self.chamfer(pad, [arc], size=1.0, TangentPropagation=False)
+        self.assertFalse(chamfer.isValid(), "expected a stop")
+        self.assertIn("tangent", chamfer.getStatusString().lower())
+
     def testChamferOffByTwoDistancesStops(self):
         """Which face takes which distance is OCCT's choice: only an equal distance chamfer runs on."""
         pad = self.slotPad()
