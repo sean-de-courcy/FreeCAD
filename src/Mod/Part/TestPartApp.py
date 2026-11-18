@@ -58,6 +58,7 @@ from parttests.FilletFallbackTest import (
     FillOverALedgeTest,
     FillOverARingLedgeTest,
     FillPastANotchTest,
+    FillToARimCuspTest,
     InvalidDressUpTest,
     KeyholeBossCornerTest,
     DPocketCornerTest,

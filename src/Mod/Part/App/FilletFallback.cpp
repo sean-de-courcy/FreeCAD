@@ -1477,6 +1477,11 @@ struct VertexEnd
     /// FreeEnd: an end face that is not a plane, whose surface bounds the tool (Case Base #105);
     /// trims then holds its tangent plane at the vertex
     TopoDS_Face surfaceEnd;
+    /// FreeEnd with surfaceEnd, tangent there: an unselected edge of the edge's planar face runs
+    /// on from the vertex the way the edge does, into the end face (FGC-FM44 #152, ops#898 cause
+    /// B: a wall's rounded end flush with the rim of the floor it stands on). The face narrows to
+    /// nothing at the vertex, so the strip on it has no width there
+    bool stripCusp = false;
     TopoDS_Edge continuation;  // TangentContinuation: the other selected edge
     TopoDS_Face beyond;        // Overflow: the face whose surface trims the end round
     std::string reason;
@@ -2032,6 +2037,33 @@ VertexEnd classify(
             // the surface, from the vertex (lineTool, trimBySurface). The plane kept is the one
             // through the vertex square to the edge
             normal = away.Reversed();
+            const TopoDS_Face& planar = data.faces[data.planeFace];
+            end.stripCusp = !data.line && !data.ruled
+                && BRepAdaptor_Surface(planar, Standard_False).GetType() == GeomAbs_Plane
+                && std::any_of(edges.begin(), edges.end(), [&](const TopoDS_Shape& shape) {
+                       const TopoDS_Edge& other = TopoDS::Edge(shape);
+                       if (other.IsSame(data.edge) || ctx.selected.Contains(other)) {
+                           return false;
+                       }
+                       auto ofOther = ctx.list(ctx.edgeFaces, other);
+                       auto has = [&](const TopoDS_Face& face) {
+                           return std::any_of(ofOther.begin(), ofOther.end(), [&](const TopoDS_Shape& f) {
+                               return f.IsSame(face);
+                           });
+                       };
+                       if (ofOther.size() != 2 || !has(planar) || !has(endFace)
+                           || awayFrom(other, vertex).Dot(away) <= 1 - angularTolerance) {
+                           return false;
+                       }
+                       // The end face drops away from the floor along the rim (FGC-FM44 #152's
+                       // outer cylinder); a wall rising there (a pocket's) is not measured
+                       // (review of the cause B branch, note 1)
+                       BRepAdaptor_Curve rim(other);
+                       const double middle = (rim.FirstParameter() + rim.LastParameter()) / 2;
+                       return gp_Vec(inwardInAny(endFace, other, middle))
+                                  .Dot(gp_Vec(outwardNormal(planar, point)))
+                           < -0.5;
+                   });
         }
         else if (normal.Dot(away) > 0) {
             normal.Reverse();
@@ -4483,7 +4515,15 @@ Tool circleTool(const Context& ctx, const EdgeData& data, const VertexEnd ends[2
         if (ends[i].kind == VertexClass::Corner2Reflex) {
             continue;
         }
-        if (!ends[i].surfaceEnd.IsNull()) {
+        // A concave round's end at a cusp of its planar face (VertexEnd::stripCusp): the tool ends
+        // on the meridian plane at the vertex (the plane kept there, square to the arc), and what
+        // its strip runs off the narrowing face is the fill kept over the face
+        // (trimFusedToolOverFace), as Onshape's (FGC-FM44 #152: area to 3e-6 mm2). Only where
+        // OCCT failed; a convex round or a chamfer there is not known from Onshape
+        if (!ends[i].surfaceEnd.IsNull()
+            && !(ends[i].stripCusp && ctx.request.widerScope && !data.convex
+                 && ctx.request.kind == Kind::Fillet && ends[i].kind == VertexClass::FreeEnd
+                 && ends[i].trims.size() == 1 && !missesAxis(ends[i].trims.front(), circle))) {
             refuse("an arc that ends on a face that is not a plane");
         }
         const TrimPlane& plane = ends[i].trims.front();
@@ -7076,13 +7116,17 @@ bool trimFusedToolOverFace(
             refuse("a fused tool trimmed over its face stands in the air away from its edges");
         }
     }
-    // The cut must lie past the strip: away from the faces of the tool's other strips
+    // The cut must lie past the strip: away from the faces of the tool's other strips. A touch
+    // along a line only takes none of them: where the face narrows to a cusp beside a wall's
+    // rounded end (FGC-FM44 #152, ops#898 cause B), the round wall meets the face beyond along
+    // the line at the cusp, tangent to it
     for (const auto& strip : tool.strips) {
         if (strip.face.IsSame(run.face)) {
             continue;
         }
         for (const auto& contact : strip.contacts) {
-            if (touch(contact, air)) {
+            if (touch(contact, air)
+                && areaOf(commonOf(contact, air)) > areaToleranceOf(contact)) {
                 refuse("a fused tool trimmed over its face reaches back to its other face");
             }
         }
