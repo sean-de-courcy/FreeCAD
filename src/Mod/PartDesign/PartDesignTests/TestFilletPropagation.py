@@ -234,28 +234,37 @@ class TestFilletPropagation(unittest.TestCase):
     # runs on along its own torus, about the arc's axis, until it leaves the body (notes/runout-arc-883.md)
     NOTCH_R = 5.0
 
-    def notchPad(self):
+    def notchPad(self, corner=-20, hole=None):
         """A plate x -20..20, y -15..15, z 0..10 with a U notch from its left side: walls y = +-5 from x = -20 to 0
-        and a half circle of radius 5 about the origin (x >= 0), hollow. Returns the pad, its volume and the name
-        of the half circle's top edge."""
+        and a half circle of radius 5 about the origin (x >= 0), hollow. `corner` moves the upper left corner to
+        (corner, 15): the side face the upper wall ends on then meets it obliquely; `hole` (x, y, radius) adds a
+        round hole through the plate. Returns the pad, its volume and the name of the half circle's top edge."""
         r = self.NOTCH_R
         outline = [
             Part.LineSegment(V(-20, -15, 0), V(20, -15, 0)),
             Part.LineSegment(V(20, -15, 0), V(20, 15, 0)),
-            Part.LineSegment(V(20, 15, 0), V(-20, 15, 0)),
-            Part.LineSegment(V(-20, 15, 0), V(-20, r, 0)),
+            Part.LineSegment(V(20, 15, 0), V(corner, 15, 0)),
+            Part.LineSegment(V(corner, 15, 0), V(-20, r, 0)),
             Part.LineSegment(V(-20, r, 0), V(0, r, 0)),
             Part.ArcOfCircle(Part.Circle(V(0, 0, 0), V(0, 0, 1), r), -math.pi / 2, math.pi / 2),
             Part.LineSegment(V(0, -r, 0), V(-20, -r, 0)),
             Part.LineSegment(V(-20, -r, 0), V(-20, -15, 0)),
         ]
+        if hole:
+            outline.append(Part.Circle(V(hole[0], hole[1], 0), V(0, 0, 1), hole[2]))
         pad = models.pad(self.body, models.sketch(self.doc, "Notch", outline, self.body), 10)
         self.doc.recompute()
-        volume = 10 * (40 * 30 - 20 * 2 * r - math.pi * r * r / 2)
+        volume = 10 * (40 * 30 - 20 * 2 * r - math.pi * r * r / 2 + (-20 - corner) * (15 - r) / 2)
+        if hole:
+            volume -= 10 * math.pi * hole[2] ** 2
         self.assertAlmostEqual(pad.Shape.Volume, volume, delta=1e-3)
 
         def test(edge):
-            return isinstance(edge.Curve, Part.Circle) and edge.BoundBox.ZMin > 9.999
+            return (
+                isinstance(edge.Curve, Part.Circle)
+                and abs(edge.Curve.Radius - r) < 1e-9
+                and edge.BoundBox.ZMin > 9.999
+            )
 
         return pad, volume, self.edgeName(pad.Shape, test)
 
@@ -285,6 +294,8 @@ class TestFilletPropagation(unittest.TestCase):
         self.assertEqual(len(shape.Solids), 1)
         removed = self.torusRunOn(radius, math.pi, 2)
         self.assertAlmostEqual(shape.Volume, volume - removed, delta=1e-4)
+        # the pad's 10 faces and the round's one torus face, as Onshape's (the run-ons merged into it)
+        self.assertEqual(len(shape.Faces), 11)
         # the walls' top edges stay sharp past where the run-on leaves them, at x = -sqrt((R + r)^2 - R^2)
         leave = -math.sqrt((self.NOTCH_R + radius) ** 2 - self.NOTCH_R ** 2)
         for y in (self.NOTCH_R, -self.NOTCH_R):
@@ -302,7 +313,7 @@ class TestFilletPropagation(unittest.TestCase):
             self.assertAlmostEqual(sharp[0].BoundBox.XMax, leave, delta=1e-4)
         # the round is the torus about the arc's axis, R + r from it
         tori = [f for f in shape.Faces if isinstance(f.Surface, Part.Toroid)]
-        self.assertTrue(tori)
+        self.assertEqual(len(tori), 1)
         for face in tori:
             self.assertAlmostEqual(face.Surface.MajorRadius, self.NOTCH_R + radius, delta=1e-6)
             self.assertAlmostEqual(face.Surface.MinorRadius, radius, delta=1e-6)
@@ -314,6 +325,7 @@ class TestFilletPropagation(unittest.TestCase):
         self.assertTrue(fillet.isValid(), fillet.getStatusString())
         self.assertEqual(len(fillet.Shape.Solids), 1)
         self.assertAlmostEqual(fillet.Shape.Volume, volume - self.torusRunOn(0.4, math.pi, 2), delta=1e-4)
+        self.assertEqual(len(fillet.Shape.Faces), 11)
 
     def testOffOnAHollowArcOnTheBottomFace(self):
         """The same rim on the bottom face: the plane's outside looks down the axis."""
@@ -326,6 +338,7 @@ class TestFilletPropagation(unittest.TestCase):
         self.assertTrue(fillet.isValid(), fillet.getStatusString())
         self.assertEqual(len(fillet.Shape.Solids), 1)
         self.assertAlmostEqual(fillet.Shape.Volume, volume - self.torusRunOn(1.0, math.pi, 2), delta=1e-4)
+        self.assertEqual(len(fillet.Shape.Faces), 11)
 
     def testOffOnAHollowArcWithOneSharpEnd(self):
         """FGC-NS44 #73's kind: the arc goes on tangentially into a wall at one end; at the other the body turns
@@ -352,6 +365,50 @@ class TestFilletPropagation(unittest.TestCase):
         self.assertTrue(fillet.isValid(), fillet.getStatusString())
         self.assertEqual(len(fillet.Shape.Solids), 1)
         self.assertAlmostEqual(fillet.Shape.Volume, volume - self.torusRunOn(1.0, math.pi, 1), delta=1e-4)
+        self.assertEqual(len(fillet.Shape.Faces), 10)
+
+    def testOffOnAHollowArcLineEndsOnAnObliqueFace(self):
+        """The upper wall's line ends on a side face at 18.4 deg to it (review pr883arc-r1, F1): OCCT's round of the
+        line runs on past its far end there (r / tan); Onshape keeps the line sharp over its whole length and takes
+        nothing past it, only the arc's torus and its run-ons."""
+        pad, volume, arc = self.notchPad(corner=-50)
+        fillet = self.fillet(pad, [arc], radius=1.0, TangentPropagation=False)
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+        shape = fillet.Shape
+        self.assertEqual(len(shape.Solids), 1)
+        far = Part.makeBox(60, 40, 20, V(-70, -20, -5))  # x -70..-10
+        self.assertAlmostEqual(pad.Shape.common(far).Volume - shape.common(far).Volume, 0, delta=1e-6)
+        self.assertAlmostEqual(shape.Volume, volume - self.torusRunOn(1.0, math.pi, 2), delta=1e-4)
+        self.assertEqual(len(shape.Faces), 11)
+
+    def holeRim(self, shape):
+        def test(edge):
+            return isinstance(edge.Curve, Part.Circle) and abs(edge.Curve.Radius - 2) < 1e-9 and edge.BoundBox.ZMin > 9.999
+
+        return self.edgeName(shape, test)
+
+    def testOffOnAHollowArcWithAnotherRound(self):
+        """Another picked edge whose round stays clear of the run-on's column (a hole's top rim, y 9..13): both rounds,
+        each as alone."""
+        pad, volume, arc = self.notchPad(hole=(-12, 11, 2))
+        rim = self.holeRim(pad.Shape)
+        alone = self.fillet(pad, [rim], radius=1.0)
+        self.assertTrue(alone.isValid(), alone.getStatusString())
+        rimRound = volume - alone.Shape.Volume
+        fillet = self.fillet(pad, [arc, rim], radius=1.0, TangentPropagation=False)
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+        self.assertEqual(len(fillet.Shape.Solids), 1)
+        self.assertAlmostEqual(
+            fillet.Shape.Volume, volume - rimRound - self.torusRunOn(1.0, math.pi, 2), delta=1e-4
+        )
+
+    def testOffOnAHollowArcAnotherRoundInTheColumnStops(self):
+        """Another picked edge whose round reaches into the run-on's column (a hole's top rim 1.5 r from the wall
+        line): the column would put the base's material back over it (not measured): it stops."""
+        pad, volume, arc = self.notchPad(hole=(-12, 8.5, 2))
+        fillet = self.fillet(pad, [arc, self.holeRim(pad.Shape)], radius=1.0, TangentPropagation=False)
+        self.assertFalse(fillet.isValid(), "expected a stop")
+        self.assertIn("tangent", fillet.getStatusString().lower())
 
     def testOffOnAHollowArcWithAPickedTangentLineStops(self):
         """The arc and one wall's top edge picked, the other wall's not: Onshape blends the arc into the picked

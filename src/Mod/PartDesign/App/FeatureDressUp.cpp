@@ -1639,6 +1639,13 @@ PartDesignExport std::vector<std::array<TopoDS_Shape, 3>> takeArcRunOns(
     constexpr double pi = 3.14159265358979323846;
     std::vector<std::array<TopoDS_Shape, 3>> runOns;
     std::vector<Part::TopoShape> picked = edges;
+    // the edges OCCT rounds without the arcs: none of their rounds may reach a column
+    const std::vector<Part::TopoShape> kept = edges;
+    Bnd_Box box;
+    BRepBndLib::Add(base.getShape(), box);
+    // a column runs on along its line until it leaves the body: OCCT's round of the line runs on
+    // past its far end where the face there meets the line at under 45 deg (r / tan of it)
+    const double past = std::sqrt(box.SquareExtent()) + radius;
     picked.insert(picked.end(), runOut.begin(), runOut.end());
     TopTools_IndexedDataMapOfShapeListOfShape edgeFaces;
     TopTools_IndexedDataMapOfShapeListOfShape vertexEdges;
@@ -1845,7 +1852,7 @@ PartDesignExport std::vector<std::array<TopoDS_Shape, 3>> takeArcRunOns(
             }
             neighbours.Add(line);
             // The column: the r by r square at the corner, into both planes, along the line from
-            // r before the tangent vertex to r past its farEnd end
+            // r before the tangent vertex on past its far end until it leaves the body
             const gp_Dir along(gp_Vec(at, farPoint));
             const gp_Pnt mid((at.XYZ() + farPoint.XYZ()) / 2);
             const double lineProbe = std::min(1e-3 * radius, 1e-3 * length);
@@ -1874,7 +1881,7 @@ PartDesignExport std::vector<std::array<TopoDS_Shape, 3>> takeArcRunOns(
                 arcRunOnStop();
             }
             const TopoDS_Shape column
-                = BRepPrimAPI_MakePrism(squareFace.Face(), gp_Vec(along) * (length + 2 * radius))
+                = BRepPrimAPI_MakePrism(squareFace.Face(), gp_Vec(along) * (radius + past))
                       .Shape();
             std::array<TopoDS_Shape, 3> runOn {column, TopoDS_Shape(), TopoDS_Shape()};
             for (int k = 0; k < 2; ++k) {
@@ -1906,6 +1913,32 @@ PartDesignExport std::vector<std::array<TopoDS_Shape, 3>> takeArcRunOns(
             }
         }
         edges.push_back(pick);
+    }
+    // the base's material comes back in each column: no other round may have taken any of it
+    if (!runOns.empty() && !kept.empty()) {
+        BRepFilletAPI_MakeFillet others(base.getShape());
+        for (const auto& edge : kept) {
+            others.Add(radius, TopoDS::Edge(edge.getShape()));
+        }
+        others.Build();
+        if (!others.IsDone() || others.Shape().IsNull()) {
+            arcRunOnStop();
+        }
+        for (const auto& runOn : runOns) {
+            BRepAlgoAPI_Common before(base.getShape(), runOn[0]);
+            BRepAlgoAPI_Common after(others.Shape(), runOn[0]);
+            if (!before.IsDone() || !after.IsDone()) {
+                arcRunOnStop();
+            }
+            GProp_GProps beforeProps;
+            GProp_GProps afterProps;
+            BRepGProp::VolumeProperties(before.Shape(), beforeProps);
+            BRepGProp::VolumeProperties(after.Shape(), afterProps);
+            if (std::abs(beforeProps.Mass() - afterProps.Mass())
+                > 1e-6 * beforeProps.Mass() + Precision::Confusion()) {
+                arcRunOnStop();
+            }
+        }
     }
     runOut = std::move(straight);
     return runOns;
