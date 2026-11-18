@@ -4338,4 +4338,101 @@ TEST_F(FilletFallbackTest, aRoundPastBothFacesIntoTheAirIsRefused)
     EXPECT_NE(reason.find("runs past both its faces"), std::string::npos) << reason;
 }
 
+namespace
+{
+/** A plate 40 x 26 x t with a hole about the z axis: radius r at the top, a lip lip deep, then a
+ * 45 degree cone widening to r + t - lip at the bottom (an undercut). The plate's side y = -side
+ * passes closer to the rim than a chamfer of size c > side - r reaches (ops#898 C)
+ */
+TopoDS_Shape plateWithAnUndercutHole(double r, double t, double lip, double side)
+{
+    TopoDS_Shape plate = box(40, 20 + side, t, gp_Pnt(-20, -side, 0));
+    BRepBuilderAPI_MakePolygon profile;
+    for (auto [x, z] : std::vector<std::pair<double, double>> {
+             {0, t + 1},
+             {r, t + 1},
+             {r, t - lip},
+             {r + t - lip, 0},
+             {r + t - lip, -1},
+             {0, -1}
+         }) {
+        profile.Add(gp_Pnt(x, 0, z));
+    }
+    profile.Close();
+    TopoDS_Shape hole = BRepPrimAPI_MakeRevol(
+                            BRepBuilderAPI_MakeFace(profile.Wire(), Standard_True).Face(),
+                            gp_Ax1(gp_Pnt(0, 0, 0), gp::DZ()),
+                            2 * pi
+    )
+                            .Shape();
+    ShapeUpgrade_UnifySameDomain unify(BRepAlgoAPI_Cut(plate, hole).Shape());
+    unify.Build();
+    return unify.Shape();
+}
+}  // namespace
+
+TEST_F(FilletFallbackTest, aChamferPastBothFacesKeepsItsFarSideOnThePlate)
+{
+    // ops#898 C (HNY #14 and #16): a hole's rim chamfered wider than its lip is deep, with an
+    // undercut cone under the lip, and closer to the plate's side than the chamfer is wide. Both
+    // strips run off over convex edges into the air (the lip's foot; the plate's side), so OCCT
+    // fails and the construction refused "a dress-up runs past both its faces"; but the strip on
+    // the plate keeps its far side on the plate except where it breaks out through the side.
+    // Onshape's result there is the plain cut (the rows: area to 1e-6 mm2, volume to 2e-7 of
+    // itself). Closed form: in the section, u out from the rim and d down from the top, the
+    // chamfer removes u + d <= c of the material, which under the lip is u >= d - lip, so at u it
+    // is min(c - u, u + lip) deep; swept round the axis and cut by the plate's side y = -side:
+    // the integral over rho in [r, r + c] of min(...) rho phi(rho), phi = 2 pi - 2 acos(side / rho)
+    // past the side
+    const double r = 5.0;
+    const double t = 2.0;
+    const double lip = 1.0;
+    const double side = 6.2;
+    const double c = 1.6;
+    TopoShape base(plateWithAnUndercutHole(r, t, lip, side), 1L);
+    // The plate less the lip's cylinder and the cone's frustum
+    const double outer = r + t - lip;
+    const double baseVolume = 40 * (20 + side) * t - pi * r * r * lip
+        - pi * (t - lip) / 3 * (r * r + r * outer + outer * outer);
+    ASSERT_NEAR(volume(base.getShape()), baseVolume, 1e-6);
+    auto depth = [&](double rho) { return std::min(c - (rho - r), rho - r + lip); };
+    auto full = [&](double rho) { return depth(rho) * rho * 2 * pi; };
+    // Past the side, rho = side + s^2: smooth in s at the side
+    auto cut = [&](double s) {
+        double rho = side + s * s;
+        return depth(rho) * rho * (2 * pi - 2 * std::acos(side / rho)) * 2 * s;
+    };
+    const double kink = r + (c - lip) / 2;
+    const double removed = gaussLegendre(full, r, kink) + gaussLegendre(full, kink, side)
+        + gaussLegendre(cut, 0, std::sqrt(r + c - side));
+    const double expected = baseVolume - removed;
+    std::vector<TopoShape> rim;
+    for (const auto& edge : base.getSubTopoShapes(TopAbs_EDGE)) {
+        BRepAdaptor_Curve curve(TopoDS::Edge(edge.getShape()));
+        if (curve.GetType() == GeomAbs_Circle && std::abs(curve.Circle().Radius() - r) < 1e-9
+            && std::abs(curve.Value(curve.FirstParameter()).Z() - t) < 1e-9) {
+            rim.push_back(edge);
+        }
+    }
+    ASSERT_FALSE(rim.empty());
+    FF::Request request = chamfer(c);
+    EXPECT_TRUE(occtFails(base, rim, request));
+    // Without the flag the construction keeps its refusal past both faces
+    std::string reason;
+    EXPECT_TRUE(forced(base, rim, request, &reason).isNull());
+    EXPECT_NE(reason.find("runs past both its faces"), std::string::npos) << reason;
+    request.pastBothFaces = true;
+    TopoShape result = forced(base, rim, request, &reason);
+    EXPECT_TRUE(exact(result, expected)) << reason;
+    // The plate's six faces, the chamfer's cone and the undercut's: the lip's wall is gone
+    EXPECT_EQ(result.countSubElements("Face"), 8);
+    // The public path: the same result
+    EXPECT_TRUE(exact(dressUp(base, rim, chamfer(c)), expected));
+    // A round there stays refused until Onshape's is known (ops#898 C: chamfers only)
+    FF::Request round = fillet(c);
+    round.pastBothFaces = true;
+    EXPECT_TRUE(forced(base, rim, round, &reason).isNull());
+    EXPECT_NE(reason.find("runs past both its faces"), std::string::npos) << reason;
+}
+
 // NOLINTEND(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)
