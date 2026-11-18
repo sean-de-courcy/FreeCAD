@@ -6298,7 +6298,7 @@ class FillOverARingLedgeTest(unittest.TestCase):
         # The rim a cone, leaning out under the ledge: where Onshape trims is not measured. Refused
         body, foot = self.body(1.2, lean=0.8)
         for dress in (body.makeChamfer, body.makeFillet):
-            with self.assertRaises(Exception):
+            with self.assertRaisesRegex(Exception, "kept over its face: .*face beyond is not square"):
                 dress(self.C, foot)
 
 
@@ -6348,10 +6348,71 @@ class FillPastANotchTest(unittest.TestCase):
 
     def testClosedWindowIsRefused(self):
         body, foot = self.body(0.6, window=True)
-        with self.assertRaises(Exception):
+        with self.assertRaisesRegex(Exception, "kept over its face: .*the edge of a hole in it"):
             body.makeChamfer(1.0, foot)
 
     def testSillAboveTheChamferStaysOccts(self):
         body, foot = self.body(1.4)
         result = body.makeChamfer(1.0, foot)
         self.assertAlmostEqual(result.Volume - body.Volume, 10.0, delta=1e-6)
+
+
+class FillOverALedgeRefusalsTest(unittest.TestCase):
+    """ops#898 cause A, what keeps a refusal (review of PR 484, S4): a cylinder r 7, h high, on
+    a disk r 8.2 (a ledge 1.2 wide round its foot, narrower than the chamfer or fillet of 1.5), with
+    something on the ledge's rim that Onshape's rule (the plain fill kept over the ledge, the rim
+    dropping square) does not cover: no Onshape fact, so the dress-up stays an error"""
+
+    R, W, C = 7.0, 1.2, 1.5
+
+    def body(self, extra=None, height=3.0):
+        V = FreeCAD.Vector
+        body = Part.makeCylinder(self.R + self.W, 2, V(0, 0, -2)).fuse(Part.makeCylinder(self.R, height))
+        if extra is not None:
+            body = body.fuse(extra)
+        body = body.removeSplitter()
+        foot = [
+            e
+            for e in body.Edges
+            if e.Curve.TypeId == "Part::GeomCircle"
+            and abs(e.Curve.Radius - self.R) < 1e-9
+            and all(abs(v.Point.z) < 1e-9 for v in e.Vertexes)
+        ]
+        self.assertEqual(len(foot), 1)
+        return body, foot
+
+    def refused(self, body, foot, pattern, dresses=("makeChamfer", "makeFillet")):
+        for dress in dresses:
+            with self.assertRaisesRegex(Exception, "kept over its face: .*" + pattern):
+                getattr(body, dress)(self.C, foot)
+
+    def testPlainLedgeBuilds(self):
+        # The control: the same ledge with nothing on it builds (FillOverARingLedgeTest)
+        body, foot = self.body()
+        self.assertTrue(body.makeChamfer(self.C, foot).isValid())
+
+    def testStudOnTheRim(self):
+        # Skeptic r1, find 1: a stud lower than the fill, standing on the rim and over the drop
+        V = FreeCAD.Vector
+        stud = Part.makeBox(0.8, 0.6, 0.3, V(self.R + self.W - 0.4, -0.3, 0))
+        body, foot = self.body(stud)
+        # The round on it builds (review of PR 484, S3: one air piece along the drop also stands
+        # over the stud; Onshape's result there is not measured): debt on ops#898
+        self.refused(body, foot, "a fused tool trimmed over its face stands in the air", ("makeChamfer",))
+
+    def testCurbAlongTheRim(self):
+        # A wall rising from the ledge along its whole rim, lower than the fill
+        V = FreeCAD.Vector
+        curb = Part.makeCylinder(self.R + self.W, 0.3).cut(Part.makeCylinder(self.R + self.W - 0.2, 0.3))
+        body, foot = self.body(curb)
+        self.refused(body, foot, "runs past its face into the air along no edge of it")
+
+    def testCurbOnPartOfTheRim(self):
+        # A curb lower than the fill on part of the rim, beside a square drop on the rest (the form
+        # of S3, whose air pieces here stay apart: refused)
+        V = FreeCAD.Vector
+        ring = Part.makeCylinder(self.R + self.W, 0.3).cut(Part.makeCylinder(self.R + self.W - 0.2, 0.3))
+        curb = ring.common(Part.makeBox(20, 20, 1, V(0, 0, -0.5)))
+        body, foot = self.body(curb)
+        # The round there stops earlier: OCCT's result is not valid
+        self.refused(body, foot, "stands in the air", ("makeChamfer",))

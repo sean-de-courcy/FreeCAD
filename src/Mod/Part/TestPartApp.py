@@ -54,6 +54,7 @@ from parttests.FilletFallbackTest import (
     DressUpCheckLimitsTest,
     FilledRecessTest,
     FilletFallbackTest,
+    FillOverALedgeRefusalsTest,
     FillOverALedgeTest,
     FillOverARingLedgeTest,
     FillPastANotchTest,

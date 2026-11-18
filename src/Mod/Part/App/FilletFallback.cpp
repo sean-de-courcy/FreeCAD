@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 
 #include <algorithm>
+#include <map>
 #include <cmath>
 #include <functional>
 #include <memory>
@@ -8577,10 +8578,14 @@ TopoDS_Shape constructShape(
     const Request& request,
     ShapeMapper& mapper,
     int& cornerCount,
-    bool& rolledOn
+    bool& rolledOn,
+    bool* keptOverFace = nullptr
 )
 {
     rolledOn = false;
+    if (keptOverFace) {
+        *keptOverFace = false;
+    }
     // Its own TopoShape: no element map, no hasher, a cache of its own
     const TopoShape base(baseShape);
     if (base.isNull() || countSolids(base.getShape()) != 1) {
@@ -9279,6 +9284,22 @@ TopoDS_Shape constructShape(
         checkRunOff(tool, run);
         return true;
     };
+    // Per tool, the faces whose runs trimmed it (today's trims, or kept over the face) and whether
+    // one of them was kept over its face: a tool kept over one face and trimmed on another face
+    // too, beside no overlap partner, has no Onshape fact (review of PR 484, S2): refused, as
+    // holes and miters are
+    std::map<const Tool*, std::pair<std::vector<TopoDS_Face>, bool>> trimmedOn;
+    auto noteTrim = [&](const Tool& tool, const TopoDS_Face& face, bool overFace) {
+        auto& [faces, kept] = trimmedOn[&tool];
+        const bool elsewhere = std::any_of(faces.begin(), faces.end(), [&](const TopoDS_Face& f) {
+            return !f.IsSame(face);
+        });
+        if (elsewhere && (kept || overFace) && !overlapPartner(tool)) {
+            refuse("a fused tool kept over its face and trimmed on its other face too");
+        }
+        faces.push_back(face);
+        kept = kept || overFace;
+    };
     for (const auto& run : fusedRuns) {
         for (auto& tool : tools) {
             if (&tool != run.tool) {
@@ -9290,6 +9311,7 @@ TopoDS_Shape constructShape(
             const auto planesBefore = fusedPlanes;
             const auto planeClippedBefore = planeClipped;
             const auto overlapClipsBefore = overlapClips;
+            bool today = true;
             try {
                 trimRun(tool, run);
             }
@@ -9297,6 +9319,7 @@ TopoDS_Shape constructShape(
                 if (!request.widerScope) {
                     throw;
                 }
+                today = false;
                 tool = before;
                 wallFaces = wallsBefore;
                 faceWalls = faceWallsBefore;
@@ -9314,6 +9337,13 @@ TopoDS_Shape constructShape(
                 if (!trimmed) {
                     throw;
                 }
+                noteTrim(tool, run.face, true);
+                if (keptOverFace) {
+                    *keptOverFace = true;
+                }
+            }
+            if (today && !tool.solid.IsSame(before.solid)) {
+                noteTrim(tool, run.face, false);
             }
         }
     }
@@ -14815,7 +14845,37 @@ bool construct(
         auto mapper = std::make_shared<ShapeMapper>();
         int corners = 0;
         bool rolledOn = false;
-        TopoDS_Shape shape = constructShape(base, edges, request, *mapper, corners, rolledOn);
+        bool keptOverFace = false;
+        TopoDS_Shape shape
+            = constructShape(base, edges, request, *mapper, corners, rolledOn, &keptOverFace);
+        // A fill kept over its face (ops#898 cause A) is new: where the under-overhang
+        // construction below builds the dress-up, it did so before this rule, and its result
+        // stands (review of PR 484, S1: no result that builds today changes)
+        if (keptOverFace) {
+            try {
+                auto underMapper = std::make_shared<ShapeMapper>();
+                TopoDS_Shape under = constructUnderOverhang(base, edges, request, *underMapper);
+                TopTools_IndexedMapOfShape selected;
+                for (const auto& edge : edges) {
+                    selected.Add(edge);
+                }
+                out.shape = under;
+                out.mapper = underMapper;
+                out.edges = selected.Extent();
+                out.corners = 0;
+                return true;
+            }
+            catch (const NoOverhang&) {
+            }
+            catch (const Refusal&) {
+            }
+            catch (const Standard_Failure&) {
+            }
+            catch (const Base::Exception&) {
+            }
+            catch (const std::exception&) {
+            }
+        }
         TopTools_IndexedMapOfShape selected;
         for (const auto& edge : edges) {
             selected.Add(edge);
