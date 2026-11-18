@@ -20,6 +20,7 @@
 #include <Mod/Part/App/TopoShapeOpCode.h>
 
 #include "Body.h"
+#include "FeatureAddSub.h"
 #include "FeatureApply.h"
 #include "FeatureBoolean.h"
 #include "Pieces.h"
@@ -65,8 +66,7 @@ Part::TopoShape touching(const Part::TopoShape& tool, const Part::TopoShape& bas
     const std::vector<Part::TopoShape> solids = tool.getSubTopoShapes(TopAbs_SOLID);
     std::vector<Part::TopoShape> kept;
     for (const auto& solid : solids) {
-        BRepExtrema_DistShapeShape distance(solid.getShape(), base.getShape());
-        if (distance.IsDone() && distance.Value() <= Precision::Confusion()) {
+        if (FeatureAddSub::distanceWithinConfusion(solid.getShape(), base.getShape())) {
             kept.push_back(solid);
         }
     }

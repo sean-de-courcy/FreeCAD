@@ -128,8 +128,7 @@ bool shapesTouch(const TopoShape& one, const TopoShape& other)
     if (oneBox.IsOut(otherBox)) {
         return false;
     }
-    BRepExtrema_DistShapeShape distance(one.getShape(), other.getShape());
-    if (distance.IsDone() && distance.Value() <= Precision::Confusion()) {
+    if (FeatureAddSub::distanceWithinConfusion(one.getShape(), other.getShape())) {
         return true;
     }
     // Surfaces apart: one solid may still hold the other whole
@@ -344,8 +343,7 @@ App::DocumentObjectExecReturn* executeStudioBoolean(Boolean& boolean)
         }
         auto touchesMerged = [&merged](const Part::TopoShape& shape) {
             return std::ranges::any_of(merged, [&shape](const Part::TopoShape& other) {
-                BRepExtrema_DistShapeShape distance(shape.getShape(), other.getShape());
-                return distance.IsDone() && distance.Value() <= Precision::Confusion();
+                return FeatureAddSub::distanceWithinConfusion(shape.getShape(), other.getShape());
             });
         };
         for (bool grew = !merged.empty(); grew;) {

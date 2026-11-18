@@ -35,6 +35,7 @@
 
 #include "Body.h"
 #include "Feature.h"
+#include "FeatureAddSub.h"
 #include "FeatureApply.h"
 #include "Pieces.h"
 #include "Studio.h"
@@ -95,8 +96,7 @@ namespace
 {
 bool solidsJoin(const TopoDS_Shape& a, const TopoDS_Shape& b)
 {
-    BRepExtrema_DistShapeShape distance(a, b);
-    if (!distance.IsDone() || distance.Value() > Precision::Confusion()) {
+    if (!FeatureAddSub::distanceWithinConfusion(a, b)) {
         return false;
     }
     auto count = [](const TopoDS_Shape& shape) {
@@ -251,10 +251,7 @@ bool touchesAny(const Part::TopoShape& solid, const std::vector<Part::TopoShape>
 {
     for (const auto& base : bases) {
         if (join ? studioSolidsJoin(solid.getShape(), base.getShape())
-                 : [&]() {
-                       BRepExtrema_DistShapeShape distance(solid.getShape(), base.getShape());
-                       return distance.IsDone() && distance.Value() <= Precision::Confusion();
-                   }()) {
+                 : FeatureAddSub::distanceWithinConfusion(solid.getShape(), base.getShape())) {
             return true;
         }
     }

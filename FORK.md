@@ -481,7 +481,8 @@ names it.
 | `fix/i888-a3-line-arc-corner` | fix | ops#888 | - | `fix/i888-a1-runoff-both` (fork PR 476, on fork PR 474) | `8363efb6e0` (fork PR 477), 2026-11-17 | never (fork fix): a concave arc-and-line chamfer on walls lower than it is clipped by the face beyond, as Onshape's (A3) |
 | `infra/i763-order-dependent-ones` | infra | ops#763 | - | `integration` `ac14419632` | `25712437c0` (fork PR 479), 2026-11-17 | when ops#763 is fixed: two order-dependent collision tests listed on every platform |
 | `fix/i888-a3b-boss-corner` | fix | ops#888 | - | `fix/i888-a3-line-arc-corner` (fork PR 477, on fork PRs 476 and 474) | `4fb02afd5d` (fork PR 480), 2026-11-17 | never (fork fix): concave line-and-arc fills at a corner reflex in the material meet along their intersection, as Onshape's (A3b) |
-| `fix/i888-seam-ring` | fix | ops#888 | - | `fix/i888-a3b-boss-corner` (fork PR 480, merged) | (fork PR 481) | never (fork fix): a circle split by a seam that closes into a ring is one ring across its arcs, as a single arc's |
+| `fix/i888-seam-ring` | fix | ops#888 | - | `fix/i888-a3b-boss-corner` (fork PR 480, merged) | `2a21885577` (fork PR 481), 2026-11-17 | never (fork fix): a circle split by a seam that closes into a ring is one ring across its arcs, as a single arc's |
+| `fix/i870-boolean-speed` | fix | ops#870 | - | `integration` | (fork PR 483) | never (fork fix): a Union's and the studio's touch tests stop at the first contact pair, with the old whole distance as the fallback (speed, ops#870) |
 
 ## Fork-only commits in carried topics
 

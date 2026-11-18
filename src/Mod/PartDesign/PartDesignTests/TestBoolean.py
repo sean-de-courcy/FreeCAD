@@ -407,6 +407,83 @@ class TestBoolean(unittest.TestCase):
         # rgb = App.Gui.ActiveDocument.Body002.RootNode.getChild(2).getChild(1).getChild(1).getChild(0).diffuseColor.getValues()[0].getValue()
         # # Assert the rgb color value.
 
+    # FreeCAD-CH ops#870: a Union of parts with many faces decides which tools touch with a
+    # contact pair search, not a whole-solid distance; the decisions and the result stay the same.
+    # Designed geometry: P-pitched plates with an n x n grid of blind SQ x SQ x D pockets, margins
+    # of one pitch, copies shifted by whole pitches so their pocket grids line up.
+    P, SQ, D, T, N = 4.0, 2.0, 2.0, 5.0, 8
+
+    def _pocketedPlate(self, x):
+        import Part
+
+        L = self.N * self.P + 2 * self.P
+        plate = Part.makeBox(L, L, self.T, App.Vector(x, 0, 0))
+        off = (self.P - self.SQ) / 2
+        pockets = [
+            Part.makeBox(
+                self.SQ,
+                self.SQ,
+                self.D,
+                App.Vector(x + (1 + i) * self.P + off, (1 + j) * self.P + off, self.T - self.D),
+            )
+            for i in range(self.N)
+            for j in range(self.N)
+        ]
+        return plate.cut(Part.makeCompound(pockets))
+
+    def _bodyOf(self, name, shape):
+        feature = self.Doc.addObject("Part::Feature", name + "Shape")
+        feature.Shape = shape
+        body = self.Doc.addObject("PartDesign::Body", name)
+        body.BaseFeature = feature
+        return body
+
+    def testUnionOfPocketedPlatesFusesWhatTouches(self):
+        import time
+
+        import Part
+
+        shifts = [0, 3, 6, 9]  # in pitches; each copy overlaps the one before by N - 1 pitches
+        base = self._bodyOf("Base", self._pocketedPlate(0))
+        tools = [self._bodyOf("Copy%d" % k, self._pocketedPlate(k * self.P)) for k in shifts[1:]]
+        L = self.N * self.P + 2 * self.P
+        # Apart by 1e-5 above the top: no contact (Confusion is 1e-7)
+        gap = self._bodyOf("Gap", Part.makeBox(4, 4, 1, App.Vector(0, 0, self.T + 1e-5)))
+        # On the top face of a margin: face contact only
+        onTop = self._bodyOf("OnTop", Part.makeBox(2, 2, 1, App.Vector(1, L - 3, self.T)))
+        # Inside a margin, no boundary shared: inside counts as touching
+        inside = self._bodyOf("Inside", Part.makeBox(1, 1, 1, App.Vector(1, 1, 1)))
+        # Far away
+        far = self._bodyOf("Far", Part.makeBox(2, 2, 2, App.Vector(0, -100, 0)))
+        self.Doc.recompute()
+        union = self.Doc.addObject("PartDesign::Boolean", "Union")
+        base.addObject(union)
+        union.Type = "Fuse"
+        union.setObjects(tools + [gap, onTop, inside, far])
+        start = time.perf_counter()
+        self.Doc.recompute()
+        elapsed = time.perf_counter() - start
+        FreeCAD.Console.PrintLog("ops#870 Union of %d pocketed plates: %.2f s\n" % (len(shifts), elapsed))
+
+        self.assertEqual(sorted(o.Name for o in union.SeparateTools), ["Far", "Gap"])
+        shape = union.Shape
+        self.assertTrue(shape.isValid())
+        self.assertEqual(len(shape.Solids), 1)
+        # Pocket columns (cells of width P along X) that stay open: every plate covering the
+        # cell has its pocket there
+        cells = range(0, shifts[-1] + self.N + 2)
+        open_columns = 0
+        for c in cells:
+            covering = [k for k in shifts if k <= c < k + self.N + 2]
+            if covering and all(k + 1 <= c <= k + self.N for k in covering):
+                open_columns += 1
+        length = (shifts[-1] + self.N + 2) * self.P
+        expected = length * L * self.T - open_columns * self.N * self.SQ * self.SQ * self.D
+        expected += 2 * 2 * 1  # OnTop
+        self.assertAlmostEqual(shape.Volume, expected, places=6)
+        # Whole-solid distances took minutes on such parts; the pair search takes well under this
+        self.assertLess(elapsed, 120.0)
+
     def tearDown(self):
         if hasattr(App, "KeepTestDoc") and App.KeepTestDoc:
             return

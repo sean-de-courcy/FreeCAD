@@ -1542,8 +1542,7 @@ namespace
 
 bool touches(const TopoDS_Shape& a, const TopoDS_Shape& b)
 {
-    BRepExtrema_DistShapeShape distance(a, b);
-    return distance.IsDone() && distance.Value() <= Precision::Confusion();
+    return FeatureAddSub::distanceWithinConfusion(a, b);
 }
 
 /** A part pattern as a studio feature (FreeCAD-CH ops#654 slice 9, notes/patterns-design.md
