@@ -32,6 +32,7 @@
 #include <BRepClass_FaceClassifier.hxx>
 #include <BRepLib.hxx>
 #include <BRepClass3d_SolidClassifier.hxx>
+#include <BRepClass3d_SolidExplorer.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
 #include <BRepFilletAPI_MakeFillet.hxx>
 #include <BRepGProp.hxx>
@@ -5956,7 +5957,12 @@ struct SurfaceWall
  * base's material, which absorbs the tool there: the groove's chamfer past its wall, clipped by
  * the groove's opposite face (Onshape's, oracle 9d). Into the air, nothing would trim it
  */
-void checkFusedRunOff(const TopoDS_Face& face, const TopoDS_Shape& contact, const TopoDS_Shape& base)
+void checkFusedRunOff(
+    const TopoDS_Face& face,
+    const TopoDS_Shape& contact,
+    const TopoDS_Shape& base,
+    bool insidePoint = false
+)
 {
     BRepAlgoAPI_Cut outside(contact, face);
     if (!outside.IsDone() || outside.HasErrors()) {
@@ -5965,10 +5971,21 @@ void checkFusedRunOff(const TopoDS_Face& face, const TopoDS_Shape& contact, cons
     BRepClass3d_SolidClassifier inBase(base);
     bool any = false;
     for (TopExp_Explorer it(outside.Shape(), TopAbs_FACE); it.More(); it.Next()) {
-        BRepAdaptor_Surface surface(TopoDS::Face(it.Current()));
-        double u = (surface.FirstUParameter() + surface.LastUParameter()) / 2;
-        double v = (surface.FirstVParameter() + surface.LastVParameter()) / 2;
-        inBase.Perform(surface.Value(u, v), linearTolerance);
+        // With insidePoint (only where OCCT failed: Request::widerScope), a point inside the piece:
+        // the middle of its parameter box may lie off it (a ring's middle is its centre, in the
+        // boss the ring stands around: ops#898)
+        gp_Pnt point;
+        double u = 0.0;
+        double v = 0.0;
+        if (!insidePoint
+            || !BRepClass3d_SolidExplorer::FindAPointInTheFace(TopoDS::Face(it.Current()), point, u, v)) {
+            BRepAdaptor_Surface surface(TopoDS::Face(it.Current()));
+            point = surface.Value(
+                (surface.FirstUParameter() + surface.LastUParameter()) / 2,
+                (surface.FirstVParameter() + surface.LastVParameter()) / 2
+            );
+        }
+        inBase.Perform(point, linearTolerance);
         if (inBase.State() != TopAbs_IN) {
             refuse("a concave dress-up runs past its face into the air");
         }
@@ -6912,6 +6929,195 @@ bool trimFusedTool(
         tool.inBase = inBase > volumeTolerance * tool.volume ? inBase : 0.0;
     }
     return clipped;
+}
+
+/** A fused tool whose strip runs off its planar face over edges where the face beyond drops away
+ * square to it (ops#898 cause A: a boss's foot on a ledge narrower than the dress-up, the ledge's
+ * outer edge tapering or about the arc's axis; a wall that an earlier blend cut away beside the
+ * picked edge). Onshape keeps the fill only over the face: the fill of a wide ledge, less what
+ * stands in front of the face's outline (the census rows' area and volume to 1e-6; ops#898
+ * s011f p4, p7). The tool is cut by the region in front of the plane outside the face's prism;
+ * the faces beyond grow by the cut (their surfaces are the prism's sides where they are square).
+ *
+ * Taken only where trimFusedTool and the run-off check refuse, and only where OCCT failed
+ * (Request::widerScope). Whatever the cut takes out of the air must lie along edges of the face
+ * whose face beyond drops away square to it; anything else (a face beyond that leans, a wall that
+ * rises, the other strip's face) keeps a refusal. Returns whether the tool changed
+ */
+bool trimFusedToolOverFace(
+    Tool& tool,
+    const FusedRun& run,
+    const TopoDS_Shape& base,
+    std::vector<TopoDS_Face>& wallFaces,
+    std::vector<TopoDS_Face>* faceWalls = nullptr
+)
+{
+    BRepAdaptor_Surface surface(run.face, Standard_False);
+    if (surface.GetType() != GeomAbs_Plane) {
+        refuse("a concave dress-up runs past a face that is not a plane into the air");
+    }
+    const gp_Pln plane = surface.Plane();
+    const gp_Dir outward = outwardNormal(run.face, plane.Location());
+    Bnd_Box box;
+    BRepBndLib::Add(tool.solid, box);
+    BRepBndLib::Add(run.face, box);
+    const double size = 2 * std::sqrt(box.SquareExtent()) + 1;
+    double xMin = 0.0;
+    double yMin = 0.0;
+    double zMin = 0.0;
+    double xMax = 0.0;
+    double yMax = 0.0;
+    double zMax = 0.0;
+    box.Get(xMin, yMin, zMin, xMax, yMax, zMax);
+    double u = 0.0;
+    double v = 0.0;
+    ElSLib::Parameters(plane, gp_Pnt((xMin + xMax) / 2, (yMin + yMax) / 2, (zMin + zMax) / 2), u, v);
+    const gp_Pln front(gp_Ax3(ElSLib::Value(u, v, plane), outward, plane.Position().XDirection()));
+    const TopoDS_Face sheet = BRepBuilderAPI_MakeFace(front, -size, size, -size, size);
+    const TopoDS_Shape slab = BRepPrimAPI_MakePrism(sheet, gp_Vec(outward) * size).Shape();
+    BRepPrimAPI_MakePrism column(run.face, gp_Vec(outward) * size);
+    if (!column.IsDone()) {
+        refuse("sweeping a face to trim a fused tool over it failed");
+    }
+    BRepAlgoAPI_Cut outside(slab, column.Shape());
+    if (!outside.IsDone() || outside.HasErrors()) {
+        refuse("trimming a fused tool over its face failed");
+    }
+    const TopoDS_Shape trim = outside.Shape();
+    const TopoDS_Shape piece = commonOf(tool.solid, trim);
+    if (!TopExp_Explorer(piece, TopAbs_SOLID).More()) {
+        return false;
+    }
+    BRepAlgoAPI_Cut inAir(piece, base);
+    if (!inAir.IsDone() || inAir.HasErrors()) {
+        refuse("trimming a fused tool over its face failed");
+    }
+    const TopoDS_Shape air = inAir.Shape();
+    if (volumeOf(air) <= volumeTolerance * tool.volume) {
+        return false;
+    }
+    // Along every edge of the face that the part in the air lies along, the face beyond drops
+    // away square to the face: there the prism's side is that face's surface, run on
+    TopTools_IndexedDataMapOfShapeListOfShape faceOfEdge;
+    TopExp::MapShapesAndUniqueAncestors(base, TopAbs_EDGE, TopAbs_FACE, faceOfEdge);
+    std::vector<TopoDS_Face> beyondFaces;
+    TopTools_IndexedMapOfShape seen;
+    TopTools_IndexedMapOfShape outline;
+    TopExp::MapShapes(BRepTools::OuterWire(run.face), TopAbs_EDGE, outline);
+    auto inOuterWire = [&](const TopoDS_Edge& edge) {
+        return outline.Contains(edge);
+    };
+    std::vector<TopoDS_Edge> runOver;
+    // The angle's cosine past which a face beyond is not square to the face: the census rows'
+    // faces beyond are square to 1e-12, a blend's B-spline face to its own approximation
+    constexpr double squareCosine = 1e-6;
+    for (TopExp_Explorer it(run.face, TopAbs_EDGE); it.More(); it.Next()) {
+        const TopoDS_Edge& edge = TopoDS::Edge(it.Current());
+        if (seen.Contains(edge) || BRep_Tool::Degenerated(edge)) {
+            continue;
+        }
+        seen.Add(edge);
+        if (lengthAlong(edge, air) <= 1000 * linearTolerance) {
+            continue;
+        }
+        if (edge.IsSame(tool.source)) {
+            refuse("a fused tool trimmed over its face would lose its part along its own edge");
+        }
+        // The outline only: a hole in the face under the strip is not measured in Onshape
+        if (!inOuterWire(edge)) {
+            refuse("a concave dress-up runs past its face over the edge of a hole in it");
+        }
+        TopoDS_Face beyond;
+        if (const auto* faces = faceOfEdge.Seek(edge)) {
+            for (const auto& other : *faces) {
+                if (!other.IsSame(run.face)) {
+                    if (!beyond.IsNull()) {
+                        refuse("an edge a fused tool runs off over has more than one face beyond");
+                    }
+                    beyond = TopoDS::Face(other);
+                }
+            }
+        }
+        if (beyond.IsNull()) {
+            refuse("an edge a fused tool runs off over has no face beyond");
+        }
+        BRepAdaptor_Curve curve(edge);
+        const double first = curve.FirstParameter();
+        const double last = curve.LastParameter();
+        for (int k = 0; k <= 4; ++k) {
+            const double t = first + (last - first) * (0.05 + 0.9 * k / 4);
+            const gp_Dir normal = outwardNormalAny(beyond, curve.Value(t));
+            if (std::abs(normal.Dot(outward)) > squareCosine) {
+                refuse("a concave dress-up runs past its face over an edge where the face beyond "
+                       "is not square to it");
+            }
+            // Square, the face beyond runs from the edge straight back (a drop) or straight up
+            // (a wall, which would be material in front of the face: not trimmed here)
+            if (gp_Vec(inwardInAny(beyond, edge, t)).Dot(gp_Vec(outward)) > -0.5) {
+                refuse("a concave dress-up runs past its face into a wall that rises from it");
+            }
+        }
+        beyondFaces.push_back(beyond);
+        runOver.push_back(edge);
+    }
+    if (beyondFaces.empty()) {
+        refuse("a concave dress-up runs past its face into the air along no edge of it");
+    }
+    // Every piece of it in the air lies along one of those edges: a piece that does not (over a
+    // stud standing on the face, through a wall rising from it) is not what Onshape's trim leaves
+    for (TopExp_Explorer it(air, TopAbs_SOLID); it.More(); it.Next()) {
+        if (volumeOf(it.Current()) <= volumeTolerance * tool.volume) {
+            continue;
+        }
+        if (std::none_of(runOver.begin(), runOver.end(), [&](const TopoDS_Edge& edge) {
+                return lengthAlong(edge, it.Current()) > 1000 * linearTolerance;
+            })) {
+            refuse("a fused tool trimmed over its face stands in the air away from its edges");
+        }
+    }
+    // The cut must lie past the strip: away from the faces of the tool's other strips
+    for (const auto& strip : tool.strips) {
+        if (strip.face.IsSame(run.face)) {
+            continue;
+        }
+        for (const auto& contact : strip.contacts) {
+            if (touch(contact, air)) {
+                refuse("a fused tool trimmed over its face reaches back to its other face");
+            }
+        }
+    }
+    clipTool(tool, trim);
+    for (const auto& beyond : beyondFaces) {
+        if (std::none_of(wallFaces.begin(), wallFaces.end(), [&](const TopoDS_Face& wall) {
+                return wall.IsSame(beyond);
+            })) {
+            wallFaces.push_back(beyond);
+        }
+        if (faceWalls) {
+            faceWalls->push_back(beyond);
+        }
+    }
+    for (const auto& strip : tool.strips) {
+        if (strip.contacts.empty()) {
+            refuse("a fused tool trimmed over its face has no face on a face next to its edge");
+        }
+    }
+    const double inBase = volumeOf(commonOf(base, tool.solid));
+    tool.inBase = inBase > volumeTolerance * tool.volume ? inBase : 0.0;
+    return true;
+}
+
+/// What of the tool stands in the air in front of the planar face, outside the face's prism
+double airOverFace(const Tool& tool, const TopoDS_Face& face, const TopoDS_Shape& base)
+{
+    Tool copy = tool;
+    std::vector<TopoDS_Face> walls;
+    FusedRun run {&tool, face, {}};
+    const double before = volumeOf(copy.solid) - copy.inBase;
+    if (!trimFusedToolOverFace(copy, run, base, walls)) {
+        return 0.0;
+    }
+    return before - (volumeOf(copy.solid) - copy.inBase);
 }
 
 /** Trims a cut tool by a tight wall arc's wedge (Tool::wedge, C4 shape A): what lies in the wedge
@@ -8781,6 +8987,8 @@ TopoDS_Shape constructShape(
     std::vector<TopoDS_Face> walled;
     std::vector<std::vector<std::pair<const Tool*, std::vector<TopoDS_Face>>>> wallsOf;
     std::vector<TopoDS_Face> wallFaces;
+    // The faces beyond the tools kept over their faces (trimFusedToolOverFace), among wallFaces
+    std::vector<TopoDS_Face> faceWalls;
     std::vector<FusedRun> fusedRuns;
     // Rounds between two cylinders are built wherever they fit, not only at the limit: OCCT's own
     // are B-spline faces there (preferConstruction())
@@ -8915,6 +9123,7 @@ TopoDS_Shape constructShape(
         const Tool* tool = nullptr;
         std::vector<TrimPlane> planes;
         bool other = false;
+        TopoDS_Face face;  // the face it was trimmed over (trimFusedToolOverFace), if it was
     };
     std::vector<OverlapClip> overlapClips;
     auto overlapPartner = [&](const Tool& tool) {
@@ -8922,11 +9131,23 @@ TopoDS_Shape constructShape(
             return corner.edges[0].IsSame(tool.source) || corner.edges[1].IsSame(tool.source);
         });
     };
-    for (const auto& run : fusedRuns) {
-        for (auto& tool : tools) {
-            if (&tool != run.tool) {
+    // What is still off the run's face must run into the material, which absorbs it
+    auto checkRunOff = [&](const Tool& tool, const FusedRun& run) {
+        for (const auto& strip : tool.strips) {
+            if (!strip.face.IsSame(run.face)) {
                 continue;
             }
+            for (const auto& contact : strip.contacts) {
+                if (areaOf(contact) - areaOf(commonOf(run.face, contact))
+                    > areaToleranceOf(contact, strip)) {
+                    checkFusedRunOff(run.face, contact, base.getShape(), request.widerScope);
+                }
+            }
+        }
+    };
+    // Today's trims (trimFusedTool) and the run-off check, for one tool's run on one face
+    auto trimRun = [&](Tool& tool, const FusedRun& run) {
+        {
             const size_t planesBefore = fusedPlanes.size();
             bool otherClip = false;
             if (overlapPartner(tool)) {
@@ -8952,7 +9173,7 @@ TopoDS_Shape constructShape(
                         fusedPlanes.begin() + static_cast<std::ptrdiff_t>(planesBefore),
                         fusedPlanes.end()
                     );
-                    if (known->other || known->planes.size() != 1) {
+                    if (known->other || known->planes.size() != 1 || !known->face.IsNull()) {
                         refuse("a fused tool at a concave corner reflex in the material clipped by "
                                "other than one plane");
                     }
@@ -9004,19 +9225,8 @@ TopoDS_Shape constructShape(
                         tool.inBase = inBase > volumeTolerance * tool.volume ? inBase : 0.0;
                     }
                 }
-                // What is still off its face must run into the material, which absorbs it
-                for (const auto& strip : tool.strips) {
-                    if (!strip.face.IsSame(run.face)) {
-                        continue;
-                    }
-                    for (const auto& contact : strip.contacts) {
-                        if (areaOf(contact) - areaOf(commonOf(run.face, contact))
-                            > areaToleranceOf(contact, strip)) {
-                            checkFusedRunOff(run.face, contact, base.getShape());
-                        }
-                    }
-                }
-                continue;
+                checkRunOff(tool, run);
+                return;
             }
             // A miter piece continues its tools' faces past the corner: it has no strips to trim.
             // Where OCCT failed (ops#888 A3, DU3: the keyhole pocket's floor under walls lower
@@ -9038,16 +9248,71 @@ TopoDS_Shape constructShape(
                 }
                 planeClipped.push_back(&tool);
             }
-            // What is still off its face must run into the material, which absorbs it
-            for (const auto& strip : tool.strips) {
-                if (!strip.face.IsSame(run.face)) {
-                    continue;
+            checkRunOff(tool, run);
+        }
+    };
+    // Where today's trims or the run-off check refuse, and OCCT failed (Request::widerScope): the
+    // fill kept over its face (trimFusedToolOverFace, ops#898 cause A), from the state before them
+    auto trimRunOverFace = [&](Tool& tool, const FusedRun& run) {
+        // Beside a miter (a concave corner with a circle) there is no Onshape fact
+        if (anyMiter) {
+            refuse("a fused tool trimmed over its face at a concave corner with a circle");
+        }
+        if (!trimFusedToolOverFace(tool, run, base.getShape(), wallFaces, &faceWalls)) {
+            return false;
+        }
+        if (overlapPartner(tool)) {
+            auto known = std::find_if(overlapClips.begin(), overlapClips.end(), [&](const auto& c) {
+                return c.tool == &tool;
+            });
+            if (known == overlapClips.end()) {
+                overlapClips.push_back({&tool, {}, false, {}});
+                known = std::prev(overlapClips.end());
+            }
+            if (known->other || !known->planes.empty()
+                || (!known->face.IsNull() && !known->face.IsSame(run.face))) {
+                refuse("a fused tool at a concave corner reflex in the material trimmed over its "
+                       "face and by another");
+            }
+            known->face = run.face;
+        }
+        checkRunOff(tool, run);
+        return true;
+    };
+    for (const auto& run : fusedRuns) {
+        for (auto& tool : tools) {
+            if (&tool != run.tool) {
+                continue;
+            }
+            const Tool before = tool;
+            const auto wallsBefore = wallFaces;
+            const auto faceWallsBefore = faceWalls;
+            const auto planesBefore = fusedPlanes;
+            const auto planeClippedBefore = planeClipped;
+            const auto overlapClipsBefore = overlapClips;
+            try {
+                trimRun(tool, run);
+            }
+            catch (const Refusal& refusal) {
+                if (!request.widerScope) {
+                    throw;
                 }
-                for (const auto& contact : strip.contacts) {
-                    if (areaOf(contact) - areaOf(commonOf(run.face, contact))
-                        > areaToleranceOf(contact, strip)) {
-                        checkFusedRunOff(run.face, contact, base.getShape());
-                    }
+                tool = before;
+                wallFaces = wallsBefore;
+                faceWalls = faceWallsBefore;
+                fusedPlanes = planesBefore;
+                planeClipped = planeClippedBefore;
+                overlapClips = overlapClipsBefore;
+                bool trimmed = false;
+                try {
+                    trimmed = trimRunOverFace(tool, run);
+                }
+                catch (const Refusal& over) {
+                    refuse(refusal.reason + "; kept over its face: " + over.reason);
+                }
+                // Nothing to keep over the face: today's refusal stands
+                if (!trimmed) {
+                    throw;
                 }
             }
         }
@@ -9095,11 +9360,37 @@ TopoDS_Shape constructShape(
                 partners.push_back(pair[k]);
             }
         }
-        if (!clips[0] != !clips[1]) {
+        TopoDS_Face overFace;
+        for (const auto* clip : clips) {
+            if (clip && !clip->face.IsNull()) {
+                if (!overFace.IsNull() && !overFace.IsSame(clip->face)) {
+                    refuse("the fills at a concave corner reflex in the material are trimmed over "
+                           "different faces");
+                }
+                overFace = clip->face;
+            }
+        }
+        if (!overFace.IsNull()) {
+            // Both kept over the same face (ops#898 cause A), or one, beside one that stands
+            // over the face already: their run on past the corner is then kept over it alike
+            for (int k = 0; k < 2; ++k) {
+                if (clips[k] && clips[k]->face.IsNull()) {
+                    refuse("a fill at a concave corner reflex in the material trimmed over its "
+                           "face, beside one clipped by a plane");
+                }
+                if (!clips[k]
+                    && airOverFace(*pair[k], overFace, base.getShape())
+                        > volumeTolerance * pair[k]->volume) {
+                    refuse("a fill at a concave corner reflex in the material trimmed over its "
+                           "face, beside one that is not");
+                }
+            }
+        }
+        else if (!clips[0] != !clips[1]) {
             refuse("a fill at a concave corner reflex in the material clipped by the face beyond, "
                    "beside one that is not");
         }
-        if (clips[0]) {
+        if (clips[0] && clips[1] && overFace.IsNull()) {
             const TrimPlane& a = clips[0]->planes.front();
             const TrimPlane& b = clips[1]->planes.front();
             if (!parallel(a.normal, b.normal)
@@ -9747,6 +10038,32 @@ TopoDS_Shape constructShape(
                 if (face.ShapeType() == TopAbs_FACE && sameDomain(TopoDS::Face(face), wall)) {
                     TopExp::MapShapes(face, TopAbs_EDGE, unlocked);
                     break;
+                }
+            }
+        }
+        // A face beyond a tool kept over its face (ops#898) that a tool's face merges into: its
+        // seam, if it has one, must not keep the merged face apart (a ledge's whole rim under a
+        // ring's fill: the prism's cylinder and the rim's have their seams in different places)
+        if (!faceWalls.empty()) {
+            for (TopExp_Explorer it(shape, TopAbs_FACE); it.More(); it.Next()) {
+                const TopoDS_Face& face = TopoDS::Face(it.Current());
+                if (std::none_of(faceWalls.begin(), faceWalls.end(), [&](const TopoDS_Face& wall) {
+                        return sameDomain(face, wall);
+                    })) {
+                    continue;
+                }
+                bool merging = false;
+                for (TopExp_Explorer edge(face, TopAbs_EDGE); edge.More() && !merging; edge.Next()) {
+                    merging = !BRep_Tool::IsClosed(TopoDS::Edge(edge.Current()), face)
+                        && unlocked.Contains(edge.Current());
+                }
+                if (!merging) {
+                    continue;
+                }
+                for (TopExp_Explorer edge(face, TopAbs_EDGE); edge.More(); edge.Next()) {
+                    if (BRep_Tool::IsClosed(TopoDS::Edge(edge.Current()), face)) {
+                        unlocked.Add(edge.Current());
+                    }
                 }
             }
         }
