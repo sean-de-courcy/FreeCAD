@@ -14809,6 +14809,7 @@ bool construct(
     std::string* reason
 )
 {
+    out.newRule = false;
     // Whole rim loops on plane faces are built directly, without a Boolean; whatever that
     // refuses, or fails a check of its result, goes to the construction by Booleans below
     try {
@@ -14885,6 +14886,7 @@ bool construct(
         out.edges = selected.Extent();
         out.corners = corners;
         out.rolledOn = rolledOn;
+        out.newRule = keptOverFace;
         return true;
     }
     catch (const Refusal& refusal) {

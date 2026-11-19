@@ -196,6 +196,11 @@ struct PartExport Construction
     /// plane face nor a wall lies within their reach (a cavity or a blind hole under the rim):
     /// OCCT's own round runs through that part as well, valid and wrong
     bool rimBlocked {false};
+    /// Built by a rule that refused before ops#898: a fill kept over its face (cause A), and a
+    /// concave arc's end at a cusp of its floor (cause B), which leads to it. Where a route that
+    /// came after the construction's refusal builds the dress-up, it did so before, and its
+    /// result stands (review of PR 484, S5)
+    bool newRule {false};
 };
 
 /** build() in two steps, so that the long one can run on a worker thread (KernelBudget::run()):
