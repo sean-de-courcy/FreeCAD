@@ -483,6 +483,11 @@ names it.
 | `fix/i888-a3b-boss-corner` | fix | ops#888 | - | `fix/i888-a3-line-arc-corner` (fork PR 477, on fork PRs 476 and 474) | `4fb02afd5d` (fork PR 480), 2026-11-17 | never (fork fix): concave line-and-arc fills at a corner reflex in the material meet along their intersection, as Onshape's (A3b) |
 | `fix/i888-seam-ring` | fix | ops#888 | - | `fix/i888-a3b-boss-corner` (fork PR 480, merged) | `2a21885577` (fork PR 481), 2026-11-17 | never (fork fix): a circle split by a seam that closes into a ring is one ring across its arcs, as a single arc's |
 | `fix/i870-boolean-speed` | fix | ops#870 | - | `integration` | (fork PR 483) | never (fork fix): a Union's and the studio's touch tests stop at the first contact pair, with the old whole distance as the fallback (speed, ops#870) |
+| `fix/i898-concave-overflow` | fix | ops#898 | - | `integration` | via `carry/fork-1.0.3-set` | never (fork fix): a concave fill wider than its face is kept over the face, as Onshape's (cause A) |
+| `fix/i898-arc-nonplane` | fix | ops#898 | - | `integration` (stacked on PR 484) | via `carry/fork-1.0.3-set` | never (fork fix): a concave round's arc ending at a cusp of its floor on the rim is the fill kept over the floor, as Onshape's (cause B) |
+| `fix/i883-runout-arc` | fix | ops#899, ops#883 | - | `integration` (stacked on PR 484 and the cause B PR) | via `carry/fork-1.0.3-set` | never (fork fix): a fillet's arc with tangent propagation off runs on along its torus past an unpicked tangent line, as Onshape's |
+| `fix/i898-strips-past-faces` | fix | ops#898 | - | `integration` `e7b2397644` | via `carry/fork-1.0.3-set` | never (fork fix): a chamfer past both faces whose far side stays on one is built as the plain cut (C) |
+| `fix/i901-polar-retry` | fix | ops#901 | - | `integration` `e7b2397644` | via `carry/fork-1.0.3-set` | never (fork fix, or when OCCT finds near-tangent B-spline crossings itself): a pattern cut OCCT leaves open is made again with the missed face/face crossings recovered |
 
 ## Fork-only commits in carried topics
 
