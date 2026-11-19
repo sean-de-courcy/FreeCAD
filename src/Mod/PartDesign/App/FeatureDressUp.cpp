@@ -1645,6 +1645,7 @@ PartDesignExport std::vector<std::array<TopoDS_Shape, 3>> takeArcRunOns(
         size_t firstColumn = 0;
         size_t endColumn = 0;
         std::vector<TopoDS_Vertex> sharpEnds;
+        double runOn = 0.0;
     };
     std::vector<ArcSpan> spans;
     std::vector<Part::TopoShape> picked = edges;
@@ -1783,6 +1784,7 @@ PartDesignExport std::vector<std::array<TopoDS_Shape, 3>> takeArcRunOns(
         arcSpan.tori[0] = toolOf(true, first, span);
         arcSpan.tori[1] = toolOf(false, first, span);
         arcSpan.firstColumn = runOns.size();
+        arcSpan.runOn = runOn;
 
         // The tangent neighbours
         TopTools_IndexedMapOfShape neighbours;
@@ -1968,9 +1970,27 @@ PartDesignExport std::vector<std::array<TopoDS_Shape, 3>> takeArcRunOns(
     // it (review of PR 487, M2: two rounded pocket ends in a row, both picked): Onshape rounds
     // each arc as alone, so its round over its own span is cut again within that column. No
     // column is restored for these entries (a null column), only the cut. The arc's run-on
-    // beyond its ends lies in its own columns, cut there. A column that reaches the round within
-    // 3 r of a sharp end stops: OCCT's round ends there by the end wall, not on the meridian
+    // beyond its ends lies in its own columns, cut there.
+    // At a sharp end OCCT's round of the arc alone runs past the end's meridian plane or stops
+    // short of it, by the end wall's slant, out to where that wall meets the ring's outer circle:
+    // at most the run-on from the end for a wall near the tangent. Another arc's column there
+    // puts material back or the span torus takes too much (review of PR 487 round 3, T1, and its
+    // fix's review): any column of another arc within the run-on and 2 r of a sharp end stops,
+    // whether or not it crosses the span torus
     const size_t columns = runOns.size();
+    for (const auto& arcSpan : spans) {
+        for (const auto& sharp : arcSpan.sharpEnds) {
+            for (size_t j = 0; j < columns; ++j) {
+                if (j >= arcSpan.firstColumn && j < arcSpan.endColumn) {
+                    continue;
+                }
+                BRepExtrema_DistShapeShape distance(runOns[j][0], sharp);
+                if (!distance.IsDone() || distance.Value() < arcSpan.runOn + 2 * radius) {
+                    arcRunOnStop();
+                }
+            }
+        }
+    }
     for (const auto& arcSpan : spans) {
         for (size_t j = 0; j < columns; ++j) {
             if (j >= arcSpan.firstColumn && j < arcSpan.endColumn) {
@@ -1989,15 +2009,6 @@ PartDesignExport std::vector<std::array<TopoDS_Shape, 3>> takeArcRunOns(
                     crosses = props.Mass() > Precision::Confusion();
                     if (!crosses) {
                         break;
-                    }
-                    // At a sharp end OCCT's round of the arc alone runs past the end's meridian
-                    // plane or stops short of it, by the end wall's slant; the span torus ends on
-                    // it. Not measured there: it stops (review of PR 487 round 3, T1)
-                    for (const auto& sharp : arcSpan.sharpEnds) {
-                        BRepExtrema_DistShapeShape distance(within.Shape(), sharp);
-                        if (!distance.IsDone() || distance.Value() < 3 * radius) {
-                            arcRunOnStop();
-                        }
                     }
                 }
                 else if (props.Mass() <= Precision::Confusion()) {

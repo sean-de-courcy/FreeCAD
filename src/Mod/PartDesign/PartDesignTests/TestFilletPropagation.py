@@ -492,7 +492,8 @@ class TestFilletPropagation(unittest.TestCase):
         return pad, names
 
     def testOffOnTwoHollowArcsColumnAcrossASharpEndedArc(self):
-        """B's lower column (y 3..4) crosses A's round mid-arc, far from A's sharp end: each arc as alone."""
+        """B's lower column (y 3..4) crosses A's round mid-arc, farther from A's sharp end than the run-on and 2 r:
+        each arc as alone."""
         pad, names = self.sharpEndPad(9.0)
         removed = 0.0
         for name in names:
@@ -504,13 +505,21 @@ class TestFilletPropagation(unittest.TestCase):
         self.assertEqual(len(fillet.Shape.Solids), 1)
         self.assertAlmostEqual(pad.Shape.Volume - fillet.Shape.Volume, removed, delta=1e-4)
 
-    def testOffOnTwoHollowArcsColumnAtASharpEndStops(self):
-        """B's lower column (y -3..-2) crosses A's round next to its sharp end, where OCCT's round of A alone runs
-        past the end's meridian plane (the wall goes straight down): not measured, it stops."""
-        pad, names = self.sharpEndPad(3.0)
+    def sharpEndStops(self, cy):
+        pad, names = self.sharpEndPad(cy)
         fillet = self.fillet(pad, names, radius=1.0, TangentPropagation=False)
         self.assertFalse(fillet.isValid(), "expected a stop")
         self.assertIn("tangent", fillet.getStatusString().lower())
+
+    def testOffOnTwoHollowArcsColumnAtASharpEndStops(self):
+        """B's lower column (y -3..-2) crosses A's round next to its sharp end, where OCCT's round of A alone runs
+        past the end's meridian plane (the wall goes straight down): not measured, it stops."""
+        self.sharpEndStops(3.0)
+
+    def testOffOnTwoHollowArcsColumnPastASharpEndStops(self):
+        """B's lower column (y -4..-3) passes just beyond A's sharp end without crossing its span torus, through what
+        OCCT's round of A alone takes past the meridian plane (the fix's review, T1-a): it stops."""
+        self.sharpEndStops(2.0)
 
     def testOffOnAHollowArcAnotherRoundInTheColumnStops(self):
         """Another picked edge whose round reaches into the run-on's column (a hole's top rim 1.5 r from the wall
