@@ -6249,7 +6249,8 @@ Tool miterTool(
  * listed in surfaceWalls with its tool: the caller trims that tool by the wall's own surface
  * (trimByWall). A tool off both its faces is refused, but for an overflowing end and, with
  * pastBothFaces (Request::pastBothFaces, ops#888 A1), a cut tool one of whose strips runs into a
- * wall.
+ * wall, and, with keptFarSide too (chamfers, ops#898 C), one of whose strips keeps its far side on
+ * its face along a stretch.
  */
 bool checkStrips(
     const std::vector<Tool>& tools,
@@ -6265,6 +6266,7 @@ bool checkStrips(
     std::vector<FusedRun>& fusedRuns,
     std::vector<SurfaceWall>& surfaceWalls,
     bool pastBothFaces,
+    bool keptFarSide,
     const std::vector<std::pair<TopoDS_Shape, TopoDS_Shape>>& overlapPairs = {}
 )
 {
@@ -6481,6 +6483,23 @@ bool checkStrips(
             return wall.tool == tool;
         });
     };
+    // Whether a strip's far side lies on its face along more than a grazing contact: its contacts'
+    // edges on the far side, in common with the face
+    auto farSideOnFace = [&](const Strip& strip) {
+        if (!strip.farSide.valid) {
+            return false;
+        }
+        double length = 0.0;
+        for (const auto& contact : strip.contacts) {
+            for (TopExp_Explorer it(contact, TopAbs_EDGE); it.More(); it.Next()) {
+                const TopoDS_Edge& edge = TopoDS::Edge(it.Current());
+                if (liesOn(edge, strip.farSide)) {
+                    length += lengthAlong(edge, strip.face);
+                }
+            }
+        }
+        return length > 1000 * linearTolerance;
+    };
     for (const auto& tool : tools) {
         // A fill at a concave corner reflex in the material (Corner2Overlap, ops#888 A3b) runs
         // off both faces past its vertex, into the material and the other fill, which the caller
@@ -6505,6 +6524,16 @@ bool checkStrips(
         // of r 30 on a 10 x 20 pad's edge, an oblique slab's corners) nothing trims it: no round
         // or chamfer exists there. Only where OCCT built nothing (Request::pastBothFaces)
         if (pastBothFaces && tool.cut && intoAWall(&tool)) {
+            continue;
+        }
+        // A cut tool past both its faces where a strip keeps its far side on its face along a
+        // stretch (ops#898 C, HNY #14 and #16: a hole's rim near the plate's side, over a lip
+        // thinner than the chamfer; Onshape's result is the plain cut). Each run-off is one
+        // checkRunOff resolved above, and the far side on the face bounds the cut there, as on a
+        // strip on its face: the dress-up exists, broken out where the far side leaves the face.
+        // Only where OCCT built nothing, and for chamfers until Onshape's round there is known
+        if (pastBothFaces && keptFarSide && tool.cut
+            && std::any_of(tool.strips.begin(), tool.strips.end(), farSideOnFace)) {
             continue;
         }
         refuse("a dress-up runs past both its faces");
@@ -9070,6 +9099,9 @@ TopoDS_Shape constructShape(
                              // Chamfers (Onshape's DU1) and rounds (DU4: the DU1a rail rounded
                              // r 1.2, 1.5 and 2.5 builds, the same clipped construction)
                              request.pastBothFaces,
+                             // A cut tool off both faces whose far side stays on one along a
+                             // stretch: chamfers only (ops#898 C)
+                             request.kind == Kind::Chamfer,
                              overlapPairs
                          )
         || unionCorners;
