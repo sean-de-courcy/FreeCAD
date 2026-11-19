@@ -33,6 +33,7 @@ import unittest
 
 import FreeCAD as App
 import Part
+import PartDesign
 import Sketcher
 
 from PartDesignTests.TestStudio import pad, rect, sketch, xyPlane
@@ -344,3 +345,188 @@ class TestStudioMoveKeepsBodies(unittest.TestCase):
         two.addObject(box)
         self.assertEqual(one.Group, [])
         self.assertEqual(sorted(obj.Name for obj in two.Group), ["Box", "BoxMirror"])
+
+
+class TestImportPieces(unittest.TestCase):
+    """FreeCAD-CH ops#920: a split part's pieces hold their solids after a copy into another document.
+
+    A piece Body (made by a split, PartDesign.studioMakePieces) keeps a witness: the names of the
+    faces that tell its solid apart, with the IDs of the objects that made them. A copy gives every
+    object a new ID, so after the copy's first recompute no name of the witness was on any solid:
+    "None of the faces that told '<part>' apart is on a piece any more: it holds nothing".
+
+    Designed: a bar P x 0..100, y 0..10, 10 high, in the studio S, split by a studio Pocket E (a
+    slot 1 wide at x 30..31 through it): pieces x 0..30 (3000) and x 31..100 (6900). The right piece
+    gets a boss x 60..70, y 2..8, 2 high on its top (adds 120: 7020).
+    """
+
+    def setUp(self):
+        from PartDesignTests.TestStudioList import studioList
+        from PartDesignTests.TestStudioOwner import makeOwner, studioSketch
+
+        self.dir = tempfile.mkdtemp(prefix="TestImportPieces")
+        doc = App.newDocument("TestImportPiecesSource")
+        studio = doc.addObject("App::Part", "S")
+        bar = doc.addObject("PartDesign::Body", "P")
+        studio.addObject(bar)
+        pad(bar, "PPad", sketch(bar, "PSk", xyPlane(bar), (0, 0, 100, 10)), 10)
+        doc.recompute()
+        PartDesign.studioReconcile(studioList(doc))
+        slot = studioSketch(doc, studio, "ESk", ((30, -1, 31, 11),), z=10)
+        split = makeOwner(doc, studio, "Pocket", "E", slot, ("P",), Length=11)
+        doc.recompute()
+        doc.openTransaction("pieces")
+        made = PartDesign.studioMakePieces(split)
+        doc.commitTransaction()
+        self.assertEqual(len(made), 2)
+        right = max(made, key=lambda b: b.Shape.BoundBox.XMin)
+        boss = pad(right, "RBoss", sketch(right, "RBossSk", xyPlane(right), (60, 2, 70, 8), z=10), 2)
+        PartDesign.studioInsert(boss.Profile[0], -1)
+        doc.recompute()
+        self.assertEqual(inError(doc), {})
+        self.file = os.path.join(self.dir, "pieces.FCStd")
+        doc.saveAs(self.file)
+        App.closeDocument(doc.Name)
+        self.other = os.path.join(self.dir, "other.FCStd")
+        doc = buildStudio("TestImportPiecesOther", 100)
+        doc.saveAs(self.other)
+        App.closeDocument(doc.Name)
+        # The control: the file alone, every object touched and recomputed
+        doc = App.openDocument(self.file, hidden=True)
+        TestImportReferences.touchAll(doc)
+        self.assertEqual(inError(doc), {})
+        self.alone = self.pieces(doc.Objects)
+        App.closeDocument(doc.Name)
+
+    def tearDown(self):
+        for doc in list(App.listDocuments().values()):
+            if doc.Name.startswith("TestImportPieces") or os.path.normcase(
+                os.path.normpath(doc.FileName)
+            ).startswith(os.path.normcase(os.path.normpath(self.dir))):
+                App.closeDocument(doc.Name)
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    @staticmethod
+    def pieces(objs):
+        """Each piece's solids, volume and centre, by its part id."""
+        out = {}
+        for obj in objs:
+            if obj.isDerivedFrom("PartDesign::Body") and obj.StudioPieceWitness:
+                shape = obj.Shape
+                centre = shape.Solids[0].CenterOfMass if shape.Solids else V()
+                out[obj.StudioPartId] = (len(shape.Solids),) + tuple(
+                    round(value, 6) + 0.0 for value in (shape.Volume, centre.x, centre.y, centre.z)
+                )
+        return out
+
+    def assertAsAlone(self, host, copies):
+        TestImportReferences.touchAll(host)
+        self.assertEqual(inError(host), {})
+        self.assertEqual(self.pieces(copies), self.alone)
+
+    def testThePiecesAreAsDesigned(self):
+        designed = [
+            (1, 3000, 15, 5, 5),
+            (1, 7020, (6900 * 65.5 + 120 * 65) / 7020, 5, (6900 * 5 + 120 * 11) / 7020),
+        ]
+        actual = sorted(self.alone.values())
+        self.assertEqual(len(actual), 2)
+        for got, want in zip(actual, designed):
+            for g, w in zip(got, want):
+                self.assertAlmostEqual(g, w, places=4, msg=(got, want))
+
+    def testCopiedPiecesHoldTheirSolids(self):
+        host = App.openDocument(self.other, hidden=True)
+        source = App.openDocument(self.file, hidden=True)
+        copies = host.copyObject(list(source.Objects), False, False)
+        App.closeDocument(source.Name)
+        self.assertAsAlone(host, copies)
+
+    def testMergedPiecesHoldTheirSolids(self):
+        host = App.openDocument(self.other, hidden=True)
+        before = {obj.Name for obj in host.Objects}
+        host.mergeProject(self.file)
+        self.assertAsAlone(host, [obj for obj in host.Objects if obj.Name not in before])
+
+    def testMergedPieceEditedFirst(self):
+        """Merge project keeps the file's element maps, named with the file's IDs: an edit in a
+        piece recomputed before the rest still finds the piece's faces (review pr920pre-r1 T1).
+        The boss on the right piece is made 1 higher: 7020 + 60."""
+        host = App.openDocument(self.other, hidden=True)
+        before = {obj.Name for obj in host.Objects}
+        host.mergeProject(self.file)
+        copies = [obj for obj in host.Objects if obj.Name not in before]
+        boss = [obj for obj in copies if obj.Label.startswith("RBoss") and obj.isDerivedFrom("PartDesign::Pad")]
+        self.assertEqual(len(boss), 1)
+        body = boss[0].getParentGeoFeatureGroup()
+        step = [f for f in body.Group if getattr(f, "StudioOwner", None) is body.StudioMadeBy]
+        self.assertEqual(len(step), 1)
+        step[0].touch()
+        boss[0].Length = 3
+        host.recompute()
+        self.assertEqual(inError(host), {})
+        expected = dict(self.alone)
+        right = max(expected, key=lambda k: expected[k][1])
+        count, volume = expected[right][:2]
+        got = self.pieces(copies)
+        self.assertAlmostEqual(got[right][1], volume + 60, places=4)
+        self.assertEqual({k: v for k, v in got.items() if k != right},
+                         {k: v for k, v in expected.items() if k != right})
+
+    def testMergedFrozenMaker(self):
+        """The maker's step saved frozen keeps the file's shape and names: a merge keeps the
+        pieces' records as the file has them, and they hold their solids (review pr920pre-r1 F1)."""
+        import re
+        import zipfile
+
+        frozen = os.path.join(self.dir, "frozen.FCStd")
+        with zipfile.ZipFile(self.file) as z:
+            items = {i: z.read(i) for i in z.namelist()}
+        xml = items["Document.xml"].decode("utf-8")
+        xml, n = re.subn(r'(<Object type="[^"]*" name="E_at_P")', r'\1 Freeze="1"', xml, count=1)
+        self.assertEqual(n, 1)
+        items["Document.xml"] = xml.encode("utf-8")
+        with zipfile.ZipFile(frozen, "w", zipfile.ZIP_DEFLATED) as z:
+            for name, data in items.items():
+                z.writestr(name, data)
+        host = App.openDocument(self.other, hidden=True)
+        before = {obj.Name for obj in host.Objects}
+        host.mergeProject(frozen)
+        copies = [obj for obj in host.Objects if obj.Name not in before]
+        host.recompute()
+        self.assertEqual(inError(host), {})
+        self.assertEqual(self.pieces(copies), self.alone)
+
+    def testPastedWithinTheDocumentHoldTheirSolids(self):
+        """A copy within the source document: the copies' pieces hold the copies' solids, and the
+        original's pieces stay as they were."""
+        doc = App.openDocument(self.file, hidden=True)
+        copies = doc.copyObject(list(doc.Objects), False, False)
+        TestImportReferences.touchAll(doc)
+        self.assertEqual(inError(doc), {})
+        self.assertEqual(self.pieces(copies), self.alone)
+        originals = [obj for obj in doc.Objects if obj not in copies]
+        self.assertEqual(self.pieces(originals), self.alone)
+
+    def testCopiedIntoADocumentHoldingTheSameStudio(self):
+        """The host already holds the same studio: the copies are renamed (P001, E001) and keep
+        the part ids the host's studio has too; each piece takes its parent in its own studio.
+        The host is filled so that the copies' IDs cross a power of ten where the file's don't:
+        names sort by their bytes, the IDs' digits included."""
+        twin = os.path.join(self.dir, "twin.FCStd")
+        shutil.copyfile(self.file, twin)
+        host = App.openDocument(twin, hidden=True)
+        source = App.openDocument(self.file, hidden=True)
+        ids = sorted(obj.ID for obj in source.Objects)
+        power = 10 ** len(str(ids[-1]))
+        last = max(obj.ID for obj in host.Objects)
+        for _ in range(max(0, power - len(ids) // 2 - last)):
+            host.addObject("App::DocumentObjectGroup", "Filler")
+        copies = host.copyObject(list(source.Objects), False, False)
+        App.closeDocument(source.Name)
+        copied = sorted(obj.ID for obj in copies)
+        self.assertLess(copied[0], power)
+        self.assertGreater(copied[-1], power)
+        self.assertAsAlone(host, copies)
+        originals = [obj for obj in host.Objects if obj not in copies]
+        self.assertEqual(self.pieces(originals), self.alone)
