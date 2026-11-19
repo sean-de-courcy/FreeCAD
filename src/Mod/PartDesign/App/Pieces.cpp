@@ -1368,6 +1368,7 @@ void importPieceWitnesses(const std::vector<App::DocumentObject*>& objs, Base::X
             ids[source->document][source->id] = obj->getID();
         }
     }
+    std::set<std::string> renamed;  // the documents copied from whose witnesses were rewritten
     for (auto obj : objs) {
         auto source = App::importedSource(obj);
         if (!source || !obj->isAttachedToDocument()) {
@@ -1382,6 +1383,7 @@ void importPieceWitnesses(const std::vector<App::DocumentObject*>& objs, Base::X
             if (maker && maker->document == source->document && !witness.empty()
                 && remapWitness(witness, map)) {
                 body->StudioPieceWitness.setValues(witness);
+                renamed.insert(source->document);
             }
         }
         auto values = retiredOf(obj);
@@ -1419,6 +1421,20 @@ void importPieceWitnesses(const std::vector<App::DocumentObject*>& objs, Base::X
         }
         if (changed) {
             setRetired(obj, values);
+            renamed.insert(source->document);
+        }
+    }
+    // The rewritten witnesses name the faces as a recompute of the copies names them. A copy
+    // (copyObject, a paste) is recomputed whole anyway; Merge project keeps the file's element
+    // maps, with the file's IDs, and touches nothing: until the maker's result is recomputed, a
+    // piece step recomputed alone (an edit in the piece) would find none of its faces (review
+    // pr920pre-r1 T1). So everything that came from such a file is recomputed
+    if (!renamed.empty()) {
+        for (auto obj : objs) {
+            auto source = App::importedSource(obj);
+            if (source && obj->isAttachedToDocument() && renamed.contains(source->document)) {
+                obj->getDocument()->addRecomputeObject(obj);
+            }
         }
     }
 }

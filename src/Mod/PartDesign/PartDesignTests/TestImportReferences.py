@@ -448,6 +448,31 @@ class TestImportPieces(unittest.TestCase):
         host.mergeProject(self.file)
         self.assertAsAlone(host, [obj for obj in host.Objects if obj.Name not in before])
 
+    def testMergedPieceEditedFirst(self):
+        """Merge project keeps the file's element maps, named with the file's IDs: an edit in a
+        piece recomputed before the rest still finds the piece's faces (review pr920pre-r1 T1).
+        The boss on the right piece is made 1 higher: 7020 + 60."""
+        host = App.openDocument(self.other, hidden=True)
+        before = {obj.Name for obj in host.Objects}
+        host.mergeProject(self.file)
+        copies = [obj for obj in host.Objects if obj.Name not in before]
+        boss = [obj for obj in copies if obj.Label.startswith("RBoss") and obj.isDerivedFrom("PartDesign::Pad")]
+        self.assertEqual(len(boss), 1)
+        body = boss[0].getParentGeoFeatureGroup()
+        step = [f for f in body.Group if getattr(f, "StudioOwner", None) is body.StudioMadeBy]
+        self.assertEqual(len(step), 1)
+        step[0].touch()
+        boss[0].Length = 3
+        host.recompute()
+        self.assertEqual(inError(host), {})
+        expected = dict(self.alone)
+        right = max(expected, key=lambda k: expected[k][1])
+        count, volume = expected[right][:2]
+        got = self.pieces(copies)
+        self.assertAlmostEqual(got[right][1], volume + 60, places=4)
+        self.assertEqual({k: v for k, v in got.items() if k != right},
+                         {k: v for k, v in expected.items() if k != right})
+
     def testPastedWithinTheDocumentHoldTheirSolids(self):
         """A copy within the source document: the copies' pieces hold the copies' solids, and the
         original's pieces stay as they were."""
