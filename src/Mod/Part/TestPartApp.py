@@ -62,6 +62,7 @@ from parttests.FilletFallbackTest import (
     InvalidDressUpTest,
     KeyholeBossCornerTest,
     DPocketCornerTest,
+    NotchedDPocketCornerTest,
     KeyholePocketChamferTest,
     KinkedContourTest,
     LostStepTest,

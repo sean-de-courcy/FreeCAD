@@ -6135,6 +6135,80 @@ class DPocketCornerTest(unittest.TestCase):
         self.check(body.makeFillet(1.0, floor), body, 6.749786)
 
 
+class NotchedDPocketCornerTest(unittest.TestCase):
+    """ops#883 C, designed (the form of NS44 Vial Well Atrium #136): DPocketCornerTest's block with
+    a tall-walled D pocket, depth 3, and a notch cut into the chord's wall from the top, 2 wide
+    about x = 0, its bottom round, r 1 about an axis across the wall, its lowest point sill above
+    the floor, nearer than the dress-up c = 1. The floor's arc and chord meet at two corners
+    reflex in the material. OCCT's result is valid and refused there; Onshape's (measured on
+    #136, 48 faces, area to 1e-10): the fills meet along their intersection, and the chord's is
+    kept over its wall, the notch run on through it. The reference: the base united with the
+    arc's fill (its section revolved a whole turn) and the chord's (extruded past both corners),
+    less the notch run on"""
+
+    W, H, C = 2.0, 3.0, 1.0
+
+    def section(self, kind):
+        """The fill's section in the XZ plane, x the distance from the wall, z the height"""
+        V, c = FreeCAD.Vector, self.C
+        if kind == "chamfer":
+            return Part.Face(Part.makePolygon([V(0, 0, 0), V(c, 0, 0), V(0, 0, c), V(0, 0, 0)]))
+        square = Part.Face(Part.makePolygon([V(0, 0, 0), V(c, 0, 0), V(c, 0, c), V(0, 0, c), V(0, 0, 0)]))
+        return square.cut(Part.Face(Part.Wire(Part.makeCircle(c, V(c, 0, c), V(0, 1, 0)))))
+
+    def pocket(self):
+        V = FreeCAD.Vector
+        disk = Part.makeCylinder(6, self.H, V(0, 0, 5 - self.H))
+        disk.rotate(V(0, 0, 0), V(0, 0, 1), 90)
+        air = disk.common(Part.makeBox(40, 20 + self.W, 10, V(-20, -20, 0)))
+        return Part.makeBox(24, 24, 5, V(-12, -12, 0)).cut(air).removeSplitter()
+
+    def notch(self, sill):
+        V = FreeCAD.Vector
+        z = 5 - self.H + sill + 1
+        return Part.makeCylinder(1, 4, V(0, self.W - 1, z), V(0, 1, 0)).fuse(
+            Part.makeBox(2, 4, 10, V(-1, self.W - 1, z))
+        ).removeSplitter()
+
+    def body(self, sill):
+        body = self.pocket().cut(self.notch(sill)).removeSplitter()
+        floor = [e for e in body.Edges if all(abs(v.Point.z - (5 - self.H)) < 1e-9 for v in e.Vertexes)]
+        self.assertEqual(len(floor), 2)
+        return body, floor
+
+    def reference(self, kind, sill):
+        V, floor = FreeCAD.Vector, 5 - self.H
+        arc = self.section(kind).mirror(V(0, 0, 0), V(1, 0, 0))
+        arc.translate(V(6, 0, floor))
+        arc = arc.revolve(V(0, 0, 0), V(0, 0, 1), 360).Solids[0]
+        chord = self.section(kind)
+        chord.rotate(V(0, 0, 0), V(0, 0, 1), -90)
+        chord.translate(V(-12, self.W, floor))
+        chord = chord.extrude(V(24, 0, 0))
+        block = Part.makeBox(24, 24, 5, V(-12, -12, 0))
+        return self.pocket().fuse([arc, chord]).common(block).cut(self.notch(sill))
+
+    def check(self, kind, sill, delta):
+        body, floor = self.body(sill)
+        result = getattr(body, "makeFillet" if kind == "fillet" else "makeChamfer")(self.C, floor)
+        reference = self.reference(kind, sill)
+        self.assertTrue(result.isValid())
+        self.assertEqual(len(result.Solids), 1)
+        self.assertAlmostEqual(result.Volume, reference.Volume, delta=delta)
+        self.assertLess(result.cut(reference).Volume + reference.cut(result).Volume, delta)
+        self.assertLess(result.common(self.notch(sill)).Volume, 1e-9)
+
+    def testFillet(self):
+        # The revolved round's volume is good to about 5e-6 (DPocketCornerTest's tall form)
+        self.check("fillet", 0.5, 1e-5)
+
+    def testChamfer(self):
+        self.check("chamfer", 0.5, 1e-6)
+
+    def testFilletNotchNearerTheFloor(self):
+        self.check("fillet", 0.3, 1e-5)
+
+
 class FillOverALedgeTest(unittest.TestCase):
     """ops#898 cause A, designed: a keyhole boss (the circle r 7 about the z axis and the slot |y| < 2
     to x = 12, height 3) on a slab z -2..0 whose top is the ledge round the boss's foot; the slab's
@@ -6309,14 +6383,14 @@ class FillPastANotchTest(unittest.TestCase):
     round, r 2 about the line y = 10, z = sill + 2. A chamfer of 1 at the wall's foot, the notch's
     sill at 0.6, below the chamfer's top: the fill keeps only what stands in front of the wall,
     the notch's own cylinder growing over its cut. Closed form: the plain fill (10 mm3) less its
-    part in front of the notch. A closed window instead (a hole in the wall's face) has no Onshape
-    fact: refused"""
+    part in front of the notch. A closed window instead (a hole in the wall's face, ops#883 H): the
+    hole runs on through the fill"""
 
-    def body(self, sill, window=False):
+    def body(self, sill, window=False, radius=2.0):
         V = FreeCAD.Vector
         plate = Part.makeBox(12, 20, 2, V(-2, 0, -2))
         wall = Part.makeBox(2, 20, 5, V(-2, 0, 0))
-        hole = Part.makeCylinder(2, 4, V(-3, 10, sill + 2), V(1, 0, 0))
+        hole = Part.makeCylinder(radius, 4, V(-3, 10, sill + radius), V(1, 0, 0))
         if not window:
             hole = hole.fuse(Part.makeBox(4, 4, 5, V(-3, 8, sill + 2))).removeSplitter()
         body = plate.fuse(wall).removeSplitter().cut(hole)
@@ -6346,10 +6420,65 @@ class FillPastANotchTest(unittest.TestCase):
         windows = [f for f in result.Faces if f.Surface.TypeId == "Part::GeomCylinder"]
         self.assertEqual(len(windows), 1)
 
-    def testClosedWindowIsRefused(self):
-        body, foot = self.body(0.6, window=True)
-        with self.assertRaisesRegex(Exception, "kept over its face: .*the edge of a hole in it"):
-            body.makeChamfer(1.0, foot)
+    # A closed window (ops#883 H): a hole r 0.5 through the wall about y = 10, z = 1, its rim 0.5
+    # above the floor, inside the fill's strip (OCCT fails on it, fillet and chamfer)
+    WINDOW = (0.5, 1.0)
+
+    def window_in_fill(self, depth):
+        """What of the fill stands in front of the window, the hole run on through the fill, the
+        fill depth(z) deep at height z: with z = zc - r cos(a), the chord 2 r sin(a) and dz =
+        r sin(a) da, a smooth integrand over a 0..acos((zc - 1) / r) (z from the rim to 1)"""
+        r, zc = self.WINDOW
+        return gauss_legendre(
+            lambda a: depth(zc - r * math.cos(a)) * 2 * r * r * math.sin(a) ** 2,
+            0,
+            math.acos((zc - 1) / r),
+        )
+
+    def check_window(self, result, body, added):
+        r, zc = self.WINDOW
+        self.assertTrue(result.isValid())
+        self.assertEqual(len(result.Solids), 1)
+        self.assertAlmostEqual(result.Volume - body.Volume, added, delta=1e-6)
+        # The hole runs on through the fill: nothing of the result in its cylinder, and its wall
+        # grown over the fill's cut. (Onshape's wall is one face; here the cut's piece stays a face
+        # of its own, on the coaxial cylinder of the other sense: debt, ops#883)
+        hole = Part.makeCylinder(r, 4, FreeCAD.Vector(-3, 10, zc), FreeCAD.Vector(1, 0, 0))
+        self.assertLess(result.common(hole).Volume, 1e-9)
+        walls = [
+            f
+            for f in result.Faces
+            if f.Surface.TypeId == "Part::GeomCylinder" and abs(f.Surface.Radius - r) < 1e-9
+        ]
+        self.assertAlmostEqual(sum(f.Area for f in walls), self.wall_area(), delta=1e-6)
+
+    def wall_area(self):
+        """The hole's wall through the wall (2 pi r 2) and on through the fill: over a 0..pi, the
+        fill's depth at height zc - r cos(a), times r da (pi r, from either side)"""
+        r, zc = self.WINDOW
+        return 2 * math.pi * r * 2 + 2 * gauss_legendre(
+            lambda a: self.depth(zc - r * math.cos(a)) * r, 0, math.acos((zc - 1) / r)
+        )
+
+    def window_body(self):
+        r, zc = self.WINDOW
+        return self.body(zc - r, window=True, radius=r)
+
+    def testChamferThroughAClosedWindow(self):
+        # ops#883 H (HNY-DSN Case #104, Onshape's capture to 1e-8 in area): the hole runs on
+        # through the fill
+        body, foot = self.window_body()
+        self.depth = lambda z: 1 - z
+        window = self.window_in_fill(self.depth)
+        self.check_window(body.makeChamfer(1.0, foot), body, 10 - window)
+
+    def testFilletThroughAClosedWindow(self):
+        body, foot = self.window_body()
+        # The round r 1 about the line x = 1, z = 1: the fill 1 - sqrt(1 - (1 - z)^2) deep at z,
+        # (1 - pi / 4) in section, 20 long
+        self.depth = lambda z: 1 - math.sqrt(1 - (1 - z) ** 2)
+        window = self.window_in_fill(self.depth)
+        self.check_window(body.makeFillet(1.0, foot), body, 20 * (1 - math.pi / 4) - window)
 
     def testSillAboveTheChamferStaysOccts(self):
         body, foot = self.body(1.4)

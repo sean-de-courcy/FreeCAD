@@ -8702,6 +8702,25 @@ std::shared_ptr<DressUpOutcome> buildDressUp(
                 request.pastBothFaces = out.failed || out.thin;
                 out.constructed
                     = FilletFallback::construct(base, edges, request, out.construction, &out.reason);
+                // ops#883 C: at a reflex corner with a circle OCCT's valid result is refused
+                // anyway, so where the construction refused, once more with the wider scope
+                // (concave fills that meet along their intersection, a fill kept over its wall
+                // beside a notch: NS44 Vial Well Atrium #136). Only after a refusal, so nothing
+                // that builds today moves; where this one refuses too, both reasons are given
+                if (!out.constructed && out.reflexFirst && !request.widerScope) {
+                    const std::string firstReason = out.reason;
+                    request.widerScope = true;
+                    out.constructed = FilletFallback::construct(
+                        base,
+                        edges,
+                        request,
+                        out.construction,
+                        &out.reason
+                    );
+                    if (!out.constructed) {
+                        out.reason = firstReason + " (with the wider scope: " + out.reason + ")";
+                    }
+                }
             }
         }
     );
