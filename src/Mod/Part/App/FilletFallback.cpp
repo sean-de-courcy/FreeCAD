@@ -9169,7 +9169,7 @@ TopoDS_Shape constructShape(
                         return c.tool == &tool;
                     });
                     if (known == overlapClips.end()) {
-                        overlapClips.push_back({&tool, {}, false});
+                        overlapClips.push_back({&tool, {}, false, {}});
                         known = std::prev(overlapClips.end());
                     }
                     known->other = known->other || otherClip || fusedPlanes.size() == planesBefore;
