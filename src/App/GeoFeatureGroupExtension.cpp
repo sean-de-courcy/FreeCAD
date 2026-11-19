@@ -284,6 +284,39 @@ Base::Placement GeoFeatureGroupExtension::recursiveGroupPlacement(
     return group->placement().getValue();
 }
 
+namespace
+{
+// FreeCAD-CH (ops#910): the objects that move with @p object when it enters or leaves a group:
+// those of its own coordinate system, reached over the links @p neighbours lists. An object that
+// @p stays says is in another group was linked across groups already (a part mirror of a Body's
+// feature, a studio feature's reference into a Body): it is not taken, and nothing is reached
+// through it. The whole closure took it along, which emptied the Body it belongs to, and took
+// what else linked into that Body (a second mirror) out of its group
+template<typename Neighbours, typename Stays>
+std::vector<DocumentObject*> linksThatMoveWith(DocumentObject* object,
+                                               Neighbours neighbours,
+                                               Stays stays)
+{
+    std::vector<DocumentObject*> links;
+    std::vector<DocumentObject*> pending {object};
+    while (!pending.empty()) {
+        auto* current = pending.back();
+        pending.pop_back();
+        std::vector<DocumentObject*> linked;
+        neighbours(current, linked);
+        for (auto obj : linked) {
+            if (!obj || obj == object || std::ranges::find(links, obj) != links.end()
+                || stays(obj)) {
+                continue;
+            }
+            links.push_back(obj);
+            pending.push_back(obj);
+        }
+    }
+    return links;
+}
+}  // namespace
+
 std::vector<DocumentObject*>
 GeoFeatureGroupExtension::addObjects(std::vector<App::DocumentObject*> objects)
 {
@@ -302,8 +335,20 @@ GeoFeatureGroupExtension::addObjects(std::vector<App::DocumentObject*> objects)
         // Prevent from extracting children of nested groups fixed issue:(#26743, #28830)
         // As groups manage their own local coordinate systems and children,
         // so transfer this and remove from the old group. if not a group then get CSRelevantLinks
+        // FreeCAD-CH (ops#910): only the links of its own group, the target's, or of no group
         if (!object->hasExtension(GeoFeatureGroupExtension::getExtensionClassTypeId())) {
-            links = getCSRelevantLinks(object);
+            auto* home = App::GeoFeatureGroupExtension::getGroupOfObject(object);
+            links = linksThatMoveWith(
+                object,
+                [](const DocumentObject* obj, std::vector<DocumentObject*>& linked) {
+                    getCSOutList(obj, linked);
+                    getCSInList(obj, linked);
+                },
+                [this, home](const DocumentObject* obj) {
+                    auto* group = App::GeoFeatureGroupExtension::getGroupOfObject(obj);
+                    return group && group != home && group != getExtendedObject();
+                }
+            );
         }
         links.push_back(object);
 
@@ -334,7 +379,18 @@ GeoFeatureGroupExtension::removeObjects(std::vector<App::DocumentObject*> object
 
     for (auto object : objects) {
         // cross CoordinateSystem links are not allowed, so we need to remove the whole link group
-        std::vector<DocumentObject*> links = getCSRelevantLinks(object);
+        // FreeCAD-CH (ops#910): the link group within this group, as addObjects takes it
+        std::vector<DocumentObject*> links = linksThatMoveWith(
+            object,
+            [](const DocumentObject* obj, std::vector<DocumentObject*>& linked) {
+                getCSOutList(obj, linked);
+                getCSInList(obj, linked);
+            },
+            [this](const DocumentObject* obj) {
+                auto* group = App::GeoFeatureGroupExtension::getGroupOfObject(obj);
+                return group && group != getExtendedObject();
+            }
+        );
         links.push_back(object);
 
         // remove all links out of group

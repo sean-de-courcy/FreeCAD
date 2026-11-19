@@ -35,7 +35,7 @@ import FreeCAD as App
 import Part
 import Sketcher
 
-from PartDesignTests.TestStudio import pad, rect
+from PartDesignTests.TestStudio import pad, rect, sketch, xyPlane
 
 V = App.Vector
 ROUND = 1 - math.pi / 4  # a fillet of radius 1 takes this much per unit length of a square edge
@@ -229,3 +229,118 @@ class TestImportReferences(unittest.TestCase):
         App.closeDocument(host.Name)
         host = App.openDocument(path, hidden=True)
         self.assertAsAlone(host, [host.getObject(name) for name in names])
+
+
+class TestStudioMoveKeepsBodies(unittest.TestCase):
+    """FreeCAD-CH ops#910: a studio's objects put into an App::Part leave its Bodies whole.
+
+    The merge of a studio file into a document puts the studio's top-level objects into an
+    App::Part. One of them was a part mirror (Part::Mirroring) of a Body's feature, at the history
+    point the mirror was made, feeding a second Body's BaseFeature. App::Part.addObjects takes an
+    object's linked objects along; it took the mirrored feature, and through it the Body's other
+    features and sketches, out of the Body and into the Part: "Missing face reference", then "No
+    base set" down the Body, with no import at all.
+
+    Designed: Body A, a pad x 0..20, y 0..10, 10 high (2000), then a pad x 0..4, y 0..4, 13 high
+    (adds 4 * 4 * 3 = 48). The mirror of A's first pad in the plane x = -5 (x -30..-10: 2000).
+    Body B on the mirror, with a pad x -30..-26, y 0..4, 12 high (adds 4 * 4 * 2 = 32).
+    """
+
+    def setUp(self):
+        self.doc = App.newDocument("TestStudioMoveKeepsBodies")
+        doc = self.doc
+        self.a = doc.addObject("PartDesign::Body", "A")
+        first = sketch(self.a, "ASketch", xyPlane(self.a), (0, 0, 20, 10))
+        self.first = pad(self.a, "APad", first, 10)
+        second = sketch(self.a, "ASketch2", xyPlane(self.a), (0, 0, 4, 4))
+        pad(self.a, "APad2", second, 13)
+        self.mirror = doc.addObject("Part::Mirroring", "Mirror")
+        self.mirror.Source = self.first
+        self.mirror.Base = V(-5, 0, 0)
+        self.mirror.Normal = V(1, 0, 0)
+        self.b = doc.addObject("PartDesign::Body", "B")
+        self.b.BaseFeature = self.mirror
+        third = sketch(self.b, "BSketch", xyPlane(self.b), (-30, 0, -26, 4))
+        pad(self.b, "BPad", third, 12)
+        doc.recompute()
+        self.groups = {body.Name: [obj.Name for obj in body.Group] for body in (self.a, self.b)}
+
+    def tearDown(self):
+        App.closeDocument(self.doc.Name)
+
+    def assertWhole(self, part, members):
+        self.assertEqual(sorted(obj.Name for obj in part.Group), sorted(obj.Name for obj in members))
+        for body in (self.a, self.b):
+            self.assertEqual([obj.Name for obj in body.Group], self.groups[body.Name], body.Name)
+        self.assertEqual(self.first.getParentGeoFeatureGroup(), self.a)
+        for obj in self.doc.Objects:
+            obj.touch()
+        self.doc.recompute()
+        self.assertEqual(inError(self.doc), {})
+        self.assertAlmostEqual(self.a.Shape.Volume, 2048, places=6)
+        self.assertAlmostEqual(self.mirror.Shape.Volume, 2000, places=6)
+        self.assertAlmostEqual(self.b.Shape.Volume, 2032, places=6)
+        self.assertAlmostEqual(self.b.Shape.BoundBox.XMin, -30, places=6)
+
+    def testTheModelIsAsDesigned(self):
+        self.assertEqual(inError(self.doc), {})
+        self.assertAlmostEqual(self.a.Shape.Volume, 2048, places=6)
+        self.assertAlmostEqual(self.b.Shape.Volume, 2032, places=6)
+
+    def testStudioPutIntoAPartKeepsItsBodies(self):
+        part = self.doc.addObject("App::Part", "Studio")
+        part.addObjects([self.a, self.mirror, self.b])
+        self.assertWhole(part, [self.a, self.mirror, self.b])
+
+    def testMirrorAlonePutIntoAPartLeavesTheBody(self):
+        part = self.doc.addObject("App::Part", "Studio")
+        part.addObject(self.mirror)
+        self.assertWhole(part, [self.mirror])
+
+    def testOtherMirrorOfTheBodyStays(self):
+        """Nothing is reached through the Body: a second mirror of it isn't taken along."""
+        other = self.doc.addObject("Part::Mirroring", "Other")
+        other.Source = self.a.Tip
+        other.Base = V(0, -5, 0)
+        other.Normal = V(0, 1, 0)
+        self.doc.recompute()
+        part = self.doc.addObject("App::Part", "Studio")
+        part.addObject(self.mirror)
+        self.assertIsNone(other.getParentGeoFeatureGroup())
+        self.assertIsNone(self.b.getParentGeoFeatureGroup())
+        self.assertWhole(part, [self.mirror])
+        self.assertAlmostEqual(other.Shape.Volume, 2048, places=6)
+
+    def testSiblingInTheOldPartStays(self):
+        """Moved on from one Part to another, a mirror leaves the Body and its other mirror."""
+        other = self.doc.addObject("Part::Mirroring", "Other")
+        other.Source = self.a.Tip
+        other.Base = V(0, -5, 0)
+        other.Normal = V(0, 1, 0)
+        old = self.doc.addObject("App::Part", "Old")
+        old.addObjects([self.a, self.mirror, self.b, other])
+        self.doc.recompute()
+        self.assertEqual(len(old.Group), 4)
+        new = self.doc.addObject("App::Part", "New")
+        new.addObject(self.mirror)
+        self.assertEqual(new.Group, [self.mirror])
+        self.assertEqual(sorted(obj.Name for obj in old.Group), ["A", "B", "Other"])
+        self.assertEqual([obj.Name for obj in self.a.Group], self.groups["A"])
+        old.removeObject(other)
+        self.assertEqual(sorted(obj.Name for obj in old.Group), ["A", "B"])
+        self.assertEqual([obj.Name for obj in self.a.Group], self.groups["A"])
+        self.doc.recompute()
+        self.assertEqual(inError(self.doc), {})
+
+    def testObjectsOfOneGroupStillMoveTogether(self):
+        """The rule kept: an object moved to another group takes its own group's links along."""
+        one = self.doc.addObject("App::Part", "One")
+        two = self.doc.addObject("App::Part", "Two")
+        box = self.doc.addObject("Part::Box", "Box")
+        copy = self.doc.addObject("Part::Mirroring", "BoxMirror")
+        copy.Source = box
+        one.addObject(copy)
+        self.assertEqual(sorted(obj.Name for obj in one.Group), ["Box", "BoxMirror"])
+        two.addObject(box)
+        self.assertEqual(one.Group, [])
+        self.assertEqual(sorted(obj.Name for obj in two.Group), ["Box", "BoxMirror"])

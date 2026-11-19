@@ -489,7 +489,8 @@ names it.
 | `fix/i898-strips-past-faces` | fix | ops#898 | - | `integration` `e7b2397644` | via `carry/fork-1.0.3-set` | never (fork fix): a chamfer past both faces whose far side stays on one is built as the plain cut (C) |
 | `fix/i901-polar-retry` | fix | ops#901 | - | `integration` `e7b2397644` | via `carry/fork-1.0.3-set` | never (fork fix, or when OCCT finds near-tangent B-spline crossings itself): a pattern cut OCCT leaves open is made again with the missed face/face crossings recovered |
 | `carry/fork-1.0.3-set` | carry | ops#898, ops#899, ops#901 | - | `integration` `e7b2397644` | `874ed9be94` (fork PR 489), 2026-11-19 | never: the fork-1.0.3 set, fork PRs 484, 486, 487, 485 and 488 merged as one |
-| `fix/i910-import-remap` | fix | ops#910 | - | `integration` `874ed9be94` | (fork PR 490) | never (fork fix): a copied feature whose Placement moves at its first recompute keeps its references, and a Boolean keeps tools that sit in a Body or an App::Part |
+| `fix/i910-import-remap` | fix | ops#910 | - | `integration` `874ed9be94` | `28f1c8ec85` (fork PR 490), 2026-11-19 | never (fork fix): a copied feature whose Placement moves at its first recompute keeps its references, and a Boolean keeps tools that sit in a Body or an App::Part |
+| `fix/i910-part-move` | fix | ops#910 | - | `integration` `28f1c8ec85` (needs `fix/i910-import-remap`) | (fork PR 491) | never (fork fix): an object entering or leaving an App::Part or Body keeps references to objects outside the moved set |
 
 ## Fork-only commits in carried topics
 
