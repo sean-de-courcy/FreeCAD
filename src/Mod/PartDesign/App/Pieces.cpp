@@ -3,11 +3,13 @@
 // Pieces and leftovers become parts at command time (FreeCAD-CH ops#654, P6p,
 // notes/parts-design.md 10.12).
 
+#include <charconv>
 #include <deque>
 #include <mutex>
 #include <algorithm>
 #include <iterator>
 #include <map>
+#include <optional>
 #include <set>
 #include <string>
 #include <tuple>
@@ -22,16 +24,21 @@
 
 #include <nlohmann/json.hpp>
 
+#include <App/Application.h>
 #include <App/Document.h>
 #include <App/DocumentObject.h>
 #include <App/ElementNamingUtils.h>
 #include <App/ElementSolver.h>
+#include <App/GeoFeatureGroupExtension.h>
 #include <App/GroupExtension.h>
 #include <App/MappedName.h>
 #include <App/NameTable.h>
+#include <App/MergeDocuments.h>
 #include <App/Part.h>
 #include <App/PropertyStandard.h>
 #include <Base/Tools.h>
+
+#include <Mod/Part/App/TopoShapeOpCode.h>
 
 #include "Body.h"
 #include "Feature.h"
@@ -132,19 +139,29 @@ std::string quoted(const App::DocumentObject* obj)
     return std::string("'") + (obj ? obj->Label.getValue() : "?") + "'";
 }
 
-/// The Body of doc whose part id is id, or null
-Body* bodyWithId(App::Document* doc, const std::string& id)
+/// The Body whose part id is id: in from's studio (the group holding from) if one is there, else
+/// the document's first. Part ids are a studio's: a document that holds two studios copied from
+/// files (ops#920), or a studio and its paste, holds the same ids twice
+Body* bodyWithId(const App::DocumentObject* from, const std::string& id)
 {
-    if (!doc || id.empty()) {
+    if (!from || !from->getDocument() || id.empty()) {
         return nullptr;
     }
-    for (auto obj : doc->getObjectsOfType(Body::getClassTypeId())) {
+    const auto studio = App::GeoFeatureGroupExtension::getGroupOfObject(from);
+    Body* first = nullptr;
+    for (auto obj : from->getDocument()->getObjectsOfType(Body::getClassTypeId())) {
         auto body = static_cast<Body*>(obj);
-        if (studioPartId(body) == id) {
+        if (studioPartId(body) != id) {
+            continue;
+        }
+        if (!studio || App::GeoFeatureGroupExtension::getGroupOfObject(body) == studio) {
             return body;
         }
+        if (!first) {
+            first = body;
+        }
     }
-    return nullptr;
+    return first;
 }
 
 /// shape (in body's frame) in the document's frame
@@ -408,7 +425,7 @@ Part::TopoShape pieceSource(const Body* piece, std::string* why)
         }
         return left;
     }
-    Body* parent = bodyWithId(piece->getDocument(), parentId);
+    Body* parent = bodyWithId(piece, parentId);
     if (!parent) {
         return fail("The part " + quoted(piece) + " was split from is gone");
     }
@@ -1242,12 +1259,182 @@ std::string pieceInheritedName(const Body* body)
         if (parentId.empty()) {
             return {};
         }
-        body = bodyWithId(body->getDocument(), parentId);
+        body = bodyWithId(body, parentId);
         if (body && !isDefaultName(body->Label.getValue())) {
             return body->Label.getValue();
         }
     }
     return {};
+}
+
+namespace
+{
+/// name (a full V2 name) with each section's object ID (its iteration tag) that ids holds replaced
+/// by the ID it maps to, the sign kept, also in the names its Linked Names and Connected Elements
+/// embed (a list that was sorted is sorted again: its order goes by the names' bytes, the IDs'
+/// digits included). Only the sections from the last boundary section (EXT) on are this document's:
+/// those before it, and the names they embed, hold another document's IDs and are kept. None when
+/// nothing changed, or when the name doesn't encode back to itself byte for byte (then it is no V2
+/// name this can rewrite, and it is kept as it is)
+std::optional<std::string> remapTags(const std::string& name, const std::map<long, long>& ids, int depth)
+{
+    if (depth > 64 || name.empty()) {
+        return std::nullopt;
+    }
+    // A copy: the decoding is shared, and the recursion below decodes other strings
+    Data::DecodedMappedName decoded = Data::MappedName::getDecodedMappedName(name);
+    if (decoded.empty() || Data::MappedName::makeEncodedName(decoded) != name) {
+        return std::nullopt;
+    }
+    std::size_t first = 0;
+    for (std::size_t i = 0; i < decoded.size(); ++i) {
+        if (decoded[i].opCode == Part::OpCodes::External) {
+            first = i;
+        }
+    }
+    bool changed = false;
+    auto remapList = [&](std::vector<std::string>& names) {
+        const bool sorted = std::ranges::is_sorted(names);
+        bool listChanged = false;
+        for (auto& embedded : names) {
+            if (auto remapped = remapTags(embedded, ids, depth + 1)) {
+                embedded = std::move(*remapped);
+                listChanged = true;
+            }
+        }
+        if (listChanged) {
+            if (sorted) {
+                std::ranges::sort(names);
+            }
+            changed = true;
+        }
+    };
+    for (std::size_t i = first; i < decoded.size(); ++i) {
+        auto& section = decoded[i];
+        long tag = 0;
+        const auto& text = section.iterationTag;
+        const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), tag);
+        if (error == std::errc() && end == text.data() + text.size() && tag != 0) {
+            auto it = ids.find(std::abs(tag));
+            if (it != ids.end() && it->second != std::abs(tag)) {
+                section.iterationTag = std::to_string(tag < 0 ? -it->second : it->second);
+                changed = true;
+            }
+        }
+        remapList(section.linkedNames);
+        remapList(section.connectedElements);
+    }
+    if (!changed) {
+        return std::nullopt;
+    }
+    return Data::MappedName::makeEncodedName(decoded);
+}
+
+/// witness's entries ("<tier> <name>", the name interned) with the IDs ids holds rewritten
+/// (remapTags), sorted as pieceWitness() writes them; true if any changed
+bool remapWitness(std::vector<std::string>& witness, const std::map<long, long>& ids)
+{
+    auto& table = Data::NameTable::instance();
+    bool changed = false;
+    for (auto& entry : witness) {
+        if (entry.size() < 3 || entry[1] != ' ') {
+            continue;
+        }
+        const std::string plain = table.toPlain(std::string_view(entry).substr(2));
+        if (auto remapped = remapTags(plain, ids, 0)) {
+            entry = entry.substr(0, 2) + table.toInterned(*remapped);
+            changed = true;
+        }
+    }
+    if (changed) {
+        std::ranges::sort(witness);
+    }
+    return changed;
+}
+
+/// Import, merge and paste (ops#920, notes/piece-witness-copy-920.md): the import gives every
+/// object a new ID, and a piece's witness names faces by the IDs of the objects that made them,
+/// so the copy's first recompute names none of them. Each imported piece's witness is rewritten
+/// to the IDs of the copies of the objects that came in with it (saved ID -> copy's ID, per
+/// document copied from); an ID of an object that didn't come in is kept. The retired records
+/// an imported entry carries (their witness and the entry's ID) likewise, except in a paste
+/// within the document: there the original keeps them (retiredRecords(), review R1 of ops#671)
+void importPieceWitnesses(const std::vector<App::DocumentObject*>& objs, Base::XMLReader& /*reader*/)
+{
+    std::map<std::string, std::map<long, long>> ids;  // per document copied from
+    for (auto obj : objs) {
+        auto source = App::importedSource(obj);
+        if (source && source->id > 0 && obj->isAttachedToDocument()) {
+            ids[source->document][source->id] = obj->getID();
+        }
+    }
+    for (auto obj : objs) {
+        auto source = App::importedSource(obj);
+        if (!source || !obj->isAttachedToDocument()) {
+            continue;
+        }
+        const auto& map = ids[source->document];
+        if (auto body = freecad_cast<Body*>(obj)) {
+            // Only with its maker: the witness names faces of the maker's result, and a maker
+            // that didn't come in keeps its IDs (a piece pasted within the document alone)
+            auto maker = App::importedSource(body->StudioMadeBy.getValue());
+            auto witness = body->StudioPieceWitness.getValues();
+            if (maker && maker->document == source->document && !witness.empty()
+                && remapWitness(witness, map)) {
+                body->StudioPieceWitness.setValues(witness);
+            }
+        }
+        auto values = retiredOf(obj);
+        if (values.empty() || App::importedWithin(*source, *obj->getDocument())) {
+            continue;
+        }
+        bool changed = false;
+        for (auto& text : values) {
+            auto record = nlohmann::json::parse(text, nullptr, false);
+            if (!record.is_object()) {
+                continue;
+            }
+            bool mine = false;
+            if (record.contains("maker") && record["maker"].is_number_integer()
+                && record["maker"].get<long>() == source->id) {
+                record["maker"] = obj->getID();
+                mine = true;
+            }
+            if (record.contains("witness") && record["witness"].is_array()) {
+                std::vector<std::string> witness;
+                for (const auto& w : record["witness"]) {
+                    if (w.is_string()) {
+                        witness.push_back(w.get<std::string>());
+                    }
+                }
+                if (remapWitness(witness, map)) {
+                    record["witness"] = witness;
+                    mine = true;
+                }
+            }
+            if (mine) {
+                text = record.dump();
+                changed = true;
+            }
+        }
+        if (changed) {
+            setRetired(obj, values);
+        }
+    }
+}
+}  // namespace
+
+void registerPieceImport()
+{
+    auto watch = [](App::Document& doc) {
+        doc.signalImportObjects.connect(&importPieceWitnesses);
+    };
+    for (auto doc : App::GetApplication().getDocuments()) {
+        watch(*doc);
+    }
+    App::GetApplication().signalNewDocument.connect([watch](const App::Document& doc, bool) {
+        watch(const_cast<App::Document&>(doc));
+    });
 }
 
 }  // namespace PartDesign
