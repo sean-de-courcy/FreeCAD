@@ -1362,16 +1362,23 @@ bool remapWitness(std::vector<std::string>& witness, const std::map<long, long>&
 void importPieceWitnesses(const std::vector<App::DocumentObject*>& objs, Base::XMLReader& /*reader*/)
 {
     std::map<std::string, std::map<long, long>> ids;  // per document copied from
+    std::set<std::string> frozen;  // the documents copied from that brought a frozen object
     for (auto obj : objs) {
         auto source = App::importedSource(obj);
         if (source && source->id > 0 && obj->isAttachedToDocument()) {
             ids[source->document][source->id] = obj->getID();
         }
+        if (source && obj->isFreezed()) {
+            frozen.insert(source->document);
+        }
     }
     std::set<std::string> renamed;  // the documents copied from whose witnesses were rewritten
     for (auto obj : objs) {
         auto source = App::importedSource(obj);
-        if (!source || !obj->isAttachedToDocument()) {
+        // A frozen object keeps the shape and the names the file gave it, with the file's IDs,
+        // and what follows it is named from them: a file that brings one keeps its records as
+        // they were (review pr920pre-r1 F1)
+        if (!source || !obj->isAttachedToDocument() || frozen.contains(source->document)) {
             continue;
         }
         const auto& map = ids[source->document];
@@ -1432,9 +1439,15 @@ void importPieceWitnesses(const std::vector<App::DocumentObject*>& objs, Base::X
     if (!renamed.empty()) {
         for (auto obj : objs) {
             auto source = App::importedSource(obj);
-            if (source && obj->isAttachedToDocument() && renamed.contains(source->document)) {
-                obj->getDocument()->addRecomputeObject(obj);
+            if (!source || !obj->isAttachedToDocument() || !renamed.contains(source->document)) {
+                continue;
             }
+            // Kept touched through the end of the import (afterRestore); the document's
+            // "recompute on restore" mark, which asks the user at the next open, is no import's
+            App::Document* doc = obj->getDocument();
+            const bool asked = doc->testStatus(App::Document::RecomputeOnRestore);
+            doc->addRecomputeObject(obj);
+            doc->setStatus(App::Document::RecomputeOnRestore, asked);
         }
     }
 }

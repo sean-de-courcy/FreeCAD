@@ -473,6 +473,30 @@ class TestImportPieces(unittest.TestCase):
         self.assertEqual({k: v for k, v in got.items() if k != right},
                          {k: v for k, v in expected.items() if k != right})
 
+    def testMergedFrozenMaker(self):
+        """The maker's step saved frozen keeps the file's shape and names: a merge keeps the
+        pieces' records as the file has them, and they hold their solids (review pr920pre-r1 F1)."""
+        import re
+        import zipfile
+
+        frozen = os.path.join(self.dir, "frozen.FCStd")
+        with zipfile.ZipFile(self.file) as z:
+            items = {i: z.read(i) for i in z.namelist()}
+        xml = items["Document.xml"].decode("utf-8")
+        xml, n = re.subn(r'(<Object type="[^"]*" name="E_at_P")', r'\1 Freeze="1"', xml, count=1)
+        self.assertEqual(n, 1)
+        items["Document.xml"] = xml.encode("utf-8")
+        with zipfile.ZipFile(frozen, "w", zipfile.ZIP_DEFLATED) as z:
+            for name, data in items.items():
+                z.writestr(name, data)
+        host = App.openDocument(self.other, hidden=True)
+        before = {obj.Name for obj in host.Objects}
+        host.mergeProject(frozen)
+        copies = [obj for obj in host.Objects if obj.Name not in before]
+        host.recompute()
+        self.assertEqual(inError(host), {})
+        self.assertEqual(self.pieces(copies), self.alone)
+
     def testPastedWithinTheDocumentHoldTheirSolids(self):
         """A copy within the source document: the copies' pieces hold the copies' solids, and the
         original's pieces stay as they were."""
