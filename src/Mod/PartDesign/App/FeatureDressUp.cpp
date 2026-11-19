@@ -1644,6 +1644,7 @@ PartDesignExport std::vector<std::array<TopoDS_Shape, 3>> takeArcRunOns(
         TopoDS_Shape tori[2];
         size_t firstColumn = 0;
         size_t endColumn = 0;
+        std::vector<TopoDS_Vertex> sharpEnds;
     };
     std::vector<ArcSpan> spans;
     std::vector<Part::TopoShape> picked = edges;
@@ -1821,6 +1822,7 @@ PartDesignExport std::vector<std::array<TopoDS_Shape, 3>> takeArcRunOns(
                 line = other;
             }
             if (line.IsNull()) {
+                arcSpan.sharpEnds.push_back(ends[e]);
                 continue;  // a sharp end: OCCT ends the round there, as Onshape does
             }
             // no other picked edge at the tangent vertex: its round would reach the column
@@ -1966,8 +1968,8 @@ PartDesignExport std::vector<std::array<TopoDS_Shape, 3>> takeArcRunOns(
     // it (review of PR 487, M2: two rounded pocket ends in a row, both picked): Onshape rounds
     // each arc as alone, so its round over its own span is cut again within that column. No
     // column is restored for these entries (a null column), only the cut. The arc's run-on
-    // beyond its ends lies in its own columns, cut there; past a sharp end OCCT's round ends,
-    // as Onshape's, and nothing is cut
+    // beyond its ends lies in its own columns, cut there. A column that reaches the round within
+    // 3 r of a sharp end stops: OCCT's round ends there by the end wall, not on the meridian
     const size_t columns = runOns.size();
     for (const auto& arcSpan : spans) {
         for (size_t j = 0; j < columns; ++j) {
@@ -1987,6 +1989,15 @@ PartDesignExport std::vector<std::array<TopoDS_Shape, 3>> takeArcRunOns(
                     crosses = props.Mass() > Precision::Confusion();
                     if (!crosses) {
                         break;
+                    }
+                    // At a sharp end OCCT's round of the arc alone runs past the end's meridian
+                    // plane or stops short of it, by the end wall's slant; the span torus ends on
+                    // it. Not measured there: it stops (review of PR 487 round 3, T1)
+                    for (const auto& sharp : arcSpan.sharpEnds) {
+                        BRepExtrema_DistShapeShape distance(within.Shape(), sharp);
+                        if (!distance.IsDone() || distance.Value() < 3 * radius) {
+                            arcRunOnStop();
+                        }
                     }
                 }
                 else if (props.Mass() <= Precision::Confusion()) {

@@ -459,6 +459,59 @@ class TestFilletPropagation(unittest.TestCase):
         """The second slot moved 3 sideways: the first slot's upper wall column crosses its round mid-arc."""
         self.twoSlotsRounds(3.0)
 
+    def sharpEndPad(self, cy):
+        """Review of fork PR 487 round 3, T1: plate x -40..40, y -20..20, padded 10. Pocket A: a wall y = 5 from
+        x -8 to 0 going on tangentially into an arc of radius 5 about the origin, from 90 deg down to -30 deg, whose
+        end is sharp: the wall there goes straight down. Slot B: a half circle of radius 5 about (20, `cy`) facing
+        +x, walls 8 long. Returns the pad and the names of the two arcs' top edges."""
+        r = self.NOTCH_R
+        c30, s30 = r * math.cos(math.pi / 6), r * math.sin(math.pi / 6)
+        outline = [
+            Part.LineSegment(V(-40, -20, 0), V(40, -20, 0)),
+            Part.LineSegment(V(40, -20, 0), V(40, 20, 0)),
+            Part.LineSegment(V(40, 20, 0), V(-40, 20, 0)),
+            Part.LineSegment(V(-40, 20, 0), V(-40, -20, 0)),
+            Part.LineSegment(V(-8, 5, 0), V(0, 5, 0)),
+            Part.ArcOfCircle(Part.Circle(V(0, 0, 0), V(0, 0, 1), r), -math.pi / 6, math.pi / 2),
+            Part.LineSegment(V(c30, -s30, 0), V(c30, -10, 0)),
+            Part.LineSegment(V(c30, -10, 0), V(-8, -10, 0)),
+            Part.LineSegment(V(-8, -10, 0), V(-8, 5, 0)),
+            Part.LineSegment(V(12, cy + r, 0), V(20, cy + r, 0)),
+            Part.ArcOfCircle(Part.Circle(V(20, cy, 0), V(0, 0, 1), r), -math.pi / 2, math.pi / 2),
+            Part.LineSegment(V(20, cy - r, 0), V(12, cy - r, 0)),
+            Part.LineSegment(V(12, cy - r, 0), V(12, cy + r, 0)),
+        ]
+        pad = models.pad(self.body, models.sketch(self.doc, "SharpEnd", outline, self.body), 10)
+        self.doc.recompute()
+        names = [
+            "Edge%d" % (i + 1)
+            for i, edge in enumerate(pad.Shape.Edges)
+            if isinstance(edge.Curve, Part.Circle) and abs(edge.Curve.Radius - r) < 1e-9 and edge.BoundBox.ZMin > 9.999
+        ]
+        self.assertEqual(len(names), 2)
+        return pad, names
+
+    def testOffOnTwoHollowArcsColumnAcrossASharpEndedArc(self):
+        """B's lower column (y 3..4) crosses A's round mid-arc, far from A's sharp end: each arc as alone."""
+        pad, names = self.sharpEndPad(9.0)
+        removed = 0.0
+        for name in names:
+            alone = self.fillet(pad, [name], radius=1.0, TangentPropagation=False)
+            self.assertTrue(alone.isValid(), alone.getStatusString())
+            removed += pad.Shape.Volume - alone.Shape.Volume
+        fillet = self.fillet(pad, names, radius=1.0, TangentPropagation=False)
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+        self.assertEqual(len(fillet.Shape.Solids), 1)
+        self.assertAlmostEqual(pad.Shape.Volume - fillet.Shape.Volume, removed, delta=1e-4)
+
+    def testOffOnTwoHollowArcsColumnAtASharpEndStops(self):
+        """B's lower column (y -3..-2) crosses A's round next to its sharp end, where OCCT's round of A alone runs
+        past the end's meridian plane (the wall goes straight down): not measured, it stops."""
+        pad, names = self.sharpEndPad(3.0)
+        fillet = self.fillet(pad, names, radius=1.0, TangentPropagation=False)
+        self.assertFalse(fillet.isValid(), "expected a stop")
+        self.assertIn("tangent", fillet.getStatusString().lower())
+
     def testOffOnAHollowArcAnotherRoundInTheColumnStops(self):
         """Another picked edge whose round reaches into the run-on's column (a hole's top rim 1.5 r from the wall
         line): the column would put the base's material back over it (not measured): it stops."""
