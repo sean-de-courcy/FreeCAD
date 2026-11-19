@@ -488,7 +488,8 @@ names it.
 | `fix/i883-runout-arc` | fix | ops#899, ops#883 | - | `integration` (stacked on PR 484 and the cause B PR) | via `carry/fork-1.0.3-set` | never (fork fix): a fillet's arc with tangent propagation off runs on along its torus past an unpicked tangent line, as Onshape's |
 | `fix/i898-strips-past-faces` | fix | ops#898 | - | `integration` `e7b2397644` | via `carry/fork-1.0.3-set` | never (fork fix): a chamfer past both faces whose far side stays on one is built as the plain cut (C) |
 | `fix/i901-polar-retry` | fix | ops#901 | - | `integration` `e7b2397644` | via `carry/fork-1.0.3-set` | never (fork fix, or when OCCT finds near-tangent B-spline crossings itself): a pattern cut OCCT leaves open is made again with the missed face/face crossings recovered |
-| `carry/fork-1.0.3-set` | carry | ops#898, ops#899, ops#901 | - | `integration` `e7b2397644` | (fork PR 489) | never: the fork-1.0.3 set, fork PRs 484, 486, 487, 485 and 488 merged as one |
+| `carry/fork-1.0.3-set` | carry | ops#898, ops#899, ops#901 | - | `integration` `e7b2397644` | `874ed9be94` (fork PR 489), 2026-11-19 | never: the fork-1.0.3 set, fork PRs 484, 486, 487, 485 and 488 merged as one |
+| `fix/i910-import-remap` | fix | ops#910 | - | `integration` `874ed9be94` | (fork PR 490) | never (fork fix): a copied feature whose Placement moves at its first recompute keeps its references, and a Boolean keeps tools that sit in a Body or an App::Part |
 
 ## Fork-only commits in carried topics
 
