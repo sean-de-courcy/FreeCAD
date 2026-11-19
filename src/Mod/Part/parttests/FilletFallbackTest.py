@@ -6133,3 +6133,386 @@ class DPocketCornerTest(unittest.TestCase):
     def testFillet(self):
         body, floor = self.body(4, 0.5)
         self.check(body.makeFillet(1.0, floor), body, 6.749786)
+
+
+class FillOverALedgeTest(unittest.TestCase):
+    """ops#898 cause A, designed: a keyhole boss (the circle r 7 about the z axis and the slot |y| < 2
+    to x = 12, height 3) on a slab z -2..0 whose top is the ledge round the boss's foot; the slab's
+    sides drop square from the ledge. A chamfer of 1.5 at the foot (the slot's two lines and the
+    circle's arc, which meet at the outline's concave corners, reflex in the material). Where the
+    ledge is narrower than the chamfer under a line (its outer edge parallel or tapering) or under
+    the arc, OCCT fails, and Onshape keeps the fills of a wide ledge only over the ledge: its sides
+    grow, and the ledge is consumed where it is narrower (the census rows' area and volume to 1e-6,
+    ops#898). The reference: OCCT's chamfer on a wide ledge, its added material kept over this
+    ledge's footprint."""
+
+    R, S, L, H, T, C = 7.0, 2.0, 12.0, 3.0, 2.0, 1.5
+
+    def body(self, arc, line0, line1, end=2.0):
+        """The ledge as wide as arc round the circle, and line0 at x = 0 to line1 at the slab's end
+        beside the slot's lines"""
+        V = FreeCAD.Vector
+        R, S, L, H, T = self.R, self.S, self.L, self.H, self.T
+        boss = Part.makeCylinder(R, H).fuse(Part.makeBox(L, 2 * S, H, V(0, -S, 0))).removeSplitter()
+        e = L + end
+        outline = [V(0, -(S + line0), -T), V(e, -(S + line1), -T), V(e, S + line1, -T), V(0, S + line0, -T)]
+        slab = Part.makeCylinder(R + arc, T, V(0, 0, -T)).fuse(
+            Part.Face(Part.makePolygon(outline + [outline[0]])).extrude(V(0, 0, T))
+        ).removeSplitter()
+        return slab.fuse(boss).removeSplitter(), slab
+
+    def picks(self, body, arc=True, lines=True):
+        picked = []
+        for e in body.Edges:
+            if any(abs(v.Point.z) > 1e-9 for v in e.Vertexes):
+                continue
+            if arc and e.Curve.TypeId == "Part::GeomCircle" and abs(e.Curve.Radius - self.R) < 1e-9:
+                picked.append(e)
+            if (
+                lines
+                and e.Curve.TypeId == "Part::GeomLine"
+                and all(abs(abs(v.Point.y) - self.S) < 1e-9 and v.Point.x > 1 for v in e.Vertexes)
+            ):
+                picked.append(e)
+        return picked
+
+    def footprint(self, slab, height):
+        bottom = [f for f in slab.Faces if abs(f.CenterOfMass.z + self.T) < 1e-9]
+        self.assertEqual(len(bottom), 1)
+        return bottom[0].extrude(FreeCAD.Vector(0, 0, height))
+
+    def reference(self, body, slab, arc=True, lines=True):
+        wide, _ = self.body(4, 4, 4)
+        added = wide.makeChamfer(self.C, self.picks(wide, arc, lines)).cut(wide)
+        return body.fuse(added.common(self.footprint(slab, 10))).removeSplitter()
+
+    def check(self, widths, faces, arc=True, lines=True):
+        body, slab = self.body(*widths)
+        result = body.makeChamfer(self.C, self.picks(body, arc, lines))
+        reference = self.reference(body, slab, arc, lines)
+        self.assertTrue(result.isValid())
+        self.assertEqual(len(result.Solids), 1)
+        self.assertAlmostEqual(result.Volume, reference.Volume, delta=1e-6)
+        self.assertAlmostEqual(result.Area, reference.Area, delta=1e-6)
+        self.assertEqual(len(result.Faces), faces)
+        self.assertEqual(len(reference.Faces), faces)
+        # Nothing past the ledge
+        self.assertLess(result.cut(self.footprint(slab, 10)).Volume, 1e-9)
+        return result
+
+    def testArcAtTheLimitLinesNarrowParallel(self):
+        # The ledge consumed beside the lines, the arc's strip landing on its rim
+        self.assertAlmostEqual(self.check((1.5, 1.3, 1.3), 15).Volume, 1117.318612, delta=1e-5)
+
+    def testArcAtTheLimitLinesNarrowTapering(self):
+        # The census rows' form: the ledge's outer edge beside each line not parallel to it
+        self.assertAlmostEqual(self.check((1.5, 1.3, 1.42), 15).Volume, 1119.787129, delta=1e-5)
+
+    def testArcNarrowLinesWide(self):
+        self.assertAlmostEqual(self.check((1.2, 3.0, 3.0), 15).Volume, 1135.537223, delta=1e-5)
+
+    def testArcAndLinesNarrow(self):
+        self.assertAlmostEqual(self.check((1.2, 1.3, 1.42), 15).Volume, 1090.429422, delta=1e-5)
+
+    def testArcAloneNarrow(self):
+        self.assertAlmostEqual(self.check((1.2, 3.0, 3.0), 12, lines=False).Volume, 1118.869893, delta=1e-5)
+
+    def testWideLedgeStaysOccts(self):
+        body, _ = self.body(3, 3, 3)
+        result = body.makeChamfer(self.C, self.picks(body))
+        self.assertAlmostEqual(result.Volume, 1305.093836, delta=1e-5)
+        self.assertEqual(len(result.Faces), 15)
+
+
+class FillOverARingLedgeTest(unittest.TestCase):
+    """ops#898 cause A, designed: a cylinder r 7, height 3, on a disk r 7 + w, 2 thick: a ledge of
+    width w round its foot, whose rim drops square from it. A chamfer or fillet c = 1.5 at the foot,
+    wider than the ledge (w = 1.2): Onshape's fill is the plain one kept over the ledge, the rim's
+    cylinder grows over its cut (one face), and the ledge is consumed. Closed form: the fill's
+    section revolved over r 7..7 + w"""
+
+    R, C = 7.0, 1.5
+
+    def body(self, width, lean=0.0):
+        V = FreeCAD.Vector
+        boss = Part.makeCylinder(self.R, 3)
+        if lean:
+            disk = Part.makeCone(self.R + width + lean, self.R + width, 2, V(0, 0, -2))
+        else:
+            disk = Part.makeCylinder(self.R + width, 2, V(0, 0, -2))
+        body = disk.fuse(boss).removeSplitter()
+        foot = [
+            e
+            for e in body.Edges
+            if e.Curve.TypeId == "Part::GeomCircle"
+            and abs(e.Curve.Radius - self.R) < 1e-9
+            and all(abs(v.Point.z) < 1e-9 for v in e.Vertexes)
+        ]
+        self.assertEqual(len(foot), 1)
+        return body, foot
+
+    def added(self, width, height):
+        """The fill's section, height(s) high at s from the boss's wall, revolved over 0..width"""
+        return gauss_legendre(lambda s: 2 * math.pi * (self.R + s) * height(s), 0, width)
+
+    def check(self, result, body, added):
+        self.assertTrue(result.isValid())
+        self.assertEqual(len(result.Solids), 1)
+        self.assertAlmostEqual(result.Volume - body.Volume, added, delta=1e-6)
+        # Nothing past the rim, and the rim one cylinder, grown over the fill's cut
+        self.assertLess(result.optimalBoundingBox().XMax, self.R + 1.2 + 1e-6)
+        self.assertEqual(len(result.Faces), 5)
+        rims = [
+            f
+            for f in result.Faces
+            if f.Surface.TypeId == "Part::GeomCylinder" and abs(f.Surface.Radius - (self.R + 1.2)) < 1e-9
+        ]
+        self.assertEqual(len(rims), 1)
+
+    def testChamfer(self):
+        body, foot = self.body(1.2)
+        c = self.C
+        # 2 pi (R c w - R w^2/2 + c w^2/2 - w^3/3) = 2 pi 8.064
+        self.assertAlmostEqual(self.added(1.2, lambda s: c - s), 2 * math.pi * 8.064, delta=1e-9)
+        self.check(body.makeChamfer(c, foot), body, 2 * math.pi * 8.064)
+
+    def testFillet(self):
+        body, foot = self.body(1.2)
+        R, c, w = self.R, self.C, 1.2
+
+        # The round's section is c - sqrt(c^2 - u^2) high at u = c - s: the square less the disk's
+        # part, integrated exactly (its slope is infinite at the wall)
+        def disk(u):
+            return (R + c) * (u * math.sqrt(c * c - u * u) + c * c * math.asin(u / c)) / 2 + (c * c - u * u) ** 1.5 / 3
+
+        added = 2 * math.pi * (c * (R * w + w * w / 2) - (disk(c) - disk(c - w)))
+        self.check(body.makeFillet(c, foot), body, added)
+
+    def testAtTheLimitStaysOccts(self):
+        body, foot = self.body(1.5)
+        c = self.C
+        result = body.makeChamfer(c, foot)
+        self.assertAlmostEqual(result.Volume - body.Volume, self.added(1.5, lambda s: c - s), delta=1e-6)
+
+    def testRimLeaningOutIsRefused(self):
+        # The rim a cone, leaning out under the ledge: where Onshape trims is not measured. Refused
+        body, foot = self.body(1.2, lean=0.8)
+        for dress in (body.makeChamfer, body.makeFillet):
+            with self.assertRaisesRegex(Exception, "kept over its face: .*face beyond is not square"):
+                dress(self.C, foot)
+
+
+class FillPastANotchTest(unittest.TestCase):
+    """ops#898 cause A, designed (the form of FGC-NS44 #113, where an earlier blend cut the wall
+    away beside the picked edge): a floor plate x -2..10, y 0..20, z -2..0, with a wall x -2..0,
+    z 0..5 on it, and a notch cut down into the wall from its top, 4 wide (y 8..12), its bottom
+    round, r 2 about the line y = 10, z = sill + 2. A chamfer of 1 at the wall's foot, the notch's
+    sill at 0.6, below the chamfer's top: the fill keeps only what stands in front of the wall,
+    the notch's own cylinder growing over its cut. Closed form: the plain fill (10 mm3) less its
+    part in front of the notch. A closed window instead (a hole in the wall's face) has no Onshape
+    fact: refused"""
+
+    def body(self, sill, window=False):
+        V = FreeCAD.Vector
+        plate = Part.makeBox(12, 20, 2, V(-2, 0, -2))
+        wall = Part.makeBox(2, 20, 5, V(-2, 0, 0))
+        hole = Part.makeCylinder(2, 4, V(-3, 10, sill + 2), V(1, 0, 0))
+        if not window:
+            hole = hole.fuse(Part.makeBox(4, 4, 5, V(-3, 8, sill + 2))).removeSplitter()
+        body = plate.fuse(wall).removeSplitter().cut(hole)
+        foot = [
+            e
+            for e in body.Edges
+            if e.Curve.TypeId == "Part::GeomLine"
+            and all(abs(v.Point.x) < 1e-9 and abs(v.Point.z) < 1e-9 for v in e.Vertexes)
+        ]
+        self.assertEqual(len(foot), 1)
+        return body, foot
+
+    def testChamferPastTheSill(self):
+        body, foot = self.body(0.6)
+        result = body.makeChamfer(1.0, foot)
+        self.assertTrue(result.isValid())
+        self.assertEqual(len(result.Solids), 1)
+        # In front of the notch: the fill's depth 1 - z over the window's chord 2 sqrt(4 - t^2) at
+        # t = z - 2.6, integrated exactly over t -2..-1.6
+        def chord(t):
+            return 2 * (-1.6 * (t * math.sqrt(4 - t * t) + 4 * math.asin(t / 2)) / 2 + (4 - t * t) ** 1.5 / 3)
+
+        window = chord(-1.6) - chord(-2)
+        self.assertAlmostEqual(result.Volume - body.Volume, 10 - window, delta=1e-6)
+        front = Part.makeCylinder(2, 2, FreeCAD.Vector(0, 10, 2.6), FreeCAD.Vector(1, 0, 0))
+        self.assertLess(result.common(front).Volume, 1e-9)
+        windows = [f for f in result.Faces if f.Surface.TypeId == "Part::GeomCylinder"]
+        self.assertEqual(len(windows), 1)
+
+    def testClosedWindowIsRefused(self):
+        body, foot = self.body(0.6, window=True)
+        with self.assertRaisesRegex(Exception, "kept over its face: .*the edge of a hole in it"):
+            body.makeChamfer(1.0, foot)
+
+    def testSillAboveTheChamferStaysOccts(self):
+        body, foot = self.body(1.4)
+        result = body.makeChamfer(1.0, foot)
+        self.assertAlmostEqual(result.Volume - body.Volume, 10.0, delta=1e-6)
+
+
+class FillOverALedgeRefusalsTest(unittest.TestCase):
+    """ops#898 cause A, what keeps a refusal (review of PR 484, S4): a cylinder r 7, h high, on
+    a disk r 8.2 (a ledge 1.2 wide round its foot, narrower than the chamfer or fillet of 1.5), with
+    something on the ledge's rim that Onshape's rule (the plain fill kept over the ledge, the rim
+    dropping square) does not cover: no Onshape fact, so the dress-up stays an error"""
+
+    R, W, C = 7.0, 1.2, 1.5
+
+    def body(self, extra=None, height=3.0):
+        V = FreeCAD.Vector
+        body = Part.makeCylinder(self.R + self.W, 2, V(0, 0, -2)).fuse(Part.makeCylinder(self.R, height))
+        if extra is not None:
+            body = body.fuse(extra)
+        body = body.removeSplitter()
+        foot = [
+            e
+            for e in body.Edges
+            if e.Curve.TypeId == "Part::GeomCircle"
+            and abs(e.Curve.Radius - self.R) < 1e-9
+            and all(abs(v.Point.z) < 1e-9 for v in e.Vertexes)
+        ]
+        self.assertEqual(len(foot), 1)
+        return body, foot
+
+    def refused(self, body, foot, pattern, dresses=("makeChamfer", "makeFillet")):
+        for dress in dresses:
+            with self.assertRaisesRegex(Exception, "kept over its face: .*" + pattern):
+                getattr(body, dress)(self.C, foot)
+
+    def testPlainLedgeBuilds(self):
+        # The control: the same ledge with nothing on it builds (FillOverARingLedgeTest)
+        body, foot = self.body()
+        self.assertTrue(body.makeChamfer(self.C, foot).isValid())
+
+    def testStudOnTheRim(self):
+        # Skeptic r1, find 1: a stud lower than the fill, standing on the rim and over the drop
+        V = FreeCAD.Vector
+        stud = Part.makeBox(0.8, 0.6, 0.3, V(self.R + self.W - 0.4, -0.3, 0))
+        body, foot = self.body(stud)
+        # The round on it builds (review of PR 484, S3: one air piece along the drop also stands
+        # over the stud; Onshape's result there is not measured): debt on ops#898
+        self.refused(body, foot, "a fused tool trimmed over its face stands in the air", ("makeChamfer",))
+
+    def testCurbAlongTheRim(self):
+        # A wall rising from the ledge along its whole rim, lower than the fill
+        V = FreeCAD.Vector
+        curb = Part.makeCylinder(self.R + self.W, 0.3).cut(Part.makeCylinder(self.R + self.W - 0.2, 0.3))
+        body, foot = self.body(curb)
+        self.refused(body, foot, "runs past its face into the air along no edge of it")
+
+    def testCurbOnPartOfTheRim(self):
+        # A curb lower than the fill on part of the rim, beside a square drop on the rest (the form
+        # of S3, whose air pieces here stay apart: refused)
+        V = FreeCAD.Vector
+        ring = Part.makeCylinder(self.R + self.W, 0.3).cut(Part.makeCylinder(self.R + self.W - 0.2, 0.3))
+        curb = ring.common(Part.makeBox(20, 20, 1, V(0, 0, -0.5)))
+        body, foot = self.body(curb)
+        # The round there stops earlier: OCCT's result is not valid
+        self.refused(body, foot, "stands in the air", ("makeChamfer",))
+
+
+class FillToARimCuspTest(unittest.TestCase):
+    """ops#898 cause B, designed (the form of FGC-FM44 #152): a disk r 10, z -2..0, and on its rim a
+    thin curved wall, 1.6 thick (r 8.4..10 over |angle| < a, 3 high), its ends fully rounded
+    (cylinders r 0.8 about r 9.2 at +-a), its outer side flush with the disk's. A fillet at the
+    wall's inner foot (the inner arc, in two pieces at its seam, and the end rounds' foot arcs,
+    each from its tangent point with the inner arc round to the rim): each end arc meets the
+    disk's rim tangentially, so the floor narrows to nothing there (a cusp), and the end face is
+    the disk's cylinder. OCCT fails; Onshape's fill is each arc's plain fill kept over the floor
+    (FGC-FM44 #152: area to 3e-6 mm2). Closed form: the inner arc's fill by Pappus, and each end
+    round's fill integrated over its half turn, within the rim"""
+
+    RO, T, H = 10.0, 1.6, 3.0
+
+    def body(self, angle):
+        V = FreeCAD.Vector
+        a = math.radians(angle)
+        ri = self.RO - self.T
+        ring = Part.makeCylinder(self.RO, self.H).cut(Part.makeCylinder(ri, self.H))
+        far = 2 * self.RO
+        corners = [V(0, 0, 0), V(far * math.cos(a), -far * math.sin(a), 0), V(far, 0, 0)]
+        corners += [V(far * math.cos(a), far * math.sin(a), 0), V(0, 0, 0)]
+        wall = ring.common(Part.Face(Part.makePolygon(corners)).extrude(V(0, 0, self.H)))
+        rc = self.RO - self.T / 2
+        for side in (-1, 1):
+            centre = V(rc * math.cos(side * a), rc * math.sin(side * a), 0)
+            wall = wall.fuse(Part.makeCylinder(self.T / 2, self.H, centre))
+        disk = Part.makeCylinder(self.RO, 2, V(0, 0, -2))
+        body = disk.fuse(wall).removeSplitter()
+        foot = [
+            e
+            for e in body.Edges
+            if e.Curve.TypeId == "Part::GeomCircle"
+            and all(abs(v.Point.z) < 1e-9 for v in e.Vertexes)
+            and (abs(e.Curve.Radius - ri) < 1e-9 or abs(e.Curve.Radius - self.T / 2) < 1e-9)
+        ]
+        self.assertEqual(len(foot), 4)
+        return body, foot
+
+    def added(self, angle, r):
+        a = math.radians(angle)
+        re = self.T / 2
+        rc = self.RO - re
+        ri = self.RO - self.T
+
+        def height(d):
+            # The fill's height at d from the wall, 0 <= d <= r
+            return r - math.sqrt(max(r * r - (r - d) ** 2, 0.0))
+
+        # By d = s^2: the height goes as the root of d at the wall, which Gauss's rule does not
+        inner = 2 * a * gauss_legendre(lambda s: height(s * s) * (ri - s * s) * 2 * s, 0, math.sqrt(r))
+
+        # An end round, its centre at rc on the x axis: phi 0 at its tangent point with the inner
+        # arc (towards the axis), pi at the cusp on the rim, through the wall's far side
+        def reach(phi):
+            # How far from the centre the rim is, along phi
+            dx = -math.cos(phi)
+            b = rc * dx
+            return -b + math.sqrt(b * b - (rc * rc - self.RO**2))
+
+        def slice_(phi):
+            top = min(re + r, reach(phi))
+            if top <= re:
+                return 0.0
+            return gauss_legendre(lambda s: height(s * s) * (re + s * s) * 2 * s, 0, math.sqrt(top - re))
+
+        lo, hi = 0.0, math.pi
+        for _ in range(100):
+            mid = (lo + hi) / 2
+            lo, hi = (mid, hi) if reach(mid) > re + r else (lo, mid)
+        end = gauss_legendre(slice_, 0, lo) + gauss_legendre(slice_, lo, math.pi)
+        return inner + 2 * end
+
+    def check(self, angle, r, faces):
+        body, foot = self.body(angle)
+        result = body.makeFillet(r, foot)
+        self.assertTrue(result.isValid())
+        self.assertEqual(len(result.Solids), 1)
+        # The added material on its own: the bodies' volumes differ in OCCT's precision on the disk
+        self.assertAlmostEqual(result.cut(body).Volume, self.added(angle, r), delta=1e-5)
+        self.assertLess(body.cut(result).Volume, 1e-9)
+        rim = Part.makeCylinder(self.RO, 10, FreeCAD.Vector(0, 0, -5))
+        self.assertLess(result.cut(rim).Volume, 1e-9)
+        # Debt (ops#898): each end round is a torus and a B-spline piece of it at the cusp, and the
+        # inner arc's round stays in its two pieces (Onshape: one face per arc)
+        self.assertEqual(len(result.Faces), faces)
+        return result
+
+    def testRoundAsWideAsTheWall(self):
+        self.check(40.0, 0.8, 13)
+
+    def testSmallerRoundLongerWall(self):
+        self.check(70.0, 0.5, 13)
+
+    def testChamferIsRefused(self):
+        # A chamfer ending on a face that is not a plane is not known from Onshape
+        body, foot = self.body(40.0)
+        with self.assertRaises(Exception):
+            body.makeChamfer(0.8, foot)

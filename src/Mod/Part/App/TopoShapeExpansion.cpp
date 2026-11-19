@@ -9707,7 +9707,10 @@ TopoShape& TopoShape::makeElementFillet(
                 << outcome->reason
         );
     }
-    if (outcome->failed && !outcome->constructed && inputEdges.size() > 1) {
+    // ... and where the construction builds it only by a rule new with ops#898, this retry built
+    // it before that rule: OCCT's result in the reverse order stands (review of PR 484, S5)
+    if (outcome->failed && (!outcome->constructed || outcome->construction.newRule)
+        && inputEdges.size() > 1) {
         // FreeCAD-CH (Case Base #165): OCCT's walker can fail on a tangent chain by the edge its
         // contour is seeded from (a chain's first listed edge): an ellipse seed then a line whose
         // curve runs against the chain fails, the same chain seeded from the line builds. The
@@ -9826,6 +9829,11 @@ TopoShape& TopoShape::makeElementChamfer(
     // the construction builds them, the chamfer is built again with w on every edge, today's
     // result: a chamfer that built with w never starts failing (ruling A, section 7), except at a
     // cusp, where OCCT's result with w is no longer kept either (kernel layer step 1)
+    // A first pass the construction builds only by a rule new with ops#898 waits for the second:
+    // where that builds the chamfer as it did before the rule, today's result stands; where it
+    // doesn't, the first pass's (review of PR 484, S5)
+    std::shared_ptr<DressUpOutcome> deferred;
+    TopoShape deferredInput;
     for (bool uniform : {false, true}) {
         std::vector<TopoShape> inputEdges = edges;
         const TopoShape input = FilletFallback::makerInput(shape, inputEdges);
@@ -9914,6 +9922,17 @@ TopoShape& TopoShape::makeElementChamfer(
         auto outcome = buildDressUp(mkChamferPtr, input, inputEdges, request, "The chamfer");
         if (outcome->failed || outcome->thin || outcome->invalid || outcome->cusp || outcome->ring
             || !outcome->wrongWay.empty()) {
+            if (setbacksDiffer && outcome->constructed && outcome->construction.newRule) {
+                deferred = outcome;
+                deferredInput = input;
+                continue;
+            }
+            const bool invalidOnly = outcome->invalid && !outcome->failed && !outcome->thin
+                && !outcome->cusp && !outcome->ring && outcome->wrongWay.empty();
+            if (deferred && (outcome->constructed ? outcome->construction.newRule : !invalidOnly)
+                && finishConstruction(*this, *deferred, deferredInput, op)) {
+                return *this;
+            }
             if (finishConstruction(*this, *outcome, input, op)) {
                 return *this;
             }

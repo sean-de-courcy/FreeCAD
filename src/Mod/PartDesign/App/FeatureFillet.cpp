@@ -22,6 +22,7 @@
  *                                                                         *
  ***************************************************************************/
 
+#include <array>
 #include <limits>
 
 #include <BRepFilletAPI_MakeFillet.hxx>
@@ -77,6 +78,18 @@ PartDesignExport TopoDS_Shape runOutCut(
     const TopoDS_Edge& edge,
     double radius,
     bool arc
+);
+PartDesignExport std::vector<std::array<TopoDS_Shape, 3>> takeArcRunOns(
+    const Part::TopoShape& base,
+    std::vector<Part::TopoShape>& edges,
+    std::vector<Part::TopoShape>& runOut,
+    double radius
+);
+PartDesignExport Part::TopoShape applyArcRunOns(
+    Part::TopoShape shape,
+    const Part::TopoShape& base,
+    const std::vector<std::array<TopoDS_Shape, 3>>& runOns,
+    const Part::TopoShape& blank
 );
 }  // namespace PartDesign
 
@@ -201,9 +214,14 @@ App::DocumentObjectExecReturn* Fillet::build()
         }
         // ops#655: with tangent propagation off, an edge whose tangent chain goes on is cut
         // Onshape's way after the others are filleted
-        const std::vector<Part::TopoShape> runOut = TangentPropagation.getValue()
+        std::vector<Part::TopoShape> runOut = TangentPropagation.getValue()
             ? std::vector<Part::TopoShape>()
             : takeChainedEdges(baseShape, edges, radius);
+        // ops#883: an arc's round runs on along its torus past an unpicked straight neighbour;
+        // OCCT rounds the arc with the others, then the neighbour's corner is put back and cut
+        const auto arcRunOns = runOut.empty()
+            ? std::vector<std::array<TopoDS_Shape, 3>>()
+            : takeArcRunOns(baseShape, edges, runOut, radius);
         if (edges.empty()) {
             shape = baseShape;
         }
@@ -214,6 +232,9 @@ App::DocumentObjectExecReturn* Fillet::build()
             return new App::DocumentObjectExecReturn(
                 QT_TRANSLATE_NOOP("Exception", "Resulting shape is null")
             );
+        }
+        if (!arcRunOns.empty()) {
+            shape = applyArcRunOns(shape, baseShape, arcRunOns, makeTopoShape());
         }
 
         // Limiting every tolerance to Precision::Confusion() used to be the repair: it opened the

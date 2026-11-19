@@ -102,6 +102,7 @@ from PartDesignTests.TestHelix import TestHelix
 from PartDesignTests.TestMirrored import TestMirrored
 from PartDesignTests.TestLinearPattern import TestLinearPattern
 from PartDesignTests.TestPolarPattern import TestPolarPattern
+from PartDesignTests.TestPolarPattern import TestPolarPatternOverlappingCuts  # FreeCAD-CH, ops#901
 from PartDesignTests.TestCurvePattern import TestCurvePattern
 from PartDesignTests.TestMultiTransform import TestMultiTransform
 from PartDesignTests.TestPatternRules import TestPatternRules  # FreeCAD-CH, ops#640
