@@ -7078,11 +7078,6 @@ bool trimFusedToolOverFace(
     TopExp::MapShapesAndUniqueAncestors(base, TopAbs_EDGE, TopAbs_FACE, faceOfEdge);
     std::vector<TopoDS_Face> beyondFaces;
     TopTools_IndexedMapOfShape seen;
-    TopTools_IndexedMapOfShape outline;
-    TopExp::MapShapes(BRepTools::OuterWire(run.face), TopAbs_EDGE, outline);
-    auto inOuterWire = [&](const TopoDS_Edge& edge) {
-        return outline.Contains(edge);
-    };
     std::vector<TopoDS_Edge> runOver;
     // The angle's cosine past which a face beyond is not square to the face: the census rows'
     // faces beyond are square to 1e-12, a blend's B-spline face to its own approximation
@@ -7099,10 +7094,10 @@ bool trimFusedToolOverFace(
         if (edge.IsSame(tool.source)) {
             refuse("a fused tool trimmed over its face would lose its part along its own edge");
         }
-        // The outline only: a hole in the face under the strip is not measured in Onshape
-        if (!inOuterWire(edge)) {
-            refuse("a concave dress-up runs past its face over the edge of a hole in it");
-        }
+        // An edge of a hole in the face under the strip is taken as an outline edge is (ops#883
+        // H, HNY-DSN Case #104): the hole runs on through the fill, its wall growing by the cut,
+        // where the hole's wall passes the tests below (one face beyond, square to the face,
+        // dropping away from it)
         TopoDS_Face beyond;
         if (const auto* faces = faceOfEdge.Seek(edge)) {
             for (const auto& other : *faces) {
