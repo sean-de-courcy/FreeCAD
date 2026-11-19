@@ -38,6 +38,16 @@ namespace FuzzyHelper
 double PartExport getBooleanFuzzy();
 void PartExport setBooleanFuzzy(double base);
 void PartExport withBooleanFuzzy(double base, std::function<void()> func);
+/**
+ * FreeCAD-CH ops#901: while \a func runs (process-wide, not per thread: the Boolean runs on
+ * KernelBudget's worker), the fork's Booleans
+ * (FCBRepAlgoAPI_BooleanOperation::Build) re-intersect the face pairs for which OCCT 8.0.1's
+ * face/face step found nothing, on the part of each face where they can meet, and give the
+ * crossings found to the same Boolean. Off otherwise. FREECAD_CH_CROSSING_RECOVERY = "on" turns it
+ * on for every Boolean (tests only)
+ */
+bool PartExport getCrossingRecovery();
+void PartExport withCrossingRecovery(const std::function<void()>& func);
 }  // namespace FuzzyHelper
 
 }  // namespace Part

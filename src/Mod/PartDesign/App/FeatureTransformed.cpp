@@ -28,6 +28,7 @@
 #include <Mod/Part/App/FCBRepAlgoAPI_Fuse.h>
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepBndLib.hxx>
+#include <BRepCheck_Shell.hxx>
 #include <BRepBuilderAPI_MakeVertex.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
 #include <BRepGProp.hxx>
@@ -36,7 +37,9 @@
 #include <BRepBuilderAPI_Copy.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
 #include <Precision.hxx>
+#include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
 
 
 #include <array>
@@ -46,6 +49,7 @@
 #include <unordered_map>
 #include <algorithm>
 
+#include <App/Application.h>
 #include <App/Document.h>
 #include <App/ElementNamingUtils.h>
 #include <App/ElementSolverBatch.h>
@@ -55,6 +59,8 @@
 #include <Base/Reader.h>
 #include <Base/Sequencer.h>
 #include <Mod/Part/App/AttachExtension.h>
+#include <Mod/Part/App/FuzzyHelper.h>
+#include <Mod/Part/App/KernelBudget.h>
 #include <Mod/Part/App/modelRefine.h>
 
 #include "FeatureTransformed.h"
@@ -1628,6 +1634,59 @@ App::DocumentObjectExecReturn* executeStudioPartPattern(Transformed& pattern)
     return App::DocumentObject::StdReturn;
 }
 
+/// FreeCAD-CH ops#901: the shell test of checkResult() (Feature.cpp), on the shells of \a result's
+/// solids that hold a face \a base doesn't have. True when each is closed and its faces are
+/// oriented consistently, so the feature won't be refused for a shell. \a firstSolidOnly: only
+/// the first solid, the one getSolid() keeps under the enforced single-solid rule and the only one
+/// checkResult() then sees
+bool newShellsSound(const TopoDS_Shape& result, const TopoDS_Shape& base, bool firstSolidOnly)
+{
+    TopTools_IndexedMapOfShape baseFaces;
+    if (!base.IsNull()) {
+        TopExp::MapShapes(base, TopAbs_FACE, baseFaces);
+    }
+    for (TopExp_Explorer solid(result, TopAbs_SOLID); solid.More(); solid.Next()) {
+        for (TopExp_Explorer it(solid.Current(), TopAbs_SHELL); it.More(); it.Next()) {
+            bool fresh = false;
+            for (TopExp_Explorer face(it.Current(), TopAbs_FACE); face.More() && !fresh;
+                 face.Next()) {
+                fresh = !baseFaces.Contains(face.Current());
+            }
+            if (!fresh) {
+                continue;
+            }
+            const TopoDS_Shell& shell = TopoDS::Shell(it.Current());
+            BRepCheck_Shell check(shell);
+            if (check.Closed() != BRepCheck_NoError
+                || !Part::KernelBudget::orientedConsistently(check, shell)) {
+                return false;
+            }
+        }
+        if (firstSolidOnly) {
+            break;
+        }
+    }
+    return true;
+}
+
+/// FreeCAD-CH ops#901: whether checkResult() will run on \a feature's result, under the condition
+/// Feature::recompute() applies (in a Body, a solid feature, the CheckResults preference on).
+/// FeatureBase never patterns
+bool resultWillBeChecked(const PartDesign::Feature& feature)
+{
+    return feature.getFeatureBody() && PartDesign::Body::isSolidFeature(&feature)
+        && App::GetApplication()
+               .GetParameterGroupByPath("User parameter:BaseApp/Preferences/Mod/PartDesign")
+               ->GetBool("CheckResults", true);
+}
+
+double solidVolume(const TopoDS_Shape& shape)
+{
+    GProp_GProps props;
+    BRepGProp::VolumeProperties(shape, props);
+    return std::abs(props.Mass());
+}
+
 }  // namespace
 
 App::DocumentObjectExecReturn* Transformed::execute()
@@ -2186,15 +2245,72 @@ App::DocumentObjectExecReturn* Transformed::execute()
                     // A copy that cuts nothing changes nothing: never dropped, it counts as made
                     copiesTried += shapes.size() - 1;
                     copiesMade += shapes.size() - 1;
-                    supportShape = makeResultShape(supportShape).makeElementBoolean(
-                        Part::OpCodes::Cut,
-                        shapes,
-                        nullptr,
-                        -1.0,
-                        Part::ElementMapPolicy::Propagate,
-                        inputCheck,
-                        &booleanInputsValid
-                    );
+                    const Part::TopoShape before = supportShape;
+                    auto cutCopies = [&]() {
+                        return makeResultShape(before).makeElementBoolean(
+                            Part::OpCodes::Cut,
+                            shapes,
+                            nullptr,
+                            -1.0,
+                            Part::ElementMapPolicy::Propagate,
+                            inputCheck,
+                            &booleanInputsValid
+                        );
+                    };
+                    supportShape = cutCopies();
+                    // FreeCAD-CH ops#901: copies whose faces cross where OCCT's intersection misses
+                    // the crossing (near-tangent B-spline faces of neighbouring copies) leave an
+                    // open shell, which checkResult() refuses. Only then the same cut is made
+                    // again with those crossings recovered (Part::FuzzyHelper::
+                    // withCrossingRecovery), and kept where its shells are sound and it removed
+                    // no more than the copies hold; otherwise the feature is refused as before.
+                    // Only where checkResult() would refuse it: when the check runs, and under
+                    // the enforced single-solid rule on the first solid, the one it sees
+                    const bool firstSolidOnly =
+                        singleSolidRuleMode() == SingleSolidRuleMode::Enforced
+                        && !StudioList::holding(this);
+                    if (resultWillBeChecked(*this)
+                        && !newShellsSound(
+                            supportShape.getShape(),
+                            before.getShape(),
+                            firstSolidOnly
+                        )) {
+                        const bool oneCutValid = booleanInputsValid;
+                        bool kept = false;
+                        Part::TopoShape recovered;
+                        try {
+                            Part::FuzzyHelper::withCrossingRecovery([&]() {
+                                recovered = cutCopies();
+                            });
+                        }
+                        catch (const Standard_Failure&) {
+                            recovered = Part::TopoShape();
+                        }
+                        catch (const Base::Exception&) {
+                            recovered = Part::TopoShape();
+                        }
+                        const double was = solidVolume(before.getShape());
+                        const double slack = 1e-6 * was;
+                        const double copiesVolume = solidVolume(cutShape.getShape())
+                            * static_cast<double>(shapes.size() - 1);
+                        const double now =
+                            recovered.isNull() ? 0.0 : solidVolume(recovered.getShape());
+                        if (!recovered.isNull() && countSolids(recovered.getShape()) > 0
+                            && newShellsSound(recovered.getShape(), before.getShape(), false)
+                            && now <= was + slack && was - now <= copiesVolume + slack) {
+                            supportShape = recovered;
+                            kept = true;
+                        }
+                        else {
+                            booleanInputsValid = oneCutValid;
+                        }
+                        // Counted by Tier F: none on a result that builds without it
+                        Base::Console().log(
+                            "%s: second cut with crossings recovered, %s (ops#901)\n",
+                            getFullName().c_str(),
+                            kept ? "kept" : "refused"
+                        );
+                    }
                     inputCheck = ownResultCheck();
                 }
             }

@@ -56,8 +56,499 @@
 #include <Base/Console.h>
 #include <Base/Exception.h>
 
+#include <BOPAlgo_PaveFiller.hxx>
+#include <BOPAlgo_Tools.hxx>
+#include <BOPDS_DS.hxx>
+#include <BOPDS_Interf.hxx>
+#include <BOPDS_Curve.hxx>
+#include <BRepAdaptor_Surface.hxx>
+#include <BRepBuilderAPI_MakeFace.hxx>
+#include <Extrema_GenLocateExtPS.hxx>
+#include <GeomAPI_ProjectPointOnSurf.hxx>
+#include <IntSurf_PntOn2S.hxx>
+#include <IntTools_Context.hxx>
+#include <IntTools_FClass2d.hxx>
+#include <IntTools_FaceFace.hxx>
+#include <IntTools_Tools.hxx>
+#include <NCollection_List.hxx>
+#include <Standard_ErrorHandler.hxx>
+#include <TopoDS_Edge.hxx>
+#include <gp_Pnt2d.hxx>
+
 #include <cmath>
 #include <vector>
+
+namespace
+{
+
+/* FreeCAD-CH ops#901: the face/face crossings OCCT 8.0.1 misses (notes/polar-pattern-901.md
+ * section 9). Two near-tangent B-spline faces can cross along a short curve that OCCT's
+ * surface/surface intersection never finds: its search for a start point lays a grid over the
+ * whole of each surface (IntPatch_PrmPrmIntersection::PointDepart), as dense as the surface's
+ * knots, and a crossing one or two grid cells wide falls between its points. The Boolean then
+ * leaves an open shell, or a closed one with the wrong material.
+ *
+ * CrossingFiller runs OCCT's face/face step, then, for each face pair that got no curve and no
+ * point, isn't marked tangent, has a freeform face and no periodic, closed or seamed one:
+ * 1. restricts both faces to the parameter rectangles where they can meet (tiles of sampled
+ *    boxes, a few levels), padded by their own size; nothing meets, or both still over half
+ *    their face: left as OCCT found it;
+ * 2. intersects the two rectangles of the same surfaces again (fuzzy 0), moved near the origin
+ *    as OCCT moves a pair far from it;
+ * 3. failing that, gives the intersector start points of its own: where the signed distance from
+ *    a grid on the first rectangle to the second surface changes sign, bisected onto both
+ *    surfaces, those on a rectangle's border first;
+ * 4. keeps a curve only when a point of it lies strictly inside both faces (a curve along a
+ *    boundary within tolerance is a graze, not a crossing);
+ * and appends the curves kept to the pair the way PerformFF does. The rest of the Boolean
+ * (MakeBlocks, the splits, the history) is OCCT's own.
+ * Its numbers decide a saved result once a file holds a recovered feature (R3): they don't
+ * change without a compat-change. That holds for the named constants below and for the unnamed
+ * ones in the code: the 0.1 box margin, the half-face rule, the seed thresholds 1e-9 and 1e-8,
+ * the three sample parameters of the curve filter. OCCT's own edge/face start points
+ * (GetEFPnts) are not passed: the seeds of step 3 stand in, which only limits what is
+ * recovered. */
+constexpr int TileCount = 8;        // tiles per direction and level
+constexpr int TileSamples = 4;      // sample intervals per tile edge
+constexpr int TileLevels = 4;
+constexpr double TilePad = 1.0;     // the rectangle grows by its own size on each side
+constexpr int SeedGrid = 12;        // sign-change grid on the first rectangle
+constexpr int MaxSeeds = 16;
+constexpr int BisectSteps = 50;
+
+struct Rect
+{
+    double u0, u1, v0, v1;
+    double area() const
+    {
+        return (u1 - u0) * (v1 - v0);
+    }
+};
+
+std::vector<Bnd_Box> tileBoxes(const Handle(Geom_Surface)& surface, const Rect& r)
+{
+    const int n = TileCount * TileSamples + 1;
+    std::vector<gp_Pnt> points(static_cast<std::size_t>(n) * n);
+    for (int i = 0; i < n; ++i) {
+        for (int j = 0; j < n; ++j) {
+            points[static_cast<std::size_t>(i) * n + j] = surface->Value(
+                r.u0 + (r.u1 - r.u0) * i / (n - 1),
+                r.v0 + (r.v1 - r.v0) * j / (n - 1)
+            );
+        }
+    }
+    std::vector<Bnd_Box> boxes(static_cast<std::size_t>(TileCount) * TileCount);
+    for (int a = 0; a < TileCount; ++a) {
+        for (int b = 0; b < TileCount; ++b) {
+            Bnd_Box box;
+            for (int i = a * TileSamples; i <= (a + 1) * TileSamples; ++i) {
+                for (int j = b * TileSamples; j <= (b + 1) * TileSamples; ++j) {
+                    box.Add(points[static_cast<std::size_t>(i) * n + j]);
+                }
+            }
+            box.Enlarge(0.1 * std::sqrt(box.SquareExtent()) + 1e-6);
+            boxes[static_cast<std::size_t>(a) * TileCount + b] = box;
+        }
+    }
+    return boxes;
+}
+
+/// Narrows \a r1 and \a r2 to where the two surfaces can meet; false: nowhere
+bool restrictToMeeting(
+    const Handle(Geom_Surface)& s1,
+    Rect& r1,
+    const Handle(Geom_Surface)& s2,
+    Rect& r2
+)
+{
+    const int k = TileCount;
+    for (int level = 0; level < TileLevels; ++level) {
+        const auto t1 = tileBoxes(s1, r1);
+        const auto t2 = tileBoxes(s2, r2);
+        int a0 = k, a1 = -1, b0 = k, b1 = -1, c0 = k, c1 = -1, d0 = k, d1 = -1;
+        for (int i = 0; i < k * k; ++i) {
+            for (int j = 0; j < k * k; ++j) {
+                if (!t1[i].IsOut(t2[j])) {
+                    a0 = std::min(a0, i / k);
+                    a1 = std::max(a1, i / k);
+                    b0 = std::min(b0, i % k);
+                    b1 = std::max(b1, i % k);
+                    c0 = std::min(c0, j / k);
+                    c1 = std::max(c1, j / k);
+                    d0 = std::min(d0, j % k);
+                    d1 = std::max(d1, j % k);
+                }
+            }
+        }
+        if (a1 < 0) {
+            return false;
+        }
+        const double du1 = (r1.u1 - r1.u0) / k;
+        const double dv1 = (r1.v1 - r1.v0) / k;
+        const double du2 = (r2.u1 - r2.u0) / k;
+        const double dv2 = (r2.v1 - r2.v0) / k;
+        r1 = {r1.u0 + a0 * du1, r1.u0 + (a1 + 1) * du1, r1.v0 + b0 * dv1, r1.v0 + (b1 + 1) * dv1};
+        r2 = {r2.u0 + c0 * du2, r2.u0 + (c1 + 1) * du2, r2.v0 + d0 * dv2, r2.v0 + (d1 + 1) * dv2};
+        const int kept = (a1 - a0 + 1) * (b1 - b0 + 1) + (c1 - c0 + 1) * (d1 - d0 + 1);
+        if (kept > k * k) {
+            break;  // little left to gain from another level
+        }
+    }
+    return true;
+}
+
+void pad(Rect& r, const Rect& face)
+{
+    const double w = TilePad * (r.u1 - r.u0);
+    const double h = TilePad * (r.v1 - r.v0);
+    r = {std::max(face.u0, r.u0 - w),
+         std::min(face.u1, r.u1 + w),
+         std::max(face.v0, r.v0 - h),
+         std::min(face.v1, r.v1 + h)};
+}
+
+bool analytic(GeomAbs_SurfaceType type)
+{
+    return type == GeomAbs_Plane || type == GeomAbs_Cylinder || type == GeomAbs_Cone
+        || type == GeomAbs_Sphere || type == GeomAbs_Torus;
+}
+
+/// A face whose surface closes on itself, or that has a seam: not taken (the rectangle face and
+/// the in-face test are not checked there)
+bool closedOrSeamed(const TopoDS_Face& face, const BRepAdaptor_Surface& surface)
+{
+    if (surface.IsUClosed() || surface.IsVClosed() || surface.IsUPeriodic()
+        || surface.IsVPeriodic()) {
+        return true;
+    }
+    for (TopExp_Explorer it(face, TopAbs_EDGE); it.More(); it.Next()) {
+        if (BRep_Tool::IsClosed(TopoDS::Edge(it.Current()), face)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// OCCT's ToleranceFF (BOPAlgo_PaveFiller_6.cxx): the pair's tolerance
+double toleranceFF(const BRepAdaptor_Surface& a1, const BRepAdaptor_Surface& a2)
+{
+    double tol = std::max(a1.Tolerance(), a2.Tolerance());
+    if (!analytic(a1.GetType()) || !analytic(a2.GetType())) {
+        tol = std::max(tol, 5.e-6);
+    }
+    return tol;
+}
+
+/// Start points: where the signed distance from a grid on \a r1 of \a s1 to \a s2 (on \a r2)
+/// changes sign, bisected onto both surfaces; border points first
+NCollection_List<IntSurf_PntOn2S> startPoints(
+    const Handle(Geom_Surface)& s1,
+    const Rect& r1,
+    const Handle(Geom_Surface)& s2,
+    const Rect& r2,
+    const gp_Trsf& toOrigin
+)
+{
+    GeomAdaptor_Surface adaptor2(s2, r2.u0, r2.u1, r2.v0, r2.v1);
+    double guessU = (r2.u0 + r2.u1) / 2;
+    double guessV = (r2.v0 + r2.v1) / 2;
+    bool haveGuess = false;
+    double gap = 0;
+    auto signedDistance = [&](double u, double v, double& u2, double& v2, double& distance) {
+        const gp_Pnt p = s1->Value(u, v);
+        bool found = false;
+        if (haveGuess) {
+            Extrema_GenLocateExtPS locate(adaptor2, 1e-10, 1e-10);
+            locate.Perform(p, guessU, guessV);
+            if (locate.IsDone()) {
+                locate.Point().Parameter(u2, v2);
+                found = u2 >= r2.u0 - 1e-12 && u2 <= r2.u1 + 1e-12 && v2 >= r2.v0 - 1e-12
+                    && v2 <= r2.v1 + 1e-12;
+            }
+        }
+        if (!found) {
+            GeomAPI_ProjectPointOnSurf projection(p, s2, r2.u0, r2.u1, r2.v0, r2.v1);
+            if (projection.NbPoints() == 0) {
+                return false;
+            }
+            projection.LowerDistanceParameters(u2, v2);
+        }
+        guessU = u2;
+        guessV = v2;
+        haveGuess = true;
+        gp_Pnt q;
+        gp_Vec du;
+        gp_Vec dv;
+        s2->D1(u2, v2, q, du, dv);
+        const gp_Vec normal = du.Crossed(dv);
+        if (normal.Magnitude() < 1e-12) {
+            return false;
+        }
+        gap = gp_Vec(q, p).Magnitude();
+        distance = gp_Vec(q, p).Dot(normal.Normalized());
+        return true;
+    };
+    const int n = SeedGrid;
+    const std::size_t count = static_cast<std::size_t>(n + 1) * (n + 1);
+    std::vector<double> distances(count, 0.0);
+    std::vector<double> pu(count);
+    std::vector<double> pv(count);
+    std::vector<char> ok(count, 0);
+    auto at = [&](int i, int j) {
+        return static_cast<std::size_t>(i) * (n + 1) + j;
+    };
+    for (int i = 0; i <= n; ++i) {
+        for (int j = 0; j <= n; ++j) {
+            const std::size_t k = at(i, j);
+            ok[k] = signedDistance(
+                r1.u0 + (r1.u1 - r1.u0) * i / n,
+                r1.v0 + (r1.v1 - r1.v0) * j / n,
+                pu[k],
+                pv[k],
+                distances[k]
+            );
+        }
+    }
+    NCollection_List<IntSurf_PntOn2S> border;
+    NCollection_List<IntSurf_PntOn2S> inner;
+    auto seed = [&](int ia, int ja, int ib, int jb) {
+        const std::size_t ka = at(ia, ja);
+        const std::size_t kb = at(ib, jb);
+        if (!ok[ka] || !ok[kb] || distances[ka] * distances[kb] >= 0
+            || border.Extent() + inner.Extent() >= 4 * MaxSeeds) {
+            return;
+        }
+        double ua = r1.u0 + (r1.u1 - r1.u0) * ia / n;
+        double va = r1.v0 + (r1.v1 - r1.v0) * ja / n;
+        double ub = r1.u0 + (r1.u1 - r1.u0) * ib / n;
+        double vb = r1.v0 + (r1.v1 - r1.v0) * jb / n;
+        double da = distances[ka];
+        double u2 = 0;
+        double v2 = 0;
+        double dm = 0;
+        double um = ua;
+        double vm = va;
+        for (int step = 0; step < BisectSteps; ++step) {
+            um = (ua + ub) / 2;
+            vm = (va + vb) / 2;
+            if (!signedDistance(um, vm, u2, v2, dm)) {
+                return;
+            }
+            if (dm == 0) {
+                break;
+            }
+            if (dm * da > 0) {
+                ua = um;
+                va = vm;
+                da = dm;
+            }
+            else {
+                ub = um;
+                vb = vm;
+            }
+        }
+        if (std::fabs(dm) > 1e-9 || gap > 1e-8) {
+            return;
+        }
+        IntSurf_PntOn2S point;
+        point.SetValue(s1->Value(um, vm).Transformed(toOrigin), um, vm, u2, v2);
+        auto onEdge = [](double x, double lo, double hi) {
+            return std::fabs(x - lo) < 1e-9 * (hi - lo) || std::fabs(x - hi) < 1e-9 * (hi - lo);
+        };
+        const bool onBorder = onEdge(um, r1.u0, r1.u1) || onEdge(vm, r1.v0, r1.v1)
+            || onEdge(u2, r2.u0, r2.u1) || onEdge(v2, r2.v0, r2.v1);
+        (onBorder ? border : inner).Append(point);
+    };
+    for (int i = 0; i <= n; ++i) {
+        for (int j = 0; j <= n; ++j) {
+            if (i < n) {
+                seed(i, j, i + 1, j);
+            }
+            if (j < n) {
+                seed(i, j, i, j + 1);
+            }
+        }
+    }
+    for (const auto& point : inner) {
+        if (border.Extent() >= MaxSeeds) {
+            break;
+        }
+        border.Append(point);
+    }
+    return border;
+}
+
+class CrossingFiller: public BOPAlgo_PaveFiller
+{
+public:
+    explicit CrossingFiller(const Handle(NCollection_BaseAllocator)& allocator)
+        : BOPAlgo_PaveFiller(allocator)
+    {}
+
+    int retried = 0;    ///< pairs intersected again
+    int recovered = 0;  ///< pairs that got a curve
+    int curves = 0;     ///< curves added
+
+protected:
+    void PerformFF(const Message_ProgressRange& range) override
+    {
+        Message_ProgressScope scope(range, nullptr, 10);
+        BOPAlgo_PaveFiller::PerformFF(scope.Next(9));
+        if (HasErrors()) {
+            return;
+        }
+        auto& pairs = myDS->InterfFF();
+        Message_ProgressScope retries(scope.Next(), nullptr, std::max(pairs.Length(), 1));
+        for (int k = 0; k < pairs.Length(); ++k, retries.Next()) {
+            if (UserBreak(retries)) {
+                return;
+            }
+            BOPDS_InterfFF& pair = pairs.ChangeValue(k);
+            if (pair.Curves().Length() > 0 || pair.Points().Length() > 0 || pair.TangentFaces()) {
+                continue;
+            }
+            int n1 = 0;
+            int n2 = 0;
+            pair.Indices(n1, n2);
+            try {
+                OCC_CATCH_SIGNALS
+                recover(pair, n1, n2);
+            }
+            catch (const Standard_Failure&) {
+                // left as OCCT found it
+            }
+        }
+    }
+
+private:
+    void recover(BOPDS_InterfFF& pair, int n1, int n2)
+    {
+        const TopoDS_Face f1 = TopoDS::Face(myDS->Shape(n1));
+        const TopoDS_Face f2 = TopoDS::Face(myDS->Shape(n2));
+        BRepAdaptor_Surface a1(f1, false);
+        BRepAdaptor_Surface a2(f2, false);
+        if (analytic(a1.GetType()) && analytic(a2.GetType())) {
+            return;
+        }
+        if (closedOrSeamed(f1, a1) || closedOrSeamed(f2, a2)) {
+            return;
+        }
+        Rect face1 {};
+        Rect face2 {};
+        BRepTools::UVBounds(f1, face1.u0, face1.u1, face1.v0, face1.v1);
+        BRepTools::UVBounds(f2, face2.u0, face2.u1, face2.v0, face2.v1);
+        if (face1.area() <= 0 || face2.area() <= 0) {
+            return;
+        }
+        // BRep_Tool::Surface(face): the surface with the face's location applied
+        const Handle(Geom_Surface) s1 = BRep_Tool::Surface(f1);
+        const Handle(Geom_Surface) s2 = BRep_Tool::Surface(f2);
+        Rect r1 = face1;
+        Rect r2 = face2;
+        if (!restrictToMeeting(s1, r1, s2, r2)) {
+            return;
+        }
+        if (r1.area() / face1.area() > 0.5 && r2.area() / face2.area() > 0.5) {
+            return;  // the same question OCCT answered
+        }
+        ++retried;
+        pad(r1, face1);
+        pad(r2, face2);
+        // Far from the origin, intersect near it, as PerformFF does (BOPAlgo_FaceFace::Perform)
+        gp_Trsf toOrigin;
+        const bool moved = BOPAlgo_Tools::TrsfToPoint(
+            myDS->ShapeInfo(n1).Box(),
+            myDS->ShapeInfo(n2).Box(),
+            toOrigin
+        );
+        TopoDS_Face g1 = BRepBuilderAPI_MakeFace(s1, r1.u0, r1.u1, r1.v0, r1.v1, Precision::Confusion());
+        TopoDS_Face g2 = BRepBuilderAPI_MakeFace(s2, r2.u0, r2.u1, r2.v0, r2.v1, Precision::Confusion());
+        if (moved) {
+            g1.Move(TopLoc_Location(toOrigin));
+            g2.Move(TopLoc_Location(toOrigin));
+        }
+        const double tolFF = toleranceFF(a1, a2);
+        const double boxExpand = tolFF
+            + std::max(BRep_Tool::MaxTolerance(f1, TopAbs_VERTEX),
+                       BRep_Tool::MaxTolerance(f2, TopAbs_VERTEX));
+        int added = 0;
+        for (int attempt = 0; attempt < 2 && added == 0; ++attempt) {
+            IntTools_FaceFace intersector;
+            intersector.SetParameters(true, true, true, 1.e-7);
+            intersector.SetFuzzyValue(0.0);
+            if (attempt == 1) {
+                NCollection_List<IntSurf_PntOn2S> seeds =
+                    startPoints(s1, r1, s2, r2, moved ? toOrigin : gp_Trsf());
+                if (seeds.IsEmpty()) {
+                    break;
+                }
+                intersector.SetList(seeds);
+            }
+            intersector.Perform(g1, g2, false);
+            if (!intersector.IsDone()) {
+                continue;
+            }
+            intersector.PrepareLines3D(false);
+            const auto& lines = intersector.Lines();
+            for (int i = 1; i <= lines.Length(); ++i) {
+                IntTools_Curve curve = lines(i);
+                if (moved) {
+                    curve.Curve()->Transform(toOrigin.Inverted());
+                }
+                Bnd_Box box;
+                if (!IntTools_Tools::CheckCurve(curve, box)) {
+                    continue;
+                }
+                if (!crossesBoth(curve, f1, f2)) {
+                    continue;
+                }
+                BOPDS_Curve& kept = pair.ChangeCurves().Appended();
+                kept.SetCurve(curve);
+                box.Enlarge(boxExpand);
+                kept.SetBox(box);
+                kept.SetTolerance(std::max(curve.Tolerance(), tolFF));
+                ++added;
+            }
+        }
+        if (added > 0) {
+            myDS->AddInterf(n1, n2);
+            ++recovered;
+            curves += added;
+        }
+    }
+
+    /// A point of \a curve lies strictly inside both faces
+    bool crossesBoth(const IntTools_Curve& curve, const TopoDS_Face& f1, const TopoDS_Face& f2)
+    {
+        const Handle(Geom_Curve)& c = curve.Curve();
+        const double first = c->FirstParameter();
+        const double last = c->LastParameter();
+        for (double t : {0.5, 0.25, 0.75}) {
+            const gp_Pnt p = c->Value(first + (last - first) * t);
+            bool inside = true;
+            for (const TopoDS_Face* face : {&f1, &f2}) {
+                GeomAPI_ProjectPointOnSurf projection(p, BRep_Tool::Surface(*face));
+                if (projection.NbPoints() == 0) {
+                    inside = false;
+                    break;
+                }
+                double u = 0;
+                double v = 0;
+                projection.LowerDistanceParameters(u, v);
+                if (myContext->FClass2d(*face).Perform(gp_Pnt2d(u, v)) != TopAbs_IN) {
+                    inside = false;
+                    break;
+                }
+            }
+            if (inside) {
+                return true;
+            }
+        }
+        return false;
+    }
+};
+
+}  // namespace
 
 FCBRepAlgoAPI_BooleanOperation::FCBRepAlgoAPI_BooleanOperation()
 {
@@ -332,9 +823,79 @@ void FCBRepAlgoAPI_BooleanOperation::Build()
     Build(progressRange);
 }
 
+namespace
+{
+/// Sets a flag back when it leaves its scope, an exception included
+struct FlagBack
+{
+    explicit FlagBack(Standard_Boolean& flag)
+        : flag(flag)
+    {}
+    ~FlagBack()
+    {
+        flag = Standard_True;
+    }
+    FlagBack(const FlagBack&) = delete;
+    FlagBack& operator=(const FlagBack&) = delete;
+    Standard_Boolean& flag;
+};
+}  // namespace
+
+/** FreeCAD-CH ops#901: this operation built with a CrossingFiller in place of OCCT's own
+ * intersection. The filler takes the options OCCT's IntersectShapes gives its own; the base Build
+ * then skips the intersection (myIsIntersectionNeeded false) and builds from it. Owned by the
+ * operation afterwards: with the flag set back (also when the base Build throws), the next Build's
+ * Clear() or the destructor deletes it, as it deletes OCCT's own. A filler that fails falls back to
+ * OCCT's path. A lambda in a member, not a member of its own: a change to the header rebuilds
+ * Part's precompiled header */
 void FCBRepAlgoAPI_BooleanOperation::Build(const Message_ProgressRange& progressRange)
 {
     Part::SignalException sig;
+    // ops#901, see above
+    auto buildRecoveringCrossings = [this](const Message_ProgressRange& range) {
+        Clear();
+        TopTools_ListOfShape all = myArguments;
+        for (TopTools_ListOfShape::Iterator it(myTools); it.More(); it.Next()) {
+            all.Append(it.Value());
+        }
+        Message_ProgressScope scope(range, nullptr, 10);
+        auto* filler = new CrossingFiller(myAllocator);
+        filler->SetArguments(all);
+        filler->SetRunParallel(myRunParallel);
+        filler->SetFuzzyValue(myFuzzyValue);
+        filler->SetNonDestructive(myNonDestructive);
+        filler->SetGlue(myGlue);
+        filler->SetUseOBB(myUseOBB);
+        try {
+            filler->Perform(scope.Next(7));
+        }
+        catch (...) {
+            delete filler;
+            throw;
+        }
+        if (filler->HasErrors()) {
+            delete filler;
+            myDSFiller = nullptr;
+            myIsIntersectionNeeded = Standard_True;
+            BRepAlgoAPI_BooleanOperation::Build(scope.Next(3));
+            return;
+        }
+        if (filler->retried > 0) {
+            Base::Console().log(
+                "Boolean: %d face pairs intersected again, %d with crossings, %d curves (ops#901)\n",
+                filler->retried,
+                filler->recovered,
+                filler->curves
+            );
+        }
+        myDSFiller = filler;
+        myIsIntersectionNeeded = Standard_False;
+        {
+            FlagBack back(myIsIntersectionNeeded);
+            BRepAlgoAPI_BooleanOperation::Build(scope.Next(3));
+        }
+        GetReport()->Merge(filler->GetReport());
+    };
     if (progressRange.UserBreak()) {
         throw Standard_ConstructionError("User aborted");
     }
@@ -360,8 +921,17 @@ void FCBRepAlgoAPI_BooleanOperation::Build(const Message_ProgressRange& progress
         // The pieces of the two paths above come here one by one
         FCBRepAlgoAPIHelper::refuseFacesWithoutWidth(myArguments);
         FCBRepAlgoAPIHelper::refuseFacesWithoutWidth(myTools);
+        // FreeCAD-CH ops#901: OCCT skips the face/face step under glue on purpose, and a section
+        // isn't this class's
+        if (Part::FuzzyHelper::getCrossingRecovery() && myOperation != BOPAlgo_SECTION
+            && myGlue == BOPAlgo_GlueOff) {
+            buildRecoveringCrossings(progressRange);
+        }
+        else
 #if OCC_VERSION_HEX >= 0x070600
-        BRepAlgoAPI_BooleanOperation::Build(progressRange);
+        {
+            BRepAlgoAPI_BooleanOperation::Build(progressRange);
+        }
 #else
         BRepAlgoAPI_BooleanOperation::Build();
 #endif
