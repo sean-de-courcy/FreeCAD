@@ -324,17 +324,38 @@ class TestPolarPatternOverlappingCuts(unittest.TestCase):
         self.assertUnionChanged(shape, self.changedByEachCopy(), overlaps)
 
     def testOverlappingCopiesAreCut(self):
+        # The faces of each result, the same on Windows and macOS (R4). At 2.7 the copies cut one
+        # at a time give the same 58 (notes section 9.2); at 2.52 the thin wedges leave 66
+        faces = {2.52: 66, 2.6: 58, 2.7: 58, 2.8: 58}
         for halfWidth in (2.52, 2.6, 2.7, 2.8):
             with self.subTest(halfWidth=halfWidth):
                 self.newDocument()
                 self.makeModel(halfWidth)
+                shape = self.pattern.Shape
+                # Printed in full so that the platforms' logs can be compared
+                print(
+                    "ops#901 hw %.2f: %d faces, volume %.17g, area %.17g"
+                    % (halfWidth, len(shape.Faces), shape.Volume, shape.Area)
+                )
                 self.assertSoundPattern(overlaps=True)
-                harness.assertEveryElementNamed(self.pattern.Shape)
-                harness.assertDistinctNames(self.pattern.Shape)
-                if halfWidth == 2.7:
-                    # The copies cut one at a time give the same 58 faces (notes section 9.2);
-                    # the same count on Windows and macOS (R4)
-                    self.assertEqual(len(self.pattern.Shape.Faces), 58)
+                harness.assertEveryElementNamed(shape)
+                harness.assertDistinctNames(shape)
+                self.assertEqual(len(shape.Faces), faces[halfWidth])
+
+    def testNoSecondCutWhenResultsAreNotChecked(self):
+        """With the CheckResults preference off, fork-1.0.2 builds the overlapping pattern as its
+        one cut gives it (an open shell, no error). The second cut is made only where the check
+        would refuse the result, so that file's result stays the same"""
+        params = FreeCAD.ParamGet("User parameter:BaseApp/Preferences/Mod/PartDesign")
+        was = params.GetBool("CheckResults", True)
+        params.SetBool("CheckResults", False)
+        try:
+            self.makeModel(2.7)
+            self.assertTrue(self.pattern.isValid(), self.pattern.getStatusString())
+            self.assertFalse(self.pattern.Shape.isValid())
+            self.assertNotEqual(len(self.pattern.Shape.Faces), 58)
+        finally:
+            params.SetBool("CheckResults", was)
 
     def testCopiesApartAreCut(self):
         """The control: copies apart from each other (inner half width 2.0) build today"""

@@ -103,7 +103,11 @@ namespace
  * and appends the curves kept to the pair the way PerformFF does. The rest of the Boolean
  * (MakeBlocks, the splits, the history) is OCCT's own.
  * Its numbers decide a saved result once a file holds a recovered feature (R3): they don't
- * change without a compat-change. */
+ * change without a compat-change. That holds for the named constants below and for the unnamed
+ * ones in the code: the 0.1 box margin, the half-face rule, the seed thresholds 1e-9 and 1e-8,
+ * the three sample parameters of the curve filter. OCCT's own edge/face start points
+ * (GetEFPnts) are not passed: the seeds of step 3 stand in, which only limits what is
+ * recovered. */
 constexpr int TileCount = 8;        // tiles per direction and level
 constexpr int TileSamples = 4;      // sample intervals per tile edge
 constexpr int TileLevels = 4;
@@ -813,38 +817,67 @@ void FCBRepAlgoAPIHelper::checkLostTools(BRepAlgoAPI_BooleanOperation* op)
     }
 }
 
+void FCBRepAlgoAPI_BooleanOperation::Build()
+{
+    Message_ProgressRange progressRange;
+    Build(progressRange);
+}
+
 namespace
 {
-/// The protected state of the base Boolean, reached through a derived class
-struct BooleanAccess: FCBRepAlgoAPI_BooleanOperation
+/// Sets a flag back when it leaves its scope, an exception included
+struct FlagBack
 {
-    /** FreeCAD-CH ops#901: \a op built with a CrossingFiller in place of OCCT's own intersection.
-     * The filler takes the options OCCT's IntersectShapes gives its own; the base Build then
-     * skips the intersection (myIsIntersectionNeeded false) and builds from it. Owned by the
-     * operation afterwards: with the flag set back, the next Build's Clear() or the destructor
-     * deletes it, as it deletes OCCT's own. A filler that fails falls back to OCCT's path. */
-    static void build(FCBRepAlgoAPI_BooleanOperation* op, const Message_ProgressRange& range)
+    explicit FlagBack(Standard_Boolean& flag)
+        : flag(flag)
+    {}
+    ~FlagBack()
     {
-        auto* self = static_cast<BooleanAccess*>(op);
-        self->Clear();
-        TopTools_ListOfShape all = self->myArguments;
-        for (TopTools_ListOfShape::Iterator it(self->myTools); it.More(); it.Next()) {
+        flag = Standard_True;
+    }
+    FlagBack(const FlagBack&) = delete;
+    FlagBack& operator=(const FlagBack&) = delete;
+    Standard_Boolean& flag;
+};
+}  // namespace
+
+/** FreeCAD-CH ops#901: this operation built with a CrossingFiller in place of OCCT's own
+ * intersection. The filler takes the options OCCT's IntersectShapes gives its own; the base Build
+ * then skips the intersection (myIsIntersectionNeeded false) and builds from it. Owned by the
+ * operation afterwards: with the flag set back (also when the base Build throws), the next Build's
+ * Clear() or the destructor deletes it, as it deletes OCCT's own. A filler that fails falls back to
+ * OCCT's path. A lambda in a member, not a member of its own: a change to the header rebuilds
+ * Part's precompiled header */
+void FCBRepAlgoAPI_BooleanOperation::Build(const Message_ProgressRange& progressRange)
+{
+    Part::SignalException sig;
+    // ops#901, see above
+    auto buildRecoveringCrossings = [this](const Message_ProgressRange& range) {
+        Clear();
+        TopTools_ListOfShape all = myArguments;
+        for (TopTools_ListOfShape::Iterator it(myTools); it.More(); it.Next()) {
             all.Append(it.Value());
         }
         Message_ProgressScope scope(range, nullptr, 10);
-        auto* filler = new CrossingFiller(self->myAllocator);
+        auto* filler = new CrossingFiller(myAllocator);
         filler->SetArguments(all);
-        filler->SetRunParallel(self->myRunParallel);
-        filler->SetFuzzyValue(self->myFuzzyValue);
-        filler->SetNonDestructive(self->myNonDestructive);
-        filler->SetGlue(self->myGlue);
-        filler->SetUseOBB(self->myUseOBB);
-        filler->Perform(scope.Next(7));
+        filler->SetRunParallel(myRunParallel);
+        filler->SetFuzzyValue(myFuzzyValue);
+        filler->SetNonDestructive(myNonDestructive);
+        filler->SetGlue(myGlue);
+        filler->SetUseOBB(myUseOBB);
+        try {
+            filler->Perform(scope.Next(7));
+        }
+        catch (...) {
+            delete filler;
+            throw;
+        }
         if (filler->HasErrors()) {
             delete filler;
-            self->myDSFiller = nullptr;
-            self->myIsIntersectionNeeded = true;
-            self->BRepAlgoAPI_BooleanOperation::Build(scope.Next(3));
+            myDSFiller = nullptr;
+            myIsIntersectionNeeded = Standard_True;
+            BRepAlgoAPI_BooleanOperation::Build(scope.Next(3));
             return;
         }
         if (filler->retried > 0) {
@@ -855,29 +888,14 @@ struct BooleanAccess: FCBRepAlgoAPI_BooleanOperation
                 filler->curves
             );
         }
-        self->myDSFiller = filler;
-        self->myIsIntersectionNeeded = false;
-        self->BRepAlgoAPI_BooleanOperation::Build(scope.Next(3));
-        self->myIsIntersectionNeeded = true;
-        self->GetReport()->Merge(filler->GetReport());
-    }
-};
-
-void buildRecoveringCrossings(FCBRepAlgoAPI_BooleanOperation* op, const Message_ProgressRange& range)
-{
-    BooleanAccess::build(op, range);
-}
-}  // namespace
-
-void FCBRepAlgoAPI_BooleanOperation::Build()
-{
-    Message_ProgressRange progressRange;
-    Build(progressRange);
-}
-
-void FCBRepAlgoAPI_BooleanOperation::Build(const Message_ProgressRange& progressRange)
-{
-    Part::SignalException sig;
+        myDSFiller = filler;
+        myIsIntersectionNeeded = Standard_False;
+        {
+            FlagBack back(myIsIntersectionNeeded);
+            BRepAlgoAPI_BooleanOperation::Build(scope.Next(3));
+        }
+        GetReport()->Merge(filler->GetReport());
+    };
     if (progressRange.UserBreak()) {
         throw Standard_ConstructionError("User aborted");
     }
@@ -903,8 +921,11 @@ void FCBRepAlgoAPI_BooleanOperation::Build(const Message_ProgressRange& progress
         // The pieces of the two paths above come here one by one
         FCBRepAlgoAPIHelper::refuseFacesWithoutWidth(myArguments);
         FCBRepAlgoAPIHelper::refuseFacesWithoutWidth(myTools);
-        if (Part::FuzzyHelper::getCrossingRecovery() && myOperation != BOPAlgo_SECTION) {
-            buildRecoveringCrossings(this, progressRange);
+        // FreeCAD-CH ops#901: OCCT skips the face/face step under glue on purpose, and a section
+        // isn't this class's
+        if (Part::FuzzyHelper::getCrossingRecovery() && myOperation != BOPAlgo_SECTION
+            && myGlue == BOPAlgo_GlueOff) {
+            buildRecoveringCrossings(progressRange);
         }
         else
 #if OCC_VERSION_HEX >= 0x070600

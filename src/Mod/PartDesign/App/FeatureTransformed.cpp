@@ -49,6 +49,7 @@
 #include <unordered_map>
 #include <algorithm>
 
+#include <App/Application.h>
 #include <App/Document.h>
 #include <App/ElementNamingUtils.h>
 #include <App/ElementSolverBatch.h>
@@ -1635,8 +1636,10 @@ App::DocumentObjectExecReturn* executeStudioPartPattern(Transformed& pattern)
 
 /// FreeCAD-CH ops#901: the shell test of checkResult() (Feature.cpp), on the shells of \a result's
 /// solids that hold a face \a base doesn't have. True when each is closed and its faces are
-/// oriented consistently, so the feature won't be refused for a shell
-bool newShellsSound(const TopoDS_Shape& result, const TopoDS_Shape& base)
+/// oriented consistently, so the feature won't be refused for a shell. \a firstSolidOnly: only
+/// the first solid, the one getSolid() keeps under the enforced single-solid rule and the only one
+/// checkResult() then sees
+bool newShellsSound(const TopoDS_Shape& result, const TopoDS_Shape& base, bool firstSolidOnly)
 {
     TopTools_IndexedMapOfShape baseFaces;
     if (!base.IsNull()) {
@@ -1659,8 +1662,22 @@ bool newShellsSound(const TopoDS_Shape& result, const TopoDS_Shape& base)
                 return false;
             }
         }
+        if (firstSolidOnly) {
+            break;
+        }
     }
     return true;
+}
+
+/// FreeCAD-CH ops#901: whether checkResult() will run on \a feature's result, under the condition
+/// Feature::recompute() applies (in a Body, a solid feature, the CheckResults preference on).
+/// FeatureBase never patterns
+bool resultWillBeChecked(const PartDesign::Feature& feature)
+{
+    return feature.getFeatureBody() && PartDesign::Body::isSolidFeature(&feature)
+        && App::GetApplication()
+               .GetParameterGroupByPath("User parameter:BaseApp/Preferences/Mod/PartDesign")
+               ->GetBool("CheckResults", true);
 }
 
 double solidVolume(const TopoDS_Shape& shape)
@@ -2246,9 +2263,20 @@ App::DocumentObjectExecReturn* Transformed::execute()
                     // open shell, which checkResult() refuses. Only then the same cut is made
                     // again with those crossings recovered (Part::FuzzyHelper::
                     // withCrossingRecovery), and kept where its shells are sound and it removed
-                    // no more than the copies hold; otherwise the feature is refused as before
-                    if (!newShellsSound(supportShape.getShape(), before.getShape())) {
+                    // no more than the copies hold; otherwise the feature is refused as before.
+                    // Only where checkResult() would refuse it: when the check runs, and under
+                    // the enforced single-solid rule on the first solid, the one it sees
+                    const bool firstSolidOnly =
+                        singleSolidRuleMode() == SingleSolidRuleMode::Enforced
+                        && !StudioList::holding(this);
+                    if (resultWillBeChecked(*this)
+                        && !newShellsSound(
+                            supportShape.getShape(),
+                            before.getShape(),
+                            firstSolidOnly
+                        )) {
                         const bool oneCutValid = booleanInputsValid;
+                        bool kept = false;
                         Part::TopoShape recovered;
                         try {
                             Part::FuzzyHelper::withCrossingRecovery([&]() {
@@ -2268,13 +2296,20 @@ App::DocumentObjectExecReturn* Transformed::execute()
                         const double now =
                             recovered.isNull() ? 0.0 : solidVolume(recovered.getShape());
                         if (!recovered.isNull() && countSolids(recovered.getShape()) > 0
-                            && newShellsSound(recovered.getShape(), before.getShape())
+                            && newShellsSound(recovered.getShape(), before.getShape(), false)
                             && now <= was + slack && was - now <= copiesVolume + slack) {
                             supportShape = recovered;
+                            kept = true;
                         }
                         else {
                             booleanInputsValid = oneCutValid;
                         }
+                        // Counted by Tier F: none on a result that builds without it
+                        Base::Console().log(
+                            "%s: second cut with crossings recovered, %s (ops#901)\n",
+                            getFullName().c_str(),
+                            kept ? "kept" : "refused"
+                        );
                     }
                     inputCheck = ownResultCheck();
                 }
