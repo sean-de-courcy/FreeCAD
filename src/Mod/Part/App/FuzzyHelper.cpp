@@ -24,11 +24,17 @@
 
 #include <FuzzyHelper.h>
 
+#include <atomic>
+#include <cstdlib>
+#include <cstring>
+
 using namespace Part;
 
 namespace
 {
 double BooleanFuzzy = 1.0;
+// Not per thread: the Boolean runs on KernelBudget's worker while its caller waits
+std::atomic<int> CrossingRecovery {0};
 }
 
 double FuzzyHelper::getBooleanFuzzy()
@@ -47,4 +53,31 @@ void FuzzyHelper::withBooleanFuzzy(double base, std::function<void()> func)
     setBooleanFuzzy(base);
     func();
     setBooleanFuzzy(oldValue);
+}
+
+bool FuzzyHelper::getCrossingRecovery()
+{
+    if (CrossingRecovery.load() > 0) {
+        return true;
+    }
+    const char* value = std::getenv("FREECAD_CH_CROSSING_RECOVERY");
+    return value && std::strcmp(value, "on") == 0;
+}
+
+void FuzzyHelper::withCrossingRecovery(const std::function<void()>& func)
+{
+    struct Restore
+    {
+        Restore()
+        {
+            ++CrossingRecovery;
+        }
+        ~Restore()
+        {
+            --CrossingRecovery;
+        }
+        Restore(const Restore&) = delete;
+        Restore& operator=(const Restore&) = delete;
+    } restore;
+    func();
 }
