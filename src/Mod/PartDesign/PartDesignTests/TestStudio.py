@@ -1134,15 +1134,12 @@ class TestStudio(unittest.TestCase):
         assertAlong()
         holder.Placement = App.Placement(V(0, 0, 5), App.Rotation())
         self.doc.recompute()
-        # Dir took A's features into the Part with it (an App::Part takes what links into what it
-        # gets), so the cube's Profile is placed by the Part too, and the cube fails first. A
-        # Body's first solid feature in error isn't passed through: the pattern fails without
-        # running, naming it (ops#579, decision 255 (1))
-        self.assertFalse(cube.isValid())
-        self.assertIn("placed elsewhere", cube.getStatusString())
-        self.assertIn("Profile of this feature is in " + holder.Label, cube.getStatusString())
-        self.assertFalse(pattern.isValid())
-        self.assertIn(f"'{cube.Label}', which has an error", pattern.getStatusString())
+        # Dir alone is in the Part (ops#910: an App::Part takes an object's links of its own group
+        # along, never another group's: A's features stay in A), so the placer is placed apart
+        self.assertEqual(holder.Group, [line])
+        self.assertEqual(cube.getParentGeoFeatureGroup(), a)
+        self.assertTrue(cube.isValid(), cube.getStatusString())
+        assertApart(holder.Label)
         holder.addObject(a)  # one origin again
         self.doc.recompute()
         assertAlong()
