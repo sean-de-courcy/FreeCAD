@@ -492,6 +492,8 @@ names it.
 | `fix/i910-import-remap` | fix | ops#910 | - | `integration` `874ed9be94` | `28f1c8ec85` (fork PR 490), 2026-11-19 | never (fork fix): a copied feature whose Placement moves at its first recompute keeps its references, and a Boolean keeps tools that sit in a Body or an App::Part |
 | `fix/i910-part-move` | fix | ops#910 | - | `integration` `28f1c8ec85` (needs `fix/i910-import-remap`) | `3c882341fa` (fork PR 491), 2026-11-19 | never (fork fix): an object entering or leaving an App::Part or Body keeps references to objects outside the moved set |
 | `fix/i883-fillet-c-h` | fix | ops#883 | - | `integration` `874ed9be94` | (fork PR 492) | never (fork fix): a fill kept over its face runs on through a hole in it (H); a concave line/arc reflex corner beside a notched wall builds, the fills meeting along their intersection (C) |
+| `fix/i920-piece-witness-copy` | fix | ops#920 | - | `integration` `3c882341fa` | via `carry/fork-1.0.4-set` | never (fork fix): a split part's pieces keep their solids when their studio is copied, pasted or merged into a document |
+| `infra/fork-release-103` | infra | ops#883 | - | `integration` `89f63756b3` | via `carry/fork-1.0.4-set` | never (fork release stamp): ForkRelease 14, the release after fork-1.0.3 |
 
 ## Fork-only commits in carried topics
 
