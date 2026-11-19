@@ -38,6 +38,18 @@
 #include <BRepLProp_SLProps.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
+#include <BRepPrimAPI_MakeRevol.hxx>
+#include <BRepGProp.hxx>
+#include <ElCLib.hxx>
+#include <GProp_GProps.hxx>
+#include <GeomAPI_ProjectPointOnSurf.hxx>
+#include <gp_Circ.hxx>
+#include <gp_Cylinder.hxx>
+#include <gp_Lin.hxx>
+#include <TopTools_MapOfShape.hxx>
+#include <gp_Torus.hxx>
+#include <BRepCheck_Analyzer.hxx>
+#include <ShapeUpgrade_UnifySameDomain.hxx>
 #include <Bnd_Box.hxx>
 #include <GC_MakeArcOfCircle.hxx>
 #include <Geom_TrimmedCurve.hxx>
@@ -58,6 +70,9 @@
 
 #include <cstdio>
 #include <cstring>
+#include <array>
+#include <utility>
+#include <vector>
 #include <map>
 #include <memory>
 #include <regex>
@@ -75,6 +90,7 @@
 #include <Base/Exception.h>
 #include <Base/Writer.h>
 #include "Mod/Part/App/TopoShapeMapper.h"
+#include "Mod/Part/App/TopoShapeOpCode.h"
 #include "Body.h"
 
 FC_LOG_LEVEL_INIT("PartDesign", true, true)
@@ -1531,6 +1547,616 @@ PartDesignExport TopoDS_Shape runOutCut(
         }
     }
     return count ? TopoDS_Shape(touching) : TopoDS_Shape();
+}
+}  // namespace PartDesign
+
+// ops#883: tangent propagation off on a fillet's arc edge, as Onshape's (notes/runout-arc-883.md);
+// declared where used
+namespace
+{
+[[noreturn]] void arcRunOnStop()
+{
+    throw Base::CADKernelError(QT_TRANSLATE_NOOP(
+        "Exception",
+        "Tangent propagation off: a picked edge continues tangentially into an edge that isn't "
+        "picked, and only a straight edge between two flat faces, or a fillet's arc between a flat "
+        "face and a hollow cylinder that goes on into a straight edge, with a convex corner can "
+        "stop there. Pick the whole tangent chain, or turn tangent propagation on."
+    ));
+}
+
+/// The outward normal of `face` at `point` on it
+bool outwardAt(const TopoDS_Face& face, const gp_Pnt& point, gp_Dir& outward)
+{
+    GeomAPI_ProjectPointOnSurf project(point, BRep_Tool::Surface(face));
+    if (project.NbPoints() == 0) {
+        return false;
+    }
+    double u = 0;
+    double v = 0;
+    project.LowerDistanceParameters(u, v);
+    BRepLProp_SLProps props(BRepAdaptor_Surface(face), u, v, 1, Precision::Confusion());
+    if (!props.IsNormalDefined()) {
+        return false;
+    }
+    outward = props.Normal();
+    if (face.Orientation() == TopAbs_REVERSED) {
+        outward.Reverse();
+    }
+    return true;
+}
+
+/// Across `edge` at `point`, into `face` (a plane holding the edge whose direction there is
+/// `along`)
+gp_Dir intoFace(const TopoDS_Face& face, const gp_Pnt& point, const gp_Dir& along, double probe)
+{
+    gp_Dir normal;
+    if (!outwardAt(face, point, normal)) {
+        arcRunOnStop();
+    }
+    gp_Dir into = along.Crossed(normal);
+    BRepClass_FaceClassifier inside(face, point.Translated(gp_Vec(into) * probe), 1e-9);
+    if (inside.State() != TopAbs_IN) {
+        into.Reverse();
+        BRepClass_FaceClassifier other(face, point.Translated(gp_Vec(into) * probe), 1e-9);
+        if (other.State() != TopAbs_IN) {
+            arcRunOnStop();
+        }
+    }
+    return into;
+}
+
+bool contains(const std::vector<Part::TopoShape>& shapes, const TopoDS_Shape& shape)
+{
+    return std::any_of(shapes.begin(), shapes.end(), [&](const Part::TopoShape& s) {
+        return s.getShape().IsSame(shape);
+    });
+}
+}  // namespace
+
+namespace PartDesign
+{
+/// ops#883: Onshape runs the round of an arc edge between a plane square to the arc's axis and a
+/// coaxial concave cylinder of the arc's radius (the rim of a pocket's rounded end) on along its
+/// own torus, about the arc's axis, past an unpicked tangent neighbour, until it leaves the body;
+/// the neighbour stays sharp (FGC-NS44 #73; oracle 9k's correction of FB1/FB4). A convex
+/// cylinder is Onshape's refusal (FILLET_ADJOINING_EDGE_NOT_FILLETED). The construction is the
+/// measured one (s2834's probe 5): OCCT rounds the arc with the rest, and with it its tangent
+/// chain; along each unpicked straight neighbour the base's material comes back in the r by r
+/// column at the corner, and the torus is cut in that column. Measured, and so built, only: a
+/// fillet; a neighbour that is a straight edge between two square planes, the arc's own and
+/// the cylinder's tangent plane, longer than the run-on, with no other picked edge at its ends;
+/// an OCCT contour of the arc that holds only picked edges and those neighbours.
+/// Takes the arcs out of `runOut` into `edges` and returns, per neighbour, the column and the
+/// torus within it, its axis one way and the other (applyArcRunOns).
+PartDesignExport std::vector<std::array<TopoDS_Shape, 3>> takeArcRunOns(
+    const Part::TopoShape& base,
+    std::vector<Part::TopoShape>& edges,
+    std::vector<Part::TopoShape>& runOut,
+    double radius
+)
+{
+    constexpr double pi = 3.14159265358979323846;
+    std::vector<std::array<TopoDS_Shape, 3>> runOns;
+    // per arc, its round over its own span (the torus one way and the other) and its columns
+    struct ArcSpan
+    {
+        TopoDS_Shape tori[2];
+        size_t firstColumn = 0;
+        size_t endColumn = 0;
+        std::vector<TopoDS_Vertex> sharpEnds;
+        double runOn = 0.0;
+    };
+    std::vector<ArcSpan> spans;
+    std::vector<Part::TopoShape> picked = edges;
+    // the edges OCCT rounds without the arcs: none of their rounds may reach a column
+    const std::vector<Part::TopoShape> kept = edges;
+    Bnd_Box box;
+    BRepBndLib::Add(base.getShape(), box);
+    // a column runs on along its line until it leaves the body: OCCT's round of the line runs on
+    // past its far end where the face there meets the line at under 45 deg (r / tan of it)
+    const double past = std::sqrt(box.SquareExtent()) + radius;
+    picked.insert(picked.end(), runOut.begin(), runOut.end());
+    TopTools_IndexedDataMapOfShapeListOfShape edgeFaces;
+    TopTools_IndexedDataMapOfShapeListOfShape vertexEdges;
+    TopExp::MapShapesAndAncestors(base.getShape(), TopAbs_EDGE, TopAbs_FACE, edgeFaces);
+    TopExp::MapShapesAndAncestors(base.getShape(), TopAbs_VERTEX, TopAbs_EDGE, vertexEdges);
+    std::vector<Part::TopoShape> straight;
+    for (const auto& pick : runOut) {
+        const TopoDS_Edge& edge = TopoDS::Edge(pick.getShape());
+        BRepAdaptor_Curve curve(edge);
+        if (curve.GetType() != GeomAbs_Circle) {
+            straight.push_back(pick);
+            continue;
+        }
+        const gp_Circ circle = curve.Circle();
+        const gp_Dir axisDir = circle.Axis().Direction();
+        const gp_Pnt centre = circle.Location();
+        const double circleRadius = circle.Radius();
+        const double first = curve.FirstParameter();
+        const double last = curve.LastParameter();
+        const double span = last - first;
+        const double tolerance = std::max(Precision::Confusion(), 1e-9 * circleRadius);
+        if (span <= 0 || span >= 2 * pi - 0.03 || !edgeFaces.Contains(edge)) {
+            arcRunOnStop();
+        }
+        // the plane square to the axis and the coaxial cylinder beside the edge
+        TopoDS_Face planeFace;
+        TopoDS_Face cylinderFace;
+        int count = 0;
+        for (const auto& shape : edgeFaces.FindFromKey(edge)) {
+            const TopoDS_Face& face = TopoDS::Face(shape);
+            ++count;
+            BRepAdaptor_Surface surface(face);
+            if (surface.GetType() == GeomAbs_Plane
+                && std::abs(surface.Plane().Axis().Direction().Dot(axisDir)) > 1 - 1e-9) {
+                planeFace = face;
+            }
+            else if (surface.GetType() == GeomAbs_Cylinder) {
+                const gp_Cylinder cylinder = surface.Cylinder();
+                if (std::abs(cylinder.Axis().Direction().Dot(axisDir)) > 1 - 1e-9
+                    && gp_Lin(cylinder.Axis()).Distance(centre) < tolerance
+                    && std::abs(cylinder.Radius() - circleRadius) < tolerance) {
+                    cylinderFace = face;
+                }
+            }
+        }
+        if (count != 2 || planeFace.IsNull() || cylinderFace.IsNull()) {
+            arcRunOnStop();
+        }
+        const gp_Pnt middle = ElCLib::Value((first + last) / 2, circle);
+        const gp_Dir radialMiddle(gp_Vec(centre, middle));
+        gp_Dir planeOut;
+        gp_Dir cylinderOut;
+        if (!outwardAt(planeFace, middle, planeOut) || !outwardAt(cylinderFace, middle, cylinderOut)) {
+            arcRunOnStop();
+        }
+        // concave: the material is outside the circle, the cylinder's outside looks at the axis
+        if (cylinderOut.Dot(radialMiddle) > -1 + 1e-6) {
+            arcRunOnStop();
+        }
+        // convex corner: the plane's material lies outward of the circle, the cylinder's below
+        // the plane
+        const double probe = std::min(1e-3 * radius, 1e-3 * circleRadius * span);
+        BRepClass_FaceClassifier onPlane(
+            planeFace,
+            middle.Translated(gp_Vec(radialMiddle) * probe),
+            1e-9
+        );
+        BRepClass_FaceClassifier onCylinder(
+            cylinderFace,
+            middle.Translated(gp_Vec(planeOut) * -probe),
+            1e-9
+        );
+        if (onPlane.State() != TopAbs_IN || onCylinder.State() != TopAbs_IN) {
+            arcRunOnStop();
+        }
+        const gp_Vec up = planeOut.Dot(axisDir) > 0 ? gp_Vec(axisDir) : gp_Vec(axisDir).Reversed();
+        // the run-on past a tangent vertex along the cylinder's tangent plane: the torus
+        // leaves it where (R + r) cos t = R
+        const double runOn
+            = std::sqrt((circleRadius + radius) * (circleRadius + radius) - circleRadius * circleRadius);
+        // The tool: the corner's section in the half-plane through the axis (the corner, the
+        // ball's touch point on the plane, outward of the corner, and on the cylinder, below it,
+        // and the r arc), revolved over the arc and a quarter turn past each end; its sides lie
+        // on the body's plane and cylinder (a line revolved parallel to the axis is a true
+        // cylinder). Never a full turn: a full turn's common came back empty (s2834's probe 6)
+        const double ext = std::min(pi / 2, (2 * pi - span) / 2 - 0.01);
+        // the tool must reach as far round past each tangent vertex as the run-on does
+        // (review of PR 487, S1: an arc over half a turn with a large r)
+        if (ext < std::acos(circleRadius / (circleRadius + radius)) + 0.01) {
+            arcRunOnStop();
+        }
+        // the section's arc from the plane to the cylinder gives the torus the axis `up`, the
+        // other way round the axis down; revolved from `start` by `angle`
+        const auto toolOf = [&](bool upward, double start, double angle) {
+            const gp_Pnt corner = ElCLib::Value(start, circle);
+            const gp_Vec radial = gp_Vec(centre, corner).Normalized();
+            const gp_Pnt ball = corner.Translated(radial * radius - up * radius);
+            const gp_Pnt onPlanePoint = corner.Translated(radial * radius);
+            const gp_Pnt onCylinderPoint = corner.Translated(up * -radius);
+            const gp_Pnt arcMiddle = ball.Translated(gp_Vec(ball, corner).Normalized() * radius);
+            const gp_Pnt from = upward ? onPlanePoint : onCylinderPoint;
+            const gp_Pnt to = upward ? onCylinderPoint : onPlanePoint;
+            BRepBuilderAPI_MakeWire wire(
+                BRepBuilderAPI_MakeEdge(corner, from).Edge(),
+                BRepBuilderAPI_MakeEdge(GC_MakeArcOfCircle(from, arcMiddle, to).Value()).Edge(),
+                BRepBuilderAPI_MakeEdge(to, corner).Edge()
+            );
+            if (!wire.IsDone()) {
+                arcRunOnStop();
+            }
+            BRepBuilderAPI_MakeFace section(wire.Wire(), true);
+            if (!section.IsDone()) {
+                arcRunOnStop();
+            }
+            BRepPrimAPI_MakeRevol revolve(section.Face(), circle.Axis(), angle);
+            if (!revolve.IsDone()) {
+                arcRunOnStop();
+            }
+            return revolve.Shape();
+        };
+        const TopoDS_Shape tori[2] = {
+            toolOf(true, first - ext, span + 2 * ext),
+            toolOf(false, first - ext, span + 2 * ext)
+        };
+        ArcSpan arcSpan;
+        arcSpan.tori[0] = toolOf(true, first, span);
+        arcSpan.tori[1] = toolOf(false, first, span);
+        arcSpan.firstColumn = runOns.size();
+        arcSpan.runOn = runOn;
+
+        // The tangent neighbours
+        TopTools_IndexedMapOfShape neighbours;
+        const TopoDS_Vertex ends[2] = {TopExp::FirstVertex(edge), TopExp::LastVertex(edge)};
+        const double endParameters[2] = {first, last};
+        for (int e = 0; e < 2; ++e) {
+            if (ends[e].IsNull() || !vertexEdges.Contains(ends[e])) {
+                arcRunOnStop();
+            }
+            gp_Pnt at;
+            gp_Vec tangent;
+            curve.D1(endParameters[e], at, tangent);
+            if (tangent.Magnitude() < Precision::Confusion()) {
+                arcRunOnStop();
+            }
+            const gp_Dir intoEdge = e == 0 ? gp_Dir(tangent) : gp_Dir(tangent.Reversed());
+            TopoDS_Edge line;
+            for (const auto& shape : vertexEdges.FindFromKey(ends[e])) {
+                const TopoDS_Edge& other = TopoDS::Edge(shape);
+                if (other.IsSame(edge) || (!line.IsNull() && other.IsSame(line))
+                    || BRep_Tool::Degenerated(other)) {
+                    continue;
+                }
+                BRepAdaptor_Curve otherCurve(other);
+                gp_Pnt point;
+                gp_Vec direction;
+                otherCurve.D1(BRep_Tool::Parameter(ends[e], other), point, direction);
+                const bool tangential = direction.Magnitude() > Precision::Confusion()
+                    && std::abs(gp_Dir(direction).Dot(intoEdge)) > 1 - 1e-7;
+                if (!tangential) {
+                    continue;
+                }
+                if (!line.IsNull() || contains(picked, other) || otherCurve.GetType() != GeomAbs_Line
+                    || !edgeFaces.Contains(other)) {
+                    arcRunOnStop();
+                }
+                line = other;
+            }
+            if (line.IsNull()) {
+                arcSpan.sharpEnds.push_back(ends[e]);
+                continue;  // a sharp end: OCCT ends the round there, as Onshape does
+            }
+            // no other picked edge at the tangent vertex: its round would reach the column
+            for (const auto& shape : vertexEdges.FindFromKey(ends[e])) {
+                if (!shape.IsSame(edge) && !shape.IsSame(line) && contains(picked, shape)) {
+                    arcRunOnStop();
+                }
+            }
+            // the line: between the arc's plane and a square plane, the cylinder's tangent plane
+            TopoDS_Face lineFaces[2];
+            int n = 0;
+            for (const auto& shape : edgeFaces.FindFromKey(line)) {
+                if (n == 2) {
+                    arcRunOnStop();
+                }
+                lineFaces[n++] = TopoDS::Face(shape);
+            }
+            if (n != 2) {
+                arcRunOnStop();
+            }
+            gp_Dir normals[2];
+            for (int k = 0; k < 2; ++k) {
+                BRepAdaptor_Surface surface(lineFaces[k]);
+                if (surface.GetType() != GeomAbs_Plane) {
+                    arcRunOnStop();
+                }
+                normals[k] = surface.Plane().Axis().Direction();
+            }
+            if (std::abs(normals[0].Dot(normals[1])) > 1e-9
+                || (std::abs(normals[0].Dot(axisDir)) < 1 - 1e-9
+                    && std::abs(normals[1].Dot(axisDir)) < 1 - 1e-9)) {
+                arcRunOnStop();
+            }
+            const TopoDS_Vertex farEnd = TopExp::FirstVertex(line).IsSame(ends[e])
+                ? TopExp::LastVertex(line)
+                : TopExp::FirstVertex(line);
+            const gp_Pnt farPoint = BRep_Tool::Pnt(farEnd);
+            const double length = at.Distance(farPoint);
+            if (length < runOn + radius) {
+                arcRunOnStop();
+            }
+            // no picked edge at the line's farEnd end: its round would reach the column
+            if (vertexEdges.Contains(farEnd)) {
+                for (const auto& shape : vertexEdges.FindFromKey(farEnd)) {
+                    if (!shape.IsSame(line) && contains(picked, shape)) {
+                        arcRunOnStop();
+                    }
+                }
+            }
+            neighbours.Add(line);
+            // The column: the r by r square at the corner, into both planes, along the line from
+            // r before the tangent vertex on past its far end until it leaves the body
+            const gp_Dir along(gp_Vec(at, farPoint));
+            const gp_Pnt mid((at.XYZ() + farPoint.XYZ()) / 2);
+            const double lineProbe = std::min(1e-3 * radius, 1e-3 * length);
+            const gp_Dir into0 = intoFace(lineFaces[0], mid, along, lineProbe);
+            const gp_Dir into1 = intoFace(lineFaces[1], mid, along, lineProbe);
+            const gp_Pnt start = at.Translated(gp_Vec(along) * -radius);
+            BRepBuilderAPI_MakeWire square(
+                BRepBuilderAPI_MakeEdge(start, start.Translated(gp_Vec(into0) * radius)).Edge(),
+                BRepBuilderAPI_MakeEdge(
+                    start.Translated(gp_Vec(into0) * radius),
+                    start.Translated(gp_Vec(into0) * radius + gp_Vec(into1) * radius)
+                )
+                    .Edge(),
+                BRepBuilderAPI_MakeEdge(
+                    start.Translated(gp_Vec(into0) * radius + gp_Vec(into1) * radius),
+                    start.Translated(gp_Vec(into1) * radius)
+                )
+                    .Edge(),
+                BRepBuilderAPI_MakeEdge(start.Translated(gp_Vec(into1) * radius), start).Edge()
+            );
+            if (!square.IsDone()) {
+                arcRunOnStop();
+            }
+            BRepBuilderAPI_MakeFace squareFace(square.Wire(), true);
+            if (!squareFace.IsDone()) {
+                arcRunOnStop();
+            }
+            const TopoDS_Shape column
+                = BRepPrimAPI_MakePrism(squareFace.Face(), gp_Vec(along) * (radius + past))
+                      .Shape();
+            std::array<TopoDS_Shape, 3> entry {column, TopoDS_Shape(), TopoDS_Shape()};
+            for (int k = 0; k < 2; ++k) {
+                BRepAlgoAPI_Common within(tori[k], column);
+                if (!within.IsDone()) {
+                    arcRunOnStop();
+                }
+                GProp_GProps props;
+                BRepGProp::VolumeProperties(within.Shape(), props);
+                if (props.Mass() <= 0) {
+                    arcRunOnStop();
+                }
+                entry[k + 1] = within.Shape();
+            }
+            runOns.push_back(entry);
+        }
+        if (neighbours.IsEmpty()) {
+            arcRunOnStop();
+        }
+        arcSpan.endColumn = runOns.size();
+        spans.push_back(arcSpan);
+        // OCCT's contour of the arc holds picked edges and these neighbours only
+        BRepFilletAPI_MakeFillet maker(base.getShape());
+        maker.Add(radius, edge);
+        for (int contour = 1; contour <= maker.NbContours(); ++contour) {
+            for (int i = 1; i <= maker.NbEdges(contour); ++i) {
+                const TopoDS_Edge& member = maker.Edge(contour, i);
+                if (!neighbours.Contains(member) && !contains(picked, member)) {
+                    arcRunOnStop();
+                }
+            }
+        }
+        edges.push_back(pick);
+    }
+    // the base's material comes back in each column: no other round may have taken any of it
+    if (!runOns.empty() && !kept.empty()) {
+        BRepFilletAPI_MakeFillet others(base.getShape());
+        for (const auto& edge : kept) {
+            others.Add(radius, TopoDS::Edge(edge.getShape()));
+        }
+        others.Build();
+        if (!others.IsDone() || others.Shape().IsNull()) {
+            arcRunOnStop();
+        }
+        for (const auto& runOn : runOns) {
+            BRepAlgoAPI_Common before(base.getShape(), runOn[0]);
+            BRepAlgoAPI_Common after(others.Shape(), runOn[0]);
+            if (!before.IsDone() || !after.IsDone()) {
+                arcRunOnStop();
+            }
+            GProp_GProps beforeProps;
+            GProp_GProps afterProps;
+            BRepGProp::VolumeProperties(before.Shape(), beforeProps);
+            BRepGProp::VolumeProperties(after.Shape(), afterProps);
+            if (std::abs(beforeProps.Mass() - afterProps.Mass())
+                > 1e-6 * beforeProps.Mass() + Precision::Confusion()) {
+                arcRunOnStop();
+            }
+        }
+    }
+    // Another arc's column puts the base's material back over this arc's round where it crosses
+    // it (review of PR 487, M2: two rounded pocket ends in a row, both picked): Onshape rounds
+    // each arc as alone, so its round over its own span is cut again within that column. No
+    // column is restored for these entries (a null column), only the cut. The arc's run-on
+    // beyond its ends lies in its own columns, cut there.
+    // At a sharp end OCCT's round of the arc alone runs past the end's meridian plane or stops
+    // short of it, by the end wall's slant, out to where that wall meets the ring's outer circle:
+    // at most the run-on from the end for a wall near the tangent. Another arc's column there
+    // puts material back or the span torus takes too much (review of PR 487 round 3, T1, and its
+    // fix's review): any column of another arc within the run-on and 2 r of a sharp end stops,
+    // whether or not it crosses the span torus
+    const size_t columns = runOns.size();
+    for (const auto& arcSpan : spans) {
+        for (const auto& sharp : arcSpan.sharpEnds) {
+            for (size_t j = 0; j < columns; ++j) {
+                if (j >= arcSpan.firstColumn && j < arcSpan.endColumn) {
+                    continue;
+                }
+                BRepExtrema_DistShapeShape distance(runOns[j][0], sharp);
+                if (!distance.IsDone() || distance.Value() < arcSpan.runOn + 2 * radius) {
+                    arcRunOnStop();
+                }
+            }
+        }
+    }
+    for (const auto& arcSpan : spans) {
+        for (size_t j = 0; j < columns; ++j) {
+            if (j >= arcSpan.firstColumn && j < arcSpan.endColumn) {
+                continue;
+            }
+            std::array<TopoDS_Shape, 3> entry;
+            bool crosses = false;
+            for (int k = 0; k < 2; ++k) {
+                BRepAlgoAPI_Common within(arcSpan.tori[k], runOns[j][0]);
+                if (!within.IsDone() || within.HasErrors()) {
+                    arcRunOnStop();
+                }
+                GProp_GProps props;
+                BRepGProp::VolumeProperties(within.Shape(), props);
+                if (k == 0) {
+                    crosses = props.Mass() > Precision::Confusion();
+                    if (!crosses) {
+                        break;
+                    }
+                }
+                else if (props.Mass() <= Precision::Confusion()) {
+                    arcRunOnStop();
+                }
+                entry[k + 1] = within.Shape();
+            }
+            if (crosses) {
+                runOns.push_back(entry);
+            }
+        }
+    }
+    runOut = std::move(straight);
+    return runOns;
+}
+}  // namespace PartDesign
+
+// ops#883: the arcs' run-on, applied to the fillet's result; declared where used
+namespace
+{
+/// The torus of a toroidal face of `shape`, the first one
+bool torusOf(const TopoDS_Shape& shape, gp_Torus& torus)
+{
+    for (TopExp_Explorer xp(shape, TopAbs_FACE); xp.More(); xp.Next()) {
+        BRepAdaptor_Surface surface(TopoDS::Face(xp.Current()));
+        if (surface.GetType() == GeomAbs_Torus) {
+            torus = surface.Torus();
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Whether two tori are the same surface, either way round its axis
+bool sameTorus(const gp_Torus& a, const gp_Torus& b)
+{
+    const double tolerance = 1e-9 * (a.MajorRadius() + a.MinorRadius()) + Precision::Confusion();
+    return a.Location().Distance(b.Location()) < tolerance
+        && std::abs(a.Axis().Direction().Dot(b.Axis().Direction())) > 1 - 1e-9
+        && std::abs(a.MajorRadius() - b.MajorRadius()) < tolerance
+        && std::abs(a.MinorRadius() - b.MinorRadius()) < tolerance;
+}
+
+double volumeOf(const TopoDS_Shape& shape)
+{
+    GProp_GProps props;
+    BRepGProp::VolumeProperties(shape, props);
+    return props.Mass();
+}
+}  // namespace
+
+namespace PartDesign
+{
+/// ops#883: puts the base's material back in each run-on's column and cuts the torus there,
+/// then merges each torus the cut split (OCCT's round of the arc and its run-on: Onshape's one
+/// face), and only those. `runOns` from takeArcRunOns: the column, the torus within it with its
+/// axis one way and the other; the one OCCT's round has is cut, else the faces wouldn't merge.
+/// `blank` names the results (the feature's makeTopoShape())
+PartDesignExport Part::TopoShape applyArcRunOns(
+    Part::TopoShape shape,
+    const Part::TopoShape& base,
+    const std::vector<std::array<TopoDS_Shape, 3>>& runOns,
+    const Part::TopoShape& blank
+)
+{
+    std::vector<TopoDS_Shape> cutters;
+    for (const auto& runOn : runOns) {
+        gp_Torus cutter;
+        if (!torusOf(runOn[1], cutter)) {
+            arcRunOnStop();
+        }
+        TopoDS_Shape chosen = runOn[1];
+        for (TopExp_Explorer xp(shape.getShape(), TopAbs_FACE); xp.More(); xp.Next()) {
+            BRepAdaptor_Surface surface(TopoDS::Face(xp.Current()));
+            if (surface.GetType() == GeomAbs_Torus && sameTorus(surface.Torus(), cutter)) {
+                if (surface.Torus().Axis().Direction().Dot(cutter.Axis().Direction()) < 0) {
+                    chosen = runOn[2];
+                }
+                break;
+            }
+        }
+        cutters.push_back(chosen);
+    }
+    for (const auto& runOn : runOns) {
+        if (runOn[0].IsNull()) {
+            continue;  // only a cut: another arc's round crossed by a column (takeArcRunOns)
+        }
+        BRepAlgoAPI_Common back(base.getShape(), runOn[0]);
+        if (!back.IsDone()) {
+            arcRunOnStop();
+        }
+        Part::TopoShape tool(blank);
+        tool.setShape(back.Shape());
+        Part::TopoShape fused(blank);
+        fused.makeElementFuse({shape, tool});
+        shape = fused;
+    }
+    for (const auto& cutter : cutters) {
+        Part::TopoShape tool(blank);
+        tool.setShape(cutter);
+        Part::TopoShape cut(blank);
+        cut.makeElementCut({shape, tool});
+        shape = cut;
+    }
+    // the seams: edges between two faces of one torus
+    TopTools_IndexedDataMapOfShapeListOfShape edgeFaces;
+    TopExp::MapShapesAndAncestors(shape.getShape(), TopAbs_EDGE, TopAbs_FACE, edgeFaces);
+    TopTools_MapOfShape keep;
+    int seams = 0;
+    for (int i = 1; i <= edgeFaces.Extent(); ++i) {
+        std::vector<gp_Torus> tori;
+        TopTools_IndexedMapOfShape faces;
+        for (const auto& face : edgeFaces(i)) {
+            faces.Add(face);
+        }
+        for (int k = 1; k <= faces.Extent(); ++k) {
+            BRepAdaptor_Surface surface(TopoDS::Face(faces(k)));
+            if (surface.GetType() == GeomAbs_Torus) {
+                tori.push_back(surface.Torus());
+            }
+        }
+        const bool seam = faces.Extent() == 2 && tori.size() == 2 && sameTorus(tori[0], tori[1])
+            && std::any_of(cutters.begin(), cutters.end(), [&](const TopoDS_Shape& cutter) {
+                   gp_Torus torus;
+                   return torusOf(cutter, torus) && sameTorus(torus, tori[0]);
+               });
+        if (seam) {
+            ++seams;
+        }
+        else {
+            keep.Add(edgeFaces.FindKey(i));
+        }
+    }
+    if (seams == 0) {
+        return shape;
+    }
+    ShapeUpgrade_UnifySameDomain unify(shape.getShape(), true, true, false);
+    unify.KeepShapes(keep);
+    unify.Build();
+    const TopoDS_Shape& unified = unify.Shape();
+    const double before = volumeOf(shape.getShape());
+    if (unified.IsNull() || !BRepCheck_Analyzer(unified).IsValid()
+        || std::abs(volumeOf(unified) - before) > 1e-7 * std::abs(before) + Precision::Confusion()) {
+        return shape;  // the seam stays: a face more than Onshape's, the same solid
+    }
+    Part::TopoShape merged(blank);
+    merged.makeShapeWithElementMap(unified, Part::MapperHistory(unify.History()), {shape}, Part::OpCodes::Refine);
+    return merged;
 }
 }  // namespace PartDesign
 
