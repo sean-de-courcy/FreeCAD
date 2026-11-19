@@ -1638,6 +1638,14 @@ PartDesignExport std::vector<std::array<TopoDS_Shape, 3>> takeArcRunOns(
 {
     constexpr double pi = 3.14159265358979323846;
     std::vector<std::array<TopoDS_Shape, 3>> runOns;
+    // per arc, its round over its own span (the torus one way and the other) and its columns
+    struct ArcSpan
+    {
+        TopoDS_Shape tori[2];
+        size_t firstColumn = 0;
+        size_t endColumn = 0;
+    };
+    std::vector<ArcSpan> spans;
     std::vector<Part::TopoShape> picked = edges;
     // the edges OCCT rounds without the arcs: none of their rounds may reach a column
     const std::vector<Part::TopoShape> kept = edges;
@@ -1732,15 +1740,20 @@ PartDesignExport std::vector<std::array<TopoDS_Shape, 3>> takeArcRunOns(
         // on the body's plane and cylinder (a line revolved parallel to the axis is a true
         // cylinder). Never a full turn: a full turn's common came back empty (s2834's probe 6)
         const double ext = std::min(pi / 2, (2 * pi - span) / 2 - 0.01);
-        const gp_Pnt corner = ElCLib::Value(first - ext, circle);
-        const gp_Vec radial = gp_Vec(centre, corner).Normalized();
-        const gp_Pnt ball = corner.Translated(radial * radius - up * radius);
-        const gp_Pnt onPlanePoint = corner.Translated(radial * radius);
-        const gp_Pnt onCylinderPoint = corner.Translated(up * -radius);
-        const gp_Pnt arcMiddle = ball.Translated(gp_Vec(ball, corner).Normalized() * radius);
+        // the tool must reach as far round past each tangent vertex as the run-on does
+        // (review of PR 487, S1: an arc over half a turn with a large r)
+        if (ext < std::acos(circleRadius / (circleRadius + radius)) + 0.01) {
+            arcRunOnStop();
+        }
         // the section's arc from the plane to the cylinder gives the torus the axis `up`, the
-        // other way round the axis down
-        const auto toolOf = [&](bool upward) {
+        // other way round the axis down; revolved from `start` by `angle`
+        const auto toolOf = [&](bool upward, double start, double angle) {
+            const gp_Pnt corner = ElCLib::Value(start, circle);
+            const gp_Vec radial = gp_Vec(centre, corner).Normalized();
+            const gp_Pnt ball = corner.Translated(radial * radius - up * radius);
+            const gp_Pnt onPlanePoint = corner.Translated(radial * radius);
+            const gp_Pnt onCylinderPoint = corner.Translated(up * -radius);
+            const gp_Pnt arcMiddle = ball.Translated(gp_Vec(ball, corner).Normalized() * radius);
             const gp_Pnt from = upward ? onPlanePoint : onCylinderPoint;
             const gp_Pnt to = upward ? onCylinderPoint : onPlanePoint;
             BRepBuilderAPI_MakeWire wire(
@@ -1755,13 +1768,20 @@ PartDesignExport std::vector<std::array<TopoDS_Shape, 3>> takeArcRunOns(
             if (!section.IsDone()) {
                 arcRunOnStop();
             }
-            BRepPrimAPI_MakeRevol revolve(section.Face(), circle.Axis(), span + 2 * ext);
+            BRepPrimAPI_MakeRevol revolve(section.Face(), circle.Axis(), angle);
             if (!revolve.IsDone()) {
                 arcRunOnStop();
             }
             return revolve.Shape();
         };
-        const TopoDS_Shape tori[2] = {toolOf(true), toolOf(false)};
+        const TopoDS_Shape tori[2] = {
+            toolOf(true, first - ext, span + 2 * ext),
+            toolOf(false, first - ext, span + 2 * ext)
+        };
+        ArcSpan arcSpan;
+        arcSpan.tori[0] = toolOf(true, first, span);
+        arcSpan.tori[1] = toolOf(false, first, span);
+        arcSpan.firstColumn = runOns.size();
 
         // The tangent neighbours
         TopTools_IndexedMapOfShape neighbours;
@@ -1883,7 +1903,7 @@ PartDesignExport std::vector<std::array<TopoDS_Shape, 3>> takeArcRunOns(
             const TopoDS_Shape column
                 = BRepPrimAPI_MakePrism(squareFace.Face(), gp_Vec(along) * (radius + past))
                       .Shape();
-            std::array<TopoDS_Shape, 3> runOn {column, TopoDS_Shape(), TopoDS_Shape()};
+            std::array<TopoDS_Shape, 3> entry {column, TopoDS_Shape(), TopoDS_Shape()};
             for (int k = 0; k < 2; ++k) {
                 BRepAlgoAPI_Common within(tori[k], column);
                 if (!within.IsDone()) {
@@ -1894,13 +1914,15 @@ PartDesignExport std::vector<std::array<TopoDS_Shape, 3>> takeArcRunOns(
                 if (props.Mass() <= 0) {
                     arcRunOnStop();
                 }
-                runOn[k + 1] = within.Shape();
+                entry[k + 1] = within.Shape();
             }
-            runOns.push_back(runOn);
+            runOns.push_back(entry);
         }
         if (neighbours.IsEmpty()) {
             arcRunOnStop();
         }
+        arcSpan.endColumn = runOns.size();
+        spans.push_back(arcSpan);
         // OCCT's contour of the arc holds picked edges and these neighbours only
         BRepFilletAPI_MakeFillet maker(base.getShape());
         maker.Add(radius, edge);
@@ -1937,6 +1959,43 @@ PartDesignExport std::vector<std::array<TopoDS_Shape, 3>> takeArcRunOns(
             if (std::abs(beforeProps.Mass() - afterProps.Mass())
                 > 1e-6 * beforeProps.Mass() + Precision::Confusion()) {
                 arcRunOnStop();
+            }
+        }
+    }
+    // Another arc's column puts the base's material back over this arc's round where it crosses
+    // it (review of PR 487, M2: two rounded pocket ends in a row, both picked): Onshape rounds
+    // each arc as alone, so its round over its own span is cut again within that column. No
+    // column is restored for these entries (a null column), only the cut. The arc's run-on
+    // beyond its ends lies in its own columns, cut there; past a sharp end OCCT's round ends,
+    // as Onshape's, and nothing is cut
+    const size_t columns = runOns.size();
+    for (const auto& arcSpan : spans) {
+        for (size_t j = 0; j < columns; ++j) {
+            if (j >= arcSpan.firstColumn && j < arcSpan.endColumn) {
+                continue;
+            }
+            std::array<TopoDS_Shape, 3> entry;
+            bool crosses = false;
+            for (int k = 0; k < 2; ++k) {
+                BRepAlgoAPI_Common within(arcSpan.tori[k], runOns[j][0]);
+                if (!within.IsDone() || within.HasErrors()) {
+                    arcRunOnStop();
+                }
+                GProp_GProps props;
+                BRepGProp::VolumeProperties(within.Shape(), props);
+                if (k == 0) {
+                    crosses = props.Mass() > Precision::Confusion();
+                    if (!crosses) {
+                        break;
+                    }
+                }
+                else if (props.Mass() <= Precision::Confusion()) {
+                    arcRunOnStop();
+                }
+                entry[k + 1] = within.Shape();
+            }
+            if (crosses) {
+                runOns.push_back(entry);
             }
         }
     }
@@ -2012,6 +2071,9 @@ PartDesignExport Part::TopoShape applyArcRunOns(
         cutters.push_back(chosen);
     }
     for (const auto& runOn : runOns) {
+        if (runOn[0].IsNull()) {
+            continue;  // only a cut: another arc's round crossed by a column (takeArcRunOns)
+        }
         BRepAlgoAPI_Common back(base.getShape(), runOn[0]);
         if (!back.IsDone()) {
             arcRunOnStop();

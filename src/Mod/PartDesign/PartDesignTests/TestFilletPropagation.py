@@ -407,6 +407,58 @@ class TestFilletPropagation(unittest.TestCase):
             fillet.Shape.Volume, volume - rimRound - self.torusRunOn(1.0, math.pi, 2), delta=1e-4
         )
 
+    def twoSlotsPad(self, shift):
+        """A plate x -40..20, y -15..15, z 0..10 with two closed slots through it in a row along x, each a half circle
+        of radius 5 (x >= its centre) with walls 8 long and a straight closing wall: the first about the origin, the
+        second about (-20, `shift`). Returns the pad, its volume and the names of the two half circles' top edges."""
+        r = self.NOTCH_R
+        outline = [
+            Part.LineSegment(V(-40, -15, 0), V(20, -15, 0)),
+            Part.LineSegment(V(20, -15, 0), V(20, 15, 0)),
+            Part.LineSegment(V(20, 15, 0), V(-40, 15, 0)),
+            Part.LineSegment(V(-40, 15, 0), V(-40, -15, 0)),
+        ]
+        for cx, cy in ((0.0, 0.0), (-20.0, shift)):
+            outline += [
+                Part.LineSegment(V(cx - 8, cy + r, 0), V(cx, cy + r, 0)),
+                Part.ArcOfCircle(Part.Circle(V(cx, cy, 0), V(0, 0, 1), r), -math.pi / 2, math.pi / 2),
+                Part.LineSegment(V(cx, cy - r, 0), V(cx - 8, cy - r, 0)),
+                Part.LineSegment(V(cx - 8, cy - r, 0), V(cx - 8, cy + r, 0)),
+            ]
+        pad = models.pad(self.body, models.sketch(self.doc, "Slots", outline, self.body), 10)
+        self.doc.recompute()
+        volume = 10 * (60 * 30 - 2 * (8 * 2 * r + math.pi * r * r / 2))
+        self.assertAlmostEqual(pad.Shape.Volume, volume, delta=1e-3)
+        names = []
+        for i, edge in enumerate(pad.Shape.Edges):
+            if (
+                isinstance(edge.Curve, Part.Circle)
+                and abs(edge.Curve.Radius - r) < 1e-9
+                and edge.BoundBox.ZMin > 9.999
+            ):
+                names.append("Edge%d" % (i + 1))
+        self.assertEqual(len(names), 2)
+        return pad, volume, names
+
+    def twoSlotsRounds(self, shift):
+        """Review of fork PR 487, M2: two slots' rounded ends in a row, both rims picked. A wall's run-on column runs
+        on through the other slot's round; Onshape rounds each arc as alone: the two rounds and their run-ons."""
+        pad, volume, arcs = self.twoSlotsPad(shift)
+        fillet = self.fillet(pad, arcs, radius=1.0, TangentPropagation=False)
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+        shape = fillet.Shape
+        self.assertTrue(shape.isValid())
+        self.assertEqual(len(shape.Solids), 1)
+        self.assertAlmostEqual(shape.Volume, volume - 2 * self.torusRunOn(1.0, math.pi, 2), delta=1e-4)
+
+    def testOffOnTwoHollowArcsInARow(self):
+        """The walls collinear: the first slot's wall columns cross the second's round near its tangent vertices."""
+        self.twoSlotsRounds(0.0)
+
+    def testOffOnTwoHollowArcsInARowOffset(self):
+        """The second slot moved 3 sideways: the first slot's upper wall column crosses its round mid-arc."""
+        self.twoSlotsRounds(3.0)
+
     def testOffOnAHollowArcAnotherRoundInTheColumnStops(self):
         """Another picked edge whose round reaches into the run-on's column (a hole's top rim 1.5 r from the wall
         line): the column would put the base's material back over it (not measured): it stops."""
