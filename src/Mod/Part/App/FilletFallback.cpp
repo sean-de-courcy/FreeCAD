@@ -1033,6 +1033,9 @@ struct Context
     TopTools_IndexedDataMapOfShapeListOfShape vertexFaces;
     TopTools_IndexedMapOfShape selected;
     double scale = 1.0;  // the base's size, for the half-spaces
+    /// A concave arc's end at a cusp of its floor was built (VertexEnd::stripCusp): a rule new
+    /// with ops#898 cause B (Construction::newRule)
+    mutable bool cuspLifted = false;
     /// The blends' continuations built so far, by wall and end (blendBeyond): one per end, so that
     /// every tool cut by it is cut by the same surface
     struct KnownBlend
@@ -4525,6 +4528,9 @@ Tool circleTool(const Context& ctx, const EdgeData& data, const VertexEnd ends[2
                  && ctx.request.kind == Kind::Fillet && ends[i].kind == VertexClass::FreeEnd
                  && ends[i].trims.size() == 1 && !missesAxis(ends[i].trims.front(), circle))) {
             refuse("an arc that ends on a face that is not a plane");
+        }
+        if (!ends[i].surfaceEnd.IsNull()) {
+            ctx.cuspLifted = true;
         }
         const TrimPlane& plane = ends[i].trims.front();
         if (!missesAxis(plane, circle)) {
@@ -10298,6 +10304,10 @@ TopoDS_Shape constructShape(
     }
     cornerCount = cornerVertices.Extent();
     rolledOn = std::any_of(tools.begin(), tools.end(), [](const Tool& t) { return t.rolled; });
+    // A cusp end is cause B's rule: what built before it still does (review of PR 487, T3)
+    if (keptOverFace && ctx.cuspLifted) {
+        *keptOverFace = true;
+    }
     return shape;
 }
 
