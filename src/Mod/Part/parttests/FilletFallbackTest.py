@@ -6135,6 +6135,80 @@ class DPocketCornerTest(unittest.TestCase):
         self.check(body.makeFillet(1.0, floor), body, 6.749786)
 
 
+class NotchedDPocketCornerTest(unittest.TestCase):
+    """ops#883 C, designed (the form of NS44 Vial Well Atrium #136): DPocketCornerTest's block with
+    a tall-walled D pocket, depth 3, and a notch cut into the chord's wall from the top, 2 wide
+    about x = 0, its bottom round, r 1 about an axis across the wall, its lowest point sill above
+    the floor, nearer than the dress-up c = 1. The floor's arc and chord meet at two corners
+    reflex in the material. OCCT's result is valid and refused there; Onshape's (measured on
+    #136, 48 faces, area to 1e-10): the fills meet along their intersection, and the chord's is
+    kept over its wall, the notch run on through it. The reference: the base united with the
+    arc's fill (its section revolved a whole turn) and the chord's (extruded past both corners),
+    less the notch run on"""
+
+    W, H, C = 2.0, 3.0, 1.0
+
+    def section(self, kind):
+        """The fill's section in the XZ plane, x the distance from the wall, z the height"""
+        V, c = FreeCAD.Vector, self.C
+        if kind == "chamfer":
+            return Part.Face(Part.makePolygon([V(0, 0, 0), V(c, 0, 0), V(0, 0, c), V(0, 0, 0)]))
+        square = Part.Face(Part.makePolygon([V(0, 0, 0), V(c, 0, 0), V(c, 0, c), V(0, 0, c), V(0, 0, 0)]))
+        return square.cut(Part.Face(Part.Wire(Part.makeCircle(c, V(c, 0, c), V(0, 1, 0)))))
+
+    def pocket(self):
+        V = FreeCAD.Vector
+        disk = Part.makeCylinder(6, self.H, V(0, 0, 5 - self.H))
+        disk.rotate(V(0, 0, 0), V(0, 0, 1), 90)
+        air = disk.common(Part.makeBox(40, 20 + self.W, 10, V(-20, -20, 0)))
+        return Part.makeBox(24, 24, 5, V(-12, -12, 0)).cut(air).removeSplitter()
+
+    def notch(self, sill):
+        V = FreeCAD.Vector
+        z = 5 - self.H + sill + 1
+        return Part.makeCylinder(1, 4, V(0, self.W - 1, z), V(0, 1, 0)).fuse(
+            Part.makeBox(2, 4, 10, V(-1, self.W - 1, z))
+        ).removeSplitter()
+
+    def body(self, sill):
+        body = self.pocket().cut(self.notch(sill)).removeSplitter()
+        floor = [e for e in body.Edges if all(abs(v.Point.z - (5 - self.H)) < 1e-9 for v in e.Vertexes)]
+        self.assertEqual(len(floor), 2)
+        return body, floor
+
+    def reference(self, kind, sill):
+        V, floor = FreeCAD.Vector, 5 - self.H
+        arc = self.section(kind).mirror(V(0, 0, 0), V(1, 0, 0))
+        arc.translate(V(6, 0, floor))
+        arc = arc.revolve(V(0, 0, 0), V(0, 0, 1), 360).Solids[0]
+        chord = self.section(kind)
+        chord.rotate(V(0, 0, 0), V(0, 0, 1), -90)
+        chord.translate(V(-12, self.W, floor))
+        chord = chord.extrude(V(24, 0, 0))
+        block = Part.makeBox(24, 24, 5, V(-12, -12, 0))
+        return self.pocket().fuse([arc, chord]).common(block).cut(self.notch(sill))
+
+    def check(self, kind, sill, delta):
+        body, floor = self.body(sill)
+        result = getattr(body, "makeFillet" if kind == "fillet" else "makeChamfer")(self.C, floor)
+        reference = self.reference(kind, sill)
+        self.assertTrue(result.isValid())
+        self.assertEqual(len(result.Solids), 1)
+        self.assertAlmostEqual(result.Volume, reference.Volume, delta=delta)
+        self.assertLess(result.cut(reference).Volume + reference.cut(result).Volume, delta)
+        self.assertLess(result.common(self.notch(sill)).Volume, 1e-9)
+
+    def testFillet(self):
+        # The revolved round's volume is good to about 5e-6 (DPocketCornerTest's tall form)
+        self.check("fillet", 0.5, 1e-5)
+
+    def testChamfer(self):
+        self.check("chamfer", 0.5, 1e-6)
+
+    def testFilletNotchNearerTheFloor(self):
+        self.check("fillet", 0.3, 1e-5)
+
+
 class FillOverALedgeTest(unittest.TestCase):
     """ops#898 cause A, designed: a keyhole boss (the circle r 7 about the z axis and the slot |y| < 2
     to x = 12, height 3) on a slab z -2..0 whose top is the ledge round the boss's foot; the slab's

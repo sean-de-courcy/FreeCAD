@@ -7019,13 +7019,20 @@ bool trimFusedTool(
  * (Request::widerScope). Whatever the cut takes out of the air must lie along edges of the face
  * whose face beyond drops away square to it; anything else (a face beyond that leans, a wall that
  * rises, the other strip's face) keeps a refusal. Returns whether the tool changed
+ *
+ * partnerWalls: at a concave corner reflex in the material (an overlap corner, ops#888 A3b), the
+ * walls of the tool's partner there. Past the corner the tool runs on in front of the partner's
+ * wall, where the two fills meet along their intersection (ops#883 C, NS44 Vial Well Atrium #136;
+ * Onshape's 48 faces, area to 1e-10): what stands in the air along an edge whose face beyond is
+ * such a wall is kept, neither trimmed nor refused
  */
 bool trimFusedToolOverFace(
     Tool& tool,
     const FusedRun& run,
     const TopoDS_Shape& base,
     std::vector<TopoDS_Face>& wallFaces,
-    std::vector<TopoDS_Face>* faceWalls = nullptr
+    std::vector<TopoDS_Face>* faceWalls = nullptr,
+    const std::vector<TopoDS_Face>* partnerWalls = nullptr
 )
 {
     BRepAdaptor_Surface surface(run.face, Standard_False);
@@ -7079,6 +7086,7 @@ bool trimFusedToolOverFace(
     std::vector<TopoDS_Face> beyondFaces;
     TopTools_IndexedMapOfShape seen;
     std::vector<TopoDS_Edge> runOver;
+    std::vector<TopoDS_Edge> runOn;
     // The angle's cosine past which a face beyond is not square to the face: the census rows'
     // faces beyond are square to 1e-12, a blend's B-spline face to its own approximation
     constexpr double squareCosine = 1e-6;
@@ -7112,6 +7120,13 @@ bool trimFusedToolOverFace(
         if (beyond.IsNull()) {
             refuse("an edge a fused tool runs off over has no face beyond");
         }
+        auto isBeyond = [&](const TopoDS_Face& wall) {
+            return wall.IsSame(beyond);
+        };
+        if (partnerWalls && std::any_of(partnerWalls->begin(), partnerWalls->end(), isBeyond)) {
+            runOn.push_back(edge);
+            continue;
+        }
         BRepAdaptor_Curve curve(edge);
         const double first = curve.FirstParameter();
         const double last = curve.LastParameter();
@@ -7131,20 +7146,41 @@ bool trimFusedToolOverFace(
         beyondFaces.push_back(beyond);
         runOver.push_back(edge);
     }
-    if (beyondFaces.empty()) {
+    if (beyondFaces.empty() && runOn.empty()) {
         refuse("a concave dress-up runs past its face into the air along no edge of it");
     }
     // Every piece of it in the air lies along one of those edges: a piece that does not (over a
-    // stud standing on the face, through a wall rising from it) is not what Onshape's trim leaves
+    // stud standing on the face, through a wall rising from it) is not what Onshape's trim leaves.
+    // A piece along an edge to the partner's wall only is the run past the corner: kept
+    BRep_Builder builder;
+    TopoDS_Compound trimmedAir;
+    builder.MakeCompound(trimmedAir);
+    TopoDS_Compound keptAir;
+    builder.MakeCompound(keptAir);
+    bool anyKept = false;
+    auto along = [](const std::vector<TopoDS_Edge>& edges, const TopoDS_Shape& piece) {
+        return std::any_of(edges.begin(), edges.end(), [&](const TopoDS_Edge& edge) {
+            return lengthAlong(edge, piece) > 1000 * linearTolerance;
+        });
+    };
     for (TopExp_Explorer it(air, TopAbs_SOLID); it.More(); it.Next()) {
-        if (volumeOf(it.Current()) <= volumeTolerance * tool.volume) {
+        if (volumeOf(it.Current()) <= volumeTolerance * tool.volume
+            || along(runOver, it.Current())) {
+            builder.Add(trimmedAir, it.Current());
             continue;
         }
-        if (std::none_of(runOver.begin(), runOver.end(), [&](const TopoDS_Edge& edge) {
-                return lengthAlong(edge, it.Current()) > 1000 * linearTolerance;
-            })) {
+        // At a corner reflex in the material, a piece that does not touch the face at all is
+        // not over it (the partner's fill across a pocket, in the prism's shadow of a notch)
+        const bool atCorner = partnerWalls && !partnerWalls->empty();
+        if (!along(runOn, it.Current()) && !(atCorner && !touch(run.face, it.Current()))) {
             refuse("a fused tool trimmed over its face stands in the air away from its edges");
         }
+        builder.Add(keptAir, it.Current());
+        anyKept = true;
+    }
+    // Only the run past the corner stands in the air: nothing to trim
+    if (beyondFaces.empty()) {
+        return false;
     }
     // The cut must lie past the strip: away from the faces of the tool's other strips. A touch
     // along a line only takes none of them: where the face narrows to a cusp beside a wall's
@@ -7155,13 +7191,22 @@ bool trimFusedToolOverFace(
             continue;
         }
         for (const auto& contact : strip.contacts) {
-            if (touch(contact, air)
-                && areaOf(commonOf(contact, air)) > areaToleranceOf(contact)) {
+            if (touch(contact, trimmedAir)
+                && areaOf(commonOf(contact, trimmedAir)) > areaToleranceOf(contact)) {
                 refuse("a fused tool trimmed over its face reaches back to its other face");
             }
         }
     }
-    clipTool(tool, trim);
+    if (anyKept) {
+        BRepAlgoAPI_Cut keep(trim, keptAir);
+        if (!keep.IsDone() || keep.HasErrors()) {
+            refuse("trimming a fused tool over its face failed");
+        }
+        clipTool(tool, keep.Shape());
+    }
+    else {
+        clipTool(tool, trim);
+    }
     for (const auto& beyond : beyondFaces) {
         if (std::none_of(wallFaces.begin(), wallFaces.end(), [&](const TopoDS_Face& wall) {
                 return wall.IsSame(beyond);
@@ -7182,14 +7227,24 @@ bool trimFusedToolOverFace(
     return true;
 }
 
-/// What of the tool stands in the air in front of the planar face, outside the face's prism
+/** What of the tool stands in the air in front of the planar face, outside the face's prism. What
+ * stands in front of the tool's own walls along an edge of the face (the fill beside the face's
+ * own fill at a concave corner reflex in the material, run on past the corner: ops#883 C) is the
+ * tool's own fill, not over the face
+ */
 double airOverFace(const Tool& tool, const TopoDS_Face& face, const TopoDS_Shape& base)
 {
     Tool copy = tool;
     std::vector<TopoDS_Face> walls;
+    std::vector<TopoDS_Face> ownWalls;
+    for (const auto& strip : tool.strips) {
+        if (!strip.face.IsSame(face)) {
+            ownWalls.push_back(strip.face);
+        }
+    }
     FusedRun run {&tool, face, {}};
     const double before = volumeOf(copy.solid) - copy.inBase;
-    if (!trimFusedToolOverFace(copy, run, base, walls)) {
+    if (!trimFusedToolOverFace(copy, run, base, walls, nullptr, &ownWalls)) {
         return 0.0;
     }
     return before - (volumeOf(copy.solid) - copy.inBase);
@@ -9340,7 +9395,36 @@ TopoDS_Shape constructShape(
         if (anyMiter) {
             refuse("a fused tool trimmed over its face at a concave corner with a circle");
         }
-        if (!trimFusedToolOverFace(tool, run, base.getShape(), wallFaces, &faceWalls)) {
+        // At an overlap corner, the partner's walls (ops#883 C): the faces of its strips that are
+        // not this tool's
+        std::vector<TopoDS_Face> partnerWalls;
+        for (const auto& corner : overlapCorners) {
+            if (!corner.edges[0].IsSame(tool.source) && !corner.edges[1].IsSame(tool.source)) {
+                continue;
+            }
+            const TopoDS_Shape& partner
+                = corner.edges[0].IsSame(tool.source) ? corner.edges[1] : corner.edges[0];
+            for (const auto& other : tools) {
+                if (&other == &tool || !other.source.IsSame(partner)) {
+                    continue;
+                }
+                for (const auto& strip : other.strips) {
+                    if (std::none_of(tool.strips.begin(), tool.strips.end(), [&](const auto& own) {
+                            return own.face.IsSame(strip.face);
+                        })) {
+                        partnerWalls.push_back(strip.face);
+                    }
+                }
+            }
+        }
+        if (!trimFusedToolOverFace(
+                tool,
+                run,
+                base.getShape(),
+                wallFaces,
+                &faceWalls,
+                &partnerWalls
+            )) {
             return false;
         }
         if (overlapPartner(tool)) {
