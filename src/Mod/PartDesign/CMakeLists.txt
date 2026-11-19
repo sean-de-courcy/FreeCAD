@@ -130,6 +130,7 @@ set(PartDesign_TestScripts
     PartDesignTests/TestStudioHistory.py
     PartDesignTests/TestPieces.py
     PartDesignTests/TestBooleanScope.py
+    PartDesignTests/TestImportReferences.py
     PartDesignTests/TestStudioPatterns.py
     PartDesignTests/TestDerivedFiles.py
     PartDesignTests/TestDerivedFollowUps.py

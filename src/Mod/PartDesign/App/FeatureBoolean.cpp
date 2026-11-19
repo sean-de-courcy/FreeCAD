@@ -274,6 +274,25 @@ bool Boolean::hasObject(const App::DocumentObject* /*object*/, bool /*recursive*
     return false;
 }
 
+void Boolean::extensionOnChanged(const App::Property* prop)
+{
+    // FreeCAD-CH ops#910: the tools are references, not members (hasObject()), so a tool may be
+    // in a group of its own: a Body in the studio's App::Part, another Body's feature (a Merge).
+    // addObjects() and its siblings set the list past the rule of one group per object, and a
+    // file's restore doesn't apply it; an import does (a paste, Document.copyObject, Merge
+    // project), and took such a tool off the list: "Boolean has no tools". Every way of setting
+    // the list takes it as addObjects() does.
+    if (prop == &Group && !Group.testStatus(App::Property::User3)) {
+        Base::ObjectStatusLocker<App::Property::Status, App::Property> guard(
+            App::Property::User3,
+            &Group
+        );
+        App::GeoFeatureGroupExtension::extensionOnChanged(prop);
+        return;
+    }
+    App::GeoFeatureGroupExtension::extensionOnChanged(prop);
+}
+
 // StudioList.cpp and StudioOwner.cpp (FreeCAD-CH ops#654 P5; declared where used)
 PartDesignExport void studioBooleanParts(const App::DocumentObject* owner,
                                          std::vector<Body*>& steps,

@@ -76,6 +76,9 @@ public:
     std::vector<App::DocumentObject*> removeObject(App::DocumentObject* object) override;
     std::vector<App::DocumentObject*> removeObjects(std::vector<App::DocumentObject*> objects) override;
     bool hasObject(const App::DocumentObject* object, bool recursive = false) const override;
+    /// The tool list set by a restore, an import or a script is taken as addObjects() takes it
+    /// (FreeCAD-CH ops#910)
+    void extensionOnChanged(const App::Property* prop) override;
     /// returns the type name of the view provider
     const char* getViewProviderName() const override
     {
