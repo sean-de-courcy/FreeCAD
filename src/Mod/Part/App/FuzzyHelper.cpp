@@ -60,8 +60,19 @@ bool FuzzyHelper::getCrossingRecovery()
     if (CrossingRecovery.load() > 0) {
         return true;
     }
+#ifdef _MSC_VER
+    char* value = nullptr;
+    std::size_t size = 0;
+    if (_dupenv_s(&value, &size, "FREECAD_CH_CROSSING_RECOVERY") != 0 || !value) {
+        return false;
+    }
+    const bool on = std::strcmp(value, "on") == 0;
+    std::free(value);
+    return on;
+#else
     const char* value = std::getenv("FREECAD_CH_CROSSING_RECOVERY");
     return value && std::strcmp(value, "on") == 0;
+#endif
 }
 
 void FuzzyHelper::withCrossingRecovery(const std::function<void()>& func)
