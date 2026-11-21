@@ -37,6 +37,7 @@
 #include <BRep_TVertex.hxx>
 #include <BRep_Tool.hxx>
 #include <BRepAdaptor_Curve.hxx>
+#include <BRepAdaptor_Surface.hxx>
 #include <BRepBndLib.hxx>
 #include <BRepLib.hxx>
 #include <BRepLib_FuseEdges.hxx>
@@ -1328,6 +1329,69 @@ static FaceTypedBase& getSphereObject()
 {
     static FaceTypedRevolved object(GeomAbs_Sphere, Revolved::Sphere);
     return object;
+}
+
+// FreeCAD-CH (ops#931, review pri931-r1 F1): makeElementRefine's UnifySameDomain fallback merges
+// cone, torus and sphere faces only where the face uniter would: each shell's faces of these kinds
+// are grouped as FaceUniter::process() groups them (by kind, by surface, by adjacency), and the
+// edges of every face in a group the uniter's buildFace refuses (a pointed cone, a sphere cap or
+// zone, a closed surface with holes) or that has no neighbour are kept. A helix earlier in the
+// body, which sends the refine to the fallback, then never decides whether such faces merge.
+// Faces in no shell keep their edges.
+void ModelRefine::revolvedEdgesToKeep(const TopoDS_Shape& shape, TopTools_MapOfShape& keep)
+{
+    FaceTypedBase* types[] = {&getConeObject(), &getTorusObject(), &getSphereObject()};
+    auto keepFace = [&keep](const TopoDS_Shape& face) {
+        for (TopExp_Explorer xe(face, TopAbs_EDGE); xe.More(); xe.Next()) {
+            keep.Add(xe.Current());
+        }
+    };
+    auto revolved = [&types](const TopoDS_Face& face) {
+        const GeomAbs_SurfaceType kind = BRepAdaptor_Surface(face).GetType();
+        for (FaceTypedBase* type : types) {
+            if (type->getType() == kind) {
+                return true;
+            }
+        }
+        return false;
+    };
+    TopTools_MapOfShape inShell;
+    for (TopExp_Explorer xs(shape, TopAbs_SHELL); xs.More(); xs.Next()) {
+        const TopoDS_Shell& shell = TopoDS::Shell(xs.Current());
+        FaceTypeSplitter splitter;
+        splitter.addShell(shell);
+        for (FaceTypedBase* type : types) {
+            splitter.registerType(type->getType());
+        }
+        splitter.split();
+        FaceAdjacencySplitter adjacencySplitter(shell);
+        for (FaceTypedBase* type : types) {
+            const FaceVectorType& typedFaces = splitter.getTypedFaceVector(type->getType());
+            for (const TopoDS_Face& face : typedFaces) {
+                inShell.Add(face);
+            }
+            FaceEqualitySplitter equalitySplitter;
+            equalitySplitter.split(typedFaces, type);
+            for (std::size_t e = 0; e < equalitySplitter.getGroupCount(); ++e) {
+                adjacencySplitter.split(equalitySplitter.getGroup(e));
+                for (std::size_t a = 0; a < adjacencySplitter.getGroupCount(); ++a) {
+                    const FaceVectorType& group = adjacencySplitter.getGroup(a);
+                    if (group.size() > 1 && !type->buildFace(group).IsNull()) {
+                        continue;
+                    }
+                    for (const TopoDS_Face& face : group) {
+                        keepFace(face);
+                    }
+                }
+            }
+        }
+    }
+    for (TopExp_Explorer xf(shape, TopAbs_FACE); xf.More(); xf.Next()) {
+        const TopoDS_Face& face = TopoDS::Face(xf.Current());
+        if (!inShell.Contains(face) && revolved(face)) {
+            keepFace(face);
+        }
+    }
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////////

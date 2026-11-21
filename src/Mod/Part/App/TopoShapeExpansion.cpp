@@ -12268,8 +12268,8 @@ TopoShape& TopoShape::makeElementRefine(const TopoShape& shape, const char* op, 
     // features' shapes) the uniter's failure kept that shell unrefined without an error, so the
     // fallback runs then too (review replc r2), and the partial result stands when it is refused.
     // OCCT's UnifySameDomain merges in place, without sewing. It merges only the face uniter's
-    // kinds (planes, cylinders, cones, tori, spheres since ops#931, B-splines): the edges of
-    // every other face are kept, since
+    // kinds (planes, cylinders, B-splines, and since ops#931 the cones, tori and spheres in groups
+    // the uniter's own build merges): the edges of every other face are kept, since
     // KeepShapes honours only edges and vertices (review replc r2, T-A: two torus halves merged),
     // so a helix earlier in the body never decides whether cones or tori merge (review replc r1,
     // T3); it runs on a fresh copy, as the uniter may have changed its own (T2); and its result
@@ -12313,6 +12313,9 @@ TopoShape& TopoShape::makeElementRefine(const TopoShape& shape, const char* op, 
                 }
             }
         }
+        // cones, tori and spheres merge only in the groups the face uniter merges (ops#931,
+        // review pri931-r1 F1: else a helix decided whether a pointed cone's pieces merge)
+        ModelRefine::revolvedEdgesToKeep(fresh.getShape(), keep);
         unify.KeepShapes(keep);
         unify.Build();
         const TopoDS_Shape& unified = unify.Shape();
