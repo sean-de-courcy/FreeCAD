@@ -86,6 +86,12 @@ Base::Type drawPageType()
     return typeNamed(type, "TechDraw::DrawPage");
 }
 
+Base::Type drawViewType()
+{
+    static Base::Type type = Base::Type::BadType;
+    return typeNamed(type, "TechDraw::DrawView");
+}
+
 bool isDerived(const DocumentObject* obj, Base::Type type)
 {
     return !type.isBad() && obj->getTypeId().isDerivedFrom(type);
@@ -197,8 +203,67 @@ bool isTopLevel(const DocumentObject* obj)
     return !GeoFeatureGroupExtension::getGroupOfObject(obj);
 }
 
-/// A 3D object of the implicit studio at the top level
-bool isImplicitContent(const DocumentObject* obj)
+/// Whether the TechDraw view @a view shows @a obj as its Source or XSource
+bool viewShows(const DocumentObject* view, const DocumentObject* obj)
+{
+    std::vector<DocumentObject*> sources;
+    if (auto links = freecad_cast<PropertyLinkList*>(view->getPropertyByName("Source"))) {
+        sources = links->getValues();
+    }
+    if (auto links = freecad_cast<PropertyXLinkList*>(view->getPropertyByName("XSource"))) {
+        const auto more = links->getValues();
+        sources.insert(sources.end(), more.begin(), more.end());
+    }
+    return std::find(sources.begin(), sources.end(), obj) != sources.end();
+}
+
+/// ops#927: a drawing's own geometry, as a frozen view's hidden Part::Feature of Onshape's lines:
+/// a 3D object that only TechDraw views use, each as its Source or XSource. It is a member of its
+/// page, not implicit Part Studio content. Any other user (a feature, a link, a sketch's external
+/// geometry) makes it model geometry again; with no user at all it shows in the implicit studio
+bool isDrawingSource(const DocumentObject* obj)
+{
+    const auto users = obj->getInList();
+    if (users.empty()) {
+        return false;
+    }
+    return std::all_of(users.begin(), users.end(), [obj](const DocumentObject* user) {
+        return user && isDerived(user, drawViewType()) && viewShows(user, obj);
+    });
+}
+
+/// The page that owns the drawing source @a obj: of the pages holding a view that shows it
+/// (through view groups too), the first in document order, so that it is never two tabs' member
+const DocumentObject* drawingSourcePage(const DocumentObject* obj)
+{
+    std::set<const DocumentObject*> pages;
+    std::set<const DocumentObject*> seen;
+    std::vector<const DocumentObject*> todo(obj->getInList().begin(), obj->getInList().end());
+    while (!todo.empty()) {
+        auto view = todo.back();
+        todo.pop_back();
+        if (!view || !seen.insert(view).second) {
+            continue;
+        }
+        if (isDerived(view, drawPageType())) {
+            pages.insert(view);
+        }
+        else if (isDerived(view, drawViewType())) {
+            for (auto user : view->getInList()) {
+                todo.push_back(user);
+            }
+        }
+    }
+    for (auto candidate : obj->getDocument()->getObjects()) {
+        if (pages.count(candidate)) {
+            return candidate;
+        }
+    }
+    return nullptr;
+}
+
+/// A 3D object at the top level, outside every tab: implicit studio content or a drawing's source
+bool isTopLevelContent(const DocumentObject* obj)
 {
     if (!obj || !obj->isAttachedToDocument() || !isTopLevel(obj) || isTabObject(obj)) {
         return false;
@@ -212,6 +277,18 @@ bool isImplicitContent(const DocumentObject* obj)
     }
     return obj->isDerivedFrom<GeoFeature>()
         || obj->hasExtension(LinkBaseExtension::getExtensionClassTypeId());
+}
+
+/// A 3D object of the implicit studio at the top level
+bool isImplicitContent(const DocumentObject* obj)
+{
+    return isTopLevelContent(obj) && !isDrawingSource(obj);
+}
+
+/// A top-level drawing source that @a page owns (ops#927)
+bool isPageHolder(const DocumentObject* obj, const DocumentObject* page)
+{
+    return isTopLevelContent(obj) && isDrawingSource(obj) && drawingSourcePage(obj) == page;
 }
 
 void addWithChildren(
@@ -249,6 +326,12 @@ void addWithChildren(
             }
             else if (auto link = freecad_cast<PropertyLink*>(prop)) {
                 addWithChildren(link->getValue(), list, seen);
+            }
+        }
+        // Its views' own geometry goes with the page (ops#927)
+        for (auto holder : obj->getDocument()->getObjects()) {
+            if (isPageHolder(holder, obj)) {
+                addWithChildren(holder, list, seen);
             }
         }
     }
