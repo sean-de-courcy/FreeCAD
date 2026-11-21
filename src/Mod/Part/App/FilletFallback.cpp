@@ -1171,7 +1171,7 @@ EdgeData analyse(const Context& ctx, const TopoDS_Edge& edge)
         // A whole circle where a cone stands on a plane normal to its axis (ops#935: HNY DSH Nest
         // Insert #30): the section lies in the meridian plane as between a plane and a cylinder,
         // its side along the cone's line, and the tool is the section revolved a whole turn.
-        // Arcs on a cone (ends to classify) are not covered
+        // Arcs on a cone (ends to classify), convex circles and chamfers (below) are not covered
         if (planes != 1 || (cylinders != 1 && !(cones == 1 && data.closed))) {
             refuse("a circular edge not between a plane and a cylinder");
         }
@@ -1216,6 +1216,12 @@ EdgeData analyse(const Context& ctx, const TopoDS_Edge& edge)
     gp_Pnt point = curve.Value(middle);
     gp_Dir inward1 = inwardIn(data.faces[1], edge, middle);
     data.convex = inward1.Dot(outwardNormal(data.faces[0], point)) < 0;
+    // On a cone only what Onshape was measured on (ops#935): a concave round, the fill at the foot
+    // of a cone standing on the plane. A convex circle on a cone (a frustum's top), or a chamfer,
+    // is refused as before
+    if (data.cone && (data.convex || ctx.request.kind != Kind::Fillet)) {
+        refuse("a circular edge not between a plane and a cylinder");
+    }
     return data;
 }
 
@@ -9176,18 +9182,41 @@ TopoDS_Shape constructShape(
     // Fills about whole circles whose strips overlap on their common face (ops#935: HNY DSH Nest
     // Insert #30, cones standing on a plane closer than their rounds' feet reach): Onshape's
     // result is the union of the plain fills (measured on the capture to 1e-4 mm2). Each pair's
-    // common part outside the base is added once (fusedOverlap, below)
+    // common part outside the base is added once (fusedOverlap, below). Only what was measured:
+    // fills about cones, each one's strip on the plane ending before the other's foot (review
+    // of fix935 r1, T2: cylinders, and feet closer than a fill's reach, are not known from Onshape)
     std::vector<std::pair<const Tool*, const Tool*>> ringPairs;
     {
-        auto wholeCircle = [&](const Tool& tool) {
-            return !tool.cut && !tool.rolled && !tool.miter
-                && std::any_of(data.begin(), data.end(), [&](const EdgeData& d) {
-                       return d.edge.IsSame(tool.source) && !d.line && d.closed;
-                   });
+        auto coneRing = [&](const Tool& tool) -> const EdgeData* {
+            if (tool.cut || tool.rolled || tool.miter) {
+                return nullptr;
+            }
+            for (const auto& d : data) {
+                if (d.edge.IsSame(tool.source) && !d.line && d.closed && d.cone) {
+                    return &d;
+                }
+            }
+            return nullptr;
+        };
+        // How far the tool's strip on the plane reaches from its circle's centre
+        auto reach = [&](const Tool& tool, const EdgeData& d) {
+            for (const auto& strip : tool.strips) {
+                if (strip.face.IsSame(d.faces[d.planeFace])) {
+                    return d.circle.Radius() + strip.width;
+                }
+            }
+            return std::numeric_limits<double>::infinity();
         };
         for (size_t i = 0; i < tools.size(); ++i) {
             for (size_t j = i + 1; j < tools.size() && request.kind == Kind::Fillet; ++j) {
-                if (!wholeCircle(tools[i]) || !wholeCircle(tools[j])) {
+                const EdgeData* a = coneRing(tools[i]);
+                const EdgeData* b = coneRing(tools[j]);
+                if (!a || !b) {
+                    continue;
+                }
+                const double apart = a->circle.Location().Distance(b->circle.Location());
+                if (reach(tools[i], *a) + b->circle.Radius() + linearTolerance > apart
+                    || reach(tools[j], *b) + a->circle.Radius() + linearTolerance > apart) {
                     continue;
                 }
                 const TopoDS_Shape both = commonOf(tools[i].solid, tools[j].solid);
@@ -15088,15 +15117,20 @@ std::vector<TopoDS_Shape> partsOf(
         TopTools_IndexedMapOfShape own;
         TopExp::MapShapes(parts[i], TopAbs_EDGE, own);
         int picked = 0;
+        int all = 0;
         for (const auto& edge : edges) {
-            if (!edge.IsNull() && own.Contains(edge)) {
+            if (edge.IsNull()) {
+                continue;
+            }
+            ++all;
+            if (own.Contains(edge)) {
                 ++picked;
             }
         }
         if (picked == 0) {
             continue;
         }
-        if (owner >= 0 || picked != static_cast<int>(edges.size())) {
+        if (owner >= 0 || picked != all) {
             why = "the picked edges lie on more than one of the base's solids";
             return {};
         }

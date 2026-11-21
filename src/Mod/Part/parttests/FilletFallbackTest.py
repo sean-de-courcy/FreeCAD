@@ -6940,3 +6940,29 @@ class ConeFootTest(unittest.TestCase):
         # The fills only: nothing of the body removed, nothing added beyond them
         self.assertLess(body.cut(result).Volume, 1e-7)
         self.assertLess(result.cut(body.fuse(union)).Volume, 1e-6)
+
+    def testFillsReachingTheOtherFootAreRefused(self):
+        # Feet 1.0 apart, nearer than a fill's reach (1.236): not known from Onshape (review of
+        # fix935 r1, T2b), refused as before
+        _, _, t = self.fill(0)
+        self.assertTrue(1.0 < t)
+        body, feet = self.base([15.0, 15.0 + 2 * self.R + 1.0])
+        with self.assertRaises(Exception):
+            body.makeFillet(self.r, feet)
+
+    def testOverlappingCylinderFillsAreRefused(self):
+        # Two bosses (cylinders) whose foot rounds overlap: not known from Onshape (T2a), refused
+        # as before
+        plate = Part.makeBox(40, 20, self.T)
+        bosses = [Part.makeCylinder(self.R, self.H, V(x, 10, self.T)) for x in (15.0, 26.0)]
+        body = plate.fuse(bosses).removeSplitter()
+        feet = [
+            e
+            for e in body.Edges
+            if e.Curve.TypeId == "Part::GeomCircle"
+            and abs(e.Curve.Radius - self.R) < 1e-9
+            and abs(e.BoundBox.ZMax - self.T) < 1e-9
+        ]
+        self.assertEqual(len(feet), 2)
+        with self.assertRaises(Exception):
+            body.makeFillet(self.r, feet)
