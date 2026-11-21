@@ -466,3 +466,19 @@ class TestOnshapeConnectors(AssemblyTestBase):
             self.assertVec(self.pegCorner(peg), (15, 5, 0), "after reopen, a deletion and a move")
         finally:
             shutil.rmtree(folder, ignore_errors=True)
+
+    def test_construction_point_through_a_link_that_keeps_the_sketch_placement(self):
+        """ops#912 (review r1, T1): a link with LinkTransform on keeps the sketch's placement, so
+        the point is the sketch's placement applied to it, as the link's Shape vertices are"""
+        front = App.Placement(App.Vector(0, 0, 5), App.Rotation(X, 90))
+        linkPlc = App.Placement(App.Vector(100, 20, 0), App.Rotation(Z, 30))
+        sketch, inserted = self.constructionSketch(front, linkPlc)
+        inserted.LinkTransform = True
+        self.doc.recompute()
+        end = self.sketchVertex(sketch, 0, 2)
+        self.assertVec(self.connector(inserted, end).Base, front.multVec(App.Vector(3, 4, 0)), "in the link's frame")
+        peg = self.part("Peg", Part.makeBox(4, 4, 4), App.Placement(App.Vector(-50, 0, 0), App.Rotation()))
+        self.fastened(peg, "Vertex1", inserted, end)
+        self.doc.recompute()
+        expected = linkPlc.multVec(front.multVec(App.Vector(3, 4, 0)))
+        self.assertVec(self.pegCorner(peg), expected, "the peg's corner on the point")

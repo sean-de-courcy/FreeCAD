@@ -1445,7 +1445,11 @@ def sketchGeometryPoint(obj, elt):
         point = None
     if point is None or not hasattr(point, "Point"):
         return None
-    return sketch.Placement.inverse().multVec(point.Point)
+    local = sketch.Placement.inverse().multVec(point.Point)
+    if obj is not sketch and getattr(obj, "LinkTransform", False):
+        # a link that keeps the sketch's placement: its Shape, and so its vertices, carry it
+        return sketch.Placement.multVec(local)
+    return local
 
 
 def get_element(shape, name):
