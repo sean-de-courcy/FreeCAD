@@ -495,7 +495,8 @@ names it.
 | `fix/i920-piece-witness-copy` | fix | ops#920 | - | `integration` `3c882341fa` | via `carry/fork-1.0.4-set` | never (fork fix): a split part's pieces keep their solids when their studio is copied, pasted or merged into a document |
 | `infra/fork-release-103` | infra | ops#883 | - | `integration` `89f63756b3` | via `carry/fork-1.0.4-set` | never (fork release stamp): ForkRelease 14, the release after fork-1.0.3 |
 | `carry/fork-1.0.4-set` | carry | ops#920, ops#883 | - | `integration` `89f63756b3` | `12d910fe18` (fork PR 495), 2026-11-19 | never: the fork-1.0.4 set, fork PRs 494 and 493 merged as one |
-| `fix/i924-no-implicit-studio` | fix | ops#924 | - | `integration` `12d910fe18` | (fork PR 497) | never (fork fix): a document whose tabs have no Part Studio shows no empty implicit Part Studio 1 |
+| `fix/i924-no-implicit-studio` | fix | ops#924 | - | `integration` `12d910fe18` | `9e1199bc2f` (fork PR 497), 2026-11-21 | never (fork fix): a document whose tabs have no Part Studio shows no empty implicit Part Studio 1 |
+| `fix/i912-sketch-point-joint` | fix | ops#912 | - | `integration` `12d910fe18` | (fork PR 496) | never (fork fix): an Assembly joint can name a construction point of a sketch (Onshape mate connectors on construction points) |
 
 ## Fork-only commits in carried topics
 
