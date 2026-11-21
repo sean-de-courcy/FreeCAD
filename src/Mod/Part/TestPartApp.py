@@ -44,6 +44,7 @@ from parttests.FilletFallbackTest import (
     ArcEndTwoWallsTest,
     BaseToleranceTest,
     BridgedRecessTest,
+    CornerBandRetryTest,  # ops#925
     CornerWithACircleTest,
     BlendEndTrimTest,
     CurvedEndTrimTest,

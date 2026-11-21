@@ -9727,8 +9727,12 @@ TopoShape& TopoShape::makeElementFillet(
         );
     }
     // ... and where the construction builds it only by a rule new with ops#898, this retry built
-    // it before that rule: OCCT's result in the reverse order stands (review of PR 484, S5)
-    if (outcome->failed && (!outcome->constructed || outcome->construction.newRule)
+    // it before that rule: OCCT's result in the reverse order stands (review of PR 484, S5).
+    // Also where OCCT's result is invalid and the construction refused it, so that the feature
+    // would fail: a line's and an arc's rounds meeting in a mitre at a corner, in OCCT's narrow
+    // bands of radius (ops#925), build in the reverse order
+    const bool failsAsIs = outcome->failed || (outcome->invalid && !outcome->constructed);
+    if (failsAsIs && (!outcome->constructed || outcome->construction.newRule)
         && inputEdges.size() > 1) {
         // FreeCAD-CH (Case Base #165): OCCT's walker can fail on a tangent chain by the edge its
         // contour is seeded from (a chain's first listed edge): an ellipse seed then a line whose

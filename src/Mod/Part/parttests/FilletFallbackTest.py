@@ -6645,3 +6645,63 @@ class FillToARimCuspTest(unittest.TestCase):
         body, foot = self.body(40.0)
         with self.assertRaises(Exception):
             body.makeChamfer(0.8, foot)
+
+
+def lobed_plate(noise=True):
+    """ops#925: a ring plate (radii 2 and 9, 2 thick, under z 0) carrying four ring-sector lobes
+    between radii 4 and 5, 60 degrees wide, 2 high; with `noise` turned half a turn about X and
+    back, which leaves sin(pi) = 1.2e-16 in its axes, as a Body's placement does"""
+    def polar(r, a):
+        return V(r * math.cos(math.radians(a)), r * math.sin(math.radians(a)), 0)
+
+    shape = Part.makeCylinder(9, 2, V(0, 0, -2)).cut(Part.makeCylinder(2, 2, V(0, 0, -2)))
+    for a0 in (15.0, 105.0, 195.0, 285.0):
+        a1, am = a0 + 60, a0 + 30
+        edges = [
+            Part.Arc(polar(4, a0), polar(4, am), polar(4, a1)).toShape(),
+            Part.makeLine(polar(4, a1), polar(5, a1)),
+            Part.Arc(polar(5, a1), polar(5, am), polar(5, a0)).toShape(),
+            Part.makeLine(polar(5, a0), polar(4, a0)),
+        ]
+        shape = shape.fuse(Part.Face(Part.Wire(edges)).extrude(V(0, 0, 2)))
+    shape = shape.removeSplitter()
+    if noise:
+        m = FreeCAD.Rotation(V(1, 0, 0), 180).toMatrix()
+        shape = shape.transformed(m, True).transformed(m, True)
+    return shape
+
+
+def lobe_feet(shape):
+    """The lobes' 16 foot edges on the plate (z 0, between radii 4 and 5)"""
+    return [
+        e
+        for e in shape.Edges
+        if abs(e.BoundBox.ZMin) < 1e-9
+        and abs(e.BoundBox.ZMax) < 1e-9
+        and all(4 - 1e-6 <= math.hypot(v.X, v.Y) <= 5 + 1e-6 for v in e.Vertexes)
+    ]
+
+
+class CornerBandRetryTest(unittest.TestCase):
+    """A fillet along the foot of ring-sector lobes: at each plan corner a line's round and an
+    arc's round run on past the corner and meet in a mitre. In narrow bands of radius OCCT's
+    result is invalid there and the exact construction refuses the corner; the same selection in
+    the reverse order builds (ops#925, scripts/repro_925_fillet_corner_band.py). Expected by
+    geometry: 16 new faces (8 cylinders, 8 tori), 16 mitre edges, a valid solid."""
+
+    setUp = InvalidDressUpTest.setUp
+    tearDown = InvalidDressUpTest.tearDown
+
+    def testInvalidCornerBuildsInTheReverseOrder(self):
+        base = lobed_plate()
+        self.assertEqual(len(lobe_feet(base)), 16)
+        for radius in (0.588, 0.55):  # inside a band; and a control outside
+            with self.subTest(radius=radius):
+                fillet = filleted_in_a_body(self.doc, base, lobe_feet, radius)
+                self.assertTrue(fillet.isValid(), fillet.getStatusString())
+                self.assertTrue(fillet.Shape.isValid())
+                self.assertEqual(len(fillet.Shape.Faces) - len(base.Faces), 16)
+                mitres = [
+                    e for e in fillet.Shape.Edges if type(e.Curve).__name__ not in ("Line", "Circle")
+                ]
+                self.assertEqual(len(mitres), 16)
