@@ -1883,6 +1883,16 @@ bool roundsAnalytically(const TopoDS_Shape& base, const TopTools_IndexedMapOfSha
 {
     TopTools_IndexedDataMapOfShapeListOfShape facesOfEdges;
     TopExp::MapShapesAndAncestors(base, TopAbs_EDGE, TopAbs_FACE, facesOfEdges);
+    // The faces of the chain's edges: the band runs along these
+    TopTools_IndexedMapOfShape chainFaces;
+    for (int i = 1; i <= chain.Extent(); ++i) {
+        const int index = facesOfEdges.FindIndex(chain(i));
+        if (index != 0) {
+            for (const auto& face : facesOfEdges(index)) {
+                chainFaces.Add(face);
+            }
+        }
+    }
     for (int i = 1; i <= chain.Extent(); ++i) {
         const TopoDS_Edge& edge = TopoDS::Edge(chain(i));
         const int index = facesOfEdges.FindIndex(edge);
@@ -1912,7 +1922,9 @@ bool roundsAnalytically(const TopoDS_Shape& base, const TopTools_IndexedMapOfSha
             return false;
         }
         // A band running on across a smooth edge onto the next face (a floor ending in a round)
-        // leaves OCCT's analytic cases: its round there is a B-spline, and right
+        // leaves OCCT's analytic cases: its round there is a B-spline, and right. A smooth edge
+        // between two faces of the chain's own edges (a rim's wall and its rounded corner) is
+        // no such edge: the band runs along the chain there, not off it (ops#932)
         for (int k = 1; k <= 2; ++k) {
             const TopoDS_Face& face = TopoDS::Face(faces(k));
             for (TopExp_Explorer it(face, TopAbs_EDGE); it.More(); it.Next()) {
@@ -1922,7 +1934,7 @@ bool roundsAnalytically(const TopoDS_Shape& base, const TopTools_IndexedMapOfSha
                     continue;
                 }
                 for (const auto& other : facesOfEdges(at)) {
-                    if (!other.IsSame(face)
+                    if (!other.IsSame(face) && !chainFaces.Contains(other)
                         && ChFi3d::IsTangentFaces(next, face, TopoDS::Face(other))) {
                         return false;
                     }

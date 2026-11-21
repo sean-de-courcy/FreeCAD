@@ -2212,6 +2212,61 @@ class BridgedRecessTest(unittest.TestCase):
             feature.getStatusString(),
         )
 
+    def rimBlock(self, sink_y=None):
+        # ops#932: the block 60 x 40 x 10 with its 4 vertical edges rounded r 6, and a countersink
+        # (a cone r 4 at the top face to r 2 at depth 2, then a through hole r 2) whose axis is at
+        # x 30, y sink_y
+        block = Part.makeBox(60, 40, 10)
+        block = block.makeFillet(6, [e for e in block.Edges if abs(e.BoundBox.ZLength - 10) < 1e-9])
+        if sink_y is None:
+            return block, None
+        sink = (
+            Part.makeCone(2, 4, 2, V(30, sink_y, 8))
+            .fuse(Part.makeCylinder(2, 10, V(30, sink_y, 0)))
+            .removeSplitter()
+        )
+        return block.cut(sink), sink
+
+    @staticmethod
+    def rim(shape):
+        """The top face's outer loop: its 4 lines and 4 arcs at z 10 (an arc's centre of mass is
+        2.18 from the sides; the countersink's circle, 5 or more)"""
+        return [
+            e
+            for e in shape.Edges
+            if all(abs(v.Point.z - 10) < 1e-9 for v in e.Vertexes)
+            and min(abs(e.CenterOfMass.x), abs(e.CenterOfMass.x - 60), abs(e.CenterOfMass.y),
+                    abs(e.CenterOfMass.y - 40)) < 3
+        ]
+
+    def testRimWithRoundedCornersAcrossACountersink(self):
+        # The countersink's rim 1 mm from the long side: the rim round's band (2 wide) crosses it.
+        # The picked loop runs round tangent corners, whose walls are tangent to the sides; the
+        # check used to stop there and OCCT's B-spline bridge was kept (DSH front lid #14)
+        shape, _ = self.rimBlock(5)
+        self.assertEqual(len(self.rim(shape)), 8)
+        fillet = filleted_in_a_body(self.doc, shape, self.rim, 2)
+        self.assertFalse(fillet.isValid())
+        status = fillet.getStatusString()
+        self.assertTrue(
+            status.startswith("The fillet's band crosses a hole or pocket on Face"), status
+        )
+
+    def testRimWithRoundedCornersClearOfACountersinkBuilds(self):
+        # The countersink's rim 6 mm from the side, clear of the band; and no countersink: the
+        # rim round builds, analytic faces only, the plain block's round with the sink cut after
+        rounded, _ = self.rimBlock()
+        plain = rounded.makeFillet(2, self.rim(rounded))
+        for sink_y in (None, 10):
+            with self.subTest(sink_y=sink_y):
+                shape, sink = self.rimBlock(sink_y)
+                fillet = filleted_in_a_body(self.doc, shape, self.rim, 2)
+                self.assertTrue(fillet.isValid(), fillet.getStatusString())
+                kinds = {f.Surface.TypeId for f in fillet.Shape.Faces}
+                self.assertNotIn("Part::GeomBSplineSurface", kinds)
+                right = plain if sink is None else plain.cut(sink)
+                self.assertLess(symmetric_difference(fillet.Shape, right), 1e-6)
+
 
 def tolerances(shape):
     return [s.Tolerance for s in shape.Vertexes + shape.Edges + shape.Faces]
