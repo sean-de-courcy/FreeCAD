@@ -382,21 +382,21 @@ bool DocumentTabs::hasImplicitStudio(const Document* doc)
         if (kind == Kind::PartStudio) {
             otherStudio = true;
         }
-        // A Variable Studio is a tab only by its mark, so it is always the registry's
+        // Only the stored order counts, not a Variable Studio's mark: the bar marks a new one
+        // before placeAfter() writes the order, and that order must still find "*" a tab
         const std::string name = obj->getNameInDocument();
-        if (kind == Kind::VariableStudio
-            || std::find(registry.order.begin(), registry.order.end(), name)
-                != registry.order.end()) {
+        if (std::find(registry.order.begin(), registry.order.end(), name)
+            != registry.order.end()) {
             registeredTab = true;
         }
     }
     if (otherStudio) {
         return false;
     }
-    // ops#924 (G1): a document whose registry holds its tabs, none of them a Part Studio, is a
-    // document like Onshape's Variable Studio-only one: no empty "Part Studio 1" of ours. Unless
-    // the stored order lists the implicit studio itself (it was a tab when the bar saved it).
-    // An empty document, and a file without the registry, keep the implicit studio
+    // ops#924 (G1): a document whose stored order holds its tabs, none of them a Part Studio, is
+    // a document like Onshape's Variable Studio-only one: no empty "Part Studio 1" of ours. Unless
+    // the order lists the implicit studio itself (it was a tab when the bar or a merge wrote it).
+    // An empty document, a file without the registry, and one with no stored order keep it
     const std::string implicit = implicitName();
     const bool orderedImplicit = std::find(registry.order.begin(), registry.order.end(), implicit)
         != registry.order.end();

@@ -420,7 +420,7 @@ class TestDocumentTabs(unittest.TestCase):
 
     # -- ops#924: no implicit studio where Onshape has no Part Studio ------------------------------
 
-    def variableStudioOnly(self, ordered=True):
+    def variableStudioOnly(self):
         """A document like a merged Onshape Variable Studio-only one: one marked VarSet "Sizes"
         with a length w = 12 mm, no solid and no Part Studio; the merge's stored order names it."""
         variables = self.doc.addObject("App::VarSet", "VarSet")
@@ -428,29 +428,36 @@ class TestDocumentTabs(unittest.TestCase):
         variables.addProperty("App::PropertyLength", "w", "Base", "")
         variables.w = 12
         Tabs.setVariableStudio(variables)
-        if ordered:
-            Tabs.setOrder(self.doc, [variables.Name])
+        Tabs.setOrder(self.doc, [variables.Name])
         self.doc.recompute()
         return variables
 
     def testVariableStudioOnlyDocumentHasNoImplicitStudio(self):
-        """ops#924 (G1): a document whose only tab is a Variable Studio, as Onshape's has, shows
-        that one tab, not an empty "Part Studio 1" besides; with or without a stored order, and
-        after a save and a reopen. Its variable is untouched."""
-        for ordered in (True, False):
-            with self.subTest(ordered=ordered):
-                self.doc = App.newDocument("TestDocumentTabsVS")
-                self.variableStudioOnly(ordered)
-                self.assertFalse(Tabs.hasImplicitStudio(self.doc))
-                self.assertEqual(self.kinds(), [("VarSet", "VariableStudio")])
-                path = os.path.join(self.folder, "vs%d.FCStd" % ordered)
-                self.doc.saveAs(path)
-                App.closeDocument(self.doc.Name)
-                self.doc = App.openDocument(path)
-                self.assertEqual(self.kinds(), [("VarSet", "VariableStudio")])
-                self.assertEqual([l for _n, _k, l in Tabs.tabs(self.doc)], ["Sizes"])
-                self.assertAlmostEqual(self.doc.VarSet.w.Value, 12, 6)
-                App.closeDocument(self.doc.Name)
+        """ops#924 (G1): a document whose stored order holds its one tab, a Variable Studio, as a
+        merged Onshape document's does, shows that one tab, not an empty "Part Studio 1" besides;
+        after a save and a reopen too. Its variable is untouched."""
+        self.variableStudioOnly()
+        self.assertFalse(Tabs.hasImplicitStudio(self.doc))
+        self.assertEqual(self.kinds(), [("VarSet", "VariableStudio")])
+        path = os.path.join(self.folder, "vs.FCStd")
+        self.doc.saveAs(path)
+        App.closeDocument(self.doc.Name)
+        self.doc = App.openDocument(path)
+        self.assertEqual(self.kinds(), [("VarSet", "VariableStudio")])
+        self.assertEqual([l for _n, _k, l in Tabs.tabs(self.doc)], ["Sizes"])
+        self.assertAlmostEqual(self.doc.VarSet.w.Value, 12, 6)
+
+    def testNewVariableStudioKeepsTheShownImplicitStudio(self):
+        """ops#924 review T1: the bar's "+ Variable Studio" in a document showing its empty implicit
+        studio marks the new set, then places it after the active tab, "*": both tabs stay, as in
+        Onshape adding a Variable Studio removes no Part Studio. A mark with no stored order
+        (a script's) keeps the implicit studio too."""
+        variables = self.doc.addObject("App::VarSet", "VarSet")
+        Tabs.setVariableStudio(variables)
+        self.assertEqual(self.kinds(), [("*", "PartStudio"), ("VarSet", "VariableStudio")])
+        Tabs.placeAfter(self.doc, variables.Name, "*")
+        self.assertEqual(Tabs.order(self.doc), ["*", "VarSet"])
+        self.assertEqual(self.kinds(), [("*", "PartStudio"), ("VarSet", "VariableStudio")])
 
     def testVariableStudioOnlyDocumentGetsTheStudioBackWithASolid(self):
         """ops#924: a solid put at the top level of such a document is the implicit studio's, as

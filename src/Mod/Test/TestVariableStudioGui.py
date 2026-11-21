@@ -418,6 +418,14 @@ class TestVariableStudioGui(unittest.TestCase):
         self.assertIn("Part Studio", measuredgui.start(self.doc, "w", "Length"))
         self.assertIsNone(measuredgui.current)
 
+    def testCreateVariableStudioKeepsShownEmptyImplicitStudio(self):
+        """ops#924 review T1: "+ Variable Studio" in a document showing its empty implicit "Part
+        Studio 1" adds the studio beside it; the Part Studio stays a tab, as in Onshape."""
+        name, _view = self.studio()
+        tabs = [(n, k) for n, k, _l in App.DocumentTabs.tabs(self.doc)]
+        self.assertEqual(tabs, [("*", "PartStudio"), (name, "VariableStudio")])
+        self.assertEqual(App.DocumentTabs.order(self.doc), ["*", name])
+
     def testDeleteTabClosesItsView(self):
         """Deleting the studio closes its window; undo brings the tab back, and a click opens a
         window again."""
