@@ -297,19 +297,35 @@ bool isPageHolder(const DocumentObject* obj, const DocumentObject* page)
     return isTopLevelContent(obj) && isDrawingSource(obj) && drawingSourcePage(obj) == page;
 }
 
-/// The names of the drawing sources @a page owns, for removing them with it (ops#927, review F4)
-std::vector<std::string> pageHolderNames(const DocumentObject* page)
+void addWithChildren(
+    DocumentObject* obj,
+    std::vector<DocumentObject*>& list,
+    std::set<DocumentObject*>& seen
+);
+
+/// The drawing sources @a page owns that go with it: those no view off the page shows, here or in
+/// another document (review r2 F5). One another page still shows stays, and becomes that page's
+std::vector<DocumentObject*> pageHolders(const DocumentObject* page)
 {
-    std::vector<std::string> names;
-    if (!isDerived(page, drawPageType())) {
-        return names;
+    std::vector<DocumentObject*> holders;
+    if (!page || !isDerived(page, drawPageType())) {
+        return holders;
     }
-    for (auto obj : page->getDocument()->getObjects()) {
-        if (isPageHolder(obj, page)) {
-            names.emplace_back(obj->getNameInDocument());
+    std::vector<DocumentObject*> list;
+    std::set<DocumentObject*> seen;
+    addWithChildren(const_cast<DocumentObject*>(page), list, seen);
+    for (auto obj : list) {
+        if (!isPageHolder(obj, page)) {
+            continue;
+        }
+        const auto users = obj->getInList();
+        if (std::all_of(users.begin(), users.end(), [&seen](DocumentObject* user) {
+                return seen.count(user) > 0;
+            })) {
+            holders.push_back(obj);
         }
     }
-    return names;
+    return holders;
 }
 
 void addWithChildren(
@@ -700,9 +716,16 @@ std::vector<DocumentObject*> DocumentTabs::dependents(const Document* doc, const
 {
     const auto list = members(doc, tab);
     const std::set<DocumentObject*> inside(list.begin(), list.end());
+    // A drawing source another page still shows stays when the page goes (removeTab()): its views
+    // there lose nothing
+    const auto removed = pageHolders(tab.object);
     std::vector<DocumentObject*> users;
     std::set<DocumentObject*> seen;
     for (auto obj : list) {
+        if (isPageHolder(obj, tab.object)
+            && std::find(removed.begin(), removed.end(), obj) == removed.end()) {
+            continue;
+        }
         for (auto user : obj->getInList()) {
             if (user && !inside.count(user) && seen.insert(user).second) {
                 users.push_back(user);
@@ -721,8 +744,9 @@ void DocumentTabs::removeTab(Document* doc, const Tab& tab)
     if (tab.object) {
         roots.emplace_back(tab.object->getNameInDocument());
         // A page's own drawing sources go with it (its members), read before its views go
-        const auto holders = pageHolderNames(tab.object);
-        roots.insert(roots.end(), holders.begin(), holders.end());
+        for (auto holder : pageHolders(tab.object)) {
+            roots.emplace_back(holder->getNameInDocument());
+        }
     }
     else {
         for (auto obj : doc->getObjects()) {

@@ -863,3 +863,35 @@ class TestDocumentTabs(unittest.TestCase):
         self.doc.recompute()
         self.assertIsNotNone(self.doc.getObject("Lines"))
         self.assertEqual(self.kinds(), [("Studio", "PartStudio"), ("Page", "Drawing")])
+
+    def testRemovingADrawingTabKeepsAHolderAnotherPageShows(self):
+        """Review r2 F5: deleting the page that owns a holder another page's view still shows keeps
+        the holder, which becomes the other page's; that view is no dependent."""
+        objects = self.drawingModel()
+        page2, view2 = self.pageShowing(objects["lines"], "Page2")
+        self.doc.recompute()
+        self.assertNotIn(view2, Tabs.dependents(self.doc, "Page"))
+        Tabs.removeTab(self.doc, "Page")
+        self.assertIsNotNone(self.doc.getObject("Lines"))
+        self.assertEqual(view2.Source, [objects["lines"]])
+        self.assertEqual(self.kinds(), [("Studio", "PartStudio"), ("Page2", "Drawing")])
+        self.assertIn(objects["lines"], Tabs.members(self.doc, "Page2"))
+
+    def testRemovingADrawingTabKeepsAHolderAnotherDocumentShows(self):
+        """Review r2 F5: a holder also shown by a view of another document stays when its page
+        goes, and is implicit content then."""
+        objects = self.drawingModel()
+        other = App.newDocument("TestDocumentTabsOther")
+        page = other.addObject("TechDraw::DrawPage", "Page")
+        page.Template = other.addObject("TechDraw::DrawSVGTemplate", "Template")
+        view = other.addObject("TechDraw::DrawViewPart", "View")
+        page.addView(view)
+        self.doc.saveAs(os.path.join(self.folder, "holder.FCStd"))
+        other.saveAs(os.path.join(self.folder, "drawing.FCStd"))
+        view.XSource = [objects["lines"]]
+        other.recompute()
+        self.assertIn(objects["lines"], Tabs.members(self.doc, "Page"))
+        Tabs.removeTab(self.doc, "Page")
+        self.assertIsNotNone(self.doc.getObject("Lines"))
+        self.assertEqual(view.XSource, [objects["lines"]])
+        self.assertIn(objects["lines"], Tabs.members(self.doc, "*"))
