@@ -83,6 +83,8 @@ from parttests.AttachAcrossContainersTest import AttachAcrossContainersTest
 from parttests.TestPartMirror import TestPartMirroringRegression
 from parttests.CompoundFilterTest import CompoundFilterTest
 from parttests.RefineElementMapTest import RefineElementMapTest
+from parttests.RefineElementMapTest import RefineConeTorusSphereTest  # ops#931
+from parttests.RefineElementMapTest import RefineConeReferenceTest  # ops#931
 from parttests.GTransformKeepsPlanesTest import GTransformKeepsPlanesTest
 from parttests.FlatFaceAxesTest import FlatFaceAxesTest
 from parttests.RefineFuseEdgesTest import RefineFuseEdgesTest

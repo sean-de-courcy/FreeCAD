@@ -12268,7 +12268,8 @@ TopoShape& TopoShape::makeElementRefine(const TopoShape& shape, const char* op, 
     // features' shapes) the uniter's failure kept that shell unrefined without an error, so the
     // fallback runs then too (review replc r2), and the partial result stands when it is refused.
     // OCCT's UnifySameDomain merges in place, without sewing. It merges only the face uniter's
-    // kinds (planes, cylinders, B-splines): the edges of every other face are kept, since
+    // kinds (planes, cylinders, cones, tori, spheres since ops#931, B-splines): the edges of
+    // every other face are kept, since
     // KeepShapes honours only edges and vertices (review replc r2, T-A: two torus halves merged),
     // so a helix earlier in the body never decides whether cones or tori merge (review replc r1,
     // T3); it runs on a fresh copy, as the uniter may have changed its own (T2); and its result
@@ -12304,7 +12305,9 @@ TopoShape& TopoShape::makeElementRefine(const TopoShape& shape, const char* op, 
         TopTools_MapOfShape keep;
         for (TopExp_Explorer xp(fresh.getShape(), TopAbs_FACE); xp.More(); xp.Next()) {
             const GeomAbs_SurfaceType kind = BRepAdaptor_Surface(TopoDS::Face(xp.Current())).GetType();
-            if (kind != GeomAbs_Plane && kind != GeomAbs_Cylinder && kind != GeomAbs_BSplineSurface) {
+            if (kind != GeomAbs_Plane && kind != GeomAbs_Cylinder && kind != GeomAbs_Cone
+                && kind != GeomAbs_Torus && kind != GeomAbs_Sphere
+                && kind != GeomAbs_BSplineSurface) {
                 for (TopExp_Explorer xe(xp.Current(), TopAbs_EDGE); xe.More(); xe.Next()) {
                     keep.Add(xe.Current());
                 }
