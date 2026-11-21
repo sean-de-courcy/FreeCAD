@@ -2267,6 +2267,40 @@ class BridgedRecessTest(unittest.TestCase):
                 right = plain if sink is None else plain.cut(sink)
                 self.assertLess(symmetric_difference(fillet.Shape, right), 1e-6)
 
+    def testBandOffOntoARoundAnotherPickBordersIsNotARecess(self):
+        # Review pri931-r3, SplitRoundSelection: the block 40 x 20 x 5, its bottom front edge
+        # rounded r 4, a groove x 20..22, z 0..2 through that round. The top front edge's band
+        # (r 1.5) runs off its front wall onto the round; the groove walls' arcs on the round are
+        # picked too. Their faces are faces of chain edges, but not of edges meeting the top
+        # front edge, so the band still leaves the chain there: no hole is crossed, and the
+        # round builds with one arc picked or both, as before ops#932
+        block = Part.makeBox(40, 20, 5)
+        block = block.makeFillet(
+            4, [e for e in block.Edges if abs(e.BoundBox.YMax) < 1e-9 and abs(e.BoundBox.ZMax) < 1e-9]
+        )
+        block = block.cut(Part.makeBox(2, 20, 2, V(20, 0, 0))).removeSplitter()
+        for walls in ((20.0,), (20.0, 22.0)):
+            with self.subTest(walls=walls):
+
+                def picked(shape, walls=walls):
+                    edges = []
+                    for e in shape.Edges:
+                        b = e.BoundBox
+                        top = abs(b.YMax) < 1e-9 and abs(b.ZMin - 5) < 1e-9 and b.XLength > 30
+                        arc = (
+                            b.XLength < 1e-9
+                            and any(abs(b.XMin - x) < 1e-9 for x in walls)
+                            and isinstance(e.Curve, Part.Circle)
+                        )
+                        if top or arc:
+                            edges.append(e)
+                    return edges
+
+                self.assertEqual(len(picked(block)), 1 + len(walls))
+                fillet = filleted_in_a_body(self.doc, block, picked, 1.5)
+                self.assertTrue(fillet.isValid(), fillet.getStatusString())
+                self.assertEqual(len(fillet.Shape.Solids), 1)
+
 
 def tolerances(shape):
     return [s.Tolerance for s in shape.Vertexes + shape.Edges + shape.Faces]

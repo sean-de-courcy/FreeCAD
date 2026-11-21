@@ -1883,16 +1883,6 @@ bool roundsAnalytically(const TopoDS_Shape& base, const TopTools_IndexedMapOfSha
 {
     TopTools_IndexedDataMapOfShapeListOfShape facesOfEdges;
     TopExp::MapShapesAndAncestors(base, TopAbs_EDGE, TopAbs_FACE, facesOfEdges);
-    // The faces of the chain's edges: the band runs along these
-    TopTools_IndexedMapOfShape chainFaces;
-    for (int i = 1; i <= chain.Extent(); ++i) {
-        const int index = facesOfEdges.FindIndex(chain(i));
-        if (index != 0) {
-            for (const auto& face : facesOfEdges(index)) {
-                chainFaces.Add(face);
-            }
-        }
-    }
     for (int i = 1; i <= chain.Extent(); ++i) {
         const TopoDS_Edge& edge = TopoDS::Edge(chain(i));
         const int index = facesOfEdges.FindIndex(edge);
@@ -1923,8 +1913,29 @@ bool roundsAnalytically(const TopoDS_Shape& base, const TopTools_IndexedMapOfSha
         }
         // A band running on across a smooth edge onto the next face (a floor ending in a round)
         // leaves OCCT's analytic cases: its round there is a B-spline, and right. A smooth edge
-        // between two faces of the chain's own edges (a rim's wall and its rounded corner) is
-        // no such edge: the band runs along the chain there, not off it (ops#932)
+        // to a face of a chain edge that meets this one at a vertex (a rim's wall and its rounded
+        // corner, the next edge of the loop) is no such edge: the band runs on along the chain
+        // there, not off it (ops#932). A face of a chain edge elsewhere doesn't count (review
+        // pri931-r3, SplitRoundSelection: the band runs off onto a round another pick borders).
+        TopTools_IndexedMapOfShape alongFaces;
+        for (int j = 1; j <= chain.Extent(); ++j) {
+            const TopoDS_Edge& other = TopoDS::Edge(chain(j));
+            const int at = facesOfEdges.FindIndex(other);
+            if (j == i || at == 0) {
+                continue;
+            }
+            bool meets = false;
+            for (TopExp_Explorer a(edge, TopAbs_VERTEX); a.More() && !meets; a.Next()) {
+                for (TopExp_Explorer b(other, TopAbs_VERTEX); b.More() && !meets; b.Next()) {
+                    meets = a.Current().IsSame(b.Current());
+                }
+            }
+            if (meets) {
+                for (const auto& face : facesOfEdges(at)) {
+                    alongFaces.Add(face);
+                }
+            }
+        }
         for (int k = 1; k <= 2; ++k) {
             const TopoDS_Face& face = TopoDS::Face(faces(k));
             for (TopExp_Explorer it(face, TopAbs_EDGE); it.More(); it.Next()) {
@@ -1934,7 +1945,7 @@ bool roundsAnalytically(const TopoDS_Shape& base, const TopTools_IndexedMapOfSha
                     continue;
                 }
                 for (const auto& other : facesOfEdges(at)) {
-                    if (!other.IsSame(face) && !chainFaces.Contains(other)
+                    if (!other.IsSame(face) && !alongFaces.Contains(other)
                         && ChFi3d::IsTangentFaces(next, face, TopoDS::Face(other))) {
                         return false;
                     }
