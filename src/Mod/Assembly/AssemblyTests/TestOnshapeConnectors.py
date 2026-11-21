@@ -482,3 +482,23 @@ class TestOnshapeConnectors(AssemblyTestBase):
         self.doc.recompute()
         expected = linkPlc.multVec(front.multVec(App.Vector(3, 4, 0)))
         self.assertVec(self.pegCorner(peg), expected, "the peg's corner on the point")
+
+    def globalConnector(self, obj, element):
+        ref = self.ref(obj, element)
+        return UtilsAssembly.getJcsGlobalPlc(UtilsAssembly.findPlacement(ref), ref)
+
+    def test_construction_point_through_a_link_to_a_link(self):
+        """ops#912 (fix review, F1): an inserted link to another link to the sketch; the inner
+        link keeps the sketch's placement, the outer one doesn't keep the inner's"""
+        front = App.Placement(App.Vector(0, 0, 5), App.Rotation(X, 90))
+        linkPlc = App.Placement(App.Vector(100, 20, 0), App.Rotation(Z, 30))
+        sketch, inserted = self.constructionSketch(front, linkPlc)
+        inner = self.doc.addObject("App::Link", "InnerLink")
+        inner.LinkedObject = sketch
+        inner.LinkTransform = True
+        inner.Placement = App.Placement(App.Vector(0, 50, 0), App.Rotation())
+        inserted.LinkedObject = inner
+        self.doc.recompute()
+        end = self.sketchVertex(sketch, 0, 2)
+        expected = linkPlc.multVec(front.multVec(App.Vector(3, 4, 0)))
+        self.assertVec(self.globalConnector(inserted, end).Base, expected, "the point where it is drawn")

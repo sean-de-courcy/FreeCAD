@@ -1436,7 +1436,13 @@ def sketchGeometryPoint(obj, elt):
     not a sketch, or a link to one, or elt is not such a name."""
     if obj is None or not re.match(r"^vertex[0-9]+$", elt or ""):
         return None
-    sketch = obj.getLinkedObject(True) if obj.isDerivedFrom("App::Link") else obj
+    # the sketch at the end of any chain of links (array elements included), and the placements
+    # the links in between keep (LinkTransform), the outer link's own left out: the frame the
+    # link's Shape vertices are read in
+    try:
+        sketch, toObj = obj.getLinkedObject(True, App.Matrix(), False)
+    except Exception:
+        return None
     if sketch is None or not sketch.isDerivedFrom("Sketcher::SketchObject"):
         return None
     try:
@@ -1446,10 +1452,7 @@ def sketchGeometryPoint(obj, elt):
     if point is None or not hasattr(point, "Point"):
         return None
     local = sketch.Placement.inverse().multVec(point.Point)
-    if obj is not sketch and getattr(obj, "LinkTransform", False):
-        # a link that keeps the sketch's placement: its Shape, and so its vertices, carry it
-        return sketch.Placement.multVec(local)
-    return local
+    return toObj.multVec(local)
 
 
 def get_element(shape, name):
