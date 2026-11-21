@@ -513,6 +513,13 @@ void DocumentTabs::placeAfter(Document* doc, const std::string& name, const std:
         }
     }
     auto it = std::find(names.begin(), names.end(), after);
+    if (it == names.end() && after == implicitName()) {
+        // ops#924 review R1b-1: the new tab is placed after the implicit studio, so that studio
+        // was a tab; the new one may have hidden it already (its name in a stale stored order,
+        // which then holds a tab and no Part Studio). The order keeps it, as before the add
+        names.push_back(after);
+        it = names.end() - 1;
+    }
     names.insert(it == names.end() ? it : it + 1, name);
     setOrder(doc, names);
 }

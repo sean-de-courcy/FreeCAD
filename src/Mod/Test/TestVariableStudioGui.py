@@ -426,6 +426,27 @@ class TestVariableStudioGui(unittest.TestCase):
         self.assertEqual(tabs, [("*", "PartStudio"), (name, "VariableStudio")])
         self.assertEqual(App.DocumentTabs.order(self.doc), ["*", name])
 
+    def testCreateVariableStudioAfterDeletingMergedOneKeepsImplicitStudio(self):
+        """ops#924 review R1b-1: a merged Variable Studio-only document (its stored order names its
+        one studio) has no "Part Studio 1"; once that studio is deleted the empty document shows
+        one, and "+ Variable Studio", whose new set takes the old name, keeps it beside the new
+        studio."""
+        merged = self.doc.addObject("App::VarSet", "VarSet")
+        App.DocumentTabs.setVariableStudio(merged)
+        App.DocumentTabs.setOrder(self.doc, [merged.Name])
+        pump(0.2)
+        self.assertEqual([n for n, _k, _l in App.DocumentTabs.tabs(self.doc)], ["VarSet"])
+        self.doc.openTransaction("Delete")
+        App.DocumentTabs.removeTab(self.doc, "VarSet")
+        self.doc.commitTransaction()
+        pump(0.3)
+        self.assertEqual([n for n, _k, _l in App.DocumentTabs.tabs(self.doc)], ["*"])
+        self.assertTrue(GuiTabs.switchTo(self.doc, "*")[0])
+        pump(0.2)
+        name, _view = self.studio()
+        tabs = [(n, k) for n, k, _l in App.DocumentTabs.tabs(self.doc)]
+        self.assertEqual(tabs, [("*", "PartStudio"), (name, "VariableStudio")])
+
     def testDeleteTabClosesItsView(self):
         """Deleting the studio closes its window; undo brings the tab back, and a click opens a
         window again."""

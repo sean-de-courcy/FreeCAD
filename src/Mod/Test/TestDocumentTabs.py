@@ -471,6 +471,21 @@ class TestDocumentTabs(unittest.TestCase):
         self.assertTrue(Tabs.hasImplicitStudio(self.doc))
         self.assertIn(("*", "PartStudio"), self.kinds())
 
+    def testNewTabAfterTheImplicitStudioKeepsIt(self):
+        """ops#924 review R1b-1: the Variable Studio of such a document deleted, its name stays in
+        the stored order and the empty document shows the implicit studio; a new set that takes
+        that name (and its mark) hides the studio before the bar places it after "*". The order
+        placeAfter() writes keeps "*", and both tabs stay."""
+        self.variableStudioOnly()
+        Tabs.removeTab(self.doc, "VarSet")
+        self.assertEqual(self.kinds(), [("*", "PartStudio")])
+        again = self.doc.addObject("App::VarSet", "VarSet")
+        self.assertEqual(again.Name, "VarSet")
+        Tabs.setVariableStudio(again)
+        Tabs.placeAfter(self.doc, again.Name, "*")
+        self.assertEqual(Tabs.order(self.doc), ["*", "VarSet"])
+        self.assertEqual(self.kinds(), [("*", "PartStudio"), ("VarSet", "VariableStudio")])
+
     def testRegisteredAssemblyOnlyDocumentHasNoImplicitStudio(self):
         """ops#924: a document whose stored order holds its one tab, an empty assembly, has no
         implicit studio (Onshape keeps a document's tabs as they are); without the registry (a
