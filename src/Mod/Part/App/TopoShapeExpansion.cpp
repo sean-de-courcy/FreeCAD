@@ -9749,8 +9749,28 @@ TopoShape& TopoShape::makeElementFillet(
         againRequest.faceTolerances = FilletFallback::faceTolerances(againInput.getShape());
         auto second
             = buildDressUp(again, againInput, againEdges, againRequest, "The fillet", false, reflex);
+        // Where OCCT's first result was invalid (ops#925), the second stands only as a valid closed
+        // solid as a whole (BRepCheck, every shell closed), else the feature fails as before. Its
+        // mitre may be OCCT's in-band one, about 3e-4 mm off its rounds (named debt, ops#925 2/3;
+        // coordinator's ruling, review pri931-r3 T1)
+        auto closedValid = [](const TopoDS_Shape& result) {
+            if (result.IsNull() || !BRepCheck_Analyzer(result).IsValid()) {
+                return false;
+            }
+            int solids = 0;
+            for (TopExp_Explorer xs(result, TopAbs_SOLID); xs.More(); xs.Next()) {
+                ++solids;
+                for (TopExp_Explorer xh(xs.Current(), TopAbs_SHELL); xh.More(); xh.Next()) {
+                    if (!BRep_Tool::IsClosed(xh.Current())) {
+                        return false;
+                    }
+                }
+            }
+            return solids > 0;
+        };
         if (!second->failed && !second->thin && !second->invalid && !second->turns
-            && !second->ring && !second->reflexFirst && second->wrongWay.empty() && !second->constructed) {
+            && !second->ring && !second->reflexFirst && second->wrongWay.empty() && !second->constructed
+            && (outcome->failed || closedValid(again->Shape()))) {
             mkFillet = again;
             input = againInput;
             inputEdges = againEdges;

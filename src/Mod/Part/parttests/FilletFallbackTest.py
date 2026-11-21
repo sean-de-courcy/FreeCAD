@@ -6760,3 +6760,16 @@ class CornerBandRetryTest(unittest.TestCase):
                     e for e in fillet.Shape.Edges if type(e.Curve).__name__ not in ("Line", "Circle")
                 ]
                 self.assertEqual(len(mitres), 16)
+                # each mitre lies on both its rounds: exactly for the control; inside the band the
+                # reverse order gives OCCT's in-band mitre, measured 3.1e-4 mm off (debt, ops#925
+                # fixes 2 and 3, the exact mitre: review pri931-r3 T1, coordinator's ruling)
+                shape = fillet.Shape
+                off = 0.0
+                for e in mitres:
+                    faces = shape.ancestorsOfType(e, Part.Face)
+                    self.assertEqual(len(faces), 2)
+                    step = (e.LastParameter - e.FirstParameter) / 20
+                    for k in range(21):
+                        point = Part.Vertex(e.valueAt(e.FirstParameter + k * step))
+                        off = max(off, max(point.distToShape(f)[0] for f in faces))
+                self.assertLess(off, 1e-3 if radius > 0.58 else 1e-6, radius)
