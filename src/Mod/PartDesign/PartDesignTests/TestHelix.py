@@ -486,8 +486,8 @@ class TestHelix(unittest.TestCase):
 
         A tube (r 10..20, height 8) carries an outer thread; two refined AdditiveTorus halves
         (R 15, r 3, 180 degrees each, turned 180 degrees apart) sit on its top. The face uniter
-        never merges toroidal faces, with or without the thread, so the bead keeps two of them.
-        The refine's fallback after a thread merged them (review replc r2, T-A)."""
+        merges the two halves into one ring, as Onshape does (ops#931), with or without the thread;
+        the refine's fallback after a thread once merged them alone (review replc r2, T-A)."""
         body = self.Doc.addObject("PartDesign::Body", "Body")
         planes = {f.Role: f for f in body.Origin.OriginFeatures}
         sketch = body.newObject("Sketcher::SketchObject", "TubeSketch")
@@ -524,7 +524,7 @@ class TestHelix(unittest.TestCase):
 
         self.assertTrue(bead.isValid(), bead.getStatusString())
         tori = [f for f in bead.Shape.Faces if f.Surface.__class__.__name__ == "Toroid"]
-        self.assertEqual(len(tori), 2, [f.Area for f in tori])
+        self.assertEqual(len(tori), 1, [f.Area for f in tori])
 
     def testRefineKeepsThreadWallWithinOnePeriod(self):
         """The refine keeps a threaded wall's faces within one turn, so booleans see them.
