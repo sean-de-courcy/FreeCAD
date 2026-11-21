@@ -365,20 +365,42 @@ bool DocumentTabs::hasImplicitStudio(const Document* doc)
     }
     // Once named or shown, it stays a tab when emptied, as Onshape keeps an empty Part Studio
     // (R6T-12); deleting the tab forgets it (removeTab())
-    if (readRegistry(doc).hasImplicit) {
+    const Registry registry = readRegistry(doc);
+    if (registry.hasImplicit) {
         return true;
     }
     bool otherStudio = false;
+    bool registeredTab = false;
     for (auto obj : doc->getObjects()) {
         if (isImplicitContent(obj)) {
             return true;
         }
         Kind kind {};
-        if (isTabObject(obj, &kind) && kind == Kind::PartStudio) {
+        if (!isTabObject(obj, &kind)) {
+            continue;
+        }
+        if (kind == Kind::PartStudio) {
             otherStudio = true;
         }
+        // A Variable Studio is a tab only by its mark, so it is always the registry's
+        const std::string name = obj->getNameInDocument();
+        if (kind == Kind::VariableStudio
+            || std::find(registry.order.begin(), registry.order.end(), name)
+                != registry.order.end()) {
+            registeredTab = true;
+        }
     }
-    return !otherStudio;
+    if (otherStudio) {
+        return false;
+    }
+    // ops#924 (G1): a document whose registry holds its tabs, none of them a Part Studio, is a
+    // document like Onshape's Variable Studio-only one: no empty "Part Studio 1" of ours. Unless
+    // the stored order lists the implicit studio itself (it was a tab when the bar saved it).
+    // An empty document, and a file without the registry, keep the implicit studio
+    const std::string implicit = implicitName();
+    const bool orderedImplicit = std::find(registry.order.begin(), registry.order.end(), implicit)
+        != registry.order.end();
+    return !registeredTab || orderedImplicit;
 }
 
 std::vector<Tab> DocumentTabs::tabs(const Document* doc)

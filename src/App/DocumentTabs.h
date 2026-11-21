@@ -84,8 +84,11 @@ AppExport DocumentObject* tabOf(const DocumentObject* obj);
 /// The tab name of tabOf(@p obj): its internal name, or "*"
 AppExport std::string tabNameOf(const DocumentObject* obj);
 
-/// Whether the implicit studio is a tab: the top level holds a 3D object of no other tab, no
-/// other Part Studio exists, or the registry holds its label (named or shown once)
+/// Whether the implicit studio is a tab: the top level holds a 3D object of no other tab, the
+/// registry holds its label (named or shown once), or no other Part Studio exists and the
+/// registry holds none of the document's tabs (or lists the implicit studio in its order).
+/// A document whose registered tabs have no Part Studio, such as one with only a Variable
+/// Studio, has no implicit studio, as in Onshape (ops#924)
 AppExport bool hasImplicitStudio(const Document* doc);
 
 /// The document's tabs, in order
