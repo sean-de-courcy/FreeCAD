@@ -365,20 +365,42 @@ bool DocumentTabs::hasImplicitStudio(const Document* doc)
     }
     // Once named or shown, it stays a tab when emptied, as Onshape keeps an empty Part Studio
     // (R6T-12); deleting the tab forgets it (removeTab())
-    if (readRegistry(doc).hasImplicit) {
+    const Registry registry = readRegistry(doc);
+    if (registry.hasImplicit) {
         return true;
     }
     bool otherStudio = false;
+    bool registeredTab = false;
     for (auto obj : doc->getObjects()) {
         if (isImplicitContent(obj)) {
             return true;
         }
         Kind kind {};
-        if (isTabObject(obj, &kind) && kind == Kind::PartStudio) {
+        if (!isTabObject(obj, &kind)) {
+            continue;
+        }
+        if (kind == Kind::PartStudio) {
             otherStudio = true;
         }
+        // Only the stored order counts, not a Variable Studio's mark: the bar marks a new one
+        // before placeAfter() writes the order, and that order must still find "*" a tab
+        const std::string name = obj->getNameInDocument();
+        if (std::find(registry.order.begin(), registry.order.end(), name)
+            != registry.order.end()) {
+            registeredTab = true;
+        }
     }
-    return !otherStudio;
+    if (otherStudio) {
+        return false;
+    }
+    // ops#924 (G1): a document whose stored order holds its tabs, none of them a Part Studio, is
+    // a document like Onshape's Variable Studio-only one: no empty "Part Studio 1" of ours. Unless
+    // the order lists the implicit studio itself (it was a tab when the bar or a merge wrote it).
+    // An empty document, a file without the registry, and one with no stored order keep it
+    const std::string implicit = implicitName();
+    const bool orderedImplicit = std::find(registry.order.begin(), registry.order.end(), implicit)
+        != registry.order.end();
+    return !registeredTab || orderedImplicit;
 }
 
 std::vector<Tab> DocumentTabs::tabs(const Document* doc)
@@ -491,6 +513,13 @@ void DocumentTabs::placeAfter(Document* doc, const std::string& name, const std:
         }
     }
     auto it = std::find(names.begin(), names.end(), after);
+    if (it == names.end() && after == implicitName()) {
+        // ops#924 review R1b-1: the new tab is placed after the implicit studio, so that studio
+        // was a tab; the new one may have hidden it already (its name in a stale stored order,
+        // which then holds a tab and no Part Studio). The order keeps it, as before the add
+        names.push_back(after);
+        it = names.end() - 1;
+    }
     names.insert(it == names.end() ? it : it + 1, name);
     setOrder(doc, names);
 }

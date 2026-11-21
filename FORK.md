@@ -494,7 +494,8 @@ names it.
 | `fix/i883-fillet-c-h` | fix | ops#883 | - | `integration` `874ed9be94` | `89f63756b3` (fork PR 492), 2026-11-19 | never (fork fix): a fill kept over its face runs on through a hole in it (H); a concave line/arc reflex corner beside a notched wall builds, the fills meeting along their intersection (C) |
 | `fix/i920-piece-witness-copy` | fix | ops#920 | - | `integration` `3c882341fa` | via `carry/fork-1.0.4-set` | never (fork fix): a split part's pieces keep their solids when their studio is copied, pasted or merged into a document |
 | `infra/fork-release-103` | infra | ops#883 | - | `integration` `89f63756b3` | via `carry/fork-1.0.4-set` | never (fork release stamp): ForkRelease 14, the release after fork-1.0.3 |
-| `carry/fork-1.0.4-set` | carry | ops#920, ops#883 | - | `integration` `89f63756b3` | (fork PR 495) | never: the fork-1.0.4 set, fork PRs 494 and 493 merged as one |
+| `carry/fork-1.0.4-set` | carry | ops#920, ops#883 | - | `integration` `89f63756b3` | `12d910fe18` (fork PR 495), 2026-11-19 | never: the fork-1.0.4 set, fork PRs 494 and 493 merged as one |
+| `fix/i924-no-implicit-studio` | fix | ops#924 | - | `integration` `12d910fe18` | (fork PR 497) | never (fork fix): a document whose tabs have no Part Studio shows no empty implicit Part Studio 1 |
 
 ## Fork-only commits in carried topics
 

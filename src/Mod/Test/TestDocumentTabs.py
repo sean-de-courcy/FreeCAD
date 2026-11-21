@@ -418,6 +418,97 @@ class TestDocumentTabs(unittest.TestCase):
         self.assertFalse(Tabs.hasImplicitStudio(self.doc))
         self.assertEqual(self.kinds(), [("Part", "PartStudio")])
 
+    # -- ops#924: no implicit studio where Onshape has no Part Studio ------------------------------
+
+    def variableStudioOnly(self):
+        """A document like a merged Onshape Variable Studio-only one: one marked VarSet "Sizes"
+        with a length w = 12 mm, no solid and no Part Studio; the merge's stored order names it."""
+        variables = self.doc.addObject("App::VarSet", "VarSet")
+        variables.Label = "Sizes"
+        variables.addProperty("App::PropertyLength", "w", "Base", "")
+        variables.w = 12
+        Tabs.setVariableStudio(variables)
+        Tabs.setOrder(self.doc, [variables.Name])
+        self.doc.recompute()
+        return variables
+
+    def testVariableStudioOnlyDocumentHasNoImplicitStudio(self):
+        """ops#924 (G1): a document whose stored order holds its one tab, a Variable Studio, as a
+        merged Onshape document's does, shows that one tab, not an empty "Part Studio 1" besides;
+        after a save and a reopen too. Its variable is untouched."""
+        self.variableStudioOnly()
+        self.assertFalse(Tabs.hasImplicitStudio(self.doc))
+        self.assertEqual(self.kinds(), [("VarSet", "VariableStudio")])
+        path = os.path.join(self.folder, "vs.FCStd")
+        self.doc.saveAs(path)
+        App.closeDocument(self.doc.Name)
+        self.doc = App.openDocument(path)
+        self.assertEqual(self.kinds(), [("VarSet", "VariableStudio")])
+        self.assertEqual([l for _n, _k, l in Tabs.tabs(self.doc)], ["Sizes"])
+        self.assertAlmostEqual(self.doc.VarSet.w.Value, 12, 6)
+
+    def testNewVariableStudioKeepsTheShownImplicitStudio(self):
+        """ops#924 review T1: the bar's "+ Variable Studio" in a document showing its empty implicit
+        studio marks the new set, then places it after the active tab, "*": both tabs stay, as in
+        Onshape adding a Variable Studio removes no Part Studio. A mark with no stored order
+        (a script's) keeps the implicit studio too."""
+        variables = self.doc.addObject("App::VarSet", "VarSet")
+        Tabs.setVariableStudio(variables)
+        self.assertEqual(self.kinds(), [("*", "PartStudio"), ("VarSet", "VariableStudio")])
+        Tabs.placeAfter(self.doc, variables.Name, "*")
+        self.assertEqual(Tabs.order(self.doc), ["*", "VarSet"])
+        self.assertEqual(self.kinds(), [("*", "PartStudio"), ("VarSet", "VariableStudio")])
+
+    def testVariableStudioOnlyDocumentGetsTheStudioBackWithASolid(self):
+        """ops#924: a solid put at the top level of such a document is the implicit studio's, as
+        before; a new App::Part studio is a tab of its own and brings no implicit studio."""
+        self.variableStudioOnly()
+        self.doc.addObject("App::Part", "Part")
+        self.assertEqual(self.kinds(), [("VarSet", "VariableStudio"), ("Part", "PartStudio")])
+        body = self.doc.addObject("PartDesign::Body", "Body")
+        box(self.doc, body)
+        self.doc.recompute()
+        self.assertTrue(Tabs.hasImplicitStudio(self.doc))
+        self.assertIn(("*", "PartStudio"), self.kinds())
+
+    def testNewTabAfterTheImplicitStudioKeepsIt(self):
+        """ops#924 review R1b-1: the Variable Studio of such a document deleted, its name stays in
+        the stored order and the empty document shows the implicit studio; a new set that takes
+        that name (and its mark) hides the studio before the bar places it after "*". The order
+        placeAfter() writes keeps "*", and both tabs stay."""
+        self.variableStudioOnly()
+        Tabs.removeTab(self.doc, "VarSet")
+        self.assertEqual(self.kinds(), [("*", "PartStudio")])
+        again = self.doc.addObject("App::VarSet", "VarSet")
+        self.assertEqual(again.Name, "VarSet")
+        Tabs.setVariableStudio(again)
+        Tabs.placeAfter(self.doc, again.Name, "*")
+        self.assertEqual(Tabs.order(self.doc), ["*", "VarSet"])
+        self.assertEqual(self.kinds(), [("*", "PartStudio"), ("VarSet", "VariableStudio")])
+
+    def testRegisteredAssemblyOnlyDocumentHasNoImplicitStudio(self):
+        """ops#924: a document whose stored order holds its one tab, an empty assembly, has no
+        implicit studio (Onshape keeps a document's tabs as they are); without the registry (a
+        file made before tabs) the implicit studio stays, as before."""
+        asm = self.doc.addObject("Assembly::AssemblyObject", "Assembly")
+        asm.Type = "Assembly"
+        asm.newObject("Assembly::JointGroup", "Joints")
+        self.doc.recompute()
+        self.assertEqual(self.kinds(), [("*", "PartStudio"), ("Assembly", "Assembly")])
+        Tabs.setOrder(self.doc, ["Assembly"])
+        self.assertEqual(self.kinds(), [("Assembly", "Assembly")])
+
+    def testNewAndLegacyDocumentsKeepTheImplicitStudio(self):
+        """ops#924 leaves these as they were: an empty document is one implicit studio; an
+        unmarked VarSet (a file made before Variable Studios) is no tab, and the implicit studio
+        stays; an order that lists the implicit studio (the bar saved it shown) keeps it."""
+        self.assertEqual(self.kinds(), [("*", "PartStudio")])
+        variables = self.doc.addObject("App::VarSet", "VarSet")
+        self.assertEqual(self.kinds(), [("*", "PartStudio")])
+        Tabs.setVariableStudio(variables)
+        Tabs.setOrder(self.doc, ["*", "VarSet"])
+        self.assertEqual(self.kinds(), [("*", "PartStudio"), ("VarSet", "VariableStudio")])
+        self.assertTrue(Tabs.hasImplicitStudio(self.doc))
 
     # -- slice 2: Duplicate and Export (ops#640 round 8) -------------------------------------------
 
