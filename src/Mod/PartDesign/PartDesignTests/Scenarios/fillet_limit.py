@@ -31,8 +31,10 @@ round of zero length) goes missing and fails its owner, with candidates for the 
 never re-pointed to the round or sphere patch that consumed it; when the element comes back
 below the limit, the reference finds it again by its name.
 
-The dress-ups have Refine off: Refine merges the faces of one surface (the two quarter rounds of
-a full round, the two sphere patches meeting at r = t/2), which is a change of its own.
+The dress-ups have Refine off: Refine merges the faces of one surface (the two sphere patches
+meeting at r = t/2), which is a change of its own. The two rounds of a full round are one face at
+the limit with Refine off too, as Onshape's (ops#900): the construction merges them, so the
+predicates of a round take no side there (`FilletLimit.side`), and the crest between them is gone.
 """
 
 from .harness import (
@@ -59,12 +61,13 @@ TOL = 1e-6
 ALL_EDGES = edge(where=lambda e: True)
 
 
-def sphereFace(center, side):
-    """The sphere face centred at `center` whose centre of mass passes `side`."""
+def sphereFace(center, side=None):
+    """The sphere face centred at `center` (whose centre of mass passes `side`)."""
     c = V(*center)
     return face(
         "sphere",
-        where=lambda f: (f.Surface.Center - c).Length < TOL and side(f.CenterOfMass),
+        where=lambda f: (f.Surface.Center - c).Length < TOL
+        and (side is None or side(f.CenterOfMass)),
     )
 
 
@@ -126,6 +129,11 @@ class FilletLimit(Scenario):
         """The elements that vanish at the limit are gone: OCCT's face narrower than its tolerance
         (2 - 1e-8) is built by the construction too."""
         return self.r > self.limit - 1e-7
+
+    def side(self, test):
+        """`test`, the side of a round's centre of mass, below the limit; none at it, where the
+        rounds on either side are one face (ops#900)."""
+        return None if self.consumed() else test
 
     @staticmethod
     def sizeProperty(kind):
@@ -278,7 +286,7 @@ class FilletLimitFullRound(RibLimit):
 
     def front(self):
         r = self.r
-        return cylinderFace((0, r, self.height - r), X, r, frontOf(self.width / 2))
+        return cylinderFace((0, r, self.height - r), X, r, self.side(frontOf(self.width / 2)))
 
     def frontEdge(self):
         r = self.r
@@ -286,7 +294,7 @@ class FilletLimitFullRound(RibLimit):
             "circle",
             center=(self.length, r, self.height - r),
             radius=r,
-            where=lambda e: e.CenterOfMass.y < self.width / 2,
+            where=lambda e: self.consumed() or e.CenterOfMass.y < self.width / 2,
         )
 
 
@@ -346,11 +354,11 @@ class FilletLimitDomedRib(FilletLimit):
 
     def verticalRound(self):
         r = self.r
-        return cylinderFace((r, r, 0), Z, r, frontOf(self.width / 2))
+        return cylinderFace((r, r, 0), Z, r, self.side(frontOf(self.width / 2)))
 
     def topRound(self):
         r = self.r
-        return cylinderFace((0, r, self.height - r), X, r, frontOf(self.width / 2))
+        return cylinderFace((0, r, self.height - r), X, r, self.side(frontOf(self.width / 2)))
 
     def endFace(self):
         return face("plane", normal=-X, through=(0, 0, 0))
@@ -460,7 +468,7 @@ class FilletLimitRoundedSlab(SlabLimit):
 
     def topEdge(self):
         r, t = self.r, self.thickness
-        return cylinderFace((0, r, t - r), X, r, lambda c: c.z > t / 2)
+        return cylinderFace((0, r, t - r), X, r, self.side(lambda c: c.z > t / 2))
 
     def vertical(self):
         r = self.r
@@ -529,7 +537,9 @@ class FilletLimitBallEndSlot(FilletLimit):
 
     def floorRound(self):
         r = self.r
-        return cylinderFace((0, self.y0 + r, self.floorZ() + r), X, r, frontOf(self.y0 + 2))
+        return cylinderFace(
+            (0, self.y0 + r, self.floorZ() + r), X, r, self.side(frontOf(self.y0 + 2))
+        )
 
     def sideWall(self):
         return face("plane", normal=Y, through=(0, self.y0, 0))
@@ -584,7 +594,7 @@ class FilletLimitRibAgainstWall(FilletLimit):
 
     def roundFront(self):
         r = self.r
-        return cylinderFace((0, r, self.height - r), X, r, frontOf(self.width / 2))
+        return cylinderFace((0, r, self.height - r), X, r, self.side(frontOf(self.width / 2)))
 
     def endFace(self):
         return face("plane", normal=-X, through=(0, 0, 0))
@@ -611,24 +621,20 @@ class FilletLimitRibAgainstWall(FilletLimit):
 
 
 class FilletLimitFullRoundFromLimit(FilletLimit):
-    """The full round of FilletLimitFullRound built at the limit (r = 2), r 2 -> 1.9 -> 2: a
-    reference made at the limit, to the crest between the two rounds, an element that exists only
-    there.
+    """The full round of FilletLimitFullRound built at the limit (r = 2), r 2 -> 1.9 -> 2:
+    references made at the limit, where the two rounds are one face (ops#900; before it, a crest
+    between them was a reference of its own here).
 
-    References: datum points on the crest (gone below the limit, where the top face lies between
-    the rounds, and back at it), on the front round and on the end face at x = 0 (surviving)."""
+    References: datum points on the round and on the end face at x = 0 (surviving)."""
 
-    REFS = ("crest", "round_front", "end_face")
+    REFS = ("round_front", "end_face")
     sizes = {"build": 2.0, "below": 1.9, "atLimit": 2.0}
     steps = ("below", "atLimit")
     length, width, height = 30.0, 4.0, 20.0
 
-    def crest(self):
-        return edge("line", direction=X, through=(0, self.width / 2, self.height))
-
     def roundFront(self):
         r = self.r
-        return cylinderFace((0, r, self.height - r), X, r, frontOf(self.width / 2))
+        return cylinderFace((0, r, self.height - r), X, r, self.side(frontOf(self.width / 2)))
 
     def endFace(self):
         return face("plane", normal=-X, through=(0, 0, 0))
@@ -639,8 +645,8 @@ class FilletLimitFullRoundFromLimit(FilletLimit):
         pad = m.pad(body, profile, self.height)
         edges = [edge("line", direction=X, through=(0, y, self.height)) for y in (0, self.width)]
         fillet = self.dressUp(body, pad, edges)
-        points = {"crest": self.crest, "round_front": self.roundFront, "end_face": self.endFace}
-        self.datums(body, fillet, points, limitOnly=("crest",))
+        points = {"round_front": self.roundFront, "end_face": self.endFace}
+        self.datums(body, fillet, points)
 
 
 class FilletLimitRoundedSlabFromLimit(FilletLimit):

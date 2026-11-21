@@ -274,8 +274,8 @@ class TestFillet(unittest.TestCase):
         fillet.Radius = 2.0
         self.Doc.recompute()
         self._assertValidFillet(fillet, 30 * 4 * 20 - 2 * self._fillet_section(2.0) * 30)
-        # One quarter cylinder per edge; refined, they merge into one half cylinder
-        self.assertEqual(len(fillet.Shape.Faces), 6 if fillet.Refine else 7)
+        # The two quarter cylinders are one half cylinder, refined or not (ops#900)
+        self.assertEqual(len(fillet.Shape.Faces), 6)
 
     def testFilletFullRoundOfAWallFlushWithItsBase(self):
         # ops#640 F1 (the replica's row 150): a curved wall's end flush with its base's end, the two
@@ -624,6 +624,170 @@ class TestFillet(unittest.TestCase):
         else:
             message = "The fillet fills a recess of the base next to %s:" % edge
             self.assertTrue(fillet.getStatusString().startswith(message), fillet.getStatusString())
+
+    # ops#900: a full round (radius half the wall) is one face where its two rounds meet on one
+    # surface, as Onshape's: one cylinder along a straight run, one torus around a corner
+    @staticmethod
+    def _rounded_ring_wall(corner, wall=2.0, height=15.0):
+        """A wall of thickness `wall` along a 40 x 30 rectangle, its corners rounded at `corner`
+        outside (0: sharp), extruded to `height`. Returns the solid and its top rim's edges."""
+        V = FreeCAD.Vector
+
+        def outline(w, h, r):
+            x, y = w / 2, h / 2
+            if r <= 0:
+                return Part.makePolygon(
+                    [V(-x, -y, 0), V(x, -y, 0), V(x, y, 0), V(-x, y, 0), V(-x, -y, 0)]
+                )
+            centres = [(x - r, -y + r), (x - r, y - r), (-x + r, y - r), (-x + r, -y + r)]
+            starts = [V(-x + r, -y, 0), V(x, -y + r, 0), V(x - r, y, 0), V(-x, y - r, 0)]
+            ends = [V(x - r, -y, 0), V(x, y - r, 0), V(-x + r, y, 0), V(-x, -y + r, 0)]
+            edges = []
+            for k in range(4):
+                edges.append(Part.LineSegment(starts[k], ends[k]).toShape())
+                circle = Part.Circle(V(centres[k][0], centres[k][1], 0), V(0, 0, 1), r)
+                edges.append(
+                    Part.ArcOfCircle(circle, (k - 1) * pi / 2, k * pi / 2).toShape()
+                )
+            return Part.Wire(edges)
+
+        inner = corner - wall if corner > 0 else 0
+        face = Part.makeFace(
+            [outline(40, 30, corner), outline(40 - 2 * wall, 30 - 2 * wall, inner)],
+            "Part::FaceMakerBullseye",
+        )
+        solid = face.extrude(V(0, 0, height))
+        rim = [
+            e
+            for e in solid.Edges
+            if abs(e.BoundBox.ZMin - height) < 1e-9 and abs(e.BoundBox.ZMax - height) < 1e-9
+        ]
+        return solid, rim
+
+    @staticmethod
+    def _kinds(shape):
+        kinds = {}
+        for face in shape.Faces:
+            name = face.Surface.__class__.__name__
+            kinds[name] = kinds.get(name, 0) + 1
+        return kinds
+
+    def testFullRoundAroundCornersIsOneTorusPerCorner(self):
+        # Wall 2 thick along a 40 x 30 rectangle with corners R 6 outside (R 4 inside), 15 high;
+        # its whole top rim rounded at 1, half the wall. The wall's mid line is 92 + 10 pi long
+        # (straights 2 * 28 + 2 * 18, four quarter circles of R 5), and the section removed,
+        # 2 * 1 - pi / 2, is symmetric about it (Pappus). Faces: bottom, 8 lateral planes, 8
+        # lateral cylinders, 4 half cylinders and 4 half tori: 25. Each half torus is the half
+        # circle of length pi turned a quarter about R 5: area pi * 5 pi / 2. Edges: 16 at the
+        # bottom, 16 upright, 16 where the rounds start, 8 half circles between a half cylinder
+        # and a half torus: 56, on 32 vertices. The two rounds of an arc were two faces of one
+        # torus (29 faces refined, 33 not); the crest between them is no edge in Onshape
+        mid = 92 + 10 * pi
+        for refine in (True, False):
+            with self.subTest(refine=refine):
+                solid, rim = self._rounded_ring_wall(6.0)
+                fillet = self._fillet_on_base(solid, rim, 1.0)
+                fillet.Refine = refine
+                self.Doc.recompute()
+                self._assertValidFillet(fillet, mid * (2 * 15 - (2 - pi / 2)))
+                shape = fillet.Shape
+                self.assertEqual(self._kinds(shape), {"Plane": 9, "Cylinder": 12, "Toroid": 4})
+                self.assertEqual((len(shape.Edges), len(shape.Vertexes)), (56, 32))
+                for face in shape.Faces:
+                    if face.Surface.__class__.__name__ == "Toroid":
+                        self.assertAlmostEqual(face.Area, pi * 5 * pi / 2, places=6)
+                rounds = [
+                    f
+                    for f in shape.Faces
+                    if f.Surface.__class__.__name__ == "Cylinder"
+                    and abs(f.Surface.Radius - 1.0) < 1e-9
+                ]
+                self.assertEqual(len(rounds), 4)
+                # Every face and edge has its name
+                named = shape.ElementReverseMap
+                for kind, count in (("Face", 25), ("Edge", 56)):
+                    for index in range(1, count + 1):
+                        self.assertTrue(named.get("%s%d" % (kind, index)), (kind, index))
+
+    def testFullRoundOfASharpCorneredWallKeepsItsCount(self):
+        # The same wall with sharp corners: four half cylinders mitred at the corners, 13 faces
+        # (bottom, 8 lateral planes, 4 half cylinders), refined or not; the wall's mid line is
+        # 2 * 38 + 2 * 28 long
+        for refine in (True, False):
+            with self.subTest(refine=refine):
+                solid, rim = self._rounded_ring_wall(0.0)
+                fillet = self._fillet_on_base(solid, rim, 1.0)
+                fillet.Refine = refine
+                self.Doc.recompute()
+                self._assertValidFillet(fillet, 132 * (2 * 15 - (2 - pi / 2)))
+                self.assertEqual(self._kinds(fillet.Shape), {"Plane": 9, "Cylinder": 4})
+
+    def testRoundsBelowHalfTheWallStayApart(self):
+        # Radius 0.6 on the wall 2 thick: a strip 0.8 wide of the top is left between the two
+        # rounds, which stay two faces each: 17 lateral and bottom faces, the top, 8 quarter
+        # cylinders and 8 quarter tori
+        solid, rim = self._rounded_ring_wall(6.0)
+        fillet = self._fillet_on_base(solid, rim, 0.6)
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+        self.assertEqual(self._kinds(fillet.Shape), {"Plane": 10, "Cylinder": 16, "Toroid": 8})
+
+    def testFullRoundOfATubeIsOneTorus(self):
+        # A tube R 6..10, 10 high, both top rims rounded at 2: bottom, two cylinders and one
+        # half torus, the half circle of length 2 pi turned about R 8: area 2 pi * 2 pi * 8
+        tube = Part.makeCylinder(10, 10).cut(Part.makeCylinder(6, 10))
+        rims = [e for e in tube.Edges if e.BoundBox.ZMin > 9.9]
+        fillet = self._fillet_on_base(tube, rims, 2.0)
+        self._assertValidFillet(fillet, pi * 64 * 10 - (2 * 4 - pi * 4 / 2) * 2 * pi * 8)
+        self.assertEqual(self._kinds(fillet.Shape), {"Plane": 1, "Cylinder": 2, "Toroid": 1})
+        torus = [f for f in fillet.Shape.Faces if f.Surface.__class__.__name__ == "Toroid"][0]
+        self.assertAlmostEqual(torus.Area, 2 * pi * 2 * pi * 8, places=6)
+
+    def testReferencesAcrossAFullRound(self):
+        # Two later references picked on the full round's result: a round on the wall's outer
+        # bottom edge along y = -15, which runs on around the whole tangent rim (92 straight and
+        # a full turn about R 6), and a binder on the half torus of the corner about (14, -9).
+        # Below the limit (0.6) the corner has two quarter tori instead; back at the limit both
+        # references give what they gave: the round its own section, the binder the half torus
+        # of area pi * 5 pi / 2 about that corner
+        solid, rim = self._rounded_ring_wall(6.0)
+        fillet = self._fillet_on_base(solid, rim, 1.0)
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+        body = fillet.getParentGeoFeatureGroup()
+        edge = self._edge_between(fillet.Shape, (-14, -15, 0), (14, -15, 0))
+        later = self.Doc.addObject("PartDesign::Fillet", "Later")
+        body.addObject(later)
+        later.Base = (fillet, [edge])
+        later.Radius = 0.5
+        corner = FreeCAD.Vector(14, -9, 15)
+        torus = next(
+            "Face%d" % i
+            for i, f in enumerate(fillet.Shape.Faces, 1)
+            if f.Surface.__class__.__name__ == "Toroid"
+            and f.Surface.Center.isEqual(FreeCAD.Vector(14, -9, 14), 1e-7)
+        )
+        binder = body.newObject("PartDesign::SubShapeBinder", "Binder")
+        binder.Support = [(fillet, (torus,))]
+        self.Doc.recompute()
+        centroid = self._fillet_section_centroid(0.5)
+        removed = self._fillet_section(0.5) * (92 + 2 * pi * (6 - centroid))
+
+        def check():
+            self.assertTrue(later.isValid(), later.getStatusString())
+            self.assertAlmostEqual(fillet.Shape.Volume - later.Shape.Volume, removed, places=6)
+            self.assertTrue(binder.isValid(), binder.getStatusString())
+            self.assertEqual(len(binder.Shape.Faces), 1)
+            self.assertAlmostEqual(binder.Shape.Area, pi * 5 * pi / 2, places=6)
+            self.assertLess(binder.Shape.BoundBox.Center.distanceToPoint(corner), 6.0)
+
+        check()
+        fillet.Radius = 0.6
+        self.Doc.recompute()
+        self.assertTrue(later.isValid(), later.getStatusString())
+        self.assertAlmostEqual(fillet.Shape.Volume - later.Shape.Volume, removed, places=6)
+        fillet.Radius = 1.0
+        self.Doc.recompute()
+        self.assertEqual(self._kinds(fillet.Shape), {"Plane": 9, "Cylinder": 12, "Toroid": 4})
+        check()
 
     def tearDown(self):
         # closing doc
