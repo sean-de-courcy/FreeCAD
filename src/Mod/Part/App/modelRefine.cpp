@@ -1335,9 +1335,10 @@ static FaceTypedBase& getSphereObject()
 // cone, torus and sphere faces only where the face uniter would: each shell's faces of these kinds
 // are grouped as FaceUniter::process() groups them (by kind, by surface, by adjacency), and the
 // edges of every face in a group the uniter's buildFace refuses (a pointed cone, a sphere cap or
-// zone, a closed surface with holes) or that has no neighbour are kept. A helix earlier in the
-// body, which sends the refine to the fallback, then never decides whether such faces merge.
-// Faces in no shell keep their edges.
+// zone, a closed surface with holes) are kept. A helix earlier in the body, which sends the
+// refine to the fallback, then never decides whether such faces merge. A face with no equal
+// neighbour is in no group (FaceAdjacencySplitter keeps groups of two or more), so there is
+// nothing to merge it with; faces in no shell keep their edges (review pri931-r2).
 void ModelRefine::revolvedEdgesToKeep(const TopoDS_Shape& shape, TopTools_MapOfShape& keep)
 {
     FaceTypedBase* types[] = {&getConeObject(), &getTorusObject(), &getSphereObject()};
@@ -1376,7 +1377,7 @@ void ModelRefine::revolvedEdgesToKeep(const TopoDS_Shape& shape, TopTools_MapOfS
                 adjacencySplitter.split(equalitySplitter.getGroup(e));
                 for (std::size_t a = 0; a < adjacencySplitter.getGroupCount(); ++a) {
                     const FaceVectorType& group = adjacencySplitter.getGroup(a);
-                    if (group.size() > 1 && !type->buildFace(group).IsNull()) {
+                    if (!type->buildFace(group).IsNull()) {
                         continue;
                     }
                     for (const TopoDS_Face& face : group) {
