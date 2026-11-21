@@ -22,6 +22,7 @@
 # **************************************************************************/
 
 import math
+import re
 
 import FreeCAD as App
 import Part
@@ -1266,6 +1267,10 @@ def findPlacement(ref, ignoreVertex=False):
         # ops#683: the part's origin and axes, whatever element carries the pick
         return App.Placement()
 
+    sketchPoint = sketchGeometryPoint(obj, elt)
+    if sketchPoint is not None:
+        return App.Placement(sketchPoint, App.Rotation())
+
     if not elt or not vtx:
         # case of whole parts such as PartDesign::Body or App/PartDesign::CordinateSystem/Point/Line/Plane.
         if obj.TypeId == "App::Line":
@@ -1419,6 +1424,35 @@ def findPlacement(ref, ignoreVertex=False):
         plc.Rotation = App.Rotation(plane.Rotation)
 
     return plc
+
+
+def sketchGeometryPoint(obj, elt):
+    """FreeCAD-CH (ops#912): a sketch's geometry point named "vertex<k>" (lower case: the sketch's
+    own vertex numbering, construction geometry included, where "Vertex<k>" is its Shape's), in the
+    sketch's own coordinates, as a Shape vertex read through a link is. Onshape mates to a point of
+    an inserted sketch, construction points included; a sketch's Shape holds no construction
+    geometry. The reference property stores the point by its geometry id (the sketch's mapped name
+    g<id>v<pos>), so the name follows the point when earlier geometry is deleted. None when obj is
+    not a sketch, or a link to one, or elt is not such a name."""
+    if obj is None or not re.match(r"^vertex[0-9]+$", elt or ""):
+        return None
+    # the sketch at the end of any chain of links (array elements included), and the placements
+    # the links in between keep (LinkTransform), the outer link's own left out: the frame the
+    # link's Shape vertices are read in
+    try:
+        sketch, toObj = obj.getLinkedObject(True, App.Matrix(), False)
+    except Exception:
+        return None
+    if sketch is None or not sketch.isDerivedFrom("Sketcher::SketchObject"):
+        return None
+    try:
+        point = sketch.getSubObject(elt)
+    except Exception:
+        point = None
+    if point is None or not hasattr(point, "Point"):
+        return None
+    local = sketch.Placement.inverse().multVec(point.Point)
+    return toObj.multVec(local)
 
 
 def get_element(shape, name):
