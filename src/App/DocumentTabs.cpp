@@ -217,21 +217,6 @@ bool viewShows(const DocumentObject* view, const DocumentObject* obj)
     return std::find(sources.begin(), sources.end(), obj) != sources.end();
 }
 
-/// ops#927: a drawing's own geometry, as a frozen view's hidden Part::Feature of Onshape's lines:
-/// a 3D object that only TechDraw views use, each as its Source or XSource. It is a member of its
-/// page, not implicit Part Studio content. Any other user (a feature, a link, a sketch's external
-/// geometry) makes it model geometry again; with no user at all it shows in the implicit studio
-bool isDrawingSource(const DocumentObject* obj)
-{
-    const auto users = obj->getInList();
-    if (users.empty()) {
-        return false;
-    }
-    return std::all_of(users.begin(), users.end(), [obj](const DocumentObject* user) {
-        return user && isDerived(user, drawViewType()) && viewShows(user, obj);
-    });
-}
-
 /// The page that owns the drawing source @a obj: of the pages holding a view that shows it
 /// (through view groups too), the first in document order, so that it is never two tabs' member
 const DocumentObject* drawingSourcePage(const DocumentObject* obj)
@@ -262,6 +247,27 @@ const DocumentObject* drawingSourcePage(const DocumentObject* obj)
     return nullptr;
 }
 
+/// ops#927: a drawing's own geometry, a frozen view's hidden Part::Feature of Onshape's lines (it
+/// carries the transfer's `OnshapeEntities`): a 3D object that only TechDraw views use, each as its
+/// Source or XSource, with a page of its own document holding one of them. It is a member of that
+/// page, not implicit Part Studio content. A user's own solid shown in a drawing stays the studio's
+/// (review r1 R3). Any other user (a feature, a link, a sketch's external geometry) makes a holder
+/// model geometry again; with no user, or its views on no page, it shows in the implicit studio
+bool isDrawingSource(const DocumentObject* obj)
+{
+    if (!obj->getPropertyByName("OnshapeEntities")) {
+        return false;
+    }
+    const auto users = obj->getInList();
+    if (users.empty()) {
+        return false;
+    }
+    const bool onlyViews = std::all_of(users.begin(), users.end(), [obj](const DocumentObject* user) {
+        return user && isDerived(user, drawViewType()) && viewShows(user, obj);
+    });
+    return onlyViews && drawingSourcePage(obj);
+}
+
 /// A 3D object at the top level, outside every tab: implicit studio content or a drawing's source
 bool isTopLevelContent(const DocumentObject* obj)
 {
@@ -289,6 +295,21 @@ bool isImplicitContent(const DocumentObject* obj)
 bool isPageHolder(const DocumentObject* obj, const DocumentObject* page)
 {
     return isTopLevelContent(obj) && isDrawingSource(obj) && drawingSourcePage(obj) == page;
+}
+
+/// The names of the drawing sources @a page owns, for removing them with it (ops#927, review F4)
+std::vector<std::string> pageHolderNames(const DocumentObject* page)
+{
+    std::vector<std::string> names;
+    if (!isDerived(page, drawPageType())) {
+        return names;
+    }
+    for (auto obj : page->getDocument()->getObjects()) {
+        if (isPageHolder(obj, page)) {
+            names.emplace_back(obj->getNameInDocument());
+        }
+    }
+    return names;
 }
 
 void addWithChildren(
@@ -699,6 +720,9 @@ void DocumentTabs::removeTab(Document* doc, const Tab& tab)
     std::vector<std::string> roots;
     if (tab.object) {
         roots.emplace_back(tab.object->getNameInDocument());
+        // A page's own drawing sources go with it (its members), read before its views go
+        const auto holders = pageHolderNames(tab.object);
+        roots.insert(roots.end(), holders.begin(), holders.end());
     }
     else {
         for (auto obj : doc->getObjects()) {

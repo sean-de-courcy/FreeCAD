@@ -727,6 +727,7 @@ class TestDocumentTabs(unittest.TestCase):
                 Part.LineSegment(App.Vector(0, 0, 0), App.Vector(0, 10, 0)).toShape(),
             ]
         )
+        lines.addProperty("App::PropertyString", "OnshapeEntities")
         lines.Visibility = False
         objects["lines"] = lines
         objects["page"], objects["view"] = self.pageShowing(lines, "Page")
@@ -808,3 +809,57 @@ class TestDocumentTabs(unittest.TestCase):
         self.assertEqual(self.kinds(), [("Studio", "PartStudio"), ("Page", "Drawing")])
         self.assertIn(objects["lines"], Tabs.members(self.doc, "Studio"))
         self.assertNotIn(objects["lines"], Tabs.members(self.doc, "Page"))
+
+    def testHolderOfAViewOffItsPageIsImplicitContent(self):
+        """Review r1 R1: a view taken off its page still shows the holder, but no page owns it:
+        the holder is implicit content, never in no tab."""
+        objects = self.drawingModel()
+        objects["page"].removeView(objects["view"])
+        self.doc.recompute()
+        self.assertIsNotNone(self.doc.getObject(objects["view"].Name))
+        self.assertEqual(self.kinds()[0], ("*", "PartStudio"))
+        self.assertIn(objects["lines"], Tabs.members(self.doc, "*"))
+
+    def testSolidShownFromAnotherDocumentStaysImplicitContent(self):
+        """Review r1 R2: a holder shown only by a view of another document's page stays implicit
+        content of its own document."""
+        objects = self.drawingModel()
+        self.doc.removeObject(objects["view"].Name)
+        other = App.newDocument("TestDocumentTabsOther")
+        page = other.addObject("TechDraw::DrawPage", "Page")
+        page.Template = other.addObject("TechDraw::DrawSVGTemplate", "Template")
+        view = other.addObject("TechDraw::DrawViewPart", "View")
+        page.addView(view)
+        self.doc.saveAs(os.path.join(self.folder, "holder.FCStd"))
+        other.saveAs(os.path.join(self.folder, "drawing.FCStd"))
+        view.XSource = [objects["lines"]]
+        other.recompute()
+        self.assertEqual(self.kinds()[0], ("*", "PartStudio"))
+        self.assertIn(objects["lines"], Tabs.members(self.doc, "*"))
+
+    def testUsersSolidShownInADrawingStaysInTheStudio(self):
+        """Review r1 R3: a user's own top-level solid that only a drawing shows (no transfer mark)
+        stays implicit studio content, shown and exported there."""
+        objects = self.drawingModel()
+        solid = self.doc.addObject("Part::Box", "Solo")
+        objects["view"].Source = [objects["lines"], solid]
+        self.doc.recompute()
+        self.assertEqual(self.kinds()[0], ("*", "PartStudio"))
+        self.assertIn(solid, Tabs.members(self.doc, "*"))
+        self.assertNotIn(solid, Tabs.members(self.doc, "Page"))
+        self.assertIn(objects["lines"], Tabs.members(self.doc, "Page"))
+
+    def testRemovingADrawingTabTakesItsHolders(self):
+        """Review r1 F4: deleting a Drawing tab removes its members, its holders too, in one undo
+        step; the undo brings them back as the page's."""
+        self.drawingModel()
+        self.doc.openTransaction("Delete Page")
+        Tabs.removeTab(self.doc, "Page")
+        self.doc.commitTransaction()
+        self.assertIsNone(self.doc.getObject("Page"))
+        self.assertIsNone(self.doc.getObject("Lines"))
+        self.assertEqual(self.kinds(), [("Studio", "PartStudio")])
+        self.doc.undo()
+        self.doc.recompute()
+        self.assertIsNotNone(self.doc.getObject("Lines"))
+        self.assertEqual(self.kinds(), [("Studio", "PartStudio"), ("Page", "Drawing")])
