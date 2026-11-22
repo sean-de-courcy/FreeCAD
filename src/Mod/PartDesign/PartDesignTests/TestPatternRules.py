@@ -54,6 +54,7 @@ import math
 import unittest
 
 import FreeCAD as App
+import Part
 
 from PartDesignTests.Scenarios import models
 
@@ -703,13 +704,14 @@ class TestPatternRules(unittest.TestCase):
         self.assertFailed(pattern, "made together")
 
     def testReapplyUpToAnOutsideFaceWithATurnedTwin(self):
-        """UNVERIFIED on Onshape (O6 is measured for a translation on a part the move doesn't map
-        onto itself; no oracle row for this case yet). The plate is square, so a quarter turn maps
+        """Onshape O6q (oracle963b, 11-22): an outside face stays the same face at every instance
+        of a quarter turn too, even on a part the turn maps onto itself. The plate is square, so a quarter turn maps
         its side x = 50 onto y = 50. A pad up to the plate's side (an outside face: the plate made
         it) from x = 35 in the Pocket (y -2..2, z 6..8; x 35..40 in the Pocket's air, +40) stays
         outside: at each instance it re-runs up to the seed's face carried back, never its turned
-        twin. At 90 and 270 deg that face is parallel to the pad: not made, with a warning. With
-        the twin read as own every instance would have its bar (97760)."""
+        twin. At 90 and 270 deg that face is parallel to the pad: not made, with a warning (Onshape
+        makes the whole pattern an error there, PATTERN_FEATURE_FAILED; the same geometry: only
+        the seed's bar). With the twin read as own every instance would have its bar (97760)."""
         self.walled()
         side = self.faceOf(self.blockPad, V(50, 0, 5), 1000)
         bar = self.barUpTo((self.blockPad, [side]), added=40)
@@ -741,6 +743,83 @@ class TestPatternRules(unittest.TestCase):
         self.assertValid(pattern)
         self.assertNoWarning(pattern)
         self.assertBody(100000 - 2400 - 40 * math.pi)
+
+    def testReapplyUpToARingCapAnotherOriginalMade(self):
+        """Review pr963a-r1 T1: an ellipse pad (centre (30, 20), semi-axes 4 and 2) from the
+        plate's top up to the top of a ring Boss (radii 8 and 4 about (30, 0), z 10..20), both
+        turned a quarter four times, Reapply on. An ellipse takes the up-to plane's blind shortcut
+        (ops#751), and the ring's top plane has its origin at the ring's centre, in its hole, off
+        the face: the face itself is on each instance's part, so every instance's pad is made,
+        no warning: 100000 + 4 x 480 pi (rings) + 4 x 80 pi (pads). Before: the point guard ran
+        on the plane's origin and dropped the instances at 90, 180 and 270 deg."""
+        self.block(-50, -50, 50, 50)
+        ringSketch = models.sketch(
+            self.doc,
+            "RingSketch",
+            [models.circle(30, 0, 8), models.circle(30, 0, 4)],
+            self.body,
+            z=10,
+        )
+        ring = models.pad(self.body, ringSketch, 10, name="Ring")
+        self.recompute()
+        top = self.faceOf(ring, V(30, 0, 20), 48 * math.pi)
+        ellipse = Part.Ellipse(V(34, 20, 0), V(30, 22, 0), V(30, 20, 0))
+        sketch = models.sketch(self.doc, "EllipseSketch", [ellipse], self.body, z=10)
+        pad = self.body.newObject("PartDesign::Pad", "EllipsePad")
+        pad.Profile = sketch
+        pad.Type = "UpToFace"
+        pad.UpToFace = (ring, [top])
+        self.recompute()
+        self.assertValid(pad)
+        self.assertBody(100000 + 480 * math.pi + 80 * math.pi)
+        pattern = self.quarterTurns([ring, pad])
+        self.assertValid(pattern)
+        self.assertNoWarning(pattern)
+        self.assertBody(100000 + 4 * 480 * math.pi + 4 * 80 * math.pi)
+        for x, y in ((30, 20), (-20, 30), (-30, -20), (20, -30)):
+            self.assertTrue(self.inside(x, y, 15), f"no pad at ({x}, {y})")
+
+    def testReapplyUpToAWholeDatumPlaneAfterAnOriginal(self):
+        """Review pr963a-r1 T2: a 10 x 10 pad (x -40..-30, y 20..30) from the plate's top up to a
+        datum plane z = 25 as a whole object (UpToShape), the datum made after the Pocket (x
+        -40..-30, y -5..5, 6 deep); both patterned along X, 3 over 40, Reapply on. The pattern
+        neither makes nor moves the datum plane, so it is outside: each instance's pad ends on z =
+        25, no warning: 100000 + 3 x (1500 - 600). Before: refused as a whole object made after
+        an original."""
+        self.block(-50, -50, 50, 50)
+        pocketSketch = models.sketch(
+            self.doc, "PocketSketch", models.rectangle(-40, -5, -30, 5), self.body, z=10
+        )
+        pocket = models.pocket(self.body, pocketSketch, 6, name="Pocket")
+        datum = self.body.newObject("PartDesign::Plane", "DatumPlane")
+        datum.AttachmentSupport = [(models.originFeature(self.body, "XY_Plane"), "")]
+        datum.MapMode = "FlatFace"
+        datum.AttachmentOffset = App.Placement(V(0, 0, 25), App.Rotation())
+        sketch = models.sketch(
+            self.doc, "PadSketch", models.rectangle(-40, 20, -30, 30), self.body, z=10
+        )
+        pad = self.body.newObject("PartDesign::Pad", "Pad")
+        pad.Profile = sketch
+        pad.Type = "UpToShape"
+        pad.UpToShape = [(datum, [""])]
+        self.recompute()
+        self.assertValid(pad)
+        self.assertBody(100000 - 600 + 1500)
+        pattern = self.body.newObject("PartDesign::LinearPattern", "LinearPattern")
+        pattern.Originals = [pocket, pad]
+        pattern.Direction = self.axis("X_Axis")
+        pattern.Mode = "Extent"
+        pattern.Length = 40
+        pattern.Occurrences = 3
+        pattern.Reapply = True
+        self.body.Tip = pattern
+        self.recompute()
+        self.assertValid(pattern)
+        self.assertNoWarning(pattern)
+        self.assertBody(100000 + 3 * (1500 - 600))
+        for x in (-35, -15, 5):
+            self.assertTrue(self.inside(x, 25, 20), f"no pad at x {x}")
+
 
 if __name__ == "__main__":
     unittest.main()

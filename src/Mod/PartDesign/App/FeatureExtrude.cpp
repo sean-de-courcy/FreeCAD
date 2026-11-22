@@ -1674,11 +1674,18 @@ App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions opt
             const gp_Pnt onProfile = BRep_Tool::Pnt(TopoDS::Vertex(profileVertex.getShape()));
             // The signed length along `along` from the profile to the plane through `target`
             // (global) parallel to the profile plane
-            // An own reference (ops#963 A) is read unmoved, and its copy must be on the base
-            auto distanceTo = [&](gp_Pnt target, const gp_Dir& along, const App::Property& from) {
+            // An own reference (ops#963 A) is read unmoved, and its copy must be on the base: an
+            // up-to vertex's point is tested here; an up-to face's plane origin is not (it can lie
+            // off the face, a ring's centre: review pr963a-r1 T1), the face itself is, below
+            auto distanceTo = [&](gp_Pnt target,
+                                  const gp_Dir& along,
+                                  const App::Property& from,
+                                  bool guardPoint = true) {
                 target.Transform(invTrsf);
                 if (reapplyRun && reapplyOwn(*this, from)) {
-                    requireOwnOnRunBase(BRepBuilderAPI_MakeVertex(target).Vertex());
+                    if (guardPoint) {
+                        requireOwnOnRunBase(BRepBuilderAPI_MakeVertex(target).Vertex());
+                    }
                 }
                 else if (reapplyRun) {
                     target.Transform(reapplyRun->toSeed);
@@ -1693,7 +1700,7 @@ App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions opt
                     face.move(invObjLoc);
                     requireOwnOnRunBase(face.getShape());
                 }
-                const double length = distanceTo(*planeEnd, dir, UpToFace);
+                const double length = distanceTo(*planeEnd, dir, UpToFace, false);
                 if (std::fabs(length) < Precision::Confusion()
                     || std::fabs(length) - offset1 < Precision::Confusion()) {
                     planeEnd.reset();

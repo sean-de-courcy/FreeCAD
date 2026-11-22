@@ -812,7 +812,10 @@ struct ReapplyCollector
                       "changes yet: " + name + unavailable;
                 return -1;
             }
-            if (body && Body::findBodyOf(obj) == body) {
+            // Only a solid feature's shape is the part at that feature: a datum plane, a sketch or
+            // another non-solid member after an original is the same at every instance (outside;
+            // review pr963a-r1 T2)
+            if (body && Body::findBodyOf(obj) == body && Body::isSolidFeature(obj)) {
                 const auto group = body->Group.getValues();
                 auto at = [&](const App::DocumentObject* o) {
                     return std::ranges::find(group, o) - group.begin();
