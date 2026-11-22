@@ -1878,12 +1878,13 @@ bool isAnalytic(GeomAbs_SurfaceType type)
 }
 
 // Whether OCCT builds the chain's round from analytic surfaces: each edge a line or a circle
-// between a plane and a plane or a cylinder, the edges meeting only tangentially (no corner), and
-// no arc too small for the radius
+// between a plane and a plane or a cylinder, and the edges meeting only tangentially (no corner).
+// The arcs too small for the radius, whose round is a B-spline, go to smallArcs
 bool roundsAnalytically(
     const TopoDS_Shape& base,
     const TopTools_IndexedMapOfShape& chain,
-    double radius
+    double radius,
+    TopTools_IndexedMapOfShape& smallArcs
 )
 {
     TopTools_IndexedDataMapOfShapeListOfShape facesOfEdges;
@@ -1919,7 +1920,8 @@ bool roundsAnalytically(
         // An arc smaller than the radius, where the ball rolls on the side of the wall's axis
         // (above a convex arc, as a rim's small rounded corner, or below a concave one), has no
         // torus: the ball's centre circle would have a negative radius. OCCT's round there is a
-        // B-spline, and right (ops#968). An arc equal to the radius gives a sphere.
+        // B-spline, and right (ops#968): bridgedRecess() excuses the faces over it. An arc equal to
+        // the radius gives a sphere.
         if (curve == GeomAbs_Circle) {
             const BRepAdaptor_Curve arc(edge);
             const gp_Circ circle = arc.Circle();
@@ -1945,7 +1947,7 @@ bool roundsAnalytically(
                         return false;
                     }
                     if ((convex ? -1.0 : 1.0) * normal.Dot(radial) < 0.0) {
-                        return false;
+                        smallArcs.Add(edge);
                     }
                 }
             }
@@ -2299,7 +2301,11 @@ std::string bridgedRecess(
     // As filledPocket() does: if the analysis throws, the check is skipped with a warning
     try {
         const auto chain = chainOf(before, edges);
-        if (chain.Extent() == 0 || !roundsAnalytically(before, chain, leastRadius < 0.0 ? radius : leastRadius)) {
+        TopTools_IndexedMapOfShape smallArcs;
+        if (chain.Extent() == 0
+            || !roundsAnalytically(
+                before, chain, leastRadius < 0.0 ? radius : leastRadius, smallArcs
+            )) {
             return {};
         }
         // OCCT's bridge lies in the band, within the round's reach of its edges (lostMaterial())
@@ -2317,6 +2323,25 @@ std::string bridgedRecess(
             BRepExtrema_DistShapeShape distance(face, chainEdges);
             return !distance.IsDone() || distance.Value() <= reach;
         };
+        // OCCT's round over an arc too small for it is a B-spline, and right (ops#968): a face whose
+        // vertices all lie within the round's reach of such arcs is that round, not a bridge
+        TopoDS_Compound arcEdges;
+        builder.MakeCompound(arcEdges);
+        for (int i = 1; i <= smallArcs.Extent(); ++i) {
+            builder.Add(arcEdges, smallArcs(i));
+        }
+        const auto overSmallArc = [&](const TopoDS_Shape& face) {
+            if (smallArcs.IsEmpty()) {
+                return false;
+            }
+            for (TopExp_Explorer it(face, TopAbs_VERTEX); it.More(); it.Next()) {
+                BRepExtrema_DistShapeShape distance(it.Current(), arcEdges);
+                if (!distance.IsDone() || distance.Value() > reach + Precision::Confusion()) {
+                    return false;
+                }
+            }
+            return true;
+        };
         // A face of the base that isn't analytic there can't be told from the bridge once a repair
         // has copied the geometry (PR review r1, T1): the check doesn't run
         std::unordered_set<const Geom_Surface*> baseSurfaces;
@@ -2330,7 +2355,8 @@ std::string bridgedRecess(
         for (TopExp_Explorer it(result, TopAbs_FACE); it.More(); it.Next()) {
             const TopoDS_Face& face = TopoDS::Face(it.Current());
             if (baseSurfaces.count(surfaceOf(face)) != 0
-                || isAnalytic(BRepAdaptor_Surface(face).GetType()) || !inReach(face)) {
+                || isAnalytic(BRepAdaptor_Surface(face).GetType()) || !inReach(face)
+                || overSmallArc(face)) {
                 continue;
             }
             return "'s band crosses a hole or pocket on " + recessFace(base, chain, face)
