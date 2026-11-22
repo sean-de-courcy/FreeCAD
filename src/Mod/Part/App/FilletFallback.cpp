@@ -6280,8 +6280,26 @@ void clipRunOff(const Context& ctx, const EdgeData& data, Tool& tool, double siz
     auto onFace = [&](const TopoDS_Shape& shape, const TopoDS_Face& face) {
         return areaOf(commonOf(shape, face));
     };
-    if (contactArea - onFace(contact, planeFace) <= areaToleranceOf(contact)) {
-        return;  // on its face all round
+    const bool planeOff = contactArea - onFace(contact, planeFace) > areaToleranceOf(contact);
+    // The contact on the wall: a fill's may run off over the wall's own far edge too (two gaskets'
+    // #9: 3.35 um past the tube's end over 2.5 mm of it; Onshape joins the chamfer to the end face
+    // along the old edge, FR1 on a square strip)
+    TopoDS_Shape wallContact;
+    for (TopExp_Explorer it(tool.solid, TopAbs_FACE); it.More(); it.Next()) {
+        if (sameDomain(TopoDS::Face(it.Current()), wallFace)) {
+            if (!wallContact.IsNull()) {
+                refuse("a chamfer's tool along an ellipse has two faces on its wall");
+            }
+            wallContact = it.Current();
+        }
+    }
+    if (wallContact.IsNull()) {
+        refuse("a chamfer's tool along an ellipse has no face on its wall");
+    }
+    const double wallOnFace = onFace(wallContact, wallFace);
+    const bool wallOff = areaOf(wallContact) - wallOnFace > areaToleranceOf(wallContact);
+    if (!planeOff && !wallOff) {
+        return;  // on its faces all round
     }
     const double measured = volumeOf(tool.solid);
     if (std::abs(measured - tool.volume) > volumeTolerance * 10 * tool.volume) {
@@ -6299,39 +6317,44 @@ void clipRunOff(const Context& ctx, const EdgeData& data, Tool& tool, double siz
         }
         return cut.Shape();
     };
-    // The contact off the plane face: a crescent, or several; a ring (off it all round, no strip
-    // left beside the edge) is not measured (section 14)
-    const TopoDS_Shape off = cutBy(contact, planeFace);
-    for (TopExp_Explorer it(off, TopAbs_FACE); it.More(); it.Next()) {
-        int wires = 0;
-        for (TopExp_Explorer w(it.Current(), TopAbs_WIRE); w.More(); w.Next()) {
-            ++wires;
-        }
-        if (wires > 1) {
-            refuse("a chamfer's tool along a closed edge whose angle varies runs off its plane all "
-                   "round (not measured against Onshape)");
-        }
-    }
-    // The faces beyond the edges the contact runs over, along a stretch of them (as checkRunOff):
-    // only those clip, each by its own surface (rule 1, the skeptic's finding 6)
-    std::vector<TopoDS_Face> beyond;
-    for (TopExp_Explorer it(planeFace, TopAbs_EDGE); it.More(); it.Next()) {
-        const TopoDS_Edge& farEdge = TopoDS::Edge(it.Current());
-        if (farEdge.IsSame(data.edge) || lengthAlong(farEdge, off) <= 1000 * linearTolerance) {
-            continue;
-        }
-        for (const auto& face : ctx.list(ctx.edgeFaces, farEdge)) {
-            if (!face.IsSame(planeFace) && !face.IsSame(wallFace)
-                && std::none_of(beyond.begin(), beyond.end(), [&](const TopoDS_Face& f) {
-                       return f.IsSame(face);
-                   })) {
-                beyond.push_back(TopoDS::Face(face));
+    // The contact off a face: a crescent, or several; a ring (off it all round, no strip left
+    // beside the edge) is not measured (section 14). The faces beyond the edges it runs over, along
+    // a stretch of them (as checkRunOff): only those clip, each by its own surface (rule 1, the
+    // skeptic's finding 6)
+    auto facesBeyond = [&](const TopoDS_Face& face, const TopoDS_Shape& onIt) {
+        const TopoDS_Shape off = cutBy(onIt, face);
+        for (TopExp_Explorer it(off, TopAbs_FACE); it.More(); it.Next()) {
+            int wires = 0;
+            for (TopExp_Explorer w(it.Current(), TopAbs_WIRE); w.More(); w.Next()) {
+                ++wires;
+            }
+            if (wires > 1) {
+                refuse("a chamfer's tool along a closed edge whose angle varies runs off its face "
+                       "all round (not measured against Onshape)");
             }
         }
-    }
-    if (beyond.empty()) {
-        refuse("a chamfer's tool runs off its plane where no face beyond cuts it");
-    }
+        std::vector<TopoDS_Face> found;
+        for (TopExp_Explorer it(face, TopAbs_EDGE); it.More(); it.Next()) {
+            const TopoDS_Edge& farEdge = TopoDS::Edge(it.Current());
+            if (farEdge.IsSame(data.edge) || lengthAlong(farEdge, off) <= 1000 * linearTolerance) {
+                continue;
+            }
+            for (const auto& other : ctx.list(ctx.edgeFaces, farEdge)) {
+                if (!other.IsSame(planeFace) && !other.IsSame(wallFace)
+                    && std::none_of(found.begin(), found.end(), [&](const TopoDS_Face& f) {
+                           return f.IsSame(other);
+                       })) {
+                    found.push_back(TopoDS::Face(other));
+                }
+            }
+        }
+        if (found.empty()) {
+            refuse("a chamfer's tool runs off its face where no face beyond cuts it");
+        }
+        return found;
+    };
+    const std::vector<TopoDS_Face> beyond =
+        planeOff ? facesBeyond(planeFace, contact) : std::vector<TopoDS_Face>();
     // The directions a face beyond's generators were measured along (rule 1): the plane face's
     // normal (the ridges, a cut's walls: Q-LEDGE LD1-LD3, wallAlongNormal) and, for a fill, the
     // chamfered cylinder's axis (FR1 and #46, on square strips; on a leaning strip an
@@ -6430,6 +6453,30 @@ void clipRunOff(const Context& ctx, const EdgeData& data, Tool& tool, double siz
         // The piece past the face's surface
         clipped = keepInside ? commonOf(clipped, side) : cutBy(clipped, side);
     }
+    // The wall side: a fill only (a cut's run-off on its wall is refused before), over a convex
+    // far edge onto a plane square to the cylinder (the tube's end: a square strip, FR1), kept on
+    // that plane's material side
+    if (wallOff) {
+        if (tool.cut) {
+            refuse(unmeasured);
+        }
+        for (const auto& face : facesBeyond(wallFace, wallContact)) {
+            BRepAdaptor_Surface surface(face, Standard_False);
+            if (surface.GetType() != GeomAbs_Plane || !along(surface.Plane().Axis().Direction(), axis)) {
+                refuse("a chamfer's fill runs off its wall onto a face that is not a plane square to "
+                       "the chamfered cylinder");
+            }
+            BRepAdaptor_Surface whole(face, Standard_True);
+            const gp_Pnt inFace = whole.Value((whole.FirstUParameter() + whole.LastUParameter()) / 2,
+                                              (whole.FirstVParameter() + whole.LastVParameter()) / 2);
+            const gp_Dir outward = outwardNormal(face, inFace);
+            // The picked edge on the material side: a convex far edge
+            if (gp_Vec(inFace, edgeMiddle).Dot(gp_Vec(outward)) >= -10 * linearTolerance) {
+                refuse(unmeasured);
+            }
+            clipped = commonOf(clipped, halfSpaceBeyond({surface.Plane().Location(), outward.Reversed()}, size));
+        }
+    }
     // What is left lies on the plane face and the wall, and the pieces held only the run-off
     TopoDS_Shape left;
     int solids = 0;
@@ -6457,18 +6504,22 @@ void clipRunOff(const Context& ctx, const EdgeData& data, Tool& tool, double siz
     if (std::abs(onFace(contact, planeFace) - areaOf(leftContact)) > areaToleranceOf(contact)) {
         refuse("clipping a chamfer's fill past its plane cut its contact on the face");
     }
-    auto wallContact = [&](const TopoDS_Shape& solid) {
-        double area = 0.0;
-        for (TopExp_Explorer it(solid, TopAbs_FACE); it.More(); it.Next()) {
-            if (sameDomain(TopoDS::Face(it.Current()), wallFace)) {
-                area += areaOf(it.Current());
+    // The wall's contact left: one face, all on the wall, and all of what was on it before
+    TopoDS_Shape leftWall;
+    for (TopExp_Explorer it(left, TopAbs_FACE); it.More(); it.Next()) {
+        if (sameDomain(TopoDS::Face(it.Current()), wallFace)) {
+            if (!leftWall.IsNull()) {
+                refuse("a chamfer's clipped tool has two faces on its wall");
             }
+            leftWall = it.Current();
         }
-        return area;
-    };
-    const double wallBefore = wallContact(tool.solid);
-    if (std::abs(wallContact(left) - wallBefore) > 1e-6 * std::max(1.0, wallBefore)) {
-        refuse("clipping a chamfer's fill past its plane cut its contact on the wall");
+    }
+    if (leftWall.IsNull()
+        || areaOf(leftWall) - onFace(leftWall, wallFace) > areaToleranceOf(leftWall)) {
+        refuse("a chamfer's tool clipped past its wall still runs off it");
+    }
+    if (std::abs(wallOnFace - areaOf(leftWall)) > std::max(areaToleranceOf(wallContact), 1e-6 * wallOnFace)) {
+        refuse("clipping a chamfer's tool past its plane cut its contact on the wall");
     }
     tool.solid = left;
     tool.volume = volumeOf(left);
