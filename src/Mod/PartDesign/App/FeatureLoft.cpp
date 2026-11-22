@@ -25,6 +25,7 @@
 #include <algorithm>
 #include <array>
 #include <limits>
+#include <optional>
 #include <set>
 
 #include <BRepAdaptor_Curve.hxx>
@@ -1087,18 +1088,226 @@ bool tangentJoint(const TopoDS_Edge& in, const TopoDS_Edge& out)
 /// edge). It matches them when the shorter chain's joints are sharp (LC1). Edge i must pair with
 /// edge i here, so a chain pair that needs new vertices stops in the first two cases (decision 150;
 /// merging such runs into one edge is ops#729).
-void tangentJointsStop(const std::vector<TopoDS_Edge>& shorter, const std::vector<TopoDS_Edge>& longer)
+bool tangentJointsBlock(const std::vector<TopoDS_Edge>& shorter, const std::vector<TopoDS_Edge>& longer)
 {
     const auto& inner = shorter.size() > 1 ? shorter : longer;
     for (size_t k = 1; k < inner.size(); ++k) {
         if (tangentJoint(inner[k - 1], inner[k])) {
-            throw Base::CADKernelError(QT_TRANSLATE_NOOP(
-                "Exception",
-                "Loft: between two connections the profiles have different edge counts and a tangent "
-                "joint; connections can't match tangent joints yet"
-            ));
+            return true;
         }
     }
+    return false;
+}
+
+void tangentJointsStop(const std::vector<TopoDS_Edge>& shorter, const std::vector<TopoDS_Edge>& longer)
+{
+    if (tangentJointsBlock(shorter, longer)) {
+        throw Base::CADKernelError(QT_TRANSLATE_NOOP(
+            "Exception",
+            "Loft: between two connections the profiles have different edge counts and a tangent "
+            "joint; connections can't match tangent joints yet"
+        ));
+    }
+}
+
+bool isLine(const TopoDS_Edge& edge)
+{
+    return BRepAdaptor_Curve(edge).GetType() == GeomAbs_Line;
+}
+
+gp_Pnt endPoint(const TopoDS_Edge& edge)
+{
+    return BRep_Tool::Pnt(TopExp::LastVertex(edge, Standard_True));
+}
+
+/// ops#729, the exact part of option (a): a vertex that only splits a straight line in two (the
+/// lines on either side collinear) is no corner to match. Between two connections, the chains with
+/// such runs of lines merged must have as many edges; each merged run must pair with a straight
+/// line (or a run) in one plane with it, so the side face between them is that plane wherever the
+/// split vertices pair. Then each such pair takes every split vertex of either side at the same
+/// fraction of its length, and the chains pair edge i with edge i. Returns false, the chains as
+/// they were, when that doesn't hold (Onshape's rule for tangent joints is the open part of ops#729).
+bool splitLinesMatch(
+    std::vector<TopoDS_Edge>& chainA,
+    std::vector<TopoDS_Edge>& chainB,
+    Part::ShapeMapper& mapperA,
+    Part::ShapeMapper& mapperB
+)
+{
+    auto runsOf = [](const std::vector<TopoDS_Edge>& chain) {
+        std::vector<std::vector<TopoDS_Edge>> runs;
+        for (size_t k = 0; k < chain.size(); ++k) {
+            const bool splitsALine = k > 0 && isLine(chain[k - 1]) && isLine(chain[k])
+                && tangentJoint(chain[k - 1], chain[k]);
+            if (!splitsALine) {
+                runs.emplace_back();
+            }
+            runs.back().push_back(chain[k]);
+        }
+        return runs;
+    };
+    const auto runsA = runsOf(chainA);
+    const auto runsB = runsOf(chainB);
+    if (runsA.size() != runsB.size() || (runsA.size() == chainA.size() && runsB.size() == chainB.size())) {
+        return false;
+    }
+    auto allLines = [](const std::vector<TopoDS_Edge>& run) {
+        return std::ranges::all_of(run, isLine);
+    };
+    for (size_t k = 0; k < runsA.size(); ++k) {
+        const auto& ra = runsA[k];
+        const auto& rb = runsB[k];
+        if (ra.size() == 1 && rb.size() == 1) {
+            continue;
+        }
+        if (!allLines(ra) || !allLines(rb)) {
+            return false;
+        }
+        // the two lines in one plane
+        const gp_Pnt p0 = startPoint(ra.front());
+        const gp_Vec u(p0, endPoint(ra.back()));
+        const gp_Vec w0(p0, startPoint(rb.front()));
+        const gp_Vec w1(p0, endPoint(rb.back()));
+        const double spread = std::max(u.Crossed(w0).Magnitude(), u.Crossed(w1).Magnitude());
+        if (spread > Precision::Confusion() * Precision::Confusion()
+            && std::abs(u.Dot(w0.Crossed(w1))) / spread > Precision::Confusion()) {
+            return false;
+        }
+    }
+    std::vector<TopoDS_Edge> edgesA, edgesB;
+    for (size_t k = 0; k < runsA.size(); ++k) {
+        const auto& ra = runsA[k];
+        const auto& rb = runsB[k];
+        if (ra.size() == 1 && rb.size() == 1) {
+            edgesA.push_back(ra.front());
+            edgesB.push_back(rb.front());
+            continue;
+        }
+        double lengthA = 0, lengthB = 0;
+        const auto fa = innerFractions(ra, lengthA);
+        const auto fb = innerFractions(rb, lengthB);
+        // the other side's split fractions that this side lacks
+        auto lacking = [](const std::vector<double>& own, const std::vector<double>& other) {
+            std::vector<double> added;
+            for (double f : other) {
+                if (std::ranges::none_of(own, [f](double g) { return std::abs(f - g) < 1e-9; })) {
+                    added.push_back(f);
+                }
+            }
+            return added;
+        };
+        for (const auto& edge : chainWithVertices(ra, lacking(fa, fb), mapperA)) {
+            edgesA.push_back(edge);
+        }
+        for (const auto& edge : chainWithVertices(rb, lacking(fb, fa), mapperB)) {
+            edgesB.push_back(edge);
+        }
+    }
+    if (edgesA.size() != edgesB.size()) {
+        return false;
+    }
+    chainA = std::move(edgesA);
+    chainB = std::move(edgesB);
+    return true;
+}
+
+/// Whether the section's loop runs the profile's way round (> 0) or must be reversed (< 0); 0 when
+/// that can't be told. Profiles at a right angle (an elbow) compare their normals along the line
+/// between their centres.
+double loopSense(
+    const std::vector<gp_Pnt>& samplesA,
+    const std::vector<gp_Pnt>& samplesB,
+    const gp_Vec& na,
+    const gp_Vec& nb
+)
+{
+    double sense = na.Dot(nb) / (na.Magnitude() * nb.Magnitude());
+    if (std::abs(sense) < 1e-3) {
+        const gp_Vec d(meanPoint(samplesA), meanPoint(samplesB));
+        sense = na.Dot(d) * nb.Dot(d);
+        if (std::abs(sense) < Precision::Confusion()) {
+            return 0;
+        }
+    }
+    return sense;
+}
+
+/// Whether the loops paired edge i to edge i (the section's already run the profile's way round,
+/// `sense` < 0 when it was reversed for that) turn the loft through itself.
+// Onshape's LOFT_INVALID (oracle 14 LC1, LC4): pairs that turn the loft through itself, a half
+// turn or crossed connections. The ruled section between paired points, seen along the normal
+// halfway between the profiles' (so an elbow's profiles both stay open), must keep the profiles'
+// sense, its area above 1 % of the smaller profile's, and must never cross itself.
+bool turnsThroughItself(
+    const std::vector<TopoDS_Edge>& edgesA,
+    const std::vector<TopoDS_Edge>& edgesB,
+    const gp_Vec& na,
+    const gp_Vec& nb,
+    double sense
+)
+{
+    auto sampled = [](const std::vector<TopoDS_Edge>& edges) {
+        std::vector<gp_Pnt> points;
+        constexpr int perEdge = 8;
+        for (const auto& edge : edges) {
+            BRepAdaptor_Curve curve(edge);
+            const bool reversed = edge.Orientation() == TopAbs_REVERSED;
+            const double length = GCPnts_AbscissaPoint::Length(curve);
+            const double from = reversed ? curve.LastParameter() : curve.FirstParameter();
+            for (int k = 0; k < perEdge; ++k) {
+                const double s = length * k / perEdge;
+                GCPnts_AbscissaPoint at(curve, reversed ? -s : s, from);
+                points.push_back(curve.Value(at.IsDone() ? at.Parameter() : from));
+            }
+        }
+        return points;
+    };
+    const auto pa = sampled(edgesA);
+    const auto pb = sampled(edgesB);
+    const gp_Vec normal = (na.Normalized() + (sense < 0 ? -nb : nb).Normalized()).Normalized();
+    const double smaller = std::min(std::abs(na.Dot(normal)), std::abs(nb.Dot(normal)));
+    // Newell's area of the blended polygon is exactly quadratic in t (each p_i x p_i+1 is), so
+    // three samples give it everywhere and its minimum over [0, 1] is exact: a half turn between
+    // profiles of different size only touches zero, between any fixed samples.
+    auto areaAt = [&](double t) {
+        std::vector<gp_Pnt> section;
+        for (size_t i = 0; i < pa.size() && i < pb.size(); ++i) {
+            section.emplace_back(pa[i].XYZ() * (1 - t) + pb[i].XYZ() * t);
+        }
+        return areaVector(section).Dot(normal);
+    };
+    const double a0 = areaAt(0.0);
+    const double a1 = areaAt(1.0);
+    const double mid = 2 * areaAt(0.5) - (a0 + a1) / 2;  // Bernstein middle coefficient
+    // The ends are the profiles; a dip below them has its vertex inside (0, 1).
+    double lowest = std::numeric_limits<double>::infinity();
+    const double curvature = a0 - 2 * mid + a1;
+    if (curvature > 0) {
+        const double t = (a0 - mid) / curvature;
+        if (t > 0 && t < 1) {
+            lowest = (1 - t) * (1 - t) * a0 + 2 * t * (1 - t) * mid + t * t * a1;
+        }
+    }
+    return lowest < 0.01 * smaller || blendCrossesItself(pa, pb, normal);
+}
+
+/// A closed wire of the loop's edges, named from `source` (split pieces through `mapper`)
+Part::TopoShape loopWire(
+    const std::vector<TopoDS_Edge>& edges,
+    const Part::ShapeMapper& mapper,
+    const Part::TopoShape& source
+)
+{
+    BRep_Builder builder;
+    TopoDS_Wire wire;
+    builder.MakeWire(wire);
+    for (const auto& edge : edges) {
+        builder.Add(wire, edge);
+    }
+    wire.Closed(Standard_True);
+    Part::TopoShape result(source.Tag, source.Hasher);
+    result.makeShapeWithElementMap(wire, mapper, {source});
+    return result;
 }
 
 /// The two loops matched for the connections (points in the loops' frame, profile first): the
@@ -1129,13 +1338,9 @@ std::pair<Part::TopoShape, Part::TopoShape> connectedLoops(
             QT_TRANSLATE_NOOP("Exception", "Loft: connections need profiles that enclose an area")
         );
     }
-    double sense = na.Dot(nb) / (na.Magnitude() * nb.Magnitude());
-    if (std::abs(sense) < 1e-3) {
-        const gp_Vec d(meanPoint(samplesA), meanPoint(samplesB));
-        sense = na.Dot(d) * nb.Dot(d);
-        if (std::abs(sense) < Precision::Confusion()) {
-            connectionsCantMatch();
-        }
+    const double sense = loopSense(samplesA, samplesB, na, nb);
+    if (sense == 0) {
+        connectionsCantMatch();
     }
     if (sense < 0) {
         b = reversedLoop(b);
@@ -1182,7 +1387,13 @@ std::pair<Part::TopoShape, Part::TopoShape> connectedLoops(
     for (size_t k = 0; k + 1 < cutsA.size(); ++k) {
         std::vector<TopoDS_Edge> chainA(a.begin() + cutsA[k], a.begin() + cutsA[k + 1]);
         std::vector<TopoDS_Edge> chainB(b.begin() + cutsB[k], b.begin() + cutsB[k + 1]);
-        if (chainA.size() != chainB.size()) {
+        const bool blocked = chainA.size() != chainB.size()
+            && (chainA.size() < chainB.size() ? tangentJointsBlock(chainA, chainB)
+                                              : tangentJointsBlock(chainB, chainA));
+        if (blocked && splitLinesMatch(chainA, chainB, mapperA, mapperB)) {
+            // ops#729: split straight lines matched; edge i pairs with edge i
+        }
+        else if (chainA.size() != chainB.size()) {
             double lengthA = 0, lengthB = 0;
             const auto fa = innerFractions(chainA, lengthA);
             const auto fb = innerFractions(chainB, lengthB);
@@ -1203,76 +1414,138 @@ std::pair<Part::TopoShape, Part::TopoShape> connectedLoops(
         edgesB.insert(edgesB.end(), chainB.begin(), chainB.end());
     }
 
-    // Onshape's LOFT_INVALID (oracle 14 LC1, LC4): pairs that turn the loft through itself, a half
-    // turn or crossed connections. The ruled section between paired points, seen along the normal
-    // halfway between the profiles' (so an elbow's profiles both stay open), must keep the profiles'
-    // sense, its area above 1 % of the smaller profile's, and must never cross itself.
-    {
-        auto sampled = [](const std::vector<TopoDS_Edge>& edges) {
-            std::vector<gp_Pnt> points;
-            constexpr int perEdge = 8;
-            for (const auto& edge : edges) {
-                BRepAdaptor_Curve curve(edge);
-                const bool reversed = edge.Orientation() == TopAbs_REVERSED;
-                const double length = GCPnts_AbscissaPoint::Length(curve);
-                const double from = reversed ? curve.LastParameter() : curve.FirstParameter();
-                for (int k = 0; k < perEdge; ++k) {
-                    const double s = length * k / perEdge;
-                    GCPnts_AbscissaPoint at(curve, reversed ? -s : s, from);
-                    points.push_back(curve.Value(at.IsDone() ? at.Parameter() : from));
-                }
-            }
-            return points;
-        };
-        const auto pa = sampled(edgesA);
-        const auto pb = sampled(edgesB);
-        const gp_Vec normal = (na.Normalized() + (sense < 0 ? -nb : nb).Normalized()).Normalized();
-        const double smaller = std::min(std::abs(na.Dot(normal)), std::abs(nb.Dot(normal)));
-        // Newell's area of the blended polygon is exactly quadratic in t (each p_i x p_i+1 is), so
-        // three samples give it everywhere and its minimum over [0, 1] is exact: a half turn between
-        // profiles of different size only touches zero, between any fixed samples.
-        auto areaAt = [&](double t) {
-            std::vector<gp_Pnt> section;
-            for (size_t i = 0; i < pa.size() && i < pb.size(); ++i) {
-                section.emplace_back(pa[i].XYZ() * (1 - t) + pb[i].XYZ() * t);
-            }
-            return areaVector(section).Dot(normal);
-        };
-        const double a0 = areaAt(0.0);
-        const double a1 = areaAt(1.0);
-        const double mid = 2 * areaAt(0.5) - (a0 + a1) / 2;  // Bernstein middle coefficient
-        // The ends are the profiles; a dip below them has its vertex inside (0, 1).
-        double lowest = std::numeric_limits<double>::infinity();
-        const double curvature = a0 - 2 * mid + a1;
-        if (curvature > 0) {
-            const double t = (a0 - mid) / curvature;
-            if (t > 0 && t < 1) {
-                lowest = (1 - t) * (1 - t) * a0 + 2 * t * (1 - t) * mid + t * t * a1;
-            }
-        }
-        if (lowest < 0.01 * smaller || blendCrossesItself(pa, pb, normal)) {
-            throw Base::CADKernelError(QT_TRANSLATE_NOOP(
-                "Exception",
-                "Loft: the connections turn the loft through itself (a half turn, or crossed connections)"
-            ));
-        }
+    if (turnsThroughItself(edgesA, edgesB, na, nb, sense)) {
+        throw Base::CADKernelError(QT_TRANSLATE_NOOP(
+            "Exception",
+            "Loft: the connections turn the loft through itself (a half turn, or crossed connections)"
+        ));
     }
 
-    auto wireOf = [](const std::vector<TopoDS_Edge>& edges,
-                     const Part::ShapeMapper& mapper,
-                     const Part::TopoShape& source) {
-        BRep_Builder builder;
-        TopoDS_Wire wire;
-        builder.MakeWire(wire);
-        for (const auto& edge : edges) {
-            builder.Add(wire, edge);
-        }
-        wire.Closed(Standard_True);
-        Part::TopoShape result(source.Tag, source.Hasher);
-        result.makeShapeWithElementMap(wire, mapper, {source});
-        return result;
+    return {loopWire(edgesA, mapperA, profile), loopWire(edgesB, mapperB, section)};
+}
+
+/// ops#933: two polygon loops lofted without connections pair as ThruSections' compatibility step
+/// picks, and that depends on the sketches' vertex order: between planes that are not parallel (an
+/// elbow) it can pair them half a turn apart, so the side faces cross (a solid turned inside out,
+/// or an invalid shell after a boolean). Onshape builds the loft that doesn't turn. Reads the
+/// pairing ThruSections took from the shell's side edges and, when that pairing turns the loft
+/// through itself (the test connections use), returns the section's loop paired anew: run the
+/// profile's way round, as for connections, and started at the vertex that gives the shortest
+/// side edges in total among the pairings that don't turn. Empty when the pairing taken is kept:
+/// it doesn't turn, it can't be read, the loops aren't polygons of as many edges, or no single
+/// pairing is shortest.
+std::optional<Part::TopoShape> unturnedSection(
+    const Part::TopoShape& shell,
+    const Part::TopoShape& profile,
+    const Part::TopoShape& section
+)
+{
+    if (profile.isNull() || section.isNull() || profile.shapeType() != TopAbs_WIRE
+        || section.shapeType() != TopAbs_WIRE || !BRep_Tool::IsClosed(profile.getShape())
+        || !BRep_Tool::IsClosed(section.getShape())) {
+        return std::nullopt;
+    }
+    const auto a = loopEdges(profile.getShape());
+    const auto b = loopEdges(section.getShape());
+    const size_t n = a.size();
+    auto straight = [](const std::vector<TopoDS_Edge>& edges) {
+        return std::ranges::all_of(edges, [](const TopoDS_Edge& edge) {
+            return BRepAdaptor_Curve(edge).GetType() == GeomAbs_Line;
+        });
     };
-    return {wireOf(edgesA, mapperA, profile), wireOf(edgesB, mapperB, section)};
+    if (n < 3 || b.size() != n || !straight(a) || !straight(b)) {
+        return std::nullopt;
+    }
+
+    // The pairing taken: each side edge joins a profile vertex to a section vertex
+    std::vector<int> partner(n, -1);
+    for (TopExp_Explorer x(shell.getShape(), TopAbs_EDGE); x.More(); x.Next()) {
+        TopoDS_Vertex v1, v2;
+        TopExp::Vertices(TopoDS::Edge(x.Current()), v1, v2);
+        if (v1.IsNull() || v2.IsNull()) {
+            continue;
+        }
+        gp_Pnt p = BRep_Tool::Pnt(v1);
+        gp_Pnt q = BRep_Tool::Pnt(v2);
+        for (int k = 0; k < 2; ++k, std::swap(p, q)) {
+            const int i = vertexIndex(a, p);
+            const int j = vertexIndex(b, q);
+            if (i >= 0 && j >= 0) {
+                if (partner[i] >= 0 && partner[i] != j) {
+                    return std::nullopt;
+                }
+                partner[i] = j;
+            }
+        }
+    }
+    if (std::ranges::find(partner, -1) != partner.end()) {
+        return std::nullopt;
+    }
+    const int nn = static_cast<int>(n);
+    const int step = (partner[1] - partner[0] + nn) % nn == 1 ? 1 : -1;
+    for (int i = 0; i < nn; ++i) {
+        if (partner[i] != ((partner[0] + step * i) % nn + nn) % nn) {
+            return std::nullopt;
+        }
+    }
+    // The section's loop as taken: its edge i starts at profile edge i's partner. Reversed, the
+    // loop's edge k starts at the vertex that began edge (n - k) % n.
+    auto rotated = [](std::vector<TopoDS_Edge> edges, int by) {
+        std::rotate(edges.begin(), edges.begin() + by, edges.end());
+        return edges;
+    };
+    const auto taken = step > 0 ? rotated(b, partner[0])
+                                : rotated(reversedLoop(b), (nn - partner[0]) % nn);
+
+    const auto samplesA = loopSamples(a);
+    const gp_Vec na = areaVector(samplesA);
+    const auto samplesTaken = loopSamples(taken);
+    const gp_Vec nt = areaVector(samplesTaken);
+    if (na.Magnitude() < Precision::Confusion() || nt.Magnitude() < Precision::Confusion()) {
+        return std::nullopt;
+    }
+    const double takenSense = loopSense(samplesA, samplesTaken, na, nt);
+    if (takenSense == 0) {
+        return std::nullopt;
+    }
+    if (takenSense > 0 && !turnsThroughItself(a, taken, na, nt, 1)) {
+        return std::nullopt;  // the pairing taken doesn't turn: kept
+    }
+
+    // Paired anew: the profile's way round, the shortest side edges among those that don't turn
+    const auto samplesB = loopSamples(b);
+    const gp_Vec nb = areaVector(samplesB);
+    const double sense = loopSense(samplesA, samplesB, na, nb);
+    if (sense == 0) {
+        return std::nullopt;
+    }
+    const auto way = sense < 0 ? reversedLoop(b) : b;
+    const gp_Vec nw = sense < 0 ? -nb : nb;
+    double best = std::numeric_limits<double>::infinity();
+    double next = best;
+    std::vector<TopoDS_Edge> chosen;
+    for (int r = 0; r < nn; ++r) {
+        auto candidate = rotated(way, r);
+        if (turnsThroughItself(a, candidate, na, nw, 1)) {
+            continue;
+        }
+        double length = 0;
+        for (size_t i = 0; i < n; ++i) {
+            length += startPoint(a[i]).Distance(startPoint(candidate[i]));
+        }
+        if (length < best) {
+            next = best;
+            best = length;
+            chosen = std::move(candidate);
+        }
+        else {
+            next = std::min(next, length);
+        }
+    }
+    if (chosen.empty() || next - best <= 1e-9 * best) {
+        return std::nullopt;
+    }
+    return loopWire(chosen, Part::ShapeMapper(), section);
 }
 
 /// The connections' vertex pairs (profile first, global coordinates). Entries 2k and 2k+1 of
@@ -1733,6 +2006,22 @@ App::DocumentObjectExecReturn* Loft::execute()
                 nullptr,
                 !connected  // ops#640: connected loops are matched already
             );
+            // ops#933: two polygons the compatibility step paired half a turn apart, paired anew
+            if (!connected && !conditioned && !closed && sectionWires.size() == 2) {
+                if (auto unturned
+                    = unturnedSection(shell, sectionWires.front(), sectionWires.back())) {
+                    sectionWires.back() = *unturned;
+                    shell = makeTopoShape().makeElementLoft(
+                        sectionWires,
+                        Part::IsSolid::notSolid,
+                        Ruled.getValue() ? Part::IsRuled::ruled : Part::IsRuled::notRuled,
+                        Part::IsClosed::notClosed,
+                        5,
+                        nullptr,
+                        false
+                    );
+                }
+            }
             if (conditioned) {
                 shell = withProfileConditions(
                     shell,

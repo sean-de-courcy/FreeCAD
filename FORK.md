@@ -498,7 +498,8 @@ names it.
 | `fix/i924-no-implicit-studio` | fix | ops#924 | - | `integration` `12d910fe18` | `9e1199bc2f` (fork PR 497), 2026-11-21 | never (fork fix): a document whose tabs have no Part Studio shows no empty implicit Part Studio 1 |
 | `fix/i912-sketch-point-joint` | fix | ops#912 | - | `integration` `12d910fe18` | `20a9ad07f1` (fork PR 496), 2026-11-21 | never (fork fix): an Assembly joint can name a construction point of a sketch (Onshape mate connectors on construction points) |
 | `fix/i932-rim-bridged-recess` | fix | ops#931, ops#925, ops#932 | - | `integration` `12d910fe18` | `97432aef2d` (fork PR 498), 2026-11-21 | never (fork feature) |
-| `fix/i927-drawing-holder` | fix | ops#927 | - | `integration` `20a9ad07f1` | (fork PR 500) | never (fork feature) |
+| `fix/i927-drawing-holder` | fix | ops#927 | - | `integration` `20a9ad07f1` | `def5449612` (fork PR 500), 2026-11-21 | never (fork feature) |
+| `fix/i939-sweep-loft-fork-fixes` | fix | ops#939, ops#933, ops#729 | - | `integration` `20a9ad07f1` | (fork PR 499) | never (fork fix): a Pipe sweeps every face of a multi-face profile; a two-polygon elbow loft pairs untwisted; a connected loft matches vertices that only split a straight line |
 
 ## Fork-only commits in carried topics
 

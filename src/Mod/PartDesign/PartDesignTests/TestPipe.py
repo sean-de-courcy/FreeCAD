@@ -6296,3 +6296,116 @@ class TestPipeNamesUnderSpineEdits(unittest.TestCase):
                             )
                         ]
                         self.assertTrue(loud, "the second corner's joints were renamed")
+
+
+class TestPipeSeveralFaces(unittest.TestCase):
+    """FreeCAD-CH, ops#939: a profile of several faces of another feature sweeps every face, as
+    Onshape's sweep does; before, the first face alone was swept and the others were dropped
+    without a word. Designed: a 60 x 20 x 10 block with two blind round pockets (r 4, depth 5) at
+    x = -15 and x = 15, so two floors in the plane z = 5; a second Body binds them and sweeps them
+    along one straight line that rises 4 in z (and 4 in x). Each floor sweeps to an oblique
+    cylinder of base 16 pi and height 4: 64 pi each."""
+
+    def setUp(self):
+        V = FreeCAD.Vector
+        self.Doc = FreeCAD.newDocument("PartDesignTestPipeSeveralFaces")
+        a = self.Doc.addObject("PartDesign::Body", "A")
+        block = a.newObject("Sketcher::SketchObject", "Block")
+        block.AttachmentSupport = [(a.Origin.OriginFeatures[3], "")]
+        block.MapMode = "FlatFace"
+        corners = [V(-30, -10, 0), V(30, -10, 0), V(30, 10, 0), V(-30, 10, 0)]
+        for k in range(4):
+            block.addGeometry(Part.LineSegment(corners[k], corners[(k + 1) % 4]))
+        pad = a.newObject("PartDesign::Pad", "Pad")
+        pad.Profile = block
+        pad.Length = 10
+        holes = a.newObject("Sketcher::SketchObject", "Holes")
+        holes.AttachmentSupport = [(a.Origin.OriginFeatures[3], "")]
+        holes.MapMode = "FlatFace"
+        holes.AttachmentOffset = FreeCAD.Placement(V(0, 0, 10), FreeCAD.Rotation())
+        for x in (-15, 15):
+            holes.addGeometry(Part.Circle(V(x, 0, 0), V(0, 0, 1), 4))
+        self.pocket = a.newObject("PartDesign::Pocket", "Pocket")
+        self.pocket.Profile = holes
+        self.pocket.Length = 5
+        self.Doc.recompute()
+        self.floors = sorted(
+            (
+                "Face%d" % (i + 1)
+                for i, f in enumerate(self.pocket.Shape.Faces)
+                if abs(f.CenterOfMass.z - 5) < 1e-6 and abs(f.Area - 16 * math.pi) < 1e-6
+            ),
+            key=lambda n: self.pocket.Shape.getElement(n).CenterOfMass.x,
+        )
+        self.assertEqual(len(self.floors), 2)
+        self.top = next(
+            "Face%d" % (i + 1)
+            for i, f in enumerate(self.pocket.Shape.Faces)
+            if abs(f.CenterOfMass.z - 10) < 1e-6
+        )
+        self.b = self.Doc.addObject("PartDesign::Body", "B")
+        path = self.b.newObject("Sketcher::SketchObject", "Path")
+        path.AttachmentSupport = [(self.b.Origin.OriginFeatures[4], "")]  # XZ: local y is z
+        path.MapMode = "FlatFace"
+        path.addGeometry(Part.LineSegment(V(15, 5, 0), V(19, 9, 0)))
+        self.path = path
+
+    def tearDown(self):
+        FreeCAD.closeDocument(self.Doc.Name)
+
+    def pipe(self, faces, thin=False):
+        binder = self.b.newObject("PartDesign::SubShapeBinder", "Floors")
+        binder.Support = [(self.pocket, tuple(faces))]
+        self.Doc.recompute()
+        names = sorted(
+            ("Face%d" % (i + 1) for i in range(len(binder.Shape.Faces))),
+            key=lambda n: binder.Shape.getElement(n).CenterOfMass.x,
+        )
+        pipe = self.b.newObject("PartDesign::AdditivePipe", "Pipe")
+        pipe.Profile = (binder, names)
+        pipe.Spine = (self.path, [])
+        if thin:
+            pipe.BodyType = 1
+            pipe.Thickness1 = 0.5
+        self.Doc.recompute()
+        return pipe
+
+    def testTwoFloorsSweepBoth(self):
+        pipe = self.pipe(self.floors)
+        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+        shape = pipe.Shape
+        self.assertTrue(shape.isValid())
+        self.assertEqual(len(shape.Solids), 2)
+        self.assertAlmostEqual(shape.Volume, 2 * 64 * math.pi, places=6)
+        # one solid per floor, each the floor moved by up to (4, 0, 4)
+        for solid, x in zip(sorted(shape.Solids, key=lambda s: s.BoundBox.XMin), (-15, 15)):
+            box = solid.BoundBox
+            self.assertAlmostEqual(solid.Volume, 64 * math.pi, places=6)
+            self.assertAlmostEqual(box.XMin, x - 4, places=6)
+            self.assertAlmostEqual(box.XMax, x + 8, places=6)
+            self.assertAlmostEqual(box.ZMin, 5, places=6)
+            self.assertAlmostEqual(box.ZMax, 9, places=6)
+
+    def testOneFloorSweepsOne(self):
+        pipe = self.pipe(self.floors[1:])
+        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+        self.assertEqual(len(pipe.Shape.Solids), 1)
+        self.assertAlmostEqual(pipe.Shape.Volume, 64 * math.pi, places=6)
+
+    def testFacesInTwoPlanesStop(self):
+        pipe = self.pipe([self.floors[0], self.top])
+        self.assertFalse(pipe.isValid())
+        self.assertIn("one plane", pipe.getStatusString())
+
+    def testAFacePickedTwiceIsOneFace(self):
+        pipe = self.pipe(self.floors[1:])
+        pipe.Profile = (pipe.Profile[0], [pipe.Profile[1][0]] * 2)
+        self.Doc.recompute()
+        self.assertTrue(pipe.isValid(), pipe.getStatusString())
+        self.assertEqual(len(pipe.Shape.Solids), 1)
+        self.assertAlmostEqual(pipe.Shape.Volume, 64 * math.pi, places=6)
+
+    def testThinOfTwoFacesStops(self):
+        pipe = self.pipe(self.floors, thin=True)
+        self.assertFalse(pipe.isValid())
+        self.assertIn("thin profile takes one face", pipe.getStatusString())

@@ -61,6 +61,7 @@ from PartDesignTests.TestPipe import TestBaseAfterAnInvalidPipe  # FreeCAD-CH, o
 from PartDesignTests.TestPipe import TestBaseAfterAnInvalidBaseFeature  # FreeCAD-CH, ops#310
 from PartDesignTests.TestPipe import TestPipeAlongTiltedWaves, TestLoosePipeWarns  # FreeCAD-CH, ops#448
 from PartDesignTests.TestPipe import TestRoundCornerNames  # FreeCAD-CH, ops#455
+from PartDesignTests.TestPipe import TestPipeSeveralFaces  # FreeCAD-CH, ops#939
 from PartDesignTests.TestPipe import TestBinormalPipe  # FreeCAD-CH, ops#406
 from PartDesignTests.TestPipe import TestPipeNamesUnderSpineEdits  # FreeCAD-CH, ops#469, ops#435
 from PartDesignTests.TestPipeOnshape import (  # FreeCAD-CH, sweeps as Onshape's (ops#640)
@@ -92,6 +93,8 @@ from PartDesignTests.TestLoftOnshape import (  # FreeCAD-CH, ops#655
 from PartDesignTests.TestLoftConnections import (  # FreeCAD-CH, ops#640
     TestLoftConnectionsTwist,
     TestLoftConnectionsUnequal,
+    TestLoftConnectionsSplitLines,  # ops#729
+    TestLoftElbowPairing,  # ops#933
 )
 from PartDesignTests.TestPrimitive import TestPrimitive
 from PartDesignTests.TestPrimitive import TestBaseAfterARefine  # FreeCAD-CH, ops#474

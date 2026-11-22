@@ -393,5 +393,122 @@ class TestLoftConnectionsUnequal(ConnectionCase):
         self.assertStops(loft, "tangent")
 
 
+class TestLoftConnectionsSplitLines(ConnectionCase):
+    """ops#729, its exact part: a vertex that only splits a straight line in two is no corner to match. Between two
+    connections the bottom runs line, arc, line, line, the last two collinear (the vertex (0, 5) splits the line
+    (5, 5) -> (-10, 5)); the top runs line, arc, line with tangent joints. Merged, both are line, arc, line, and the
+    split line's partner (2, 4) -> (-6, 4) is parallel to it, so the side face between them is one plane wherever the
+    split vertex pairs: the solid is the one of the unsplit bottom, which pairs edge for edge."""
+
+    PAIRS = [((-10, -5), (-6, -4)), ((-10, 5), (-6, 4))]
+
+    def bottom(self, split=(0, 5), end=(-10, 5)):
+        g = models.polyline([end, (-10, -5), (5, -5)])
+        g.append(Part.ArcOfCircle(Part.Circle(V(5, 0, 0), V(0, 0, 1), 5), -math.pi / 2, math.pi / 2))
+        g += models.polyline([(5, 5), split, end] if split else [(5, 5), end])
+        return g
+
+    def top(self):
+        g = models.polyline([(-6, 4), (-6, -4), (2, -4)])
+        g.append(Part.ArcOfCircle(Part.Circle(V(2, 0, 0), V(0, 0, 1), 4), -math.pi / 2, math.pi / 2))
+        g += models.polyline([(2, 4), (-6, 4)])
+        return g
+
+    def testASplitLineIsNoCorner(self):
+        # unsplit, the chains have equal edge counts and pair edge for edge (this builds without the fix)
+        whole = self.loft(self.bottom(split=None), self.top(), self.PAIRS)
+        self.assertLoft(whole, ruledByArcLength(self.bottom(split=None), self.top()))
+        volume, area = whole.Shape.Volume, whole.Shape.Area
+        self.body = models.body(self.doc)
+        split = self.loft(self.bottom(), self.top(), self.PAIRS)
+        self.assertLoft(split, volume, area=area, delta=1e-6)
+        # the split vertex pairs a third of the way along the top line, from (2, 4)
+        self.assertJoined(split, (0, 5), (2 - 8 / 3, 4))
+        for a, b in self.PAIRS + [((5, -5), (2, -4)), ((5, 5), (2, 4))]:
+            self.assertJoined(split, a, b)
+
+    def testASkewPartnerStillStops(self):
+        # the split line runs (5, 5) -> (-10, 6): not parallel to the top line (2, 4) -> (-6, 4), so the side face
+        # between them isn't a plane and depends on which vertices Onshape matches (the open part of ops#729)
+        loft = self.loft(self.bottom(split=(0, 5 + 1 / 3), end=(-10, 6)), self.top(), [((-10, -5), (-6, -4)), ((-10, 6), (-6, 4))])
+        self.assertStops(loft, "tangent")
+
+
+class TestLoftElbowPairing(unittest.TestCase):
+    """ops#933: two polygon profiles on planes that are not parallel, lofted without connections, paired half a turn
+    apart for about half of the sketches' vertex orders (the side faces crossed and the loft stopped). Designed: the
+    square x 0..4, y 6..10 on z = 30 and the rectangle x 0..4, z 2..14 on the plane y = 0. Onshape builds the loft that
+    doesn't turn: each section x = const is the quadrilateral (y, z) = (6, 30), (10, 30), (0, 2), (0, 14), area 92, so
+    V = 4 x 92 = 368 with 6 planar faces, whatever order the sketches' vertices come in."""
+
+    def setUp(self):
+        self.doc = models.newDocument("PartDesignTestLoftElbowPairing")
+
+    def tearDown(self):
+        App.closeDocument(self.doc.Name)
+
+    @staticmethod
+    def orders(points):
+        out = []
+        for r in range(len(points)):
+            q = points[r:] + points[:r]
+            out.append(("ccw%d" % r, q))
+            out.append(("cw%d" % r, [q[0]] + q[:0:-1]))
+        return out
+
+    def loop(self, body, name, placement, points):
+        import Sketcher
+
+        sketch = body.newObject("Sketcher::SketchObject", name)
+        sketch.Placement = placement
+        n = len(points)
+        for k in range(n):
+            sketch.addGeometry(Part.LineSegment(V(*points[k], 0), V(*points[(k + 1) % n], 0)))
+        for k in range(n):
+            sketch.addConstraint(Sketcher.Constraint("Coincident", k, 2, (k + 1) % n, 1))
+        return sketch
+
+    def testEveryVertexOrderBuildsThePrism(self):
+        square = [(0, 6), (4, 6), (4, 10), (0, 10)]
+        rectangle = [(0, 2), (4, 2), (4, 14), (0, 14)]  # Rotation(0, 0, 90): local (x, y) is global (x, 0, y)
+        wrong = []
+        for (ta, a), (tb, b) in [(x, y) for x in self.orders(square) for y in self.orders(rectangle)]:
+            body = self.doc.addObject("PartDesign::Body", "Body")
+            top = self.loop(body, "Top", App.Placement(V(0, 0, 30), App.Rotation()), a)
+            wall = self.loop(body, "Wall", App.Placement(V(0, 0, 0), App.Rotation(0, 0, 90)), b)
+            self.doc.recompute()
+            loft = body.newObject("PartDesign::AdditiveLoft", "Loft")
+            loft.Profile = top
+            loft.Sections = [wall]
+            loft.Refine = True
+            self.doc.recompute()
+            shape = loft.Shape
+            planes = sum(1 for f in shape.Faces if f.Surface.TypeId == "Part::GeomPlane")
+            if not (
+                loft.isValid()
+                and shape.isValid()
+                and len(shape.Solids) == 1
+                and abs(shape.Volume - 368) < 1e-6
+                and len(shape.Faces) == 6
+                and planes == 6
+            ):
+                wrong.append("%s/%s: %s V %.6f" % (ta, tb, loft.getStatusString(), shape.Volume if not shape.isNull() else 0))
+        self.assertEqual(wrong, [], "%d of 64 vertex orders" % len(wrong))
+
+    def testParallelSquaresKeepTheirPairing(self):
+        # between parallel planes the compatibility step's pairing doesn't turn: kept (a 10 square to a 6 square, 30
+        # above, the frustum's volume 30 / 3 x (100 + 36 + 60) = 1960)
+        body = self.doc.addObject("PartDesign::Body", "Body")
+        bottom = self.loop(body, "Bottom", App.Placement(), [(-5, -5), (5, -5), (5, 5), (-5, 5)])
+        top = self.loop(body, "Top", App.Placement(V(0, 0, 30), App.Rotation()), [(3, 3), (-3, 3), (-3, -3), (3, -3)])
+        self.doc.recompute()
+        loft = body.newObject("PartDesign::AdditiveLoft", "Loft")
+        loft.Profile = bottom
+        loft.Sections = [top]
+        self.doc.recompute()
+        self.assertTrue(loft.isValid(), loft.getStatusString())
+        self.assertAlmostEqual(loft.Shape.Volume, 1960, delta=1e-6)
+
+
 if __name__ == "__main__":
     unittest.main()

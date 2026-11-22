@@ -7605,6 +7605,12 @@ Part::TopoShape thinProfileOf(const Pipe& pipe)
         if (subs.empty() || subs.front().empty()) {
             throw Base::ValueError("Pipe: a thin profile needs a sketch or a planar face");
         }
+        if (subs.size() > 1) {
+            // ops#939: only the first face's wall was built before
+            throw Base::ValueError(
+                "Pipe: a thin profile takes one face; sweep each face in a Pipe of its own"
+            );
+        }
         const Part::TopoShape face = feature->Shape.getShape().getSubTopoShape(subs.front().c_str(), true);
         if (face.isNull() || face.shapeType() != TopAbs_FACE) {
             throw Base::ValueError("Pipe: a thin profile needs a sketch or a planar face");
@@ -7750,6 +7756,67 @@ int raiseTightEdgeTolerances(Part::TopoShape& shape)
     shape = copy;
     return static_cast<int>(raise.size());
 }
+
+/// ops#939: a profile of several faces of a feature (Onshape's sweep takes several faces and
+/// sweeps each). Before, only the first was swept and the others were dropped without a word.
+/// Disjoint planar faces in one plane sweep together, as a sketch's separate loops do; faces in
+/// several planes, faces that touch (Onshape would merge them) and other elements stop with an
+/// error rather than build a part of the profile.
+Part::TopoShape severalFaces(
+    const char* name,
+    App::DocumentObject* feature,
+    const Part::TopoShape& whole,
+    const std::vector<std::string>& subs,
+    bool ordered
+)
+{
+    std::vector<Part::TopoShape> faces;
+    std::optional<gp_Pln> plane;
+    for (const auto& sub : subs) {
+        Part::TopoShape face = whole.getSubTopoShape(sub.c_str(), true);
+        if (face.isNull() || face.shapeType() != TopAbs_FACE) {
+            FC_THROWM(
+                Base::ValueError,
+                name << ": a profile of several elements of " << feature->getFullName()
+                     << " takes faces only; " << sub << " is not a face"
+            );
+        }
+        BRepAdaptor_Surface surface(TopoDS::Face(face.getShape()));
+        const bool inPlane = surface.GetType() == GeomAbs_Plane
+            && (!plane
+                || (surface.Plane().Axis().IsParallel(plane->Axis(), Precision::Angular())
+                    && plane->Distance(surface.Plane().Location()) < Precision::Confusion()));
+        if (!inPlane) {
+            FC_THROWM(
+                Base::CADKernelError,
+                name << ": the profile's faces must be planar and in one plane; sweep the faces "
+                        "of each plane in a Pipe of its own"
+            );
+        }
+        if (!plane) {
+            plane = surface.Plane();
+        }
+        for (const auto& other : faces) {
+            BRepExtrema_DistShapeShape distance(other.getShape(), face.getShape());
+            if (!distance.IsDone() || distance.Value() < Precision::Confusion()) {
+                FC_THROWM(
+                    Base::CADKernelError,
+                    name << ": the profile's faces touch or overlap; faces that meet aren't "
+                            "merged into one region: pick faces that are apart"
+                );
+            }
+        }
+        faces.push_back(face);
+    }
+    if (ordered) {
+        FC_THROWM(
+            Base::CADKernelError,
+            name << ": a profile of several faces takes no sections; sweep each face in a Pipe "
+                    "of its own"
+        );
+    }
+    return Part::TopoShape(whole.Tag, whole.Hasher).makeElementCompound(faces);
+}
 }  // namespace
 
 App::DocumentObjectExecReturn* Pipe::execute()
@@ -7792,7 +7859,8 @@ App::DocumentObjectExecReturn* Pipe::execute()
 
         // An element that no longer exists ("?Vertex1"): a sketch's would fail the vertex test
         // below and give the whole sketch; a feature's would fail without naming it (ops#71)
-        if (auto missing = missingElements(feature, {subName}, true); !missing.empty()) {
+        const std::vector<std::string> named = subs.size() > 1 ? subs : std::vector<std::string> {subName};
+        if (auto missing = missingElements(feature, named, true); !missing.empty()) {
             FC_THROWM(Part::NullShapeException, "Missing element in " << name << ": " << missing);
         }
 
@@ -7834,9 +7902,20 @@ App::DocumentObjectExecReturn* Pipe::execute()
             if (subName.empty()) {
                 throw Base::ValueError("Pipe: No valid subelement linked in Part::Feature");
             }
-            return static_cast<Part::Feature*>(feature)->Shape.getShape().getSubTopoShape(
-                subName.c_str()
-            );
+            const Part::TopoShape& whole = static_cast<Part::Feature*>(feature)->Shape.getShape();
+            // A first pick that isn't a face (a vertex, an edge) is read as before: one element
+            const Part::TopoShape first = whole.getSubTopoShape(subName.c_str(), true);
+            // a face picked twice is one face (review r1: it measured as touching itself)
+            std::vector<std::string> unique;
+            for (const auto& sub : subs) {
+                if (std::ranges::find(unique, sub) == unique.end()) {
+                    unique.push_back(sub);
+                }
+            }
+            if (unique.size() == 1 || first.isNull() || first.shapeType() != TopAbs_FACE) {
+                return whole.getSubTopoShape(subName.c_str());
+            }
+            return severalFaces(name, feature, whole, unique, ordered);
         }
     };
 
