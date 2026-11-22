@@ -7463,6 +7463,28 @@ class ChamferRunThroughTest(unittest.TestCase):
         far = Part.makeBox(R, R, self.L, V(-R, 0, 0))
         self.assertGreater(body.common(far).Volume - result.common(far).Volume, 1.0)
 
+    def testHalfTubePartChamfer(self):
+        # Part::Chamfer builds what makeChamfer does: its lost-material check doesn't refuse the
+        # far leg's cut (review r1, T1)
+        body = self.half_tube()
+        edge = [e for e in self.end_edges(body) if e.BoundBox.XMin > 0][0]
+        doc = FreeCAD.newDocument("ChamferRunThrough")
+        try:
+            base = doc.addObject("Part::Feature", "Base")
+            base.Shape = body
+            feature = doc.addObject("Part::Chamfer", "Chamfer")
+            feature.Base = base
+            index = next(i for i, e in enumerate(body.Edges, 1) if e.isSame(edge))
+            feature.Edges = [(index, self.R, self.R)]
+            doc.recompute()
+            self.assertTrue(feature.isValid(), feature.getStatusString())
+            expected = body.cut(self.wedge(self.R))
+            result = feature.Shape
+            self.assertTrue(result.isValid())
+            self.assertLess(result.cut(expected).Volume + expected.cut(result).Volume, 1e-6)
+        finally:
+            FreeCAD.closeDocument(doc.Name)
+
     def testHalfTubeNarrowStripKeepsTheFarLeg(self):
         # Width 5 < r: the strip on the half ring is in two pieces; not measured in Onshape. OCCT
         # builds it or the dress-up refuses; the far leg is never cut

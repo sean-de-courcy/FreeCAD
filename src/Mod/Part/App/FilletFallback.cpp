@@ -13212,10 +13212,11 @@ Recorder::~Recorder()
     innermostRecorder = outer;
 }
 
-void Recorder::add(int edges, int corners, bool rolledOn)
+void Recorder::add(int edges, int corners, bool rolledOn, bool ranThrough)
 {
     if (Recorder* recorder = innermostRecorder) {
         recorder->rolled = recorder->rolled || rolledOn;
+        recorder->ran = recorder->ran || ranThrough;
         ++recorder->builds;
         recorder->edges += edges;
         recorder->corners += corners;
@@ -16975,6 +16976,7 @@ bool constructSolid(
             out.mapper = mapper;
             out.edges = selected.Extent();
             out.corners = 0;
+            out.ranThrough = true;
             return true;
         }
         catch (const Refusal& refusal) {
@@ -17472,7 +17474,12 @@ void finish(TopoShape& result, const Construction& construction, const TopoShape
         FC_LOG("rim rounds not built directly: " << construction.rimRefusal);
     }
     FC_LOG("built exactly: " << construction.edges << " edges, " << construction.corners << " corners");
-    Recorder::add(construction.edges, construction.corners, construction.rolledOn);
+    Recorder::add(
+        construction.edges,
+        construction.corners,
+        construction.rolledOn,
+        construction.ranThrough
+    );
 }
 
 bool build(

@@ -340,11 +340,13 @@ App::DocumentObjectExecReturn* Chamfer::build()
                 return new App::DocumentObjectExecReturn("The chamfer " + filled);
             }
             // OCCT stopping a hair short of a step drops the step's upper part, in a valid solid
-            // (ops#603)
+            // (ops#603). Not for the wedge the exact construction ran on through the part: it
+            // cuts faces beyond the band this check allows, and the construction checked what it
+            // removed against the wedge (ops#936)
             if (!passEdges.empty()) {
                 ResultCheck::stopIfPastTheLimit("The chamfer's check for lost material");
             }
-            const std::string lost = passEdges.empty()
+            const std::string lost = passEdges.empty() || recorder.ranThrough()
                 ? std::string()
                 : Part::lostMaterial(shape, TopShape, passEdges, passReach);
             if (!lost.empty()) {

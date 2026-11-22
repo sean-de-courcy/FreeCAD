@@ -286,6 +286,9 @@ struct PartExport Construction
     int corners {0};
     /// Whether a round rolled on over a tangent edge onto the next face (rollOn)
     bool rolledOn {false};
+    /// Whether a chamfer's wedge ran on along its edge's line through the whole part
+    /// (constructThroughWedge(), ops#936)
+    bool ranThrough {false};
     /// Why the rim rounds were not built directly, where the construction by Booleans ran
     std::string rimRefusal;
     /// The rim rounds were not built directly because a part of the body that is neither their
@@ -548,7 +551,7 @@ public:
     Recorder& operator=(const Recorder&) = delete;
 
     /// Adds one construction's result to the innermost recorder, if there is one
-    static void add(int edges, int corners, bool rolledOn = false);
+    static void add(int edges, int corners, bool rolledOn = false, bool ranThrough = false);
 
     /// Whether the construction built a result while this recorder collected
     bool built() const
@@ -564,6 +567,15 @@ public:
         return rolled;
     }
 
+    /// Whether a chamfer it built is the plain wedge run on along its edge's line through the
+    /// whole part (ops#936): it cuts faces beyond the band of a direct chamfer
+    /// (Part::lostMaterial()'s reach), a far leg across a bore included, and the construction
+    /// checked what it removed against the wedge
+    bool ranThrough() const
+    {
+        return ran;
+    }
+
     /// Prints the Report-view line if it did, and returns it (else empty):
     /// "<name>: built by the exact construction where OCCT failed: N edges, M corners" (OCCT
     /// refused, or left a face of zero width or an invalid result)
@@ -575,6 +587,7 @@ private:
     int edges = 0;
     int corners = 0;
     bool rolled = false;
+    bool ran = false;
 };
 
 }  // namespace Part::FilletFallback
