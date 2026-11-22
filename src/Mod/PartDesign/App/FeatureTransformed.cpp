@@ -2191,7 +2191,16 @@ App::DocumentObjectExecReturn* Transformed::execute()
                 // contributing nothing (R2); each pattern among the originals following its own
                 // Reapply (R3)
                 ReapplyCollector reapplied {
-                    *this, body, trsfInv, fromDocument, nameInstances, collector, reapply, instances
+                    *this,
+                    body,
+                    trsfInv,
+                    fromDocument,
+                    nameInstances,
+                    collector,
+                    reapply,
+                    instances,
+                    {},
+                    {}
                 };
                 std::vector<ReapplyItem> items;
                 reapplied.collectOriginals(originals);
