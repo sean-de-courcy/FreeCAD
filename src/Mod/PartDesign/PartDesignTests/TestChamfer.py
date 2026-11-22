@@ -800,8 +800,12 @@ class TestChamfer(unittest.TestCase):
         return Part.Face(Part.Wire([ellipse.toShape()]))
 
     def _assertOn(self, result, chamfer, faces):
-        """Every point of the chamfer face's edges lies on one of the given faces of the result"""
+        """Every point of the chamfer face's edges lies on one of the given faces of the result
+        (its seam, a ruling only the chamfer face holds, aside)"""
+        others = [f for f in result.Faces if not f.isSame(chamfer)]
         for edge in chamfer.Edges:
+            if not any(e.isSame(edge) for f in others for e in f.Edges):
+                continue
             for p in edge.discretize(64):
                 self.assertLess(min(f.distToShape(Part.Vertex(p))[0] for f in faces), 1e-6, p)
 
@@ -866,7 +870,7 @@ class TestChamfer(unittest.TestCase):
         self.assertEqual(len(result.Faces), len(shape.Faces) + 1)
         self.assertLess(shape.cut(result).Volume, 1e-6)
         self._assertVolume(result.cut(shape).Volume, self.RUNOFF14D)
-        self.assertLess(result.BoundBox.ZMax, top + 1e-6)
+        self.assertLess(result.optimalBoundingBox(False, False).ZMax, top + 1e-6)
 
     def testChamferVaryingAngleCutRunsOffIntoACounterbore(self):
         # T14b, Case Base #90 and #97: a bore of radius 6 through the floor of a counterbore that
@@ -936,7 +940,7 @@ class TestChamfer(unittest.TestCase):
                 self.Doc.removeObject(name)
 
         ring = self._ellipseInPlane(t, 10.0, 0.5, 0.0).extrude(n * -5).fuse(tube).removeSplitter()
-        refused(ring, foot(ring, 10.0, t), 0, 1.0, "runs off its plane all round")
+        refused(ring, foot(ring, 10.0, t), 0, 1.0, "runs off its face all round")
         bank = self._ellipseInPlane(t, 10.0, 6.0, 0.0).extrude(n * 3).cut(
             self._ellipseInPlane(t, 10.0, 1.0, -0.2).extrude(n * 3))
         rising = self._tiltedPlate(t).fuse(bank).fuse(tube).removeSplitter()
