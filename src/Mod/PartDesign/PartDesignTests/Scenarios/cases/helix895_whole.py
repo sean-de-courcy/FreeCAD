@@ -19,10 +19,12 @@ V = App.Vector
 
 class HelixWhole(Scenario):
     """A core (cylinder radius 9 about Z, z -2 .. 28) and an AdditiveHelix about Z of a square
-    profile (x 9..12, z 0..2 in an XZ sketch), pitch `pitch0`, `turns0` turns. The references, on
-    the first turn at a sixth of a turn (60 degrees) from the start: the outer face (r 12), the
-    top face (z 2 above the helix's start), the outer top edge (r 12, z 2), and the start cap (the
-    profile's plane, y = 0 at x 9..12). The edit sets the turns, the pitch or the hand."""
+    profile (x 9..`outer0`, z 0..2 in an XZ sketch), pitch `pitch0`, `turns0` turns. The
+    references, on the first turn at a sixth of a turn (60 degrees) from the start: the outer face
+    (r `outer`), the top face (z 2 above the helix's start), the outer top edge (r `outer`, z 2),
+    and the start cap (the profile's plane, y = 0). The edit sets the turns, the pitch, the hand,
+    Reversed or the profile's outer side (its lines moved, their geometry IDs kept). Reversed, the
+    helix runs down: a right-handed one turns the other way about Z."""
 
     abstract = True
     area = "twins"
@@ -39,25 +41,32 @@ class HelixWhole(Scenario):
     pitch1 = 6.0
     left0 = False
     left1 = False
+    reversed0 = False
+    reversed1 = False
+    outer0 = 12.0
+    outer1 = 12.0
+    core = True
     REFS = ("outer", "top", "top_edge", "start_cap")
     ANGLE = math.pi / 3
 
     def at(self, r, z):
         """The point at radius r and height z above the profile's start, a sixth of a turn on."""
         s = self.scale
-        angle = -self.ANGLE if self.left else self.ANGLE
-        rise = self.pitch * self.ANGLE / (2 * math.pi)
+        turn = (-1 if self.left else 1) * (-1 if self.reversed else 1)
+        angle = turn * self.ANGLE
+        rise = (-1 if self.reversed else 1) * self.pitch * self.ANGLE / (2 * math.pi)
         return V(r * math.cos(angle) * s, r * math.sin(angle) * s, (z + rise) * s)
 
     def predicate(self, name):
         s = self.scale
+        middle = (9 + self.outer) / 2
         if name == "outer":
-            return face(surface="bsplinesurface", contains=self.at(12, 1))
+            return face(surface="bsplinesurface", contains=self.at(self.outer, 1))
         if name == "top":
-            return face(surface="bsplinesurface", contains=self.at(10.5, 2))
+            return face(surface="bsplinesurface", contains=self.at(middle, 2))
         if name == "top_edge":
-            return edge(contains=self.at(12, 2))
-        return face(surface="plane", contains=V(10.5 * s, 0, 1 * s))
+            return edge(contains=self.at(self.outer, 2))
+        return face(surface="plane", contains=V(middle * s, 0, 1 * s))
 
     def expect(self, name):
         return lambda: self.predicate(name)
@@ -65,11 +74,14 @@ class HelixWhole(Scenario):
     def build(self, doc):
         s = self.scale
         self.turns, self.pitch, self.left = self.turns0, self.pitch0, self.left0
+        self.reversed, self.outer = self.reversed0, self.outer0
         body = m.body(doc)
-        core = m.sketch(doc, "Core", [m.circle(0, 0, 9 * s)], body, z=-2 * s)
-        m.pad(body, core, 30 * s)
+        if self.core:
+            core = m.sketch(doc, "Core", [m.circle(0, 0, 9 * s)], body, z=-2 * s)
+            m.pad(body, core, 30 * s)
         xz = App.Placement(V(0, 0, 0), App.Rotation(V(1, 0, 0), 90))
-        sk = m.sketch(doc, "HS", m.rectangle(9 * s, 0, 12 * s, 2 * s), body, placement=xz)
+        sk = m.sketch(doc, "HS", m.rectangle(9 * s, 0, self.outer * s, 2 * s), body, placement=xz)
+        self.profile = sk
         doc.recompute()
         self.helix = body.newObject("PartDesign::AdditiveHelix", "Helix")
         self.helix.Profile = sk
@@ -78,6 +90,7 @@ class HelixWhole(Scenario):
         self.helix.Pitch = self.pitch * s
         self.helix.Turns = self.turns
         self.helix.LeftHanded = self.left
+        self.helix.Reversed = self.reversed
         doc.recompute()
         for name in self.REFS:
             pt = body.newObject("PartDesign::Point", name)
@@ -89,9 +102,14 @@ class HelixWhole(Scenario):
     def edit(self, doc):
         s = self.scale
         self.turns, self.pitch, self.left = self.turns1, self.pitch1, self.left1
+        if self.outer1 != self.outer:
+            self.outer = self.outer1
+            m.moveRectangle(self.profile, 9 * s, 0, self.outer * s, 2 * s)
+        self.reversed = self.reversed1
         self.helix.Pitch = self.pitch * s
         self.helix.Turns = self.turns
         self.helix.LeftHanded = self.left
+        self.helix.Reversed = self.reversed
         doc.recompute()
 
 
@@ -142,3 +160,32 @@ class HelixWholeMadeLeftHanded(HelixWhole):
     abstract = False
     turns1 = 2
     left1 = True
+
+
+class HelixWholePitchAndTurns(HelixWhole):
+    __doc__ = HelixWhole.__doc__ + " Pitch 6 -> 4 and 2 -> 3 turns together (ruling ops#895 7086494780, 2a)."
+    abstract = False
+    pitch1 = 4.0
+
+
+class HelixWholeProfileWidened(HelixWhole):
+    __doc__ = HelixWhole.__doc__ + (
+        " The profile's outer side moved from x 12 to 13 (its lines kept; ruling 2b): the outer"
+        " face and the top edge go out to r 13."
+    )
+    abstract = False
+    turns1 = 2
+    outer1 = 13.0
+
+
+class HelixWholeReversed(HelixWhole):
+    __doc__ = HelixWhole.__doc__ + " Reversed, 2 turns (ruling 2c): the helix runs down from the profile."
+    abstract = False
+    turns1 = 2
+    reversed1 = True
+
+
+class HelixWholeNoBase(HelixWhole):
+    __doc__ = HelixWhole.__doc__ + " No core: the helix is the body's first feature, 2 -> 3 turns (ruling 2d)."
+    abstract = False
+    core = False
