@@ -779,9 +779,11 @@ class TestChamfer(unittest.TestCase):
     # beyond grows to meet the chamfer face. T14a and T14b: the volumes are the test's own quadrature
     # of section 2's triangle sweep E W L kept inside the wall's prism (midpoint rule, 2000 x 200 and
     # 4000 x 400 samples over theta and the triangle's first side, the second side's interval in the
-    # prism in closed form; extrapolated: 28.94835 and 11.23471)
+    # prism in closed form; extrapolated: 28.94835 and 11.23471). T14d's, under the tube's top as well: 28.9425085,
+    # 28.9424600 and 28.9424580 at 2000 x 200, 4000 x 400 and 8000 x 800
     RUNOFF14A = 28.94835
     RUNOFF14B = 11.23471
+    RUNOFF14D = 28.94246
 
     @staticmethod
     def _frame942(tilt):
@@ -840,6 +842,31 @@ class TestChamfer(unittest.TestCase):
         self.assertEqual(len(new), 1)
         tube = [f for f in result.Faces if f.Surface.TypeId == "Part::GeomCylinder" and f.BoundBox.ZMax > 5]
         self._assertOn(result, new[0], tube + strips + walls)
+
+    def testChamferVaryingAngleRunsOffOverTheWallsEnd(self):
+        # T14d, two gaskets' #9 (their wall rail 3.35 um past the tube's end): T14a with the tube cut
+        # off 0.05 below the top of the wall's rail at the narrow side (z = R tan t + 1.0 there).
+        # The fill adds nothing past the tube's top either (FR1, a square strip): one face more, the
+        # fill RUNOFF14D, the quadrature kept inside the wall's prism and under the tube's top
+        V = FreeCAD.Vector
+        t = math.radians(3)
+        u, v, n = self._frame942(t)
+        d = math.tan((math.pi / 2 - t) / 2)
+        top = 10.0 * math.tan(t) + d * (1 + math.sin(t)) / math.cos(t) - 0.05
+        wall = self._ellipseInPlane(t, 10.0, 1.0, -0.2).extrude(n * -5)
+        shape = wall.fuse(Part.makeCylinder(10.0, top + 20, V(0, 0, -20))).removeSplitter()
+        foot = ["Edge%d" % (i + 1) for i, e in enumerate(shape.Edges)
+                if e.isClosed() and e.Curve.TypeId == "Part::GeomEllipse" and abs(e.Curve.MinorRadius - 10.0) < 1e-6
+                and all(abs(p.z - p.x * math.tan(t)) < 1e-6 for p in e.discretize(12))]
+        self.assertEqual(len(foot), 1)
+        base, chamfer = self._varyingChamfer(shape, 0, foot, size=1.0)
+        self.assertTrue(chamfer.isValid(), chamfer.getStatusString())
+        result = chamfer.Shape
+        self.assertTrue(result.isValid())
+        self.assertEqual(len(result.Faces), len(shape.Faces) + 1)
+        self.assertLess(shape.cut(result).Volume, 1e-6)
+        self._assertVolume(result.cut(shape).Volume, self.RUNOFF14D)
+        self.assertLess(result.BoundBox.ZMax, top + 1e-6)
 
     def testChamferVaryingAngleCutRunsOffIntoACounterbore(self):
         # T14b, Case Base #90 and #97: a bore of radius 6 through the floor of a counterbore that
