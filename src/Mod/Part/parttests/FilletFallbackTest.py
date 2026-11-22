@@ -8279,3 +8279,80 @@ class NotchEndFilletTest(unittest.TestCase):
         # At 75 deg the groove leaves the floor 0.74 from the wall, inside the round's 1.5: the
         # round would run on over the floor beside it, not known from Onshape (review of the design)
         self.refused(0.25, 75.0)
+
+
+class StraightBSplineWallTest(unittest.TestCase):
+    """ops#950: a rim loop with one wall edge down from a rim vertex that is a straight
+    B-spline (degree 1, two poles), as a Boolean or an import leaves it (OW Screw Lid #50: its R36
+    wall's split, one of 400 rim vertices). The direct rim builder refused the whole loop for it
+    ("not square to the plane face"), and the general construction rounded it corner by corner:
+    14 s for 12 edges, past 28 minutes for 400. Designed: a ring of radius 36 with three ridges
+    (per ridge two r 0.4 discs on the ring 0.301 degrees apart and the sector between them out to
+    36.4: arcs only, reflex plan corners with a circle at the ridges' feet), its top face's outer
+    wire rounded by 0.2. The same solid with that one edge's line written as a B-spline must give
+    the line's result"""
+
+    RC, S, T, r = 36.0, 0.4, 4.0, 0.2
+    DELTA = math.radians(0.1505)
+
+    def ring(self):
+        pieces = []
+        for i in range(3):
+            a = i * 2 * math.pi / 3
+            for b in (a - self.DELTA, a + self.DELTA):
+                c = V(self.RC * math.cos(b), self.RC * math.sin(b), 0)
+                disc = Part.makeCylinder(self.S, self.T, c)
+                disc.rotate(c, V(0, 0, 1), math.degrees(b) + 180.0)  # its seam inside the ring
+                pieces.append(disc)
+            sector = Part.makeCylinder(
+                self.RC + self.S, self.T, V(0, 0, 0), V(0, 0, 1), math.degrees(2 * self.DELTA)
+            )
+            sector.rotate(V(0, 0, 0), V(0, 0, 1), math.degrees(a - self.DELTA))
+            pieces.append(sector)
+        body = Part.makeCylinder(self.RC, self.T).fuse(pieces).removeSplitter()
+        return body.cut(Part.makeCylinder(30.0, self.T)).removeSplitter()
+
+    def top(self, shape):
+        faces = [
+            f
+            for f in shape.Faces
+            if f.Surface.TypeId == "Part::GeomPlane" and abs(f.CenterOfMass.z - self.T) < 1e-9
+        ]
+        self.assertEqual(len(faces), 1)
+        return faces[0]
+
+    def withBSplineWall(self, shape):
+        top = self.top(shape)
+        for v in top.OuterWire.Vertexes:
+            for e in shape.Edges:
+                if (
+                    e.Curve.TypeId == "Part::GeomLine"
+                    and abs(e.Curve.Direction.z) > 0.99
+                    and any(x.isSame(v) for x in e.Vertexes)
+                ):
+                    bs = Part.BSplineCurve()
+                    bs.buildFromPoles([x.Point for x in e.Vertexes], False, 1)
+                    straight = Part.Edge(bs, bs.FirstParameter, bs.LastParameter)
+                    out = shape.replaceShape([(e, straight)])
+                    out.fix(1e-7, 1e-7, 1e-7)
+                    return Part.Solid(Part.Shell(out.Shells[0].Faces))
+        self.fail("no wall line at a rim vertex")
+
+    def testStraightBSplineWallKeepsTheDirectBuilder(self):
+        plain = self.ring()
+        bent = self.withBSplineWall(plain)
+        self.assertTrue(bent.isValid())
+        self.assertEqual(
+            [e.Curve.TypeId for e in bent.Edges].count("Part::GeomBSplineCurve"), 1
+        )
+        expected = plain.makeFillet(self.r, self.top(plain).OuterWire.Edges)
+        start = time.perf_counter()
+        result = bent.makeFillet(self.r, self.top(bent).OuterWire.Edges)
+        elapsed = time.perf_counter() - start
+        self.assertTrue(result.isValid())
+        self.assertEqual(len(result.Solids), 1)
+        self.assertEqual(len(result.Faces), len(expected.Faces))
+        # The general construction's result is 4e-6 off the direct builder's
+        self.assertAlmostEqual(result.Volume, expected.Volume, delta=1e-8)
+        self.assertAlmostEqual(result.Area, expected.Area, delta=1e-7)
+        self.assertLess(elapsed, 5.0)
