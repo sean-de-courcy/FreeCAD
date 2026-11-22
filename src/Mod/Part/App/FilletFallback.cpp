@@ -12265,12 +12265,15 @@ bool mitreAsks(const MitreOff& occt, double radius)
 {
     // The visible floor (ops#941 section 4; coordinator c784): OCCT's error is a continuum set by
     // the scale and the span, and only a band's mitre, cut short or misplaced, has its ends off its
-    // vertices. Asking past mitreThreshold() alone took about 3 in 4 such fillets at 10x and up
+    // vertices. Asking past mitreThreshold() alone took about 3 in 4 such fillets at 10x and up.
+    // The ends' floor lies between OCCT's gaps within an edge's own tolerance (up to 4.2e-5 r, about
+    // 2e-5 mm at 1x) and the bands' (7.8e-4 r and more): a floor among the gaps decided by the
+    // platform's last digits (fix941 b: r 0.419 asked on Windows, not on macOS)
     if (!occt.found()) {
         return true;
     }
     const double threshold = mitreThreshold(radius);
-    return occt.ends > std::max(threshold, 1e-5 * radius)
+    return occt.ends > std::max(threshold, 2e-4 * radius)
         || occt.rounds > std::max(threshold, 1e-3 * radius);
 }
 

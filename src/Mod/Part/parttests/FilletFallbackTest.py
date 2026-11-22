@@ -7174,13 +7174,19 @@ class MitreCornerTest(unittest.TestCase):
 
     def testBandRadiiBuildTheExactMitre(self):
         # 0.588, 0.586, 0.589, 0.419: inside OCCT's bands (invalid, cut short, or off its rounds);
-        # 0.55: a control, OCCT's result
+        # 0.55: a control, OCCT's result. 0.419 on the noisy base: OCCT's result is valid, off its
+        # rounds by 5.4e-4 r with its ends on their vertices (one within its edge's tolerance), under
+        # the visible floor: it stands on every platform, within that floor (fix941 b: a floor among
+        # the tolerance gaps asked on Windows and not on macOS)
         for noise in (True, False):
             base = lobed_plate(noise)
             for radius in (0.588, 0.586, 0.589, 0.419, 0.55):
                 with self.subTest(radius=radius, noise=noise):
                     fillet = filleted_in_a_body(self.doc, base, lobe_feet, radius)
-                    self.checkMitre(fillet, base, radius, MITRE_ON_ROUNDS)
+                    below = noise and radius == 0.419
+                    self.checkMitre(
+                        fillet, base, radius, MITRE_VISIBLE_FLOOR * radius if below else MITRE_ON_ROUNDS
+                    )
 
     def testRadiusEditKeepsTheNamesAndPicks(self):
         # names and counts equal OCCT's good result (r 0.55) at a band's radius (the construction),
@@ -7382,3 +7388,6 @@ class MitreAskTimeTest(unittest.TestCase):
 # How far the construction's mitre edges may lie off their rounds (ops#941): the Boolean's
 # intersection curve of the cylinder and the torus is an approximation (measured: work notes)
 MITRE_ON_ROUNDS = 1e-4
+# The visible floor on OCCT's mitre, per unit of radius (mitreAsks(), ops#941 section 4): below it
+# OCCT's result stands
+MITRE_VISIBLE_FLOOR = 1e-3

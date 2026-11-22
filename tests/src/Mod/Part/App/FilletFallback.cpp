@@ -4628,7 +4628,7 @@ TEST_F(FilletFallbackTest, mitreOffMeasuresEachCornersOwnMitre)
 
 TEST_F(FilletFallbackTest, mitreAsksPastTheVisibleFloor)
 {
-    // ops#941 section 4: ends off their vertices by over 1e-5 r, or points off the rounds by over
+    // ops#941 section 4: ends off their vertices by over 2e-4 r, or points off the rounds by over
     // 1e-3 r, and never under the construction's own threshold; not found is asked
     const double r = 5.0;
     auto off = [](double rounds, double ends) {
@@ -4639,12 +4639,15 @@ TEST_F(FilletFallbackTest, mitreAsksPastTheVisibleFloor)
     };
     EXPECT_FALSE(FF::mitreAsks(off(9e-4 * r, 0.0), r));
     EXPECT_TRUE(FF::mitreAsks(off(1.1e-3 * r, 0.0), r));
-    EXPECT_FALSE(FF::mitreAsks(off(0.0, 0.9e-5 * r), r));
-    EXPECT_TRUE(FF::mitreAsks(off(0.0, 2e-5 * r), r));
+    // A gap within an edge's tolerance (4.2e-5 r measured) is not asked; a band's (7.8e-4 r) is
+    EXPECT_FALSE(FF::mitreAsks(off(0.0, 4.2e-5 * r), r));
+    EXPECT_FALSE(FF::mitreAsks(off(0.0, 1.9e-4 * r), r));
+    EXPECT_TRUE(FF::mitreAsks(off(0.0, 2.1e-4 * r), r));
+    EXPECT_TRUE(FF::mitreAsks(off(0.0, 7.8e-4 * r), r));
     EXPECT_TRUE(FF::mitreAsks(FF::MitreOff(), r));
-    // At r 0.5 the threshold's 1e-5 is the floor of the ends
-    EXPECT_FALSE(FF::mitreAsks(off(0.0, 0.9e-5), 0.5));
-    EXPECT_TRUE(FF::mitreAsks(off(0.0, 1.1e-5), 0.5));
+    // At r 0.02 the threshold's 1e-5 is the floor of the ends
+    EXPECT_FALSE(FF::mitreAsks(off(0.0, 0.9e-5), 0.02));
+    EXPECT_TRUE(FF::mitreAsks(off(0.0, 1.1e-5), 0.02));
 }
 
 TEST_F(FilletFallbackTest, optionalRunStopsAtItsOwnLimit)
