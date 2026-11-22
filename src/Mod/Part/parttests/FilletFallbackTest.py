@@ -7239,6 +7239,59 @@ class MitreCornerTest(unittest.TestCase):
                         (16, 32, 16),
                     )
 
+    def testNoCornerPieceIsAFaceOfItsOwn(self):
+        # review pr941-r1 (outer_round at 600 mm, r 0.419): where OCCT's result is invalid and the
+        # construction at the limit builds the mitre, its pieces merge into the rounds or it
+        # refuses. Each arc's round is one face, holding a point of its torus inside both corners'
+        # pieces (half the foot's angle past the arc's end, 20 deg up its section), as OCCT's good
+        # result and Onshape's (oracle941). Where nothing builds, the fillet fails, as on integration
+        scale = 600.0 / 18.0
+        for noise in (True, False):
+            base = lobed_plate(noise)
+            base.scale(scale)
+
+            def feet(shape, s=scale):
+                return [
+                    e
+                    for e in shape.Edges
+                    if abs(e.BoundBox.ZMin) < 1e-9 * s
+                    and abs(e.BoundBox.ZMax) < 1e-9 * s
+                    and all(
+                        (4 - 1e-6) * s <= math.hypot(v.X, v.Y) <= (5 + 1e-6) * s for v in e.Vertexes
+                    )
+                ]
+
+            for radius in (0.419, 0.586, 0.66):
+                with self.subTest(noise=noise, radius=radius):
+                    r = radius * scale
+                    fillet = filleted_in_a_body(self.doc, base, feet, r)
+                    if not fillet.isValid():
+                        self.assertIn("invalid", fillet.getStatusString())
+                        continue
+                    shape = fillet.Shape
+                    self.assertTrue(shape.isValid())
+                    self.assertEqual(
+                        (len(shape.Faces) - len(base.Faces), len(shape.Edges) - len(base.Edges),
+                         len(shape.Vertexes) - len(base.Vertexes)),
+                        (16, 32, 16),
+                    )
+                    tol = 1e-5 * scale
+                    phi = math.radians(20.0)
+                    for a0 in (15.0, 105.0, 195.0, 285.0):
+                        for R, inner in ((4.0 * scale, True), (5.0 * scale, False)):
+                            foot = math.degrees(math.asin(r / (R - r) if inner else r / (R + r)))
+                            rho = R - r + r * math.sin(phi) if inner else R + r - r * math.sin(phi)
+                            z = r - r * math.cos(phi)
+
+                            def at(angle):
+                                a = math.radians(angle)
+                                return V(rho * math.cos(a), rho * math.sin(a), z)
+
+                            rounds = [f for f in shape.Faces if f.isInside(at(a0 + 30.0), tol, True)]
+                            self.assertEqual(len(rounds), 1, (a0, R))
+                            for angle in (a0 - foot / 2, a0 + 60.0 + foot / 2):
+                                self.assertTrue(rounds[0].isInside(at(angle), tol, True), (a0, R, angle))
+
     def testMixedSelectionKeepsOcctsResult(self):
         # the 16 edges and the plate's outer rim: not whole loops of mitre corners, so OCCT's result
         # (or fix 1's retry) stands, with no error

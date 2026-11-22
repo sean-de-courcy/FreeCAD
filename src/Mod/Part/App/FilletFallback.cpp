@@ -2105,6 +2105,9 @@ const char* const mitreLoopRefusal
 const char* const mitreFootRefusal
     = "the mitre's foot lies past the end of a round at a concave corner with a circle";
 
+const char* const mitreMergeRefusal
+    = "the mitre corners' rounds did not merge into one face per edge";
+
 /// How far past the arc's end the mitre's foot lies, as an angle about the arc's axis: the foot is
 /// on the plate at R + r (outer arc) or R - r (inner arc), r from the line's wall (section 2)
 double mitreFootAngle(double R, double r, bool inner)
@@ -11424,6 +11427,23 @@ TopoDS_Shape constructShape(
             }
         }
     }
+    // The faces the edge tools' faces become through the stages (ops#941)
+    auto edgeToolFacesThrough = [&](const std::vector<Stage>& through) {
+        TopTools_IndexedMapOfShape faces;
+        for (size_t i = 0; i < tools.size(); ++i) {
+            if (tools[i].miter || toolStage[i] > through.size()) {
+                continue;
+            }
+            for (TopExp_Explorer it(tools[i].solid, TopAbs_FACE); it.More(); it.Next()) {
+                for (const auto& image : imagesThrough(through, toolStage[i], it.Current())) {
+                    if (image.ShapeType() == TopAbs_FACE) {
+                        faces.Add(image);
+                    }
+                }
+            }
+        }
+        return faces;
+    };
     auto history = [&](ShapeMapper& into, const std::vector<Stage>& through) {
         TopTools_IndexedMapOfShape images;
         for (auto type : {TopAbs_FACE, TopAbs_EDGE, TopAbs_VERTEX}) {
@@ -11448,19 +11468,7 @@ TopoDS_Shape constructShape(
         // A fillet's mitre piece (ops#941): its faces merge into the rounds' faces, which OCCT's
         // good result names from their edges alone; where a piece's face became an edge tool's
         // face, the vertex is not named a generator of it, so that the names equal OCCT's
-        TopTools_IndexedMapOfShape edgeToolFaces;
-        for (size_t i = 0; i < tools.size(); ++i) {
-            if (tools[i].miter || toolStage[i] > through.size()) {
-                continue;
-            }
-            for (TopExp_Explorer it(tools[i].solid, TopAbs_FACE); it.More(); it.Next()) {
-                for (const auto& image : imagesThrough(through, toolStage[i], it.Current())) {
-                    if (image.ShapeType() == TopAbs_FACE) {
-                        edgeToolFaces.Add(image);
-                    }
-                }
-            }
-        }
+        const TopTools_IndexedMapOfShape edgeToolFaces = edgeToolFacesThrough(through);
         for (size_t i = 0; i < tools.size(); ++i) {
             if (toolStage[i] > through.size()) {
                 continue;
@@ -11481,6 +11489,28 @@ TopoDS_Shape constructShape(
             }
         }
     };
+    // Every face a fillet's mitre piece leaves merged into an edge tool's round: a piece left as a
+    // face of its own is silent to a pick of the round, which then holds only part of it (review
+    // pr941-r1, T1: at 600 mm and 4 m, 5 to 8 of 16; the general construction at the limit too,
+    // outer_round at 600 mm, r 0.419 x 33.3, where integration fails). OCCT's good result and
+    // Onshape's have one face per round (oracle941). Judged on the result, not on the result
+    // before a merge of the construction's own faces (MergedNames)
+    {
+        const TopTools_IndexedMapOfShape edgeToolFaces = edgeToolFacesThrough(stages);
+        for (size_t i = 0; i < tools.size(); ++i) {
+            if (!tools[i].miter || tools[i].mitreFace.IsNull()) {
+                continue;
+            }
+            for (TopExp_Explorer it(tools[i].solid, TopAbs_FACE); it.More(); it.Next()) {
+                for (const auto& image : imagesThrough(stages, toolStage[i], it.Current())) {
+                    if (image.ShapeType() == TopAbs_FACE && !baseImages.Contains(image)
+                        && !edgeToolFaces.Contains(image)) {
+                        refuse(mitreMergeRefusal);
+                    }
+                }
+            }
+        }
+    }
     history(mapper, stages);
     // The merge's elements are named as the result before it names them (MergedNames): its
     // history from the base, and where each element of the result comes from in it
@@ -16459,7 +16489,7 @@ bool constructSolid(
             if (count(shape, TopAbs_FACE) - count(base, TopAbs_FACE) != n
                 || count(shape, TopAbs_EDGE) - count(base, TopAbs_EDGE) != 2 * n
                 || count(shape, TopAbs_VERTEX) - count(base, TopAbs_VERTEX) != n) {
-                refuse("the mitre corners' rounds did not merge into one face per edge");
+                refuse(mitreMergeRefusal);
             }
             out.shape = shape;
             out.mapper = mapper;
