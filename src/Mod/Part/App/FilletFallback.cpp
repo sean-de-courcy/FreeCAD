@@ -1374,6 +1374,9 @@ struct Tool
     /// The end faces (not planes) whose surfaces trim the tool: a strip that runs off its face
     /// over an edge onto one of them runs into the surface that cut it off, by construction
     std::vector<TopoDS_Face> surfaceEnds;
+    /// The base's vertices at its ends past a low strip (ops#962): the strip's edge and the
+    /// channel's kink there end up between the same two faces, and are joined into one edge
+    std::vector<TopoDS_Shape> joinVertices;
     /// The planes of its ends at two-edge corners with unequal dihedral angles: the other edge's
     /// side face, which its faces there lie on. They join contactFaces: nothing of them may be
     /// left (the side face covers them, or the other edge's tool removes them)
@@ -2136,6 +2139,18 @@ struct VertexEnd
     /// B: a wall's rounded end flush with the rim of the floor it stands on). The face narrows to
     /// nothing at the vertex, so the strip on it has no width there
     bool stripCusp = false;
+    /// FreeEnd with surfaceEnd, past a low strip (ops#962, notchEnd): the end face's surface is
+    /// bounded at its iso line (in u, else v) at the parameter, on the side away from the face, and
+    /// continued past it by the plane, tangent to it there
+    struct SurfaceBound
+    {
+        TopoDS_Face plane;
+        bool inU = true;
+        double at = 0.0;
+        bool keepBelow = true;  // the face lies below the bound in its parameter
+        TopoDS_Vertex vertex;   // the edge's end
+    };
+    std::optional<SurfaceBound> bound;
     TopoDS_Edge continuation;  // TangentContinuation: the other selected edge
     TopoDS_Face beyond;        // Overflow: the face whose surface trims the end round
     std::string reason;
@@ -2698,6 +2713,303 @@ std::optional<VertexEnd> overflowEnd(
     return end;
 }
 
+Section sectionAt(const Context& ctx, const EdgeData& data, double parameter);
+
+/** A concave fillet's straight edge between two planes, ending at a channel cut lower than the
+ * round across one of its faces (ops#962, notes fillet-notch-end-962): at a vertex of 4 edges and
+ * 4 faces, the edge's faces F and W and two end faces S and G, around the vertex in the order
+ * F - W - S - G. S (the channel's cylinder behind the wall) lies wholly behind W and meets it in
+ * a strip lower than the section's extent on W; past the strip W meets a plane B, and G's surface
+ * (the groove's) runs into B tangentially along an iso line through the strip's far end. Onshape
+ * trims the round by G's surface up to that line and by B above it (the same solid as rounding the
+ * edge before the channel is cut). The end is a FreeEnd on G's surface with that bound; none for
+ * anything else (the vertex keeps its refusal)
+ */
+std::optional<VertexEnd> notchEnd(
+    const Context& ctx,
+    const EdgeData& data,
+    const TopoDS_Vertex& vertex,
+    const std::vector<TopoDS_Shape>& edges,
+    const std::vector<TopoDS_Shape>& faces
+)
+{
+    if (ctx.request.kind != Kind::Fillet || !data.line || data.convex) {
+        return std::nullopt;
+    }
+    for (const auto& face : data.faces) {
+        if (BRepAdaptor_Surface(face, Standard_False).GetType() != GeomAbs_Plane) {
+            return std::nullopt;
+        }
+    }
+    std::vector<TopoDS_Face> ends;
+    for (const auto& face : faces) {
+        if (!face.IsSame(data.faces[0]) && !face.IsSame(data.faces[1])) {
+            ends.push_back(TopoDS::Face(face));
+        }
+    }
+    if (ends.size() != 2) {
+        return std::nullopt;
+    }
+    auto between = [&](const TopoDS_Shape& edge, const TopoDS_Shape& a, const TopoDS_Shape& b) {
+        auto of = ctx.list(ctx.edgeFaces, edge);
+        return of.size() == 2
+            && ((of[0].IsSame(a) && of[1].IsSame(b)) || (of[0].IsSame(b) && of[1].IsSame(a)));
+    };
+    // The roles: W carries the strip (its edge with S), F meets G, and S meets G in W's plane (the
+    // channel turns at the wall). The cycle alone is symmetric: F and W swap with S and G
+    int found = 0;
+    int w = 0;
+    int s = 0;
+    TopoDS_Edge strip;
+    TopoDS_Edge foot;
+    for (int wk = 0; wk < 2; ++wk) {
+        const gp_Pln wallPlane = BRepAdaptor_Surface(data.faces[wk], Standard_False).Plane();
+        for (int sk = 0; sk < 2; ++sk) {
+            TopoDS_Edge stripEdge;
+            TopoDS_Edge footEdge;
+            int matched = 0;
+            bool kinkInWall = false;
+            for (const auto& shape : edges) {
+                if (shape.IsSame(data.edge)) {
+                    continue;
+                }
+                if (ctx.selected.Contains(shape)) {
+                    return std::nullopt;
+                }
+                if (between(shape, data.faces[wk], ends[sk])) {
+                    stripEdge = TopoDS::Edge(shape);
+                    ++matched;
+                }
+                else if (between(shape, data.faces[1 - wk], ends[1 - sk])) {
+                    footEdge = TopoDS::Edge(shape);
+                    ++matched;
+                }
+                else if (between(shape, ends[0], ends[1])) {
+                    kinkInWall = edgeInPlane(TopoDS::Edge(shape), wallPlane);
+                    ++matched;
+                }
+            }
+            if (matched == 3 && !stripEdge.IsNull() && kinkInWall) {
+                ++found;
+                w = wk;
+                s = sk;
+                strip = stripEdge;
+                foot = footEdge;
+            }
+        }
+    }
+    if (found != 1) {
+        return std::nullopt;
+    }
+    const TopoDS_Face& wall = data.faces[w];
+    const TopoDS_Face& stripFace = ends[s];
+    const TopoDS_Face& endFace = ends[1 - s];
+    const gp_Pnt point = BRep_Tool::Pnt(vertex);
+    // S behind W, away from the tool (which lies on W's outer side, in the air a concave round fills)
+    if (!whollyBeyond(stripFace, point, outwardNormal(wall, point))) {
+        return std::nullopt;
+    }
+    // The strip's far end, lower than the round reaches up W
+    TopoDS_Vertex first;
+    TopoDS_Vertex last;
+    TopExp::Vertices(strip, first, last);
+    if (first.IsNull() || last.IsNull() || BRep_Tool::Degenerated(strip)) {
+        return std::nullopt;
+    }
+    const TopoDS_Vertex tip = first.IsSame(vertex) ? last : first;
+    if (tip.IsSame(vertex)) {
+        return std::nullopt;
+    }
+    const gp_Pnt top = BRep_Tool::Pnt(tip);
+    const gp_Dir along(gp_Vec(data.start, data.end));
+    const Section section = sectionAt(ctx, data, data.first);
+    const gp_Lin line(data.start, along);
+    // (with a margin: at the setback B's face would be a sliver)
+    if (line.Distance(top) >= section.length[w] * (1 - 1e-3)) {
+        return std::nullopt;
+    }
+    // G's foot on F reaches past the round's extent on F: else the round runs on over F beside the
+    // groove (a channel rising steeply out of the floor), which is not known from Onshape
+    {
+        BRepAdaptor_Curve curve(foot);
+        double reached = 0.0;
+        for (int k = 0; k <= 32; ++k) {
+            const double t = curve.FirstParameter()
+                + (curve.LastParameter() - curve.FirstParameter()) * k / 32.0;
+            reached = std::max(reached, line.Distance(curve.Value(t)));
+        }
+        if (reached <= section.length[1 - w] * (1 + 1e-3)) {
+            return std::nullopt;
+        }
+    }
+    // B: W's other face at the strip's far end
+    TopoDS_Face plane;
+    TopoDS_Edge rise;
+    for (const auto& shape : ctx.list(ctx.vertexEdges, tip)) {
+        if (shape.IsSame(strip)) {
+            continue;
+        }
+        auto of = ctx.list(ctx.edgeFaces, shape);
+        if (of.size() != 2 || !(of[0].IsSame(wall) || of[1].IsSame(wall))) {
+            continue;
+        }
+        if (!plane.IsNull()) {
+            return std::nullopt;
+        }
+        plane = TopoDS::Face(of[0].IsSame(wall) ? of[1] : of[0]);
+        rise = TopoDS::Edge(shape);
+    }
+    if (plane.IsNull() || plane.IsSame(stripFace) || plane.IsSame(endFace) || plane.IsSame(data.faces[1 - w])) {
+        return std::nullopt;
+    }
+    BRepAdaptor_Surface planeSurface(plane, Standard_False);
+    if (planeSurface.GetType() != GeomAbs_Plane) {
+        return std::nullopt;
+    }
+    const gp_Pln pln = planeSurface.Plane();
+    // B rises from the strip as a straight convex edge with W, past the round's extent on W, and
+    // lies behind W: the round's end in B's plane lies on nothing of B's own face
+    {
+        BRepAdaptor_Curve curve(rise);
+        TopoDS_Vertex a;
+        TopoDS_Vertex b;
+        TopExp::Vertices(rise, a, b);
+        if (curve.GetType() != GeomAbs_Line || a.IsNull() || b.IsNull()) {
+            return std::nullopt;
+        }
+        const gp_Pnt end = BRep_Tool::Pnt(a.IsSame(tip) ? b : a);
+        if (line.Distance(end) <= section.length[w] * (1 + 1e-3)
+            || ChFi3d::DefineConnectType(rise, wall, plane, Precision::Angular(), Standard_False)
+                != ChFiDS_Convex
+            || !whollyBeyond(plane, point, outwardNormal(wall, point))) {
+            return std::nullopt;
+        }
+    }
+    // G's surface through the far end, and its iso line there lying in B, tangent to it
+    TopLoc_Location location;
+    const Handle(Geom_Surface)& surface = BRep_Tool::Surface(endFace, location);
+    if (surface.IsNull()) {
+        return std::nullopt;
+    }
+    double fu0 = 0.0;
+    double fu1 = 0.0;
+    double fv0 = 0.0;
+    double fv1 = 0.0;
+    BRepTools::UVBounds(endFace, fu0, fu1, fv0, fv1);
+    const double reach = 2 * (section.length[0] + section.length[1]);
+    double u0 = 0.0;
+    double u1 = 0.0;
+    double v0 = 0.0;
+    double v1 = 0.0;
+    surface->Bounds(u0, u1, v0, v1);
+    // Over what the sheet covers (trimBySurface: the face's bounds run on by its reach where the
+    // surface is unbounded)
+    u0 = Precision::IsInfinite(u0) ? fu0 - reach : u0;
+    u1 = Precision::IsInfinite(u1) ? fu1 + reach : u1;
+    v0 = Precision::IsInfinite(v0) ? fv0 - reach : v0;
+    v1 = Precision::IsInfinite(v1) ? fv1 + reach : v1;
+    const gp_Pnt local = top.Transformed(location.Inverted().Transformation());
+    GeomAPI_ProjectPointOnSurf projection(local, surface, u0, u1, v0, v1);
+    if (projection.NbPoints() == 0
+        || projection.LowerDistance() > std::max(1e-6, BRep_Tool::Tolerance(tip))) {
+        return std::nullopt;
+    }
+    double pu = 0.0;
+    double pv = 0.0;
+    projection.LowerDistanceParameters(pu, pv);
+    BRepAdaptor_Surface onSurface(endFace, Standard_False);
+    std::optional<VertexEnd::SurfaceBound> bound;
+    for (bool inU : {true, false}) {
+        const double at = inU ? pu : pv;
+        const double lo = inU ? v0 : u0;
+        const double hi = inU ? v1 : u1;
+        bool lies = true;
+        std::vector<gp_Pnt> points;
+        for (int k = 0; k <= 4 && lies; ++k) {
+            const double t = lo + (hi - lo) * k / 4.0;
+            gp_Pnt p;
+            gp_Vec du;
+            gp_Vec dv;
+            onSurface.D1(inU ? at : t, inU ? t : at, p, du, dv);
+            gp_Vec normal = du.Crossed(dv);
+            lies = pln.Distance(p) < 1e-6 && normal.Magnitude() > linearTolerance
+                && gp_Dir(normal).IsParallel(pln.Axis().Direction(), 1e-6);
+            points.push_back(p);
+        }
+        // A straight line: the plane's face continues the sheet from a segment of it
+        if (lies) {
+            const gp_Lin line(points.front(), gp_Dir(gp_Vec(points.front(), points.back())));
+            lies = std::all_of(points.begin(), points.end(), [&](const gp_Pnt& p) {
+                return line.Distance(p) < 1e-7;
+            });
+        }
+        if (!lies) {
+            continue;
+        }
+        // The bound outside the face's own range, the nearest copy of a periodic parameter
+        const double f0 = inU ? fu0 : fv0;
+        const double f1 = inU ? fu1 : fv1;
+        const double slack = 1e-9 * (1.0 + std::abs(f1 - f0));
+        double shifted = at;
+        if (inU ? surface->IsUPeriodic() : surface->IsVPeriodic()) {
+            // The copies just above and just below the face's range; one inside it is a line
+            // through the face
+            const double period = inU ? surface->UPeriod() : surface->VPeriod();
+            const double above = at + period * std::ceil((f1 - slack - at) / period);
+            const double below = above - period;
+            if (below > f0 + slack) {
+                continue;
+            }
+            shifted = f0 - below < above - f1 ? below : above;
+        }
+        VertexEnd::SurfaceBound candidate;
+        candidate.vertex = vertex;
+        candidate.plane = plane;
+        candidate.inU = inU;
+        candidate.at = shifted;
+        if (shifted >= f1 - slack) {
+            candidate.keepBelow = true;
+        }
+        else if (shifted <= f0 + slack) {
+            candidate.keepBelow = false;
+        }
+        else {
+            continue;  // the line runs through the face
+        }
+        if (bound) {
+            return std::nullopt;  // both lines: a plane, not a bound
+        }
+        bound = candidate;
+    }
+    if (!bound) {
+        return std::nullopt;
+    }
+    // The end's plane, as a curved end's: G's tangent plane at the vertex, facing back along the edge
+    gp_Dir away = awayFrom(data.edge, vertex);
+    gp_Pnt2d uv = BRep_Tool::Parameters(vertex, endFace);
+    gp_Pnt onG;
+    gp_Vec du;
+    gp_Vec dv;
+    onSurface.D1(uv.X(), uv.Y(), onG, du, dv);
+    gp_Vec tangentNormal = du.Crossed(dv);
+    if (tangentNormal.Magnitude() < linearTolerance) {
+        return std::nullopt;
+    }
+    gp_Dir normal(tangentNormal);
+    if (std::abs(normal.Dot(away)) < 1e-6) {
+        return std::nullopt;
+    }
+    if (normal.Dot(away) > 0) {
+        normal.Reverse();
+    }
+    VertexEnd end;
+    end.kind = VertexClass::FreeEnd;
+    end.trims = {{point, normal}};
+    end.surfaceEnd = endFace;
+    end.bound = bound;
+    return end;
+}
+
 /// 5.6, interface point 1: how the selected edge ends at the vertex
 VertexEnd classify(
     const Context& ctx,
@@ -2743,6 +3055,9 @@ VertexEnd classify(
     // cylinder's seam, as a fused stadium's half circle): only a tangent continuation
     bool insideCurve = edges.size() == 2 && faces.size() == 2;
     if (edges.size() == 4 && faces.size() == 4) {
+        if (auto notch = notchEnd(ctx, data, vertex, edges, faces)) {
+            return *notch;
+        }
         std::string why;
         if (auto overflow = overflowEnd(ctx, data, vertex, edges, faces, why)) {
             return *overflow;
@@ -4403,6 +4718,109 @@ TopoDS_Face sheetOf(
     return TopoDS::Face(make.Face().Moved(location));
 }
 
+/** The end face's surface up to its bound past a low strip (ops#962, notchEnd), as a face, and the
+ * plane past the bound as the face beyond (sewn to it by sheetWith): the surface from the face's
+ * own far bound to the bound's line, the other parameter as sheetOf's (natural, else the face's
+ * own run on by the reach); the plane's face the rectangle on that line's segment, run on by the
+ * reach the way the surface leaves the line
+ */
+TopoDS_Face boundedSheet(
+    const TopoDS_Face& endFace,
+    double reach,
+    const VertexEnd::SurfaceBound& bound,
+    Handle(Geom_Surface)& surface,
+    TopLoc_Location& location,
+    TopoDS_Face& beyond
+)
+{
+    surface = BRep_Tool::Surface(endFace, location);
+    if (surface.IsNull()) {
+        refuse("an end face without a surface");
+    }
+    double u0 = 0.0;
+    double u1 = 0.0;
+    double v0 = 0.0;
+    double v1 = 0.0;
+    surface->Bounds(u0, u1, v0, v1);
+    double fu0 = 0.0;
+    double fu1 = 0.0;
+    double fv0 = 0.0;
+    double fv1 = 0.0;
+    BRepTools::UVBounds(endFace, fu0, fu1, fv0, fv1);
+    u0 = Precision::IsInfinite(u0) ? fu0 - reach : u0;
+    u1 = Precision::IsInfinite(u1) ? fu1 + reach : u1;
+    v0 = Precision::IsInfinite(v0) ? fv0 - reach : v0;
+    v1 = Precision::IsInfinite(v1) ? fv1 + reach : v1;
+    double& lo = bound.inU ? u0 : v0;
+    double& hi = bound.inU ? u1 : v1;
+    // The far side: the face's own bound, run on to half a period from the bound on a periodic
+    // surface (a circle's tube: to its opposite tangent line), else the surface's own (sheetOf's)
+    const bool periodic = bound.inU ? surface->IsUPeriodic() : surface->IsVPeriodic();
+    const double half = periodic ? (bound.inU ? surface->UPeriod() : surface->VPeriod()) / 2 : 0.0;
+    if (bound.keepBelow) {
+        if (periodic) {
+            lo = std::min(bound.inU ? fu0 : fv0, bound.at - half);
+        }
+        hi = bound.at;
+    }
+    else {
+        lo = bound.at;
+        if (periodic) {
+            hi = std::max(bound.inU ? fu1 : fv1, bound.at + half);
+        }
+    }
+    if (hi - lo <= linearTolerance) {
+        refuse("an end face's surface up to its line in the plane past a strip is empty");
+    }
+    BRepBuilderAPI_MakeFace make(surface, u0, u1, v0, v1, Precision::Confusion());
+    if (!make.IsDone()) {
+        refuse("an end face's surface up to its line in the plane past a strip can't be made a face");
+    }
+    const TopoDS_Face sheet = TopoDS::Face(make.Face().Moved(location));
+    // The line's segment, and the way on past it in the plane
+    BRepAdaptor_Surface onSurface(sheet, Standard_False);
+    const double w0 = bound.inU ? v0 : u0;
+    const double w1 = bound.inU ? v1 : u1;
+    auto at = [&](double w) {
+        return bound.inU ? onSurface.Value(bound.at, w) : onSurface.Value(w, bound.at);
+    };
+    gp_Pnt middle;
+    gp_Vec du;
+    gp_Vec dv;
+    if (bound.inU) {
+        onSurface.D1(bound.at, (w0 + w1) / 2, middle, du, dv);
+    }
+    else {
+        onSurface.D1((w0 + w1) / 2, bound.at, middle, du, dv);
+    }
+    gp_Vec past = bound.inU ? du : dv;
+    if (!bound.keepBelow) {
+        past.Reverse();
+    }
+    const gp_Pln pln = BRepAdaptor_Surface(bound.plane, Standard_False).Plane();
+    const gp_Vec normal(pln.Axis().Direction());
+    past -= normal * past.Dot(normal);
+    if (past.Magnitude() < linearTolerance) {
+        refuse("an end face's surface leaves its line in the plane past a strip along nothing");
+    }
+    past.Normalize();
+    const gp_Pnt a = at(w0);
+    const gp_Pnt b = at(w1);
+    BRepBuilderAPI_MakePolygon polygon(
+        a,
+        b,
+        b.Translated(past * reach),
+        a.Translated(past * reach),
+        Standard_True
+    );
+    BRepBuilderAPI_MakeFace plane(pln, polygon.Wire(), Standard_True);
+    if (!polygon.IsDone() || !plane.IsDone()) {
+        refuse("the plane past a strip can't be made a face");
+    }
+    beyond = plane.Face();
+    return sheet;
+}
+
 /** A prism's end trimmed by the end face's surface, not its plane (Case Base #105). The prism's
  * part past its inner end (the edge's middle, or its other end) is split by the surface, run on past the face, and
  * the pieces that don't hold the prism beside the edge are cut from it. The prism must come out
@@ -4423,7 +4841,8 @@ double trimBySurface(
     double inner,
     double outer,
     const gp_Pnt& vertex,
-    const TopoDS_Edge& continuation
+    const TopoDS_Edge& continuation,
+    const std::optional<VertexEnd::SurfaceBound>& bound
 )
 {
     const double sign = outer > inner ? 1.0 : -1.0;
@@ -4448,17 +4867,28 @@ double trimBySurface(
         Handle(Geom_Surface) surface;
         TopLoc_Location location;
         TopoDS_Face beyond;
-        TopoDS_Face face = surfaceFace(
-            ctx,
-            endFace,
-            data.faces,
-            vertex,
-            2 * size,
-            extend,
-            surface,
-            location,
-            beyond
-        );
+        TopoDS_Face face;
+        if (bound) {
+            // Past a low strip (ops#962): the surface up to its line in the plane, the plane on
+            // past it; nothing to extend
+            if (extend) {
+                break;
+            }
+            face = boundedSheet(endFace, 2 * size, *bound, surface, location, beyond);
+        }
+        else {
+            face = surfaceFace(
+                ctx,
+                endFace,
+                data.faces,
+                vertex,
+                2 * size,
+                extend,
+                surface,
+                location,
+                beyond
+            );
+        }
         if (face.IsNull()) {
             break;
         }
@@ -4780,7 +5210,8 @@ std::optional<Tool> lineTool(const Context& ctx, const EdgeData& data, const Ver
                 i == 0 ? data.start : data.end,
                 ends[1 - i].surfaceEnd.IsNull() && ends[1 - i].kind == VertexClass::TangentContinuation
                     ? ends[1 - i].continuation
-                    : TopoDS_Edge()
+                    : TopoDS_Edge(),
+                ends[i].bound
             );
             continue;
         }
@@ -4811,6 +5242,12 @@ std::optional<Tool> lineTool(const Context& ctx, const EdgeData& data, const Ver
     for (int i = 0; i < 2; ++i) {
         if (ends[i].kind == VertexClass::FreeEnd && ends[i].surfaceEnd.IsNull()) {
             tool.caps.push_back(ends[i].trims.front());
+        }
+        else if (ends[i].bound) {
+            // The tool's face in the plane past the strip merges into that plane's face (ops#962)
+            const gp_Pln pln = BRepAdaptor_Surface(ends[i].bound->plane, Standard_False).Plane();
+            tool.caps.push_back({pln.Location(), pln.Axis().Direction()});
+            tool.joinVertices.push_back(ends[i].bound->vertex);
         }
         else if (ends[i].kind == VertexClass::Corner2Unequal) {
             tool.openEnds.push_back(ends[i].trims.front());
@@ -9796,6 +10233,9 @@ TopoDS_Shape constructShape(
             }
         }
     }
+    // An end past a low strip (notchEnd, ops#962) is built below the limit too: OCCT is not done
+    // there, and nothing lands on an edge
+    bool notchEnds = false;
     for (const auto& edgeData : data) {
         VertexEnd ends[2];
         if (!edgeData.closed) {
@@ -9814,6 +10254,7 @@ TopoDS_Shape constructShape(
                 }
                 classified[slot] = true;
                 ends[slot] = classify(ctx, data, edgeData, vertices[i]);
+                notchEnds = notchEnds || ends[slot].bound.has_value();
                 VertexClass kind = ends[slot].kind;
                 if (kind == VertexClass::Refuse) {
                     refuse(ends[slot].reason);
@@ -10087,7 +10528,7 @@ TopoDS_Shape constructShape(
     // Rounds between two cylinders are built wherever they fit, not only at the limit: OCCT's own
     // are B-spline faces there (preferConstruction())
     const bool limitOnly = request.limitOnly && !request.mitreOnly
-        && !(!data.empty() && std::all_of(data.begin(), data.end(), betweenCylinders));
+        && !(!data.empty() && std::all_of(data.begin(), data.end(), betweenCylinders)) && !notchEnds;
     std::vector<SurfaceWall> surfaceWalls;
     std::vector<std::pair<TopoDS_Shape, TopoDS_Shape>> overlapPairs;
     for (const auto& corner : overlapCorners) {
@@ -11353,6 +11794,82 @@ TopoDS_Shape constructShape(
                     shape = unify.Shape();
                     stages.emplace_back(unify.History(), shape);
                 }
+            }
+        }
+    }
+
+    // At an end past a low strip (ops#962) the strip's edge and the channel's kink are left between
+    // the same two faces (the channel's cylinder behind the wall and the groove's face, which the
+    // tool's cap merged into): one edge, as Onshape's half circle on the wall's plane. Only those
+    // two edges and the vertex between them may merge; the result must stay one valid solid
+    if (std::any_of(tools.begin(), tools.end(), [](const Tool& tool) {
+            return !tool.joinVertices.empty();
+        })) {
+        collectBaseImages();
+        TopTools_IndexedDataMapOfShapeListOfShape vertexEdges;
+        TopTools_IndexedDataMapOfShapeListOfShape edgeFaces;
+        TopExp::MapShapesAndAncestors(shape, TopAbs_VERTEX, TopAbs_EDGE, vertexEdges);
+        TopExp::MapShapesAndAncestors(shape, TopAbs_EDGE, TopAbs_FACE, edgeFaces);
+        TopTools_IndexedMapOfShape joinable;
+        auto facesOf = [&](const TopoDS_Shape& edge) {
+            std::vector<TopoDS_Shape> faces;
+            for (const auto& face : edgeFaces.FindFromKey(edge)) {
+                if (std::none_of(faces.begin(), faces.end(), [&](const TopoDS_Shape& f) {
+                        return f.IsSame(face);
+                    })) {
+                    faces.push_back(face);
+                }
+            }
+            return faces;
+        };
+        for (const auto& tool : tools) {
+            for (const auto& vertex : tool.joinVertices) {
+                for (const auto& image : imagesThrough(stages, 0, vertex)) {
+                    if (image.ShapeType() != TopAbs_VERTEX || !vertexEdges.Contains(image)) {
+                        continue;
+                    }
+                    std::vector<TopoDS_Shape> edges;
+                    for (const auto& edge : vertexEdges.FindFromKey(image)) {
+                        if (std::none_of(edges.begin(), edges.end(), [&](const TopoDS_Shape& e) {
+                                return e.IsSame(edge);
+                            })) {
+                            edges.push_back(edge);
+                        }
+                    }
+                    if (edges.size() != 2 || !edgeFaces.Contains(edges[0]) || !edgeFaces.Contains(edges[1])) {
+                        continue;
+                    }
+                    auto a = facesOf(edges[0]);
+                    auto b = facesOf(edges[1]);
+                    if (a.size() != 2 || b.size() != 2
+                        || !((a[0].IsSame(b[0]) && a[1].IsSame(b[1]))
+                             || (a[0].IsSame(b[1]) && a[1].IsSame(b[0])))) {
+                        continue;
+                    }
+                    joinable.Add(edges[0]);
+                    joinable.Add(edges[1]);
+                    joinable.Add(image);
+                }
+            }
+        }
+        if (!joinable.IsEmpty()) {
+            NCollection_Map<TopoDS_Shape, TopTools_ShapeMapHasher> keep;
+            for (auto type : {TopAbs_EDGE, TopAbs_VERTEX}) {
+                TopTools_IndexedMapOfShape all;
+                TopExp::MapShapes(shape, type, all);
+                for (int i = 1; i <= all.Extent(); ++i) {
+                    if (!joinable.Contains(all(i))) {
+                        keep.Add(all(i));
+                    }
+                }
+            }
+            ShapeUpgrade_UnifySameDomain unify(shape, true, false, false);
+            unify.KeepShapes(keep);
+            unify.Build();
+            const TopoDS_Shape joined = unify.Shape();
+            if (countSolids(joined) == 1 && BRepCheck_Analyzer(joined).IsValid()) {
+                shape = joined;
+                stages.emplace_back(unify.History(), shape);
             }
         }
     }

@@ -8063,3 +8063,219 @@ class MixedCoverageTest(unittest.TestCase):
         edges = [self.edge_at(body, 30, 0), self.edge_at(body, 30, top), self.edge_at(body, x0, top)]
         with self.assertRaises(Exception):
             body.makeFillet(self.R, edges + along)
+
+
+class NotchEndFilletTest(unittest.TestCase):
+    """ops#962, designed (notes fillet-notch-end-962): a stepped block (floor z 4, wall y 15, a rim
+    behind it up to z 10) with a U-shaped channel (a half circle of radius RC under two flat sides)
+    through the rim, whose half circle's axis lies h above the floor; in front of the wall the channel
+    carries on as a groove in the floor rising at the angle a. The floor/wall edge up to the channel is
+    rounded (concave, r 1.5). It ends on a vertex of 4 edges and 4 faces: the floor, the wall, the
+    rim's cylinder (a strip h tall on the wall) and the groove's surface. OCCT is not done there for
+    h < r. Onshape trims the round by the groove's surface and, above its top line, by the plane of
+    the channel's flat side: the same solid as rounding the edge before the channel is cut,
+    fillet(step) - tool, whose faces the result must equal. Its added volume, in closed form along
+    the edge, is the section's (1 - pi / 4) r^2 times the edge's length up to the channel's flat side,
+    plus at each channel the material the groove leaves past that side: in the section (y, z), from
+    the flat side to the tube, x = RC - sqrt(RC^2 - (z' - 4 - h)^2), below the tube's top line
+    (z' = z - (15 - y) tan a < 4 + h), by quadrature. The round adds one face (the flat side's plane
+    and the groove's face grow)."""
+
+    RC = 3.0
+    r = 1.5
+
+    def profile(self, cx, y, h, top, vee=False, seamLow=False):
+        left, right = V(cx - self.RC, y, 4 + h), V(cx + self.RC, y, 4 + h)
+        bottom = V(cx, y, 4 + h - self.RC)
+        if vee:
+            first = [Part.makeLine(left, bottom), Part.makeLine(bottom, right)]
+        elif seamLow:
+            # the circle's seam at the bottom: the groove face's u range straddles it
+            circle = Part.Circle(V(cx, y, 4 + h), V(0, -1, 0), self.RC)
+            circle.XAxis = V(0, 0, -1)
+            first = [Part.ArcOfCircle(circle, -math.pi / 2, math.pi / 2).toShape()]
+        else:
+            first = [Part.Arc(left, bottom, right).toShape()]
+        return Part.Face(
+            Part.Wire(
+                first
+                + [
+                    Part.makeLine(right, V(right.x, y, top)),
+                    Part.makeLine(V(right.x, y, top), V(left.x, y, top)),
+                    Part.makeLine(V(left.x, y, top), left),
+                ]
+            )
+        )
+
+    def channel(self, cx, h, a, vee=False, seamLow=False, nurbs=False):
+        rim = self.profile(cx, 15, h, 12, vee).extrude(V(0, 7, 0))
+        rad = math.radians(a)
+        groove = self.profile(cx, 15, h, 40, vee, seamLow).extrude(V(0, -14 * math.cos(rad), 14 * math.sin(rad)))
+        if nurbs:
+            # the groove a B-spline surface, bounded (as a document's swept channel can be)
+            groove = groove.toNurbs()
+        return rim.fuse(groove)
+
+    def step(self):
+        return Part.makeBox(40, 20, 10).cut(Part.makeBox(40, 15, 6, V(0, 0, 4)))
+
+    def edge(self, shape, x0, x1):
+        found = [
+            e
+            for e in shape.Edges
+            if e.Curve.TypeId == "Part::GeomLine"
+            and all(abs(v.Y - 15) < 1e-7 and abs(v.Z - 4) < 1e-7 for v in e.Vertexes)
+            and abs(min(v.X for v in e.Vertexes) - x0) < 1e-4
+            and abs(max(v.X for v in e.Vertexes) - x1) < 1e-4
+        ]
+        self.assertEqual(len(found), 1)
+        return found[0]
+
+    def past(self, h, a):
+        """The material a channel's groove leaves past its flat side, inside the round's section"""
+        r, rc, ta = self.r, self.RC, math.tan(math.radians(a))
+
+        def width(y, z):
+            q = rc * rc - (z - (15 - y) * ta - 4 - h) ** 2
+            return rc - math.sqrt(max(q, 0.0))
+
+        def top(y):  # the round, over the section's corner (y 15 - r .. 15, z 4 ..)
+            return 4 + r - math.sqrt(max(r * r - (y - 15 + r) ** 2, 0.0))
+
+        def line(y):  # the tube's top line
+            return 4 + h + (15 - y) * ta
+
+        def over(y):
+            hi = min(top(y), line(y))
+            return gauss_legendre(lambda z: width(y, z), 4.0, hi) if hi > 4 else 0.0
+
+        cuts = [15 - r, 15.0]
+        lo, hi = cuts
+        if (line(lo) - top(lo)) * (line(hi) - top(hi)) < 0:
+            for _ in range(100):
+                m = (lo + hi) / 2
+                if (line(lo) - top(lo)) * (line(m) - top(m)) <= 0:
+                    hi = m
+                else:
+                    lo = m
+            cuts = [15 - r, (lo + hi) / 2, 15.0]
+        total = 0.0
+        for a0, a1 in zip(cuts, cuts[1:]):
+            # graded towards y 15, where the round meets the wall (a square root's end point)
+            for k in range(30):
+                g0, g1 = 1 - 2.0**-k, 1 - 2.0 ** -(k + 1)
+                total += gauss_legendre(over, a0 + (a1 - a0) * g0, a0 + (a1 - a0) * g1)
+        return total
+
+    def case(self, centres, h, a, vee=False, mirrored=False):
+        """The base, its edge, the expected solid and the box it is compared in, and the volume added"""
+        tools = [self.channel(cx, h, a, vee) for cx in centres]
+        tool = tools[0] if len(tools) == 1 else tools[0].fuse(tools[1:])
+        step = self.step()
+        lo = -1.0 if len(centres) == 1 else centres[0]
+        box = Part.makeBox(centres[-1] - lo, 40, 40, V(lo, -10, -10))
+        if mirrored:
+            # floor and wall swapped: the channel crosses the floor, the groove runs up the wall
+            tool, step, box = (s.mirror(V(0, 15, 4), V(0, 1, 1)) for s in (tool, step, box))
+        base = step.cut(tool)
+        reach = math.sqrt(self.RC * self.RC - h * h)
+        x0 = 0.0 if len(centres) == 1 else centres[0] + reach
+        x1 = centres[-1] - reach
+        expected = step.makeFillet(self.r, [self.edge(step, 0.0, 40.0)]).cut(tool)
+        # only between the channels' middles (from the block's end with one): the expected solid is
+        # rounded past them too
+        length = centres[-1] - self.RC - (0.0 if len(centres) == 1 else centres[0] + self.RC)
+        added = (1 - math.pi / 4) * self.r**2 * length + len(centres) * self.past(h, a)
+        return base, self.edge(base, x0, x1), expected.common(box), box, added
+
+    def check(self, centres, h, a, mirrored=False, rc=3.0, roundEdges=None):
+        self.RC = rc
+        base, edge, want, box, added = self.case(centres, h, a, mirrored=mirrored)
+        got = base.makeFillet(self.r, [edge])
+        self.assertTrue(got.isValid())
+        self.assertEqual(len(got.Solids), 1)
+        # The material the round adds, in closed form along the edge (measured alone: over the
+        # whole solid GProp's volumes read up to 1.3e-4 off here), and nothing of the base removed
+        self.assertAlmostEqual(got.cut(base).Volume, added, delta=2e-5)
+        self.assertLess(base.cut(got).Volume, 1e-7)
+        part = got.common(box)
+        self.assertLess(part.cut(want).Volume + want.cut(part).Volume, 1e-5)
+        self.assertEqual(len(got.Faces), len(base.Faces) + 1)
+        rounds = [
+            f
+            for f in got.Faces
+            if f.Surface.TypeId == "Part::GeomCylinder" and abs(f.Surface.Radius - self.r) < 1e-9
+        ]
+        self.assertEqual(len(rounds), 1)
+        if roundEdges is not None:
+            self.assertEqual(len(rounds[0].Edges), roundEdges)
+            # the strip's edge and the kink joined into one edge: no vertex left where the edge ended
+            for p in [v.Point for v in edge.Vertexes if 0 < v.X < 40]:
+                self.assertFalse(any(v.Point.distanceToPoint(p) < 1e-6 for v in got.Vertexes))
+
+    def testRoundEndsAtAChannelBelowItsRadius(self):
+        # The round's face: its two contact lines, the arc at the block's end, two edges at the channel
+        for h, a, rc in ((0.25, 30.0, 3.0), (1.0, 30.0, 3.0), (0.25, 60.0, 3.0), (0.25, 30.0, 1.8)):
+            with self.subTest(h=h, a=a, rc=rc):
+                self.check([20.0], h, a, rc=rc, roundEdges=5)
+
+    def testRoundEndsAtAChannelAcrossTheFloor(self):
+        # The strip on the edge's other face
+        self.check([20.0], 0.25, 30.0, mirrored=True, roundEdges=5)
+
+    def testRoundBetweenTwoChannels(self):
+        # Both ends of the edge at a channel, the second mirrored (its strip on the other flat side);
+        # last, an edge about 1 long between two channels 7 apart
+        for centres, h, a in (([10.0, 30.0], 0.25, 30.0), ([10.0, 30.0], 1.0, 50.0), ([10.0, 17.0], 0.25, 30.0)):
+            with self.subTest(centres=centres, h=h, a=a):
+                self.check(centres, h, a, roundEdges=6)
+
+    def testRoundsOnBothSidesOfAChannel(self):
+        # The documents' case: the edges on both sides of one channel rounded together; the
+        # groove's surface an extrusion of a whole circle, of one with its seam at the bottom, and
+        # a bounded B-spline surface
+        for kind in ("circle", "seamLow", "nurbs"):
+            with self.subTest(kind=kind):
+                self.RC = 3.0
+                h, a = 0.25, 30.0
+                tool = self.channel(20.0, h, a, seamLow=kind == "seamLow", nurbs=kind == "nurbs")
+                base = self.step().cut(tool)
+                reach = math.sqrt(self.RC * self.RC - h * h)
+                got = base.makeFillet(self.r, [self.edge(base, 0.0, 20 - reach), self.edge(base, 20 + reach, 40.0)])
+                self.assertTrue(got.isValid())
+                self.assertEqual(len(got.Solids), 1)
+                added = 2 * ((1 - math.pi / 4) * self.r**2 * (20 - self.RC) + self.past(h, a))
+                self.assertAlmostEqual(got.cut(base).Volume, added, delta=4e-5)
+                self.assertLess(base.cut(got).Volume, 1e-7)
+                self.assertEqual(len(got.Faces), len(base.Faces) + 2)
+                # the strip's edge and the kink joined: no vertex left where the edges ended
+                for x in (20 - reach, 20 + reach):
+                    self.assertFalse(any(v.Point.distanceToPoint(V(x, 15, 4)) < 1e-6 for v in got.Vertexes))
+
+    def testChannelAboveTheRadiusIsOcctsOwn(self):
+        # h 2 > r: OCCT builds; the same solid
+        self.check([20.0], 2.0, 30.0)
+
+    def refused(self, h, a, vee=False):
+        tool = self.channel(20.0, h, a, vee=vee)
+        base = self.step().cut(tool)
+        edges = [
+            e
+            for e in base.Edges
+            if e.Curve.TypeId == "Part::GeomLine"
+            and all(abs(v.Y - 15) < 1e-7 and abs(v.Z - 4) < 1e-7 for v in e.Vertexes)
+            and min(v.X for v in e.Vertexes) < 1e-7
+        ]
+        self.assertEqual(len(edges), 1)
+        with self.assertRaisesRegex(Exception, "4 edges meet"):
+            base.makeFillet(self.r, edges)
+
+    def testVShapedChannelIsRefused(self):
+        # The face past the strip is not tangent to the groove's (a V's flat bottom side): not known
+        # from Onshape, refused as before
+        self.refused(0.25, 30.0, vee=True)
+
+    def testSteepChannelIsRefused(self):
+        # At 75 deg the groove leaves the floor 0.74 from the wall, inside the round's 1.5: the
+        # round would run on over the floor beside it, not known from Onshape (review of the design)
+        self.refused(0.25, 75.0)

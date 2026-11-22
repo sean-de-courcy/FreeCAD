@@ -73,6 +73,7 @@ from parttests.FilletFallbackTest import (
     KeyholePocketChamferTest,
     KinkedContourTest,
     LostStepTest,
+    NotchEndFilletTest,  # ops#962
     OverflowTest,
     RoundBetweenCylindersTest,
     RoundOnASplineLidEndingInAHoleTest,
