@@ -65,6 +65,7 @@
 #include <BRepBuilderAPI_Copy.hxx>
 #include <BRepBuilderAPI_Sewing.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
+#include <BRepBuilderAPI_FindPlane.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakePolygon.hxx>
 #include <BRepBuilderAPI_MakeSolid.hxx>
@@ -104,8 +105,10 @@
 #include <GCPnts_AbscissaPoint.hxx>
 #include <GeomAPI_Interpolate.hxx>
 #include <GeomFill_Frenet.hxx>
+#include <GeomAPI_IntCS.hxx>
 #include <GeomAPI_ProjectPointOnCurve.hxx>
 #include <GeomAPI_ProjectPointOnSurf.hxx>
+#include <gp_Pln.hxx>
 #include <gp.hxx>
 #include <GProp_GProps.hxx>
 #include <GProp_PEquation.hxx>
@@ -5669,6 +5672,87 @@ struct ProfileFoot
 /// distance from all of it, within 1e-15 mm)
 constexpr double tieTolerance = 10 * Precision::Confusion();
 
+/// The points where \a path crosses the plane of the profile \a wires, through \a centre, at any
+/// distance from the profile (ops#974; notes\sweep-oblique-path-974.md section 3; Onshape, SW26).
+/// Crossings near a path vertex are that vertex, and none is listed twice. None for a profile with
+/// no plane (a lone straight edge, a non-planar wire).
+std::vector<gp_Pnt> planeCrossings(
+    const std::vector<TopoDS_Shape>& wires,
+    const TopoDS_Wire& path,
+    const gp_Pnt& centre
+)
+{
+    constexpr double tolerance = 1e-5;
+    TopoDS_Compound compound;
+    BRep_Builder builder;
+    builder.MakeCompound(compound);
+    for (const TopoDS_Shape& wire : wires) {
+        builder.Add(compound, wire);
+    }
+    BRepBuilderAPI_FindPlane find(compound, tolerance);
+    if (!find.Found() || find.Plane().IsNull()) {
+        return {};
+    }
+    const gp_Pln plane(centre, find.Plane()->Pln().Axis().Direction());
+    const Handle(Geom_Plane) surface = new Geom_Plane(plane);
+
+    std::vector<gp_Pnt> vertices;
+    for (TopExp_Explorer it(path, TopAbs_VERTEX); it.More(); it.Next()) {
+        vertices.push_back(BRep_Tool::Pnt(TopoDS::Vertex(it.Current())));
+    }
+    std::vector<gp_Pnt> found;
+    auto add = [&](gp_Pnt point) {
+        for (const gp_Pnt& vertex : vertices) {
+            if (point.Distance(vertex) < tolerance) {
+                point = vertex;
+                break;
+            }
+        }
+        for (const gp_Pnt& other : found) {
+            if (other.Distance(point) <= tieTolerance) {
+                return;
+            }
+        }
+        found.push_back(point);
+    };
+    for (TopExp_Explorer it(path, TopAbs_EDGE); it.More(); it.Next()) {
+        const TopoDS_Edge& edge = TopoDS::Edge(it.Current());
+        double first = 0;
+        double last = 0;
+        const Handle(Geom_Curve) curve = BRep_Tool::Curve(edge, first, last);
+        if (curve.IsNull()) {
+            continue;
+        }
+        // On the edge's range only: a periodic curve (an arc) may meet the plane again outside it
+        const Handle(Geom_TrimmedCurve) trimmed = new Geom_TrimmedCurve(curve, first, last);
+        GeomAPI_IntCS intersection(trimmed, surface);
+        if (intersection.IsDone()) {
+            for (int i = 1; i <= intersection.NbPoints(); ++i) {
+                const gp_Pnt point = intersection.Point(i);
+                GeomAPI_ProjectPointOnCurve onEdge(point, curve, first, last);
+                if (onEdge.NbPoints() > 0 && onEdge.LowerDistance() < tolerance) {
+                    add(point);
+                }
+            }
+        }
+        // An end on the plane, the edge leaving it (an edge lying in the plane crosses nowhere)
+        bool leaves = false;
+        for (const double share : {0.25, 0.5, 0.75}) {
+            if (plane.Distance(curve->Value(first + (last - first) * share)) > tolerance) {
+                leaves = true;
+            }
+        }
+        if (leaves) {
+            for (const TopoDS_Vertex& vertex : {TopExp::FirstVertex(edge), TopExp::LastVertex(edge)}) {
+                if (!vertex.IsNull() && plane.Distance(BRep_Tool::Pnt(vertex)) < tolerance) {
+                    add(BRep_Tool::Pnt(vertex));
+                }
+            }
+        }
+    }
+    return found;
+}
+
 /// Where the profile of \a wires lies against \a path (ProfileFoot)
 ProfileFoot profileFoot(const std::vector<TopoDS_Shape>& wires, const TopoDS_Wire& path)
 {
@@ -5711,6 +5795,16 @@ ProfileFoot profileFoot(const std::vector<TopoDS_Shape>& wires, const TopoDS_Wir
     }
     if (candidates.empty()) {
         return foot;
+    }
+    // The profile lies where the path crosses its plane, at the crossing nearest its centre at any
+    // distance (ops#974; Onshape, SW26): on a path oblique to the plane the nearest point to the
+    // centre is part-way along it. On a path square to the plane both are the same point; with no
+    // crossing, the nearest point (SW5's offsets)
+    if (std::vector<gp_Pnt> crossings = planeCrossings(wires, path, foot.centre); !crossings.empty()) {
+        candidates.clear();
+        for (const gp_Pnt& point : crossings) {
+            candidates.emplace_back(point, point.Distance(foot.centre));
+        }
     }
     auto nearest = candidates.begin();
     for (auto it = candidates.begin(); it != candidates.end(); ++it) {

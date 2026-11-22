@@ -286,6 +286,149 @@ class TestPipeProfilePlacement(PipeCase):
         self.assertAlmostEqual(pipe.Shape.BoundBox.XMax, 3, 4)
 
 
+class TestPipeObliquePath(PipeCase):
+    """ops#974 (notes\\sweep-oblique-path-974.md): the profile lies where the path crosses its plane
+    nearest its centre (at any distance; Onshape, SW26), not at the path's point nearest its centre, which
+    on a path oblique to the plane
+    is part-way along it. A rectangle 10 x 10 on Front (normal -Y); straight paths along
+    D = (0, 0.819152, 0.573576), 35 degrees from the normal. Every section is the profile moved along
+    the path, so a stretch t0..t1 sweeps 100 x 0.819152 x (t1 - t0)."""
+
+    D = V(0, math.sin(math.radians(55)), math.cos(math.radians(55)))
+    PRISM = 100 * math.sin(math.radians(55))  # volume per unit of t
+
+    def rectangle(self, z0=10.0, name="Profile"):
+        return self.sketch(name, models.rectangle(-5, z0, 5, z0 + 10), placement=XZ)
+
+    def path(self, origin, t0, t1, name="Path"):
+        """The straight path origin + t D, t t0..t1, as a model edge."""
+        origin = V(*origin)
+        line = Part.makeLine(origin + self.D * t0, origin + self.D * t1)
+        return models.feature(self.doc, name, Part.Wire([line]))
+
+    def testOffAtAnEndOnTheProfilesEdgeSweepsTheWholePath(self):
+        """rc969 (ops#972, the NS44 capture's sweep #14): the path starts on the profile's bottom edge, at
+        (0, 0, 10); Onshape sweeps all of it: 655.32. The nearest point to the centre, t 2.868, cut it."""
+        pipe = self.pipe(self.rectangle(), self.path((0, 0, 10), 0, 8))
+        self.assertSweeps(pipe, self.PRISM * 8)
+        self.assertAlmostEqual(pipe.Shape.BoundBox.YMin, 0, 4)
+
+    def testOffAtAnEndJustOffThePlaneSweepsTheWholePath(self):
+        """The same with the start 5e-7 off the profile's plane."""
+        self.assertSweeps(self.pipe(self.rectangle(), self.path((0, 5e-7, 10), 0, 8)), self.PRISM * 8)
+
+    def testOffAtAnEndJustInsideTheProfileSweepsTheWholePath(self):
+        """The same with the start 5e-7 inside the profile's bottom edge."""
+        self.assertSweeps(self.pipe(self.rectangle(), self.path((0, 0, 10 + 5e-7), 0, 8)), self.PRISM * 8)
+
+    def testOffAtAnEndJustOutsideTheProfileSweepsTheWholePath(self):
+        """The same with the start 5e-7 below the profile's bottom edge."""
+        self.assertSweeps(self.pipe(self.rectangle(), self.path((0, 0, 10 - 5e-7), 0, 8)), self.PRISM * 8)
+
+    def testCutAtAnEndOnTheProfilesEdgeRemovesTheWholePath(self):
+        """rc969's block 40 x 20 x 40, cut: removes 655.32, not 234.92 less."""
+        block = models.pad(self.body, self.sketch("Base", models.rectangle(-20, 0, 20, 20)), 40, "Block")
+        self.doc.recompute()
+        pipe = self.pipe(self.rectangle(), self.path((0, 0, 10), 0, 8), kind="SubtractivePipe")
+        self.assertSweeps(pipe)
+        self.assertAlmostEqual(block.Shape.Volume - pipe.Shape.Volume, self.PRISM * 8, 3)
+
+    def testGuardCentredOnTheStartSweepsTheWholePath(self):
+        """Guard (passes before ops#974 too): the path starts at the profile's centre."""
+        self.assertSweeps(self.pipe(self.rectangle(), self.path((0, 0, 15), 0, 8)), self.PRISM * 8)
+
+    def testGuardExtendedSweepsTheWholePath(self):
+        """Guard: rc969's case with Extend to full path on."""
+        pipe = self.pipe(self.rectangle(), self.path((0, 0, 10), 0, 8), ExtendToFullPath=True)
+        self.assertSweeps(pipe, self.PRISM * 8)
+
+    def testGuardRingFromItsHolesCentreSweepsTheWholePath(self):
+        """Guard: a ring (r 5, hole r 2) whose path starts at the hole's centre, (0, 0, 5), t 0..10: the
+        whole path, 21 pi x 8.19152 (SW26 (h): 540.423). The crossing is in the hole."""
+        ring = self.sketch("Profile", [models.circle(0, 5, 5), models.circle(0, 5, 2)], placement=XZ)
+        pipe = self.pipe(ring, self.path((0, 0, 5), 0, 10))
+        self.assertSweeps(pipe, 21 * math.pi * self.PRISM / 10, 2)
+
+    def testOffCentreThreadToothSweepsTheWholeHelix(self):
+        """A tooth (10, 20), (11, 20.5), (10, 21) on Front at a helix r 10, pitch 2, 3 turns from
+        (10, 0, 20): the helix starts on the tooth's edge, where it crosses Front. The nearest point to
+        the tooth's centre lies about 0.015 mm up the helix, which cut it there; now the whole helix,
+        the same as with Extend to full path on."""
+        tooth = self.sketch("Tooth", models.polygon([(10, 20), (11, 20.5), (10, 21)]), placement=XZ)
+        helix = self.doc.addObject("Part::Helix", "Helix")
+        helix.Pitch, helix.Height, helix.Radius = 2, 6, 10
+        helix.Placement = App.Placement(V(0, 0, 20), App.Rotation())
+        pipe = self.pipe(tooth, helix, ProfileControl="None")
+        self.assertSweeps(pipe, 97.389, 2)  # SW26 (i)
+        off = pipe.Shape.Volume
+        pipe.ExtendToFullPath = True
+        self.doc.recompute()
+        self.assertSweeps(pipe)
+        self.assertAlmostEqual(off, pipe.Shape.Volume, 4)
+
+    # O974 (notes\sweep-oblique-path-974.md section 7): the rectangle x -5..5, z 0..10; the line
+    # (0, 0, 2) + t D, t -6..10, crossing Front at (0, 0, 2), inside the profile, 3 below its centre.
+    # Onshape's values, SW26 (ops#974 comment 7086703202).
+
+    def testO974aOffInTheMiddleSweepsFromTheCrossing(self):
+        """SW26 (a): t 0..10, 819.152, y 0..8.1915 (the nearest point, t 1.7207, gave 678.20)."""
+        pipe = self.pipe(self.rectangle(0), self.path((0, 0, 2), -6, 10))
+        self.assertSweeps(pipe, self.PRISM * 10)
+        self.assertAlmostEqual(pipe.Shape.BoundBox.YMin, 0, 4)
+        self.assertAlmostEqual(pipe.Shape.BoundBox.YMax, 10 * self.D.y, 4)
+
+    def testO974bOppositeDirectionSweepsTheOtherWayFromTheCrossing(self):
+        """SW26 (b): t -6..0, 491.491, y -4.9149..0."""
+        pipe = self.pipe(self.rectangle(0), self.path((0, 0, 2), -6, 10), PathReversed=True)
+        self.assertSweeps(pipe, self.PRISM * 6)
+        self.assertAlmostEqual(pipe.Shape.BoundBox.YMax, 0, 4)
+
+    def testO974cExtendedSweepsAll(self):
+        """SW26 (c): 1310.643, y -4.9149..8.1915."""
+        pipe = self.pipe(self.rectangle(0), self.path((0, 0, 2), -6, 10), ExtendToFullPath=True)
+        self.assertSweeps(pipe, self.PRISM * 16, 2)
+
+    def testO974dCrossingBesideTheProfileSweepsFromIt(self):
+        """SW26 (d): the line moved to x 15 crosses Front at (15, 0, 2), beside the profile: 819.152 from the
+        crossing, the profile kept where it is (x -5..5)."""
+        pipe = self.pipe(self.rectangle(0), self.path((15, 0, 2), -6, 10))
+        self.assertSweeps(pipe, self.PRISM * 10)
+        self.assertAlmostEqual(pipe.Shape.BoundBox.XMin, -5, 4)
+        self.assertAlmostEqual(pipe.Shape.BoundBox.XMax, 5, 4)
+
+    def testO974fCrossingBelowTheProfileSweepsFromIt(self):
+        """SW26 (f): the line through (0, 0, -8) crosses Front 13 below the centre: 819.152 from the
+        crossing (the nearest point to the centre, t 7.4565, gave 208.35)."""
+        pipe = self.pipe(self.rectangle(0), self.path((0, 0, -8), -6, 10))
+        self.assertSweeps(pipe, self.PRISM * 10)
+
+    def testO974gEndOnThePlaneBesideTheProfileSweepsTheWholePath(self):
+        """SW26 (g): (d)'s line cut to t 0..10 starts on Front 15.3 from the centre: the whole path,
+        819.152 (the nearest point, t 1.7207, gave 678.20)."""
+        pipe = self.pipe(self.rectangle(0), self.path((15, 0, 2), 0, 10))
+        self.assertSweeps(pipe, self.PRISM * 10)
+        self.assertAlmostEqual(pipe.Shape.BoundBox.XMin, -5, 4)
+
+    def testO974m2FarCrossingCutsThePath(self):
+        """SW26 (m2): a circle r 2 on z -5 (normal +Z); the path (0, 0, 0)-(0, 0, 20)-(30, 0, 20)-(30, 0, -10)
+        crosses z -5 only at (30, 0, -5), 30 away: it is cut there and sweeps the 5 against the normal,
+        62.832, moved onto the profile."""
+        path = self.sketch("Path", models.polyline([(0, 0), (0, 20), (30, 20), (30, -10)]), placement=XZ)
+        pipe = self.pipe(self.circle(z=-5), path)
+        self.assertSweeps(pipe, AREA * 5)
+        self.assertAlmostEqual(pipe.Shape.BoundBox.XMax, 2, 4)
+        self.assertAlmostEqual(pipe.Shape.BoundBox.ZMin, -10, 4)
+
+    def testO974jScaleIsTheProfilesOwnAtTheCrossing(self):
+        """SW26 (j): (a) with Extend to full path on and scale 2: the scale is 1 at the crossing,
+        so the section in the profile's plane is the profile itself (100)."""
+        pipe = self.pipe(self.rectangle(0), self.path((0, 0, 2), -6, 10), ExtendToFullPath=True,
+                         HasScale=True, ScaleFactor=2)
+        self.assertSweeps(pipe)
+        section = pipe.Shape.slice(V(0, 1, 0), 0)
+        self.assertAlmostEqual(Part.Face(Part.Wire(section[0].Edges)).Area, 100, 3)
+
+
 class TestPipePathFromSeveralObjects(PipeCase):
     """`SpineMore`: the path's edges may come from several objects (sketches, model edges), joined in any
     order (Onshape picks path edges one by one). A path whose edges don't meet stops, naming the gap."""
