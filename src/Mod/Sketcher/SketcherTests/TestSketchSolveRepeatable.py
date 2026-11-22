@@ -4,10 +4,11 @@
 # the last address, so one sketch gave different coordinates (in the last bits, and sometimes a
 # failed solve) from process to process, and a later feature that is sensitive to 1e-13 built in
 # one run and refused in the next. Designed geometry: three loops of four lines and four tangent
-# arcs (an outline and two slots inside it), placed by distances. Every line starts a few tenths
-# off its place, and every arc starts on its corner's centre but with the next corner's quarter
-# span, so the solver has to swing it round (the solution's arcs span three quarters). It is a
-# hard start, not the drawing of a rounded rectangle: the point is a long, many-step solve. The
+# arcs (an outline and two slots inside it), placed by distances. Every line starts off its place
+# (up to about 2 mm), and every arc starts near its corner's centre but with the next corner's
+# quarter span, so the solver has to swing it round (in the solution five of the twelve arcs span
+# three quarters, the rest a quarter). It is a hard start, not the drawing of a rounded
+# rectangle: the point is a long, many-step solve. The
 # expected result is the same bits everywhere, and a fully constrained, solved sketch.
 
 import hashlib
@@ -44,8 +45,9 @@ os._exit(0)
 
 
 def _rounded(sk, x0, y0, w, h, r, j):
-    """Four lines started off by j and four tangent arcs, each on its corner's centre (off by j)
-    with the next corner's quarter span; equal radii, a radius, a width and a height."""
+    """Four lines started off by multiples of j and four tangent arcs, each near its corner's
+    centre (off by j) with the next corner's quarter span; equal radii, a radius, a width and a
+    height."""
     g0 = sk.GeometryCount
     c = [(x0 + r, y0 + r), (x0 + w - r, y0 + r), (x0 + w - r, y0 + h - r), (x0 + r, y0 + h - r)]
     lines = [
@@ -155,24 +157,27 @@ class TestSketchSolveRepeatable(unittest.TestCase):
         with open(script, "w", encoding="utf-8") as fh:
             fh.write(CHILD_SCRIPT)
         procs = []
-        for i in range(PROCESSES):
-            env = dict(os.environ)
-            env[OUT] = os.path.join(work, f"line{i}.txt")
-            env[CHURN] = str(3 * i)
-            env[PATH] = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            log = open(os.path.join(work, f"child{i}.log"), "w", encoding="utf-8")
-            procs.append(
-                (subprocess.Popen([_freecadCmd(), script], env=env, cwd=work, stdout=log,
-                                  stderr=subprocess.STDOUT), log, env[OUT])
-            )
         lines = []
         try:
+            for i in range(PROCESSES):
+                env = dict(os.environ)
+                env[OUT] = os.path.join(work, f"line{i}.txt")
+                env[CHURN] = str(3 * i)
+                env[PATH] = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                log = open(os.path.join(work, f"child{i}.log"), "w", encoding="utf-8")
+                try:
+                    proc = subprocess.Popen([_freecadCmd(), script], env=env, cwd=work,
+                                            stdout=log, stderr=subprocess.STDOUT)
+                except BaseException:
+                    log.close()
+                    raise
+                procs.append((proc, log, env[OUT]))
             for proc, log, out in procs:
                 proc.wait(timeout=600)
         finally:
             for proc, log, out in procs:
                 if proc.poll() is None:
-                    proc.kill()  # timed out: leave nothing running
+                    proc.kill()  # a timeout or a failed start: leave nothing running
                     proc.wait()
                 log.close()
         for proc, log, out in procs:
