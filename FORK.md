@@ -503,7 +503,8 @@ names it.
 | `fix/i935-dressup-fork-fixes` | fix | ops#935 | - | `integration` `97432aef2d` | `7fbb316bb4` (fork PR 502), 2026-11-21 | never (fork fix): dress-ups on a base of several solids, and concave rounds where a cone stands on a plane |
 | `fix/i900-fullround-torus` | fix | ops#900 | - | integration | `d01198675b` (fork PR 501), 2026-11-22 | never (fork fix): a full round is one face per run and per corner, answering to each round's name (ops#900) |
 | `fix/i941-fillet-mitre` | fix | ops#941, ops#925 | - | `integration` `d01198675b` | `a737a8565d` (fork PR 504), 2026-11-22 | never (fork feature) |
-| `fix/i930-sweep-spine-import` | fix | ops#930 | - | `integration` `a737a8565d` | (fork PR 507) | never (fork fix): an imported sketch on a face keeps the references into it (ops#930) |
+| `fix/i930-sweep-spine-import` | fix | ops#930 | - | `integration` `a737a8565d` | `0f8c201e7f` (fork PR 507), 2026-11-22 | never (fork fix): an imported sketch on a face keeps the references into it (ops#930) |
+| `fix/i956-brep-notation` | fix | ops#956 | - | integration | (fork PR 511) | never (fork fix): text BRep in a document save is written in the default notation, so unbounded parameter ranges read back (ops#956) |
 
 ## Fork-only commits in carried topics
 
