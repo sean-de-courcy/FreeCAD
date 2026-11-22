@@ -23,7 +23,9 @@ twins differed only by the duplicate counter, which follows the inputs' order, s
 references to the other twin (loudly where the solver saw the move, silently onto a Reverse's twin
 in the same place)."""
 
+import math
 import unittest
+from collections import Counter
 
 import FreeCAD as App
 import Part
@@ -329,6 +331,183 @@ class RefineElementMapTest(unittest.TestCase):
         self.assertFalse(self.warned(point))
         index = int(point.AttachmentSupport[0][1][0][len("Face"):])
         self.assertIn(index, range(1, 7), "the point moved from the twin to the box's face")
+
+
+# Refine merges two adjacent faces on one cone, torus or sphere (FreeCAD-CH ops#931).
+#
+# The face uniter had plane, cylinder and B-spline types only: two faces on one cone, torus or sphere
+# stayed two faces after a boolean, a mirror fuse or a dress-up, where Onshape has one face (props-only
+# face-count differences in 8 team studios).
+#
+# Designed models: a primitive cut in two by the plane x = 0 through its axis, the halves fused back
+# unrefined (each primitive's seam lies in the x > 0 half, so the fuse holds three faces of its
+# surface), then refined. Expected, geometrically: the primitive's own faces (one face of its surface),
+# the same volume, a valid solid. A 1 mm chamfer on the top rim of a disc, halved, the half mirrored
+# and fused: the chamfered disc's 4 faces. Controls that must stay apart: two coaxial cones with
+# different half angles meeting on a circle, and two equal tori with different centres fused across
+# each other. A torus whose halves sit on surfaces with opposite axes (as a full round's two rounds
+# do) is one torus too. A reference to the merged cone face resolves to the whole cone face, before
+# and after an edit of the cone.
+
+
+def kinds(shape):
+    return dict(Counter(type(f.Surface).__name__ for f in shape.Faces))
+
+
+def halfBox():
+    return Part.makeBox(200, 200, 200, V(0, -100, -100))
+
+
+def halvesFused(first, second=None):
+    """`first`'s x >= 0 half and `second`'s (else `first`'s) x <= 0 half, fused unrefined."""
+    box = halfBox()
+    a = first.common(box)
+    b = (second if second is not None else first).cut(box)
+    return a.fuse(b)
+
+
+class RefineConeTorusSphereTest(unittest.TestCase):
+    def checkMerged(self, whole, fused, expected):
+        refined = fused.removeSplitter()
+        self.assertTrue(refined.isValid())
+        self.assertEqual(kinds(refined), expected, kinds(fused))
+        self.assertAlmostEqual(refined.Volume, whole.Volume, places=6)
+        self.assertAlmostEqual(refined.Area, whole.Area, places=6)
+        return refined
+
+    def testCylinderHalvesMerge(self):
+        # the control: what the uniter did before for cylinders
+        whole = Part.makeCylinder(10, 10)
+        self.checkMerged(whole, halvesFused(whole), {"Cylinder": 1, "Plane": 2})
+
+    def testConeHalvesMerge(self):
+        whole = Part.makeCone(10, 5, 10)
+        fused = halvesFused(whole)
+        self.assertEqual(kinds(fused)["Cone"], 3)
+        refined = self.checkMerged(whole, fused, {"Cone": 1, "Plane": 2})
+        cone = [f for f in refined.Faces if type(f.Surface).__name__ == "Cone"][0]
+        self.assertAlmostEqual(cone.Area, math.pi * 15 * math.hypot(5, 10), places=6)
+
+    def testTorusHalvesMerge(self):
+        whole = Part.makeTorus(20, 5)
+        fused = halvesFused(whole)
+        self.assertEqual(kinds(fused)["Toroid"], 3)
+        self.checkMerged(whole, fused, {"Toroid": 1})
+
+    def testSphereHalvesMerge(self):
+        whole = Part.makeSphere(10)
+        fused = halvesFused(whole)
+        self.assertEqual(kinds(fused)["Sphere"], 3)
+        refined = self.checkMerged(whole, fused, {"Sphere": 1})
+        self.assertAlmostEqual(refined.Faces[0].Area, 4 * math.pi * 100, places=6)
+
+    def testTorusHalvesWithOppositeAxesMerge(self):
+        up = Part.makeTorus(20, 5, V(0, 0, 0), V(0, 0, 1))
+        down = Part.makeTorus(20, 5, V(0, 0, 0), V(0, 0, -1))
+        fused = halvesFused(up, down)
+        axes = {round(f.Surface.Axis.z) for f in fused.Faces}
+        self.assertEqual(axes, {1, -1})
+        self.checkMerged(up, fused, {"Toroid": 1})
+
+    def testPartialPiecesMerge(self):
+        # pieces that do not go round the axis: a 270 degree cone frustum (the x = 0 plane cuts
+        # it across its seam side) and a quarter of a torus cut at 45 degrees, as a fillet's
+        # torus in two pieces round a corner
+        cone = Part.makeCone(10, 5, 10, V(0, 0, 0), V(0, 0, 1), 270)
+        self.checkMerged(cone, halvesFused(cone), {"Cone": 1, "Plane": 4})
+        quarter = Part.makeTorus(20, 5).common(Part.makeBox(100, 100, 100, V(0, 0, -50)))
+        self.assertEqual(kinds(quarter), {"Toroid": 1, "Plane": 2})
+        wedge = Part.makeBox(200, 200, 200, V(0, -100, -100))
+        wedge.rotate(V(0, 0, 0), V(0, 0, 1), 135)  # the half x <= y
+        fused = quarter.common(wedge).fuse(quarter.cut(wedge))
+        self.assertEqual(kinds(fused)["Toroid"], 2)
+        refined = self.checkMerged(quarter, fused, {"Toroid": 1, "Plane": 2})
+        torus = [f for f in refined.Faces if type(f.Surface).__name__ == "Toroid"][0]
+        self.assertAlmostEqual(torus.Area, (2 * math.pi * 5) * (2 * math.pi * 20) / 4, places=6)
+
+    def testChamferedDiscMirrored(self):
+        disc = Part.makeCylinder(10, 5)
+        rim = [e for e in disc.Edges if e.BoundBox.ZMin > 4.999 and e.Length > 60]
+        self.assertEqual(len(rim), 1)
+        chamfered = disc.makeChamfer(1.0, rim)
+        self.assertEqual(kinds(chamfered), {"Cylinder": 1, "Cone": 1, "Plane": 2})
+        half = chamfered.common(halfBox())
+        fused = half.fuse(half.mirror(V(0, 0, 0), V(1, 0, 0)))
+        self.assertGreater(len(fused.Faces), 4)
+        self.checkMerged(chamfered, fused, {"Cylinder": 1, "Cone": 1, "Plane": 2})
+
+    def testCoaxialConesWithOtherAnglesStayApart(self):
+        lower = Part.makeCone(10, 8, 5)
+        upper = Part.makeCone(8, 3, 5, V(0, 0, 5))
+        fused = lower.fuse(upper)
+        refined = fused.removeSplitter()
+        self.assertTrue(refined.isValid())
+        self.assertEqual(kinds(refined)["Cone"], 2)
+        self.assertAlmostEqual(refined.Volume, lower.Volume + upper.Volume, places=6)
+
+    def testEqualToriWithOtherCentresStayApart(self):
+        one = Part.makeTorus(20, 5)
+        two = Part.makeTorus(20, 5, V(8, 0, 0))
+        fused = one.fuse(two)
+        refined = fused.removeSplitter()
+        self.assertTrue(refined.isValid())
+        centres = {
+            round(f.Surface.Center.x, 6) for f in refined.Faces if type(f.Surface).__name__ == "Toroid"
+        }
+        self.assertEqual(centres, {0.0, 8.0})
+        self.assertEqual(kinds(refined), kinds(fused))
+        self.assertAlmostEqual(refined.Volume, fused.Volume, places=6)
+
+
+class RefineConeReferenceTest(unittest.TestCase):
+    """A Part::Refine of the fused cone halves; a datum point at the centre of mass of its cone face."""
+
+    def setUp(self):
+        self.doc = App.newDocument("RefineConeReference")
+        doc = self.doc
+        self.cone = doc.addObject("Part::Cone", "Cone")
+        self.cone.Radius1, self.cone.Radius2, self.cone.Height = 10, 5, 10
+        box = doc.addObject("Part::Box", "Box")
+        box.Length = box.Width = box.Height = 200
+        box.Placement.Base = V(0, -100, -100)
+        common = doc.addObject("Part::Common", "Common")
+        common.Base, common.Tool = self.cone, box
+        cut = doc.addObject("Part::Cut", "Cut")
+        cut.Base, cut.Tool = self.cone, box
+        fuse = doc.addObject("Part::MultiFuse", "Fuse")
+        fuse.Shapes = [common, cut]
+        fuse.Refine = False
+        self.refine = doc.addObject("Part::Refine", "Refine")
+        self.refine.Source = fuse
+        doc.recompute()
+
+    def tearDown(self):
+        App.closeDocument(self.doc.Name)
+
+    def coneFace(self):
+        faces = [
+            (i, f)
+            for i, f in enumerate(self.refine.Shape.Faces, 1)
+            if type(f.Surface).__name__ == "Cone"
+        ]
+        self.assertEqual(len(faces), 1, kinds(self.refine.Shape))
+        return faces[0]
+
+    def testReferenceOnTheMergedFace(self):
+        index, face = self.coneFace()
+        point = self.doc.addObject("Part::DatumPoint", "Point")
+        point.AttachmentSupport = [(self.refine, "Face%d" % index)]
+        point.MapMode = "CenterOfMass"
+        self.doc.recompute()
+        self.assertLess((point.Placement.Base - face.CenterOfMass).Length, 1e-6)
+        self.assertLess(abs(point.Placement.Base.x), 1e-6)  # the whole cone's, on its axis
+
+        self.cone.Radius2 = 3
+        self.doc.recompute()
+        index, face = self.coneFace()
+        self.assertEqual(point.AttachmentSupport[0][1], ("Face%d" % index,))
+        self.assertLess((point.Placement.Base - face.CenterOfMass).Length, 1e-6)
+        self.assertAlmostEqual(face.Area, math.pi * 13 * math.hypot(7, 10), places=6)
 
 
 if __name__ == "__main__":

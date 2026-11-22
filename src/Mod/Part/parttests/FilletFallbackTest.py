@@ -2212,6 +2212,95 @@ class BridgedRecessTest(unittest.TestCase):
             feature.getStatusString(),
         )
 
+    def rimBlock(self, sink_y=None):
+        # ops#932: the block 60 x 40 x 10 with its 4 vertical edges rounded r 6, and a countersink
+        # (a cone r 4 at the top face to r 2 at depth 2, then a through hole r 2) whose axis is at
+        # x 30, y sink_y
+        block = Part.makeBox(60, 40, 10)
+        block = block.makeFillet(6, [e for e in block.Edges if abs(e.BoundBox.ZLength - 10) < 1e-9])
+        if sink_y is None:
+            return block, None
+        sink = (
+            Part.makeCone(2, 4, 2, V(30, sink_y, 8))
+            .fuse(Part.makeCylinder(2, 10, V(30, sink_y, 0)))
+            .removeSplitter()
+        )
+        return block.cut(sink), sink
+
+    @staticmethod
+    def rim(shape):
+        """The top face's outer loop: its 4 lines and 4 arcs at z 10 (an arc's centre of mass is
+        2.18 from the sides; the countersink's circle, 5 or more)"""
+        return [
+            e
+            for e in shape.Edges
+            if all(abs(v.Point.z - 10) < 1e-9 for v in e.Vertexes)
+            and min(abs(e.CenterOfMass.x), abs(e.CenterOfMass.x - 60), abs(e.CenterOfMass.y),
+                    abs(e.CenterOfMass.y - 40)) < 3
+        ]
+
+    def testRimWithRoundedCornersAcrossACountersink(self):
+        # The countersink's rim 1 mm from the long side: the rim round's band (2 wide) crosses it.
+        # The picked loop runs round tangent corners, whose walls are tangent to the sides; the
+        # check used to stop there and OCCT's B-spline bridge was kept (DSH front lid #14)
+        shape, _ = self.rimBlock(5)
+        self.assertEqual(len(self.rim(shape)), 8)
+        fillet = filleted_in_a_body(self.doc, shape, self.rim, 2)
+        self.assertFalse(fillet.isValid())
+        status = fillet.getStatusString()
+        self.assertTrue(
+            status.startswith("The fillet's band crosses a hole or pocket on Face"), status
+        )
+
+    def testRimWithRoundedCornersClearOfACountersinkBuilds(self):
+        # The countersink's rim 6 mm from the side, clear of the band; and no countersink: the
+        # rim round builds, analytic faces only, the plain block's round with the sink cut after
+        rounded, _ = self.rimBlock()
+        plain = rounded.makeFillet(2, self.rim(rounded))
+        for sink_y in (None, 10):
+            with self.subTest(sink_y=sink_y):
+                shape, sink = self.rimBlock(sink_y)
+                fillet = filleted_in_a_body(self.doc, shape, self.rim, 2)
+                self.assertTrue(fillet.isValid(), fillet.getStatusString())
+                kinds = {f.Surface.TypeId for f in fillet.Shape.Faces}
+                self.assertNotIn("Part::GeomBSplineSurface", kinds)
+                right = plain if sink is None else plain.cut(sink)
+                self.assertLess(symmetric_difference(fillet.Shape, right), 1e-6)
+
+    def testBandOffOntoARoundAnotherPickBordersIsNotARecess(self):
+        # Review pri931-r3, SplitRoundSelection: the block 40 x 20 x 5, its bottom front edge
+        # rounded r 4, a groove x 20..22, z 0..2 through that round. The top front edge's band
+        # (r 1.5) runs off its front wall onto the round; the groove walls' arcs on the round are
+        # picked too. Their faces are faces of chain edges, but not of edges meeting the top
+        # front edge, so the band still leaves the chain there: no hole is crossed, and the
+        # round builds with one arc picked or both, as before ops#932
+        block = Part.makeBox(40, 20, 5)
+        block = block.makeFillet(
+            4, [e for e in block.Edges if abs(e.BoundBox.YMax) < 1e-9 and abs(e.BoundBox.ZMax) < 1e-9]
+        )
+        block = block.cut(Part.makeBox(2, 20, 2, V(20, 0, 0))).removeSplitter()
+        for walls in ((20.0,), (20.0, 22.0)):
+            with self.subTest(walls=walls):
+
+                def picked(shape, walls=walls):
+                    edges = []
+                    for e in shape.Edges:
+                        b = e.BoundBox
+                        top = abs(b.YMax) < 1e-9 and abs(b.ZMin - 5) < 1e-9 and b.XLength > 30
+                        arc = (
+                            b.XLength < 1e-9
+                            and any(abs(b.XMin - x) < 1e-9 for x in walls)
+                            and isinstance(e.Curve, Part.Circle)
+                        )
+                        if top or arc:
+                            edges.append(e)
+                    return edges
+
+                self.assertEqual(len(picked(block)), 1 + len(walls))
+                fillet = filleted_in_a_body(self.doc, block, picked, 1.5)
+                self.assertTrue(fillet.isValid(), fillet.getStatusString())
+                self.assertEqual(len(fillet.Shape.Solids), 1)
+
 
 def tolerances(shape):
     return [s.Tolerance for s in shape.Vertexes + shape.Edges + shape.Faces]
@@ -6645,3 +6734,76 @@ class FillToARimCuspTest(unittest.TestCase):
         body, foot = self.body(40.0)
         with self.assertRaises(Exception):
             body.makeChamfer(0.8, foot)
+
+
+def lobed_plate(noise=True):
+    """ops#925: a ring plate (radii 2 and 9, 2 thick, under z 0) carrying four ring-sector lobes
+    between radii 4 and 5, 60 degrees wide, 2 high; with `noise` turned half a turn about X and
+    back, which leaves sin(pi) = 1.2e-16 in its axes, as a Body's placement does"""
+    def polar(r, a):
+        return V(r * math.cos(math.radians(a)), r * math.sin(math.radians(a)), 0)
+
+    shape = Part.makeCylinder(9, 2, V(0, 0, -2)).cut(Part.makeCylinder(2, 2, V(0, 0, -2)))
+    for a0 in (15.0, 105.0, 195.0, 285.0):
+        a1, am = a0 + 60, a0 + 30
+        edges = [
+            Part.Arc(polar(4, a0), polar(4, am), polar(4, a1)).toShape(),
+            Part.makeLine(polar(4, a1), polar(5, a1)),
+            Part.Arc(polar(5, a1), polar(5, am), polar(5, a0)).toShape(),
+            Part.makeLine(polar(5, a0), polar(4, a0)),
+        ]
+        shape = shape.fuse(Part.Face(Part.Wire(edges)).extrude(V(0, 0, 2)))
+    shape = shape.removeSplitter()
+    if noise:
+        m = FreeCAD.Rotation(V(1, 0, 0), 180).toMatrix()
+        shape = shape.transformed(m, True).transformed(m, True)
+    return shape
+
+
+def lobe_feet(shape):
+    """The lobes' 16 foot edges on the plate (z 0, between radii 4 and 5)"""
+    return [
+        e
+        for e in shape.Edges
+        if abs(e.BoundBox.ZMin) < 1e-9
+        and abs(e.BoundBox.ZMax) < 1e-9
+        and all(4 - 1e-6 <= math.hypot(v.X, v.Y) <= 5 + 1e-6 for v in e.Vertexes)
+    ]
+
+
+class CornerBandRetryTest(unittest.TestCase):
+    """A fillet along the foot of ring-sector lobes: at each plan corner a line's round and an
+    arc's round run on past the corner and meet in a mitre. In narrow bands of radius OCCT's
+    result is invalid there and the exact construction refuses the corner; the same selection in
+    the reverse order builds (ops#925, scripts/repro_925_fillet_corner_band.py). Expected by
+    geometry: 16 new faces (8 cylinders, 8 tori), 16 mitre edges, a valid solid."""
+
+    setUp = InvalidDressUpTest.setUp
+    tearDown = InvalidDressUpTest.tearDown
+
+    def testInvalidCornerBuildsInTheReverseOrder(self):
+        base = lobed_plate()
+        self.assertEqual(len(lobe_feet(base)), 16)
+        for radius in (0.588, 0.55):  # inside a band; and a control outside
+            with self.subTest(radius=radius):
+                fillet = filleted_in_a_body(self.doc, base, lobe_feet, radius)
+                self.assertTrue(fillet.isValid(), fillet.getStatusString())
+                self.assertTrue(fillet.Shape.isValid())
+                self.assertEqual(len(fillet.Shape.Faces) - len(base.Faces), 16)
+                mitres = [
+                    e for e in fillet.Shape.Edges if type(e.Curve).__name__ not in ("Line", "Circle")
+                ]
+                self.assertEqual(len(mitres), 16)
+                # each mitre lies on both its rounds: exactly for the control; inside the band the
+                # reverse order gives OCCT's in-band mitre, measured 3.1e-4 mm off (debt, ops#925
+                # fixes 2 and 3, the exact mitre: review pri931-r3 T1, coordinator's ruling)
+                shape = fillet.Shape
+                off = 0.0
+                for e in mitres:
+                    faces = shape.ancestorsOfType(e, Part.Face)
+                    self.assertEqual(len(faces), 2)
+                    step = (e.LastParameter - e.FirstParameter) / 20
+                    for k in range(21):
+                        point = Part.Vertex(e.valueAt(e.FirstParameter + k * step))
+                        off = max(off, max(point.distToShape(f)[0] for f in faces))
+                self.assertLess(off, 1e-3 if radius > 0.58 else 1e-6, radius)

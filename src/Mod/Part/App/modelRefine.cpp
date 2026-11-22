@@ -24,6 +24,7 @@
 
 
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <memory>
 #include <string>
@@ -36,6 +37,7 @@
 #include <BRep_TVertex.hxx>
 #include <BRep_Tool.hxx>
 #include <BRepAdaptor_Curve.hxx>
+#include <BRepAdaptor_Surface.hxx>
 #include <BRepBndLib.hxx>
 #include <BRepLib.hxx>
 #include <BRepLib_FuseEdges.hxx>
@@ -45,22 +47,31 @@
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakeSolid.hxx>
 #include <BRepBuilderAPI_Sewing.hxx>
+#include <BRepCheck_Analyzer.hxx>
+#include <BRepGProp.hxx>
 #include <Geom2d_BSplineCurve.hxx>
 #include <Geom2d_Curve.hxx>
 #include <Geom2d_TrimmedCurve.hxx>
 #include <Geom2dConvert_CompCurveToBSplineCurve.hxx>
 #include <Geom_BSplineSurface.hxx>
 #include <Geom_Conic.hxx>
+#include <Geom_ConicalSurface.hxx>
 #include <Geom_Curve.hxx>
 #include <Geom_CylindricalSurface.hxx>
+#include <Geom_ElementarySurface.hxx>
 #include <Geom_Plane.hxx>
 #include <Geom_RectangularTrimmedSurface.hxx>
+#include <Geom_SphericalSurface.hxx>
 #include <Geom_Surface.hxx>
+#include <Geom_ToroidalSurface.hxx>
 #include <GeomAdaptor_Surface.hxx>
 #include <GeomAPI_ProjectPointOnSurf.hxx>
 #include <gp_Ax3.hxx>
+#include <gp_Cone.hxx>
 #include <gp_Cylinder.hxx>
 #include <gp_Pln.hxx>
+#include <gp_Torus.hxx>
+#include <GProp_GProps.hxx>
 #include <Precision.hxx>
 #include <ShapeAnalysis_Curve.hxx>
 #include <ShapeAnalysis_Shell.hxx>
@@ -933,6 +944,459 @@ FaceTypedCylinder& ModelRefine::getCylinderObject()
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////////
 
+// Cones, tori and spheres (ops#931). Two adjacent faces on one such surface stayed two faces: a
+// chamfer's cone after a mirror fuse, a revolve's cone cut across its seam, a fillet's torus in two
+// pieces. Onshape has one face there. Faces are grouped by the surface in space (an axis in either
+// direction: two rounds of one full round sweep the same torus about opposite axes), and the merged
+// face is built on a copy of the first face's surface from the group's boundary, as the cylinder's.
+// A group is left as it is unless the merged face is valid and has the group's area.
+namespace
+{
+
+// The angle a point turns about an axis, in the plane through the axis' location at right angles
+// to it; nothing for a point on the axis
+bool angleAbout(const gp_Ax3& frame, const gp_Pnt& point, double& angle)
+{
+    const gp_Vec d(frame.Location(), point);
+    const double x = d.Dot(gp_Vec(frame.XDirection()));
+    const double y = d.Dot(gp_Vec(frame.YDirection()));
+    if (std::hypot(x, y) < Precision::Confusion()) {
+        return false;
+    }
+    angle = std::atan2(y, x);
+    return true;
+}
+
+// The angle a point turns about a torus' tube, in the half plane of the torus' axis through it
+bool angleAboutTube(const gp_Torus& torus, const gp_Pnt& point, double& angle)
+{
+    const gp_Ax3& frame = torus.Position();
+    double u = 0.0;
+    if (!angleAbout(frame, point, u)) {
+        return false;
+    }
+    const gp_Vec radial = gp_Vec(frame.XDirection()) * std::cos(u)
+        + gp_Vec(frame.YDirection()) * std::sin(u);
+    const gp_Pnt centre = frame.Location().Translated(radial * torus.MajorRadius());
+    const gp_Vec d(centre, point);
+    const double x = d.Dot(radial);
+    const double y = d.Dot(gp_Vec(frame.Direction()));
+    if (std::hypot(x, y) < Precision::Confusion()) {
+        return false;
+    }
+    angle = std::atan2(y, x);
+    return true;
+}
+
+// The angle a wire turns in all, by `angleOf` at points along each edge in the edge's direction
+// (degenerated edges left out): about 0 for a wire that does not go round, about 2 pi for one that
+// goes round once. Each step is taken under pi
+template<typename AngleOf>
+double wireTurn(const TopoDS_Wire& wire, const AngleOf& angleOf)
+{
+    constexpr int steps = 64;
+    double total = 0.0;
+    for (TopExp_Explorer xp(wire, TopAbs_EDGE); xp.More(); xp.Next()) {
+        const TopoDS_Edge& edge = TopoDS::Edge(xp.Current());
+        if (BRep_Tool::Degenerated(edge)) {
+            continue;
+        }
+        BRepAdaptor_Curve curve(edge);
+        double first = curve.FirstParameter();
+        double last = curve.LastParameter();
+        if (edge.Orientation() == TopAbs_REVERSED) {
+            std::swap(first, last);
+        }
+        bool have = false;
+        double previous = 0.0;
+        for (int i = 0; i <= steps; ++i) {
+            double angle = 0.0;
+            if (!angleOf(curve.Value(first + (last - first) * i / steps), angle)) {
+                continue;
+            }
+            if (have) {
+                double step = angle - previous;
+                while (step > std::numbers::pi) {
+                    step -= 2.0 * std::numbers::pi;
+                }
+                while (step <= -std::numbers::pi) {
+                    step += 2.0 * std::numbers::pi;
+                }
+                total += step;
+            }
+            previous = angle;
+            have = true;
+        }
+    }
+    return total;
+}
+
+double faceArea(const TopoDS_Shape& shape)
+{
+    GProp_GProps props;
+    BRepGProp::SurfaceProperties(shape, props);
+    return props.Mass();
+}
+
+enum class Revolved
+{
+    Cone,
+    Torus,
+    Sphere
+};
+
+// The face's elementary surface (a trimmed one's basis), or null
+Handle(Geom_ElementarySurface) elementarySurface(const TopoDS_Face& face)
+{
+    Handle(Geom_Surface) surface = BRep_Tool::Surface(face);
+    Handle(Geom_RectangularTrimmedSurface)
+        trimmed = Handle(Geom_RectangularTrimmedSurface)::DownCast(surface);
+    if (!trimmed.IsNull()) {
+        surface = trimmed->BasisSurface();
+    }
+    return Handle(Geom_ElementarySurface)::DownCast(surface);
+}
+
+bool sameAxisLine(const gp_Ax1& one, const gp_Ax1& two)
+{
+    return one.IsCoaxial(two, Precision::Angular(), Precision::Confusion())
+        || one.IsCoaxial(two.Reversed(), Precision::Angular(), Precision::Confusion());
+}
+
+bool sameLength(double one, double two)
+{
+    return std::fabs(one - two) <= Precision::Confusion();
+}
+
+bool revolvedEqual(Revolved kind, const TopoDS_Face& faceOne, const TopoDS_Face& faceTwo)
+{
+    switch (kind) {
+        case Revolved::Cone: {
+            auto one = Handle(Geom_ConicalSurface)::DownCast(elementarySurface(faceOne));
+            auto two = Handle(Geom_ConicalSurface)::DownCast(elementarySurface(faceTwo));
+            if (one.IsNull() || two.IsNull()) {
+                return false;
+            }
+            // one double cone in space: the apex, the axis line and the half angle
+            const gp_Cone c1 = one->Cone();
+            const gp_Cone c2 = two->Cone();
+            return c1.Apex().Distance(c2.Apex()) <= Precision::Confusion()
+                && std::fabs(std::fabs(c1.SemiAngle()) - std::fabs(c2.SemiAngle()))
+                <= Precision::Angular()
+                && sameAxisLine(c1.Axis(), c2.Axis());
+        }
+        case Revolved::Torus: {
+            auto one = Handle(Geom_ToroidalSurface)::DownCast(elementarySurface(faceOne));
+            auto two = Handle(Geom_ToroidalSurface)::DownCast(elementarySurface(faceTwo));
+            if (one.IsNull() || two.IsNull()) {
+                return false;
+            }
+            const gp_Torus t1 = one->Torus();
+            const gp_Torus t2 = two->Torus();
+            return sameLength(t1.MajorRadius(), t2.MajorRadius())
+                && sameLength(t1.MinorRadius(), t2.MinorRadius())
+                && t1.Location().Distance(t2.Location()) <= Precision::Confusion()
+                && sameAxisLine(t1.Axis(), t2.Axis());
+        }
+        case Revolved::Sphere: {
+            auto one = Handle(Geom_SphericalSurface)::DownCast(elementarySurface(faceOne));
+            auto two = Handle(Geom_SphericalSurface)::DownCast(elementarySurface(faceTwo));
+            if (one.IsNull() || two.IsNull()) {
+                return false;
+            }
+            return sameLength(one->Radius(), two->Radius())
+                && one->Location().Distance(two->Location()) <= Precision::Confusion();
+        }
+    }
+    return false;
+}
+
+// The UV range of a merged face stays within one period, as withinOnePeriod() for cylinders: in u
+// for all three, in v too for a torus
+bool withinPeriods(const TopoDS_Face& face, Revolved kind)
+{
+    Standard_Real u0 = 0.0, u1 = 0.0, v0 = 0.0, v1 = 0.0;
+    BRepTools::UVBounds(face, u0, u1, v0, v1);
+    const double period = 2.0 * std::numbers::pi + Precision::PConfusion();
+    return u1 - u0 <= period && (kind != Revolved::Torus || v1 - v0 <= period);
+}
+
+TopoDS_Face buildRevolvedFace(Revolved kind, const FaceVectorType& faces, const std::vector<EdgeVectorType>& boundaries)
+{
+    Handle(Geom_ElementarySurface) basis = elementarySurface(faces.at(0));
+    if (basis.IsNull()) {
+        return {};
+    }
+    basis = copyOfSurface(basis);
+
+    // The group's boundary without its degenerated edges (a cone's apex, a sphere's poles)
+    std::vector<EdgeVectorType> kept;
+    bool degenerated = false;
+    for (const auto& boundary : boundaries) {
+        bool all = true;
+        bool some = false;
+        for (const auto& edge : boundary) {
+            const bool d = BRep_Tool::Degenerated(edge);
+            all = all && d;
+            some = some || d;
+        }
+        if (some && !all) {
+            return {};  // a boundary running into an apex or a pole: not built here
+        }
+        degenerated = degenerated || some;
+        if (!all) {
+            kept.push_back(boundary);
+        }
+    }
+
+    TopoDS_Face face;
+    if (kept.empty()) {
+        // No boundary but degenerated edges, or none at all: the group is the whole closed
+        // surface (a sphere's or a torus' pieces). The surface's own face, on the first face's side
+        if (kind == Revolved::Cone) {
+            return {};
+        }
+        BRepBuilderAPI_MakeFace maker(basis, Precision::Confusion());
+        if (!maker.IsDone()) {
+            return {};
+        }
+        face = maker.Face();
+        face.Orientation(faces.at(0).Orientation());
+    }
+    else {
+        if (degenerated) {
+            return {};  // a cap to an apex or a pole beside another boundary: not built here
+        }
+        std::vector<TopoDS_Wire> wires;
+        for (const auto& boundary : kept) {
+            BRepLib_MakeWire wireMaker;
+            for (const auto& edge : boundary) {
+                wireMaker.Add(edge);
+            }
+            if (wireMaker.Error() != BRepLib_WireDone) {
+                return {};
+            }
+            wires.push_back(wireMaker.Wire());
+        }
+        std::sort(wires.begin(), wires.end(), ModelRefine::WireSort());
+
+        // Wires that go round the axis, or round a torus' tube, cut the surface into bands
+        const gp_Ax3 frame = basis->Position();
+        std::vector<TopoDS_Wire> inner, encircling;
+        int roundAxis = 0;
+        int roundTube = 0;
+        for (const auto& wire : wires) {
+            bool round = false;
+            if (kind == Revolved::Torus) {
+                const gp_Torus torus = Handle(Geom_ToroidalSurface)::DownCast(basis)->Torus();
+                const double tube = wireTurn(wire, [&torus](const gp_Pnt& p, double& a) {
+                    return angleAboutTube(torus, p, a);
+                });
+                if (std::fabs(tube) > std::numbers::pi) {
+                    ++roundTube;
+                    round = true;
+                }
+            }
+            const double turn = wireTurn(wire, [&frame](const gp_Pnt& p, double& a) {
+                return angleAbout(frame, p, a);
+            });
+            if (std::fabs(turn) > std::numbers::pi) {
+                ++roundAxis;
+                round = true;
+            }
+            (round ? encircling : inner).push_back(wire);
+        }
+        // the bands built: two wires round the axis (a cylinder's kind) or two round the tube (a
+        // torus cut by two half planes of its axis), each going round one way only
+        if (roundAxis > 0 && roundTube > 0) {
+            return {};
+        }
+
+        if (encircling.empty()) {
+            BRepBuilderAPI_MakeFace maker(basis, wires.front());
+            if (!maker.IsDone()) {
+                return {};
+            }
+            for (std::size_t i = 1; i < wires.size(); ++i) {
+                maker.Add(wires[i]);
+                if (!maker.IsDone()) {
+                    return {};
+                }
+            }
+            face = fixFace(maker.Face());
+        }
+        else {
+            // a band between two wires round the axis, as a cylinder's; a sphere's are caps and
+            // zones, not built here
+            if (encircling.size() != 2 || kind == Revolved::Sphere) {
+                return {};
+            }
+            std::vector<TopoDS_Wire> order(inner);
+            order.push_back(encircling.front());
+            order.push_back(encircling.back());
+            // the inner wires first, as for a cylinder: those across the seam fail otherwise
+            BRepBuilderAPI_MakeFace maker(basis, order.front(), false);
+            if (!maker.IsDone()) {
+                return {};
+            }
+            for (std::size_t i = 1; i < order.size(); ++i) {
+                maker.Add(order[i]);
+                if (!maker.IsDone()) {
+                    return {};
+                }
+            }
+            face = fixFace(maker.Face());
+        }
+    }
+    if (face.IsNull() || !withinPeriods(face, kind) || !BRepCheck_Analyzer(face).IsValid()) {
+        return {};
+    }
+    // The merged face covers the group: the same area
+    double area = 0.0;
+    for (const auto& f : faces) {
+        area += faceArea(f);
+    }
+    if (std::fabs(faceArea(face) - area) > 1e-7 * area + Precision::Confusion()) {
+        return {};
+    }
+    return face;
+}
+
+class FaceTypedRevolved: public FaceTypedBase
+{
+public:
+    FaceTypedRevolved(GeomAbs_SurfaceType type, Revolved kind)
+        : FaceTypedBase(type)
+        , kind(kind)
+    {}
+
+    bool isEqual(const TopoDS_Face& faceOne, const TopoDS_Face& faceTwo) const override
+    {
+        try {
+            return revolvedEqual(kind, faceOne, faceTwo);
+        }
+        catch (Standard_Failure&) {
+            return false;
+        }
+    }
+
+    GeomAbs_SurfaceType getType() const override
+    {
+        return surfaceType;
+    }
+
+    TopoDS_Face buildFace(const FaceVectorType& faces) const override
+    {
+        try {
+            std::vector<EdgeVectorType> boundaries;
+            boundarySplit(faces, boundaries);
+            // every boundary edge in a closed boundary, else the group is left as it is
+            EdgeVectorType edges;
+            ModelRefine::boundaryEdges(faces, edges);
+            std::size_t inBoundaries = 0;
+            for (const auto& boundary : boundaries) {
+                inBoundaries += boundary.size();
+            }
+            if (inBoundaries != edges.size()) {
+                return {};
+            }
+            return buildRevolvedFace(kind, faces, boundaries);
+        }
+        catch (Standard_Failure&) {
+            return {};
+        }
+    }
+
+private:
+    Revolved kind;
+};
+
+}  // namespace
+
+static FaceTypedBase& getConeObject()
+{
+    static FaceTypedRevolved object(GeomAbs_Cone, Revolved::Cone);
+    return object;
+}
+
+static FaceTypedBase& getTorusObject()
+{
+    static FaceTypedRevolved object(GeomAbs_Torus, Revolved::Torus);
+    return object;
+}
+
+static FaceTypedBase& getSphereObject()
+{
+    static FaceTypedRevolved object(GeomAbs_Sphere, Revolved::Sphere);
+    return object;
+}
+
+// FreeCAD-CH (ops#931, review pri931-r1 F1): makeElementRefine's UnifySameDomain fallback merges
+// cone, torus and sphere faces only where the face uniter would: each shell's faces of these kinds
+// are grouped as FaceUniter::process() groups them (by kind, by surface, by adjacency), and the
+// edges of every face in a group the uniter's buildFace refuses (a pointed cone, a sphere cap or
+// zone, a closed surface with holes) are kept. A helix earlier in the body, which sends the
+// refine to the fallback, then never decides whether such faces merge. A face with no equal
+// neighbour is in no group (FaceAdjacencySplitter keeps groups of two or more), so there is
+// nothing to merge it with; faces in no shell keep their edges (review pri931-r2).
+void ModelRefine::revolvedEdgesToKeep(const TopoDS_Shape& shape, TopTools_MapOfShape& keep)
+{
+    FaceTypedBase* types[] = {&getConeObject(), &getTorusObject(), &getSphereObject()};
+    auto keepFace = [&keep](const TopoDS_Shape& face) {
+        for (TopExp_Explorer xe(face, TopAbs_EDGE); xe.More(); xe.Next()) {
+            keep.Add(xe.Current());
+        }
+    };
+    auto revolved = [&types](const TopoDS_Face& face) {
+        const GeomAbs_SurfaceType kind = BRepAdaptor_Surface(face).GetType();
+        for (FaceTypedBase* type : types) {
+            if (type->getType() == kind) {
+                return true;
+            }
+        }
+        return false;
+    };
+    TopTools_MapOfShape inShell;
+    for (TopExp_Explorer xs(shape, TopAbs_SHELL); xs.More(); xs.Next()) {
+        const TopoDS_Shell& shell = TopoDS::Shell(xs.Current());
+        FaceTypeSplitter splitter;
+        splitter.addShell(shell);
+        for (FaceTypedBase* type : types) {
+            splitter.registerType(type->getType());
+        }
+        splitter.split();
+        FaceAdjacencySplitter adjacencySplitter(shell);
+        for (FaceTypedBase* type : types) {
+            const FaceVectorType& typedFaces = splitter.getTypedFaceVector(type->getType());
+            for (const TopoDS_Face& face : typedFaces) {
+                inShell.Add(face);
+            }
+            FaceEqualitySplitter equalitySplitter;
+            equalitySplitter.split(typedFaces, type);
+            for (std::size_t e = 0; e < equalitySplitter.getGroupCount(); ++e) {
+                adjacencySplitter.split(equalitySplitter.getGroup(e));
+                for (std::size_t a = 0; a < adjacencySplitter.getGroupCount(); ++a) {
+                    const FaceVectorType& group = adjacencySplitter.getGroup(a);
+                    if (!type->buildFace(group).IsNull()) {
+                        continue;
+                    }
+                    for (const TopoDS_Face& face : group) {
+                        keepFace(face);
+                    }
+                }
+            }
+        }
+    }
+    for (TopExp_Explorer xf(shape, TopAbs_FACE); xf.More(); xf.Next()) {
+        const TopoDS_Face& face = TopoDS::Face(xf.Current());
+        if (!inShell.Contains(face) && revolved(face)) {
+            keepFace(face);
+        }
+    }
+}
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////////
+
 // TODO: change this version after occ fix. Freecad Mantis 1450
 #if OCC_VERSION_HEX <= 0x7fffff
 void collectConicEdges(const TopoDS_Shell& shell, TopTools_IndexedMapOfShape& map)
@@ -1480,6 +1944,9 @@ bool FaceUniter::process()
     deletedShapes.clear();
     typeObjects.push_back(&getPlaneObject());
     typeObjects.push_back(&getCylinderObject());
+    typeObjects.push_back(&getConeObject());
+    typeObjects.push_back(&getTorusObject());
+    typeObjects.push_back(&getSphereObject());
     typeObjects.push_back(&getBSplineObject());
     // add more face types.
 

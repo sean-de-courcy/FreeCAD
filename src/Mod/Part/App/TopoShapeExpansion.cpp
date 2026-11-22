@@ -9727,8 +9727,12 @@ TopoShape& TopoShape::makeElementFillet(
         );
     }
     // ... and where the construction builds it only by a rule new with ops#898, this retry built
-    // it before that rule: OCCT's result in the reverse order stands (review of PR 484, S5)
-    if (outcome->failed && (!outcome->constructed || outcome->construction.newRule)
+    // it before that rule: OCCT's result in the reverse order stands (review of PR 484, S5).
+    // Also where OCCT's result is invalid and the construction refused it, so that the feature
+    // would fail: a line's and an arc's rounds meeting in a mitre at a corner, in OCCT's narrow
+    // bands of radius (ops#925), build in the reverse order
+    const bool failsAsIs = outcome->failed || (outcome->invalid && !outcome->constructed);
+    if (failsAsIs && (!outcome->constructed || outcome->construction.newRule)
         && inputEdges.size() > 1) {
         // FreeCAD-CH (Case Base #165): OCCT's walker can fail on a tangent chain by the edge its
         // contour is seeded from (a chain's first listed edge): an ellipse seed then a line whose
@@ -9745,8 +9749,28 @@ TopoShape& TopoShape::makeElementFillet(
         againRequest.faceTolerances = FilletFallback::faceTolerances(againInput.getShape());
         auto second
             = buildDressUp(again, againInput, againEdges, againRequest, "The fillet", false, reflex);
+        // Where OCCT's first result was invalid (ops#925), the second stands only as a valid closed
+        // solid as a whole (BRepCheck, every shell closed), else the feature fails as before. Its
+        // mitre may be OCCT's in-band one, about 3e-4 mm off its rounds (named debt, ops#925 2/3;
+        // coordinator's ruling, review pri931-r3 T1)
+        auto closedValid = [](const TopoDS_Shape& result) {
+            if (result.IsNull() || !BRepCheck_Analyzer(result).IsValid()) {
+                return false;
+            }
+            int solids = 0;
+            for (TopExp_Explorer xs(result, TopAbs_SOLID); xs.More(); xs.Next()) {
+                ++solids;
+                for (TopExp_Explorer xh(xs.Current(), TopAbs_SHELL); xh.More(); xh.Next()) {
+                    if (!BRep_Tool::IsClosed(xh.Current())) {
+                        return false;
+                    }
+                }
+            }
+            return solids > 0;
+        };
         if (!second->failed && !second->thin && !second->invalid && !second->turns
-            && !second->ring && !second->reflexFirst && second->wrongWay.empty() && !second->constructed) {
+            && !second->ring && !second->reflexFirst && second->wrongWay.empty() && !second->constructed
+            && (outcome->failed || closedValid(again->Shape()))) {
             mkFillet = again;
             input = againInput;
             inputEdges = againEdges;
@@ -12268,7 +12292,8 @@ TopoShape& TopoShape::makeElementRefine(const TopoShape& shape, const char* op, 
     // features' shapes) the uniter's failure kept that shell unrefined without an error, so the
     // fallback runs then too (review replc r2), and the partial result stands when it is refused.
     // OCCT's UnifySameDomain merges in place, without sewing. It merges only the face uniter's
-    // kinds (planes, cylinders, B-splines): the edges of every other face are kept, since
+    // kinds (planes, cylinders, B-splines, and since ops#931 the cones, tori and spheres in groups
+    // the uniter's own build merges): the edges of every other face are kept, since
     // KeepShapes honours only edges and vertices (review replc r2, T-A: two torus halves merged),
     // so a helix earlier in the body never decides whether cones or tori merge (review replc r1,
     // T3); it runs on a fresh copy, as the uniter may have changed its own (T2); and its result
@@ -12304,12 +12329,17 @@ TopoShape& TopoShape::makeElementRefine(const TopoShape& shape, const char* op, 
         TopTools_MapOfShape keep;
         for (TopExp_Explorer xp(fresh.getShape(), TopAbs_FACE); xp.More(); xp.Next()) {
             const GeomAbs_SurfaceType kind = BRepAdaptor_Surface(TopoDS::Face(xp.Current())).GetType();
-            if (kind != GeomAbs_Plane && kind != GeomAbs_Cylinder && kind != GeomAbs_BSplineSurface) {
+            if (kind != GeomAbs_Plane && kind != GeomAbs_Cylinder && kind != GeomAbs_Cone
+                && kind != GeomAbs_Torus && kind != GeomAbs_Sphere
+                && kind != GeomAbs_BSplineSurface) {
                 for (TopExp_Explorer xe(xp.Current(), TopAbs_EDGE); xe.More(); xe.Next()) {
                     keep.Add(xe.Current());
                 }
             }
         }
+        // cones, tori and spheres merge only in the groups the face uniter merges (ops#931,
+        // review pri931-r1 F1: else a helix decided whether a pointed cone's pieces merge)
+        ModelRefine::revolvedEdgesToKeep(fresh.getShape(), keep);
         unify.KeepShapes(keep);
         unify.Build();
         const TopoDS_Shape& unified = unify.Shape();

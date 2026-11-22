@@ -23,6 +23,7 @@
 # ***************************************************************************
 
 from math import cos, pi, sin
+import math
 import unittest
 
 import FreeCAD
@@ -486,8 +487,8 @@ class TestHelix(unittest.TestCase):
 
         A tube (r 10..20, height 8) carries an outer thread; two refined AdditiveTorus halves
         (R 15, r 3, 180 degrees each, turned 180 degrees apart) sit on its top. The face uniter
-        never merges toroidal faces, with or without the thread, so the bead keeps two of them.
-        The refine's fallback after a thread merged them (review replc r2, T-A)."""
+        merges the two halves into one ring, as Onshape does (ops#931), with or without the thread;
+        the refine's fallback after a thread once merged them alone (review replc r2, T-A)."""
         body = self.Doc.addObject("PartDesign::Body", "Body")
         planes = {f.Role: f for f in body.Origin.OriginFeatures}
         sketch = body.newObject("Sketcher::SketchObject", "TubeSketch")
@@ -524,7 +525,59 @@ class TestHelix(unittest.TestCase):
 
         self.assertTrue(bead.isValid(), bead.getStatusString())
         tori = [f for f in bead.Shape.Faces if f.Surface.__class__.__name__ == "Toroid"]
-        self.assertEqual(len(tori), 2, [f.Area for f in tori])
+        self.assertEqual(len(tori), 1, [f.Area for f in tori])
+
+    def testRefineAfterThreadLeavesAPointedConeAsWithout(self):
+        """A pointed cone the face uniter leaves in pieces stays so after a thread (ops#931).
+
+        The tube and thread of the test above; on its top a pointed AdditiveCone (r 15, height 10)
+        and the same cone over 90 degrees, refined. The face uniter refuses a cone group whose
+        boundary runs to the apex, so without the thread the cone keeps two faces. The thread sends
+        the refine to its UnifySameDomain fallback, which merged them (review pri931-r1, F1):
+        suppressing the thread then turned one face into two and broke a reference to it."""
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        planes = {f.Role: f for f in body.Origin.OriginFeatures}
+        sketch = body.newObject("Sketcher::SketchObject", "TubeSketch")
+        sketch.AttachmentSupport = [(planes["XY_Plane"], "")]
+        sketch.MapMode = "FlatFace"
+        sketch.addGeometry(Part.Circle(Base.Vector(0, 0, 0), Base.Vector(0, 0, 1), 20))
+        sketch.addGeometry(Part.Circle(Base.Vector(0, 0, 0), Base.Vector(0, 0, 1), 10))
+        tube = body.newObject("PartDesign::Pad", "Tube")
+        tube.Profile = sketch
+        tube.Length = 8
+        profile = body.newObject("Sketcher::SketchObject", "ThreadProfile")
+        profile.AttachmentSupport = [(planes["XZ_Plane"], "")]
+        profile.MapMode = "FlatFace"
+        corners = [Base.Vector(20, 1.0, 0), Base.Vector(20, 2.0, 0), Base.Vector(20.8, 1.5, 0)]
+        for i in range(3):
+            profile.addGeometry(Part.LineSegment(corners[i], corners[(i + 1) % 3]))
+        thread = body.newObject("PartDesign::AdditiveHelix", "Thread")
+        thread.Profile = profile
+        thread.ReferenceAxis = (planes["Z_Axis"], [""])
+        thread.Mode = "pitch-height-angle"
+        thread.Pitch = 2.5
+        thread.Height = 4.0
+        thread.Refine = True
+        for i, sweep in enumerate((360, 90)):
+            cone = body.newObject("PartDesign::AdditiveCone", "Cone%d" % i)
+            cone.Radius1 = 15
+            cone.Radius2 = 0
+            cone.Height = 10
+            cone.Angle = sweep
+            cone.Placement = FreeCAD.Placement(Base.Vector(0, 0, 8), FreeCAD.Rotation())
+            cone.Refine = True
+        self.Doc.recompute()
+
+        def cones():
+            self.assertTrue(cone.isValid(), cone.getStatusString())
+            return [f for f in cone.Shape.Faces if f.Surface.__class__.__name__ == "Cone"]
+
+        withThread = cones()
+        self.assertEqual(len(withThread), 2, [f.Area for f in withThread])
+        self.assertAlmostEqual(sum(f.Area for f in withThread), math.pi * 15 * math.hypot(15, 10), delta=1e-6)
+        thread.Suppressed = True
+        self.Doc.recompute()
+        self.assertEqual(len(cones()), 2)
 
     def testRefineKeepsThreadWallWithinOnePeriod(self):
         """The refine keeps a threaded wall's faces within one turn, so booleans see them.

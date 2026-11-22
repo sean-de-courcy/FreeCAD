@@ -218,6 +218,10 @@ private:
     ShapeVectorType deletedShapes;
     bool modifiedSignal;
 };
+
+// The edges of the cone, torus and sphere faces of `shape` that the face uniter would leave
+// unmerged (FreeCAD-CH, ops#931): makeElementRefine's UnifySameDomain fallback keeps them.
+void revolvedEdgesToKeep(const TopoDS_Shape& shape, TopTools_MapOfShape& keep);
 }  // namespace ModelRefine
 
 /* excerpt from GeomAbs_SurfaceType.hxx
