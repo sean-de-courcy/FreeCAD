@@ -25,6 +25,7 @@
 #include <FCConfig.h>
 
 #include <algorithm>
+#include <limits>
 #include <utility>
 #include <vector>
 
@@ -183,8 +184,10 @@ App::DocumentObjectExecReturn* Fillet::execute()
             return new App::DocumentObjectExecReturn("Resulting shape is invalid");
         }
         double largest = 0.0;
+        double smallest = std::numeric_limits<double>::max();
         for (const auto& [radius1, radius2] : radii) {
             largest = std::max({largest, radius1, radius2});
+            smallest = std::min({smallest, radius1, radius2});
         }
         // OCCT fills a recess its band crosses, in a valid solid (ops#393)
         const std::string filled = Part::filledPocket(res, baseTopoShape, edgeShapes, largest);
@@ -206,8 +209,16 @@ App::DocumentObjectExecReturn* Fillet::execute()
         const bool constantRadius = std::all_of(radii.begin(), radii.end(), [](const auto& r) {
             return r.first == r.second;
         });
-        const std::string bridged
-            = Part::bridgedRecess(res, baseTopoShape, edgeShapes, constantRadius ? largest : 0.0);
+        // An arc is excused as too small for its round only below the smallest radius, so an arc
+        // above its own edge's radius is never excused by a larger one elsewhere (review
+        // pr968pre-r1, MixedRadiusBridge)
+        const std::string bridged = Part::bridgedRecess(
+            res,
+            baseTopoShape,
+            edgeShapes,
+            constantRadius ? largest : 0.0,
+            constantRadius ? smallest : -1.0
+        );
         if (!bridged.empty()) {
             return new App::DocumentObjectExecReturn("The fillet" + bridged);
         }

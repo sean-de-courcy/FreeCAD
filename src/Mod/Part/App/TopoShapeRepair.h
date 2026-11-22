@@ -206,7 +206,10 @@ PartExport double distanceAngleReach(
  * @param shape The fillet's result (its solids are checked)
  * @param base The shape that was filleted
  * @param edges The edges of \a base that were filleted
- * @param radius The fillet's radius, or 0 if the edges don't all have one radius along them
+ * @param radius The fillet's radius, or 0 if the edges don't all have one radius along them; with
+ * several radii, the largest (it bounds the round's reach)
+ * @param leastRadius With several radii, the smallest: a chain arc below it has no torus and its
+ * round is no bridge (ops#968); negative for  radius
  * @return what the result bridges, naming the base face with the hole (e.g. "'s band crosses a
  * hole or pocket on Face3; a round that rolls through it is not built yet"), or an empty string
  */
@@ -214,7 +217,8 @@ PartExport std::string bridgedRecess(
     const TopoShape& shape,
     const TopoShape& base,
     const std::vector<TopoShape>& edges,
-    double radius
+    double radius,
+    double leastRadius = -1.0
 );
 
 /// What healSliverCorners() changed

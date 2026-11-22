@@ -2286,7 +2286,8 @@ std::string bridgedRecess(
     const TopoShape& shape,
     const TopoShape& base,
     const std::vector<TopoShape>& edges,
-    double radius
+    double radius,
+    double leastRadius
 )
 {
     const TopoDS_Compound result = solidsIn(shape.getShape());
@@ -2298,7 +2299,7 @@ std::string bridgedRecess(
     // As filledPocket() does: if the analysis throws, the check is skipped with a warning
     try {
         const auto chain = chainOf(before, edges);
-        if (chain.Extent() == 0 || !roundsAnalytically(before, chain, radius)) {
+        if (chain.Extent() == 0 || !roundsAnalytically(before, chain, leastRadius < 0.0 ? radius : leastRadius)) {
             return {};
         }
         // OCCT's bridge lies in the band, within the round's reach of its edges (lostMaterial())
