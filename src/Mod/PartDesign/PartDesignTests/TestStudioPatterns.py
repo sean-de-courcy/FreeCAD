@@ -1380,7 +1380,9 @@ class TestStudioPatterns(unittest.TestCase):
 
     def testFailingInstanceContributesNothing(self):
         """R2: the boss patterned +x 20 x 3, Reapply on and off: instance 3 (x 45..55) has no
-        ceiling over it and adds nothing, with no error; instance 2 reaches the ceiling."""
+        ceiling over it and adds nothing, with no error; instance 2 reaches the ceiling. Since
+        ops#963 the pattern names the instance in a warning (Onshape says nothing: a UI deviation,
+        the geometry the same)."""
         boss, base = self.ceilingStudio()
         lp = linear(self.part(), "LP", [boss], X_AXIS, 40, 3)
         for reapply in (True, False):
@@ -1388,7 +1390,8 @@ class TestStudioPatterns(unittest.TestCase):
                 lp.Reapply = reapply
                 self.doc.recompute()
                 self.assertValid(lp)
-                self.assertEqual(lp.getStatusString(), "Valid")
+                self.assertIn("Warning", lp.State)
+                self.assertIn("'Boss' isn't made at 1 of 2", lp.getStatusString())
                 self.assertTipVolume(base + 2 * 1500)
                 self.assertTrue(self.tipShape().isInside(V(30, 10, 12), 1e-6, True))
                 self.assertFalse(self.tipShape().isInside(V(50, 10, 7), 1e-6, True))
