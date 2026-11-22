@@ -646,7 +646,8 @@ class TestHelix(unittest.TestCase):
             centroid += (x1 + x2) * cross / 6
         centroid /= area
         volume = pi * (r**2 - (r - 1) ** 2) * height + abs(area) * 2 * pi * centroid * height / pitch
-        self.assertAlmostEqual(shape.Volume, volume, delta=5e-4)
+        # 1.4e-7 of the part: the crest joined across the turns' cuts (ops#895) moved it by 5e-4
+        self.assertAlmostEqual(shape.Volume, volume, delta=1e-3)
 
     # ops#895: a helix has one face per profile edge, as Onshape's (a 10-turn thread there has 9
     # faces in all), not one per turn. A tube r 10..20 carries a triangular thread profile
@@ -755,10 +756,11 @@ class TestHelix(unittest.TestCase):
         self.assertAlmostEqual(thread.Shape.Volume, pi * (20**2 - 10**2) * 40 - groove, delta=5e-3)
 
     def testThreadFacesKeepTheirNamesWhenTheTurnsChange(self):
-        """A flank's and an end cap's names don't depend on the number of turns (ops#895).
+        """A flank's, an end cap's and the crest's names don't depend on the turns (ops#895).
 
         Before, a flank was one face per turn, named by its turn, and the names of the last
-        turn's faces moved with Turns."""
+        turn's faces moved with Turns. The crest is the edge between the flanks, at r 20.8; it
+        keeps its name across one turn too, where the cuts per turn begin (review pr895-r1, L1)."""
         thread = self.makeThread(3.4)
 
         def names():
@@ -772,12 +774,18 @@ class TestHelix(unittest.TestCase):
                 ):
                     mapped = shape.ElementReverseMap.get("Face%d" % i)
                     found.setdefault(kind, set()).add(mapped if isinstance(mapped, str) else mapped[0])
+            for i, e in enumerate(shape.Edges, 1):
+                points = [v.Point for v in e.Vertexes] + [e.valueAt((e.FirstParameter + e.LastParameter) / 2)]
+                if all(abs(math.hypot(q.x, q.y) - 20.8) < 1e-4 for q in points):
+                    mapped = shape.ElementReverseMap.get("Edge%d" % i)
+                    found.setdefault("crest", set()).add(mapped if isinstance(mapped, str) else mapped[0])
             return found
 
         before = names()
         self.assertEqual(len(before["BSplineSurface"]), 2)
         self.assertEqual(len(before["Plane"]), 2)
-        for turns in (5, 2.2):
+        self.assertEqual(len(before["crest"]), 1)
+        for turns in (5, 2.2, 0.6, 1.0, 1.0005, 3.4):
             thread.Turns = turns
             self.Doc.recompute()
             self.assertTrue(thread.isValid(), thread.getStatusString())

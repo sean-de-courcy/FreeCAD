@@ -1983,13 +1983,80 @@ std::vector<std::size_t> orderByRanks(const std::vector<std::vector<long>>& rank
     return order;
 }
 
+/// Projections of many points onto one curve or surface (FreeCAD-CH, ops#895). GeomAPI's
+/// one-point constructors build Extrema's grid of the geometry again for every point, which took
+/// time in the square of the pieces where a split's many pieces lie on one long face (a helix's
+/// 30 turns: 3.5 s of twinOrder). Initialized once, with the same bounds and tolerances as those
+/// constructors (the curve's or the surface's own, or the range given), so the same answers.
+class Projector
+{
+public:
+    Projector(const Handle(Geom_Curve)& curve, double first, double last)
+        : curve(curve)
+    {
+        if (!curve.IsNull()) {
+            onCurve.Init(curve, first, last);
+        }
+    }
+    explicit Projector(const Handle(Geom_Curve)& curve)
+        : Projector(
+              curve,
+              curve.IsNull() ? 0.0 : curve->FirstParameter(),
+              curve.IsNull() ? 0.0 : curve->LastParameter()
+          )
+    {}
+    explicit Projector(const Handle(Geom_Surface)& surface)
+        : surface(surface)
+    {
+        if (!surface.IsNull()) {
+            double u1 = 0;
+            double u2 = 0;
+            double v1 = 0;
+            double v2 = 0;
+            surface->Bounds(u1, u2, v1, v2);
+            onSurface.Init(surface, u1, u2, v1, v2);
+        }
+    }
+    bool onACurve() const
+    {
+        return !curve.IsNull();
+    }
+    /// The nearest point's distance, or -1 for none; its parameters in `u` (and `v`)
+    double project(const gp_Pnt& point, double& u, double& v)
+    {
+        if (!curve.IsNull()) {
+            onCurve.Perform(point);
+            if (onCurve.NbPoints() == 0) {
+                return -1.0;
+            }
+            u = onCurve.LowerDistanceParameter();
+            return onCurve.LowerDistance();
+        }
+        if (!surface.IsNull()) {
+            onSurface.Perform(point);
+            if (onSurface.NbPoints() == 0) {
+                return -1.0;
+            }
+            onSurface.LowerDistanceParameters(u, v);
+            return onSurface.LowerDistance();
+        }
+        return -1.0;
+    }
+
+private:
+    Handle(Geom_Curve) curve;
+    Handle(Geom_Surface) surface;
+    GeomAPI_ProjectPointOnCurve onCurve;
+    GeomAPI_ProjectPointOnSurf onSurface;
+};
+
 /// True if `member` lies on the curve or surface of `source` (an edge or a face): points of the
 /// member itself are on the source's geometry within their tolerances, at its ends as well as
 /// inside it, so that a member that only crosses the source doesn't pass (a vertex: its point; an
 /// edge: its ends and the middle of its range; a face: its vertexes and the middle of its (u, v)
 /// bounds). A member of a higher dimension than the source (a face swept from an edge) never lies
 /// on it.
-bool liesOn(const TopoDS_Shape& member, const TopoDS_Shape& source)
+bool liesOn(const TopoDS_Shape& member, const TopoDS_Shape& source, Projector* shared = nullptr)
 {
     std::vector<std::pair<gp_Pnt, double>> points;  // with the member's tolerance there
     switch (member.ShapeType()) {
@@ -2055,22 +2122,26 @@ bool liesOn(const TopoDS_Shape& member, const TopoDS_Shape& source)
             return false;
         }
     }
+    std::optional<Projector> own;
+    if (!shared) {
+        if (!curve.IsNull()) {
+            own.emplace(curve);
+        }
+        else {
+            own.emplace(surface);
+        }
+    }
+    Projector& projector = shared ? *shared : *own;
     for (const auto& [point, memberTolerance] : points) {
         if (!std::isfinite(point.X()) || !std::isfinite(point.Y()) || !std::isfinite(point.Z())) {
             return false;
         }
         const double tolerance = 10 * Precision::Confusion() + memberTolerance + sourceTolerance;
-        if (!curve.IsNull()) {
-            GeomAPI_ProjectPointOnCurve onCurve(point, curve);
-            if (onCurve.NbPoints() == 0 || onCurve.LowerDistance() > tolerance) {
-                return false;
-            }
-        }
-        else {
-            GeomAPI_ProjectPointOnSurf onSurface(point, surface);
-            if (onSurface.NbPoints() == 0 || onSurface.LowerDistance() > tolerance) {
-                return false;
-            }
+        double u = 0;
+        double v = 0;
+        const double distance = projector.project(point, u, v);
+        if (distance < 0 || distance > tolerance) {
+            return false;
         }
     }
     return true;
@@ -2136,8 +2207,22 @@ std::vector<std::size_t> twinOrder(
     }
     const TopoDS_Shape& placedOn = edge.IsNull() ? face : edge;
     if (!placedOn.IsNull()) {
+        // liesOn's projections, on the whole curve or surface of the source, made once
+        std::optional<Projector> onSource;
+        if (!edge.IsNull()) {
+            double from = 0;
+            double to = 0;
+            if (const Handle(Geom_Curve) geometry = BRep_Tool::Curve(TopoDS::Edge(edge), from, to);
+                !geometry.IsNull()) {
+                onSource.emplace(geometry);
+            }
+        }
+        else if (const Handle(Geom_Surface) geometry = BRep_Tool::Surface(TopoDS::Face(face));
+                 !geometry.IsNull()) {
+            onSource.emplace(geometry);
+        }
         for (const auto& member : members) {
-            if (!liesOn(member, placedOn)) {
+            if (!liesOn(member, placedOn, onSource ? &*onSource : nullptr)) {
                 if (makerOrder) {
                     *makerOrder = true;
                 }
@@ -2171,23 +2256,31 @@ std::vector<std::size_t> twinOrder(
     const double none = std::numeric_limits<double>::quiet_NaN();
     std::vector<OrderValues> keys;
     keys.reserve(members.size());
+    std::optional<Projector> projector;
+    if (!curve.IsNull()) {
+        projector.emplace(curve, first, last);
+    }
+    else if (!surface.IsNull()) {
+        projector.emplace(surface);
+    }
     for (const auto& member : members) {
         double mass = 0;
         const gp_Pnt point = elementPoint(member, mass);
         OrderValues values;
         if (!curve.IsNull()) {
-            GeomAPI_ProjectPointOnCurve onCurve(point, curve, first, last);
+            double u = none;
+            double v = none;
             values.push_back(
-                {onCurve.NbPoints() > 0 ? onCurve.LowerDistanceParameter() : none,
+                {projector->project(point, u, v) >= 0 ? u : none,
                  curve->IsPeriodic() ? curve->Period() : 0}
             );
         }
         else if (!surface.IsNull()) {
-            GeomAPI_ProjectPointOnSurf onSurface(point, surface);
             double u = none;
             double v = none;
-            if (onSurface.NbPoints() > 0) {
-                onSurface.LowerDistanceParameters(u, v);
+            if (projector->project(point, u, v) < 0) {
+                u = none;
+                v = none;
             }
             values.push_back({u, surface->IsUPeriodic() ? surface->UPeriod() : 0});
             values.push_back({v, surface->IsVPeriodic() ? surface->VPeriod() : 0});
@@ -12311,18 +12404,25 @@ long firstTagOf(const std::string& name)
  * the input's order. The pieces' own names stay on the face
  * after them, for references made to them.
  */
-void restoreWholeFaceNames(TopoShape& result, const TopoShape& input, const TopoShape::Mapper& mapper)
+void restoreWholeFaceNames(
+    TopoShape& result,
+    const TopoShape& input,
+    const TopoShape::Mapper& mapper,
+    TopAbs_ShapeEnum type = TopAbs_FACE
+)
 {
+    // Edges come back the same way (ops#895: a helix's crest, merged across its turns' cuts)
+    const char* typeName = type == TopAbs_EDGE ? "Edge" : "Face";
     if (result.getHistoryAlgorithm() != App::HistoryAlgorithm::V2) {
         return;
     }
-    const int inputCount = static_cast<int>(input.countSubShapes(TopAbs_FACE));
+    const int inputCount = static_cast<int>(input.countSubShapes(type));
     // The faces of the input merged into each face of the result
     std::map<int, std::vector<int>> merged;
     for (int i = 1; i <= inputCount; ++i) {
-        const std::vector<TopoDS_Shape> images = mapper.modified(input.findShape(TopAbs_FACE, i));
+        const std::vector<TopoDS_Shape> images = mapper.modified(input.findShape(type, i));
         if (images.size() != 1 || images.front().IsNull()
-            || images.front().ShapeType() != TopAbs_FACE) {
+            || images.front().ShapeType() != type) {
             continue;
         }
         if (const int index = result.findShape(images.front()); index > 0) {
@@ -12380,7 +12480,7 @@ void restoreWholeFaceNames(TopoShape& result, const TopoShape& input, const Topo
         for (int face : faces) {
             members.insert(face);
             for (const auto& entry :
-                 input.getElementMappedNames(Data::IndexedName::fromConst("Face", face))) {
+                 input.getElementMappedNames(Data::IndexedName::fromConst(typeName, face))) {
                 auto levels = splitsOf(entry.first.toString());
                 if (levels.empty()) {
                     continue;
@@ -12407,7 +12507,7 @@ void restoreWholeFaceNames(TopoShape& result, const TopoShape& input, const Topo
             continue;
         }
         for (const auto& entry :
-             input.getElementMappedNames(Data::IndexedName::fromConst("Face", face))) {
+             input.getElementMappedNames(Data::IndexedName::fromConst(typeName, face))) {
             const std::string name = entry.first.toString();
             if (!interned
                 && std::ranges::none_of(prefixes, [&](std::string_view prefix) {
@@ -12456,7 +12556,7 @@ void restoreWholeFaceNames(TopoShape& result, const TopoShape& input, const Topo
                 }
             }
         }
-        const Data::IndexedName element = Data::IndexedName::fromConst("Face", index);
+        const Data::IndexedName element = Data::IndexedName::fromConst(typeName, index);
         // A name another element holds stays there (setElementName would count a duplicate)
         std::erase_if(whole, [&](const Whole& entry) {
             const Data::IndexedName holder = result.getIndexedName(entry.name);
@@ -12491,11 +12591,12 @@ void restoreWholeFaceNames(TopoShape& result, const TopoShape& input, const Topo
 void restoreWholeFaceNamesSafely(
     TopoShape& result,
     const TopoShape& input,
-    const TopoShape::Mapper& mapper
+    const TopoShape::Mapper& mapper,
+    TopAbs_ShapeEnum type = TopAbs_FACE
 )
 {
     try {
-        restoreWholeFaceNames(result, input, mapper);
+        restoreWholeFaceNames(result, input, mapper, type);
     }
     catch (const Base::Exception& e) {
         FC_WARN("refine: whole face names not restored: " << e.what());
@@ -14255,12 +14356,36 @@ bool ModelRefine::unifyAcrossSameSurface(Part::TopoShape& shape, const TopoDS_Sh
         if (freeEdges == 0) {
             return false;
         }
+        // A cut's vertex joins the two edges it split, where both pieces are of one curve (a
+        // crest cut at each turn); elsewhere it stays (the boolean's sections at a thread's root,
+        // a curve per turn: joined, their boundaries moved the volume by 1.4e-7 of the part)
+        TopTools_IndexedDataMapOfShapeListOfShape vertexEdges;
+        TopExp::MapShapesAndUniqueAncestors(fresh.getShape(), TopAbs_VERTEX, TopAbs_EDGE, vertexEdges);
+        auto oneCurve = [&](const TopoDS_Shape& vertex) {
+            std::vector<TopoDS_Edge> others;
+            for (const TopoDS_Shape& edge : vertexEdges.FindFromKey(vertex)) {
+                if (keep.Contains(edge)) {
+                    others.push_back(TopoDS::Edge(edge));
+                }
+            }
+            if (others.size() != 2) {
+                return false;
+            }
+            TopLoc_Location firstPlace;
+            TopLoc_Location secondPlace;
+            double from = 0;
+            double to = 0;
+            const Handle(Geom_Curve) first = BRep_Tool::Curve(others[0], firstPlace, from, to);
+            const Handle(Geom_Curve) second = BRep_Tool::Curve(others[1], secondPlace, from, to);
+            return !first.IsNull() && first == second && firstPlace.IsEqual(secondPlace);
+        };
         for (TopExp_Explorer xv(fresh.getShape(), TopAbs_VERTEX); xv.More(); xv.Next()) {
-            if (!freeVertices.Contains(xv.Current())) {
+            if (!freeVertices.Contains(xv.Current()) || !oneCurve(xv.Current())) {
                 keep.Add(xv.Current());
             }
         }
-        ShapeUpgrade_UnifySameDomain unify(fresh.getShape(), true, true, false);
+        // B-spline edges too, through the vertices left free above only
+        ShapeUpgrade_UnifySameDomain unify(fresh.getShape(), true, true, true);
         unify.KeepShapes(keep);
         unify.Build();
         const TopoDS_Shape& unified = unify.Shape();
@@ -14297,6 +14422,7 @@ bool ModelRefine::unifyAcrossSameSurface(Part::TopoShape& shape, const TopoDS_Sh
         TopoShape result(shape.Tag, shape.Hasher, shape.getHistoryAlgorithm());
         result.makeShapeWithElementMap(unified, history, {fresh}, op);
         Part::restoreWholeFaceNamesSafely(result, fresh, history);
+        Part::restoreWholeFaceNamesSafely(result, fresh, history, TopAbs_EDGE);
         result.fixSolidOrientation();
         if (result.isClosed() != closed) {
             return false;
