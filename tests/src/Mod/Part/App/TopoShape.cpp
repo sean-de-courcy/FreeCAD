@@ -9,7 +9,19 @@
 
 #include <App/ElementMap.h>
 #include <App/NameTable.h>
+#include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
+#include <BRepTools.hxx>
+#include <BRep_Builder.hxx>
+#include <BRep_Tool.hxx>
+#include <Geom_CylindricalSurface.hxx>
+#include <Geom_RectangularTrimmedSurface.hxx>
+#include <Precision.hxx>
+#include <TopoDS.hxx>
+#include <gp_Ax3.hxx>
+#include <ios>
+#include <iterator>
+#include <sstream>
 #include <TopExp_Explorer.hxx>
 #include <TopoDS_Shape.hxx>
 #include <algorithm>
@@ -758,4 +770,51 @@ TEST_F(TopoShapeTest, higherElementsGiveAVertexItsFaces)
             }
         }
     }
+}
+
+// ops#956 (a): a document save writes shapes through the zip writer's stream, which is set to fixed
+// notation (Base::ZipWriter). A face on a cylinder trimmed in U only (V from -2e100 to 2e100, as
+// ShapeUpgrade_UnifySameDomain builds for a merged full round) then gets numbers of 119 characters,
+// and OCCT reads at most 30 per number: the shape is lost on reopen. exportBrep writes in the
+// default notation whatever the stream's, and leaves the stream's own settings as they were.
+TEST_F(TopoShapeTest, exportBrepToAFixedNotationStreamReadsBack)
+{
+    Handle(Geom_CylindricalSurface) cylinder = new Geom_CylindricalSurface(gp_Ax3(), 1.5);
+    Handle(Geom_RectangularTrimmedSurface) trimmed = new Geom_RectangularTrimmedSurface(
+        cylinder, 1.5 * M_PI, 2.5 * M_PI, Standard_True);
+    double v1 = 0;
+    double v2 = 0;
+    double u1 = 0;
+    double u2 = 0;
+    trimmed->Bounds(u1, u2, v1, v2);
+    ASSERT_GE(v2, Precision::Infinite());
+    TopoDS_Face face = BRepBuilderAPI_MakeFace(trimmed, 1.5 * M_PI, 2.5 * M_PI, 0.0, 5.0, 1e-7);
+    Part::TopoShape shape(face);
+
+    std::ostringstream out;
+    out.precision(16);
+    out.setf(std::ios::fixed, std::ios::floatfield);
+    shape.exportBrep(out);
+    EXPECT_EQ(out.flags() & std::ios::floatfield, std::ios::fixed);
+    EXPECT_EQ(out.precision(), 16);
+
+    std::string text = out.str();
+    std::istringstream words(text);
+    size_t longest = 0;
+    for (auto it = std::istream_iterator<std::string>(words); it != std::istream_iterator<std::string>(); ++it) {
+        longest = std::max(longest, it->size());
+    }
+    // OCCT 8.0.1 reads at most 30 characters per number; check before reading, which fails badly
+    ASSERT_LE(longest, 30u);
+
+    std::istringstream in(text);
+    TopoDS_Shape back;
+    BRep_Builder builder;
+    BRepTools::Read(back, in, builder);
+    ASSERT_FALSE(back.IsNull());
+    Part::TopoShape read(back);
+    ASSERT_EQ(read.countSubShapes(TopAbs_FACE), 1);
+    TopoDS_Face backFace = TopoDS::Face(read.getSubShape(TopAbs_FACE, 1));
+    EXPECT_FALSE(Handle(Geom_RectangularTrimmedSurface)::DownCast(BRep_Tool::Surface(backFace)).IsNull());
+    EXPECT_TRUE(read.isValid());
 }

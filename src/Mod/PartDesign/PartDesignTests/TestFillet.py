@@ -936,6 +936,64 @@ class TestFillet(unittest.TestCase):
                 )
                 self.assertEqual(named, first)
 
+    def testFullRoundSurvivesSaveAndReopen(self):
+        # ops#956 (a): a wall 3 wide, both long top edges rounded at 1.5. The full round is one face
+        # on a cylinder trimmed in U only (V from -2e100 to 2e100), which a document save wrote in
+        # fixed notation, 119 characters a number, beyond what OCCT reads: the Fillet and the Body
+        # came back null on reopen. Reopened, they keep their faces and edges.
+        import os
+        import tempfile
+        import Sketcher
+
+        doc = FreeCAD.newDocument("FullRoundSave")
+        path = os.path.join(tempfile.mkdtemp(prefix="fc956"), "fullround.FCStd")
+        try:
+            body = doc.addObject("PartDesign::Body", "Body")
+            sketch = body.newObject("Sketcher::SketchObject", "Sketch")
+            xy = [o for o in body.Origin.OriginFeatures if o.Role == "XY_Plane"][0]
+            sketch.AttachmentSupport = [(xy, "")]
+            sketch.MapMode = "FlatFace"
+            pts = [(-1.5, 0), (1.5, 0), (1.5, 10), (-1.5, 10)]
+            for i in range(4):
+                a, c = pts[i], pts[(i + 1) % 4]
+                sketch.addGeometry(
+                    Part.LineSegment(FreeCAD.Vector(a[0], a[1], 0), FreeCAD.Vector(c[0], c[1], 0))
+                )
+            for i in range(4):
+                sketch.addConstraint(Sketcher.Constraint("Coincident", i, 2, (i + 1) % 4, 1))
+            pad = body.newObject("PartDesign::Pad", "Pad")
+            pad.Profile = sketch
+            pad.Length = 5
+            doc.recompute()
+            top = [
+                "Edge%d" % (i + 1)
+                for i, e in enumerate(pad.Shape.Edges)
+                if e.BoundBox.ZMin > 4.999 and e.BoundBox.XLength < 1e-9
+            ]
+            self.assertEqual(len(top), 2)
+            fillet = body.newObject("PartDesign::Fillet", "Fillet")
+            fillet.Base = (pad, top)
+            fillet.Radius = 1.5
+            doc.recompute()
+            self.assertTrue(fillet.Shape.isValid(), fillet.getStatusString())
+            faces, edges = len(fillet.Shape.Faces), len(fillet.Shape.Edges)
+            self.assertEqual(faces, 6)
+            doc.saveAs(path)
+            FreeCAD.closeDocument(doc.Name)
+            doc = FreeCAD.openDocument(path)
+            for name in ("Pad", "Fillet", "Body"):
+                shape = doc.getObject(name).Shape
+                self.assertFalse(shape.isNull(), name)
+                self.assertTrue(shape.isValid(), name)
+            self.assertEqual(len(doc.getObject("Fillet").Shape.Faces), faces)
+            self.assertEqual(len(doc.getObject("Fillet").Shape.Edges), edges)
+            self.assertEqual(len(doc.getObject("Body").Shape.Edges), edges)
+        finally:
+            FreeCAD.closeDocument(doc.Name)
+            if os.path.exists(path):
+                os.remove(path)
+            os.rmdir(os.path.dirname(path))
+
     def tearDown(self):
         # closing doc
         FreeCAD.closeDocument("PartDesignTestFillet")

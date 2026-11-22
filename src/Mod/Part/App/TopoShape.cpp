@@ -1008,11 +1008,29 @@ void TopoShape::exportBrep(std::ostream& out) const
         VERSION_2 = 2,
         VERSION_3 = 3
     };
-    BRepTools_ShapeSet SS(Standard_False);
-    SS.SetFormatNb(VERSION_1);
-    SS.Add(this->_Shape);
-    SS.Write(out);
-    SS.Write(this->_Shape, out);
+    // A document save hands in the zip writer's stream, which is set to fixed notation
+    // (Base::ZipWriter). OCCT sets only the precision, so an unbounded parameter range
+    // (Precision::Infinite(), 2e100, as on a face whose surface is trimmed in one direction
+    // only) would be written with all its integer digits, 119 characters, and OCCT reads at
+    // most 30 per number: the shape could not be read back (ops#956). Write in the default
+    // notation and give the stream back as it came.
+    const std::ios_base::fmtflags flags = out.flags();
+    const std::streamsize precision = out.precision();
+    out.unsetf(std::ios::floatfield);
+    try {
+        BRepTools_ShapeSet SS(Standard_False);
+        SS.SetFormatNb(VERSION_1);
+        SS.Add(this->_Shape);
+        SS.Write(out);
+        SS.Write(this->_Shape, out);
+    }
+    catch (...) {
+        out.flags(flags);
+        out.precision(precision);
+        throw;
+    }
+    out.flags(flags);
+    out.precision(precision);
 }
 
 void TopoShape::exportBinary(std::ostream& out) const
