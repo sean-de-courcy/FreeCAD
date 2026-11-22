@@ -3,13 +3,17 @@
 # The solver ordered its unknowns by memory address and took the start of a reduced equality from
 # the last address, so one sketch gave different coordinates (in the last bits, and sometimes a
 # failed solve) from process to process, and a later feature that is sensitive to 1e-13 built in
-# one run and refused in the next. Designed geometry: a rounded rectangle with two rounded slots
-# inside it, placed by distances, every element started a few tenths off its place. The expected
-# result is the same bits everywhere, and a fully constrained, solved sketch.
+# one run and refused in the next. Designed geometry: three loops of four lines and four tangent
+# arcs (an outline and two slots inside it), placed by distances. Every line starts a few tenths
+# off its place, and every arc starts on its corner's centre but with the next corner's quarter
+# span, so the solver has to swing it round (the solution's arcs span three quarters). It is a
+# hard start, not the drawing of a rounded rectangle: the point is a long, many-step solve. The
+# expected result is the same bits everywhere, and a fully constrained, solved sketch.
 
 import hashlib
 import math
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -40,8 +44,8 @@ os._exit(0)
 
 
 def _rounded(sk, x0, y0, w, h, r, j):
-    """Four lines and four tangent arcs, each started off by j; equal radii, a radius, a width
-    and a height."""
+    """Four lines started off by j and four tangent arcs, each on its corner's centre (off by j)
+    with the next corner's quarter span; equal radii, a radius, a width and a height."""
     g0 = sk.GeometryCount
     c = [(x0 + r, y0 + r), (x0 + w - r, y0 + r), (x0 + w - r, y0 + h - r), (x0 + r, y0 + h - r)]
     lines = [
@@ -128,9 +132,10 @@ def _freecadCmd():
     base = os.path.basename(sys.executable).lower()
     if base.startswith("freecadcmd") or base.startswith(packaged.lower()):
         return sys.executable
-    for folder in ("bin", "MacOS", ""):
+    # a build tree's bin/, a macOS app bundle's Contents/MacOS (the home is Contents/Resources)
+    for folder in ("bin", "MacOS", os.path.join(os.pardir, "MacOS"), ""):
         for name in names:
-            path = os.path.join(App.getHomePath(), folder, name)
+            path = os.path.normpath(os.path.join(App.getHomePath(), folder, name))
             if os.path.isfile(path):
                 return path
     raise FileNotFoundError("FreeCADCmd next to " + App.getHomePath())
@@ -161,11 +166,16 @@ class TestSketchSolveRepeatable(unittest.TestCase):
                                   stderr=subprocess.STDOUT), log, env[OUT])
             )
         lines = []
-        for proc, log, out in procs:
-            try:
+        try:
+            for proc, log, out in procs:
                 proc.wait(timeout=600)
-            finally:
+        finally:
+            for proc, log, out in procs:
+                if proc.poll() is None:
+                    proc.kill()  # timed out: leave nothing running
+                    proc.wait()
                 log.close()
+        for proc, log, out in procs:
             self.assertTrue(os.path.isfile(out), f"a child wrote no line ({work})")
             with open(out, encoding="utf-8") as fh:
                 lines.append(fh.read().strip())
@@ -174,6 +184,7 @@ class TestSketchSolveRepeatable(unittest.TestCase):
         for line in lines:
             self._check(line)
         self.assertEqual(len(set(lines)), 1, "different solutions:\n" + "\n".join(lines))
+        shutil.rmtree(work, ignore_errors=True)  # kept above, where it failed, for its logs
 
     def testSameBitsInOneProcess(self):
         """The same sketch, built again in this process after other sketches have changed the heap,
