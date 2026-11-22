@@ -821,5 +821,62 @@ class TestPatternRules(unittest.TestCase):
             self.assertTrue(self.inside(x, 25, 20), f"no pad at x {x}")
 
 
+    def testReapplyUpToAnOwnFaceThePatternMoves(self):
+        """Review pr963a-r2 SideCap: a Block (x -10..10, y -30..-20, z 10..20) and a pad from the
+        plane y = -50 along +y up to the Block's side y = -30 (20 long; an ellipse, semi-axes 4 and
+        2 about (x 0, z 15): the blind shortcut; a 10 x 6 rectangle: the up-to prism), both patterned
+        along Y, 2 over 60, Reapply on. The second instance's pad ends on its own Block's side (y =
+        30): 100000 + 2 x 2000 + 2 x 20 x area, no warning. Integration carries the seed's face to
+        the instance and the pad runs to y = -30 there, the wrong length (105256.6 against 105005.3
+        for the ellipse)."""
+        for ellipse in (True, False):
+            with self.subTest(ellipse=ellipse):
+                if hasattr(self, "body"):
+                    App.closeDocument(self.doc.Name)
+                    self.doc = App.newDocument("PartDesignTestPatternRules")
+                self.block(-50, -50, 50, 50)
+                block = self.topPad("SideBlock", -10, -30, 10, -20)
+                block.Length = 10
+                self.recompute()
+                side = self.faceOf(block, V(0, -30, 15), 200)
+                if ellipse:
+                    geometry = [Part.Ellipse(V(4, -15, 0), V(0, -13, 0), V(0, -15, 0))]
+                    area = 8 * math.pi
+                else:
+                    geometry = models.rectangle(-5, -18, 5, -12)
+                    area = 60
+                sketch = models.sketch(
+                    self.doc,
+                    "SideSketch",
+                    geometry,
+                    self.body,
+                    placement=App.Placement(V(0, -50, 0), App.Rotation(V(1, 0, 0), -90)),
+                )
+                pad = self.body.newObject("PartDesign::Pad", "SidePad")
+                pad.Profile = sketch
+                pad.Type = "UpToFace"
+                pad.UpToFace = (block, [side])
+                want = 100000 + 2000 + 20 * area
+                for reversed_ in (False, True):
+                    pad.Reversed = reversed_
+                    self.recompute()
+                    if pad.isValid() and abs(self.body.Shape.Volume - want) < 1e-6:
+                        break
+                self.assertBody(want)
+                pattern = self.body.newObject("PartDesign::LinearPattern", "LinearPattern")
+                pattern.Originals = [block, pad]
+                pattern.Direction = self.axis("Y_Axis")
+                pattern.Mode = "Extent"
+                pattern.Length = 60
+                pattern.Occurrences = 2
+                pattern.Reapply = True
+                self.body.Tip = pattern
+                self.recompute()
+                self.assertValid(pattern)
+                self.assertNoWarning(pattern)
+                self.assertBody(100000 + 2 * 2000 + 2 * 20 * area)
+                self.assertTrue(self.inside(0, 20, 15), "no pad at the second instance")
+
+
 if __name__ == "__main__":
     unittest.main()
