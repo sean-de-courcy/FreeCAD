@@ -262,31 +262,7 @@ gp_Vec faceNormal(const TopoDS_Face& face, double u, double v, gp_Pnt& point)
 bool sidedSheet(const App::DocumentObject* tool)
 {
     auto extrusion = freecad_cast<const Part::Extrusion*>(tool);
-    if (!extrusion || extrusion->Solid.getValue()
-        || (extrusion->EndType.getValue() != 1 && extrusion->BaseEdges.getSubValues().empty())) {
-        return false;
-    }
-    TopoShape profile;
-    try {
-        profile = extrusion->baseShape();
-    }
-    catch (const Base::Exception&) {
-        return false;
-    }
-    catch (Standard_Failure&) {
-        return false;
-    }
-    if (profile.isNull() || profile.hasSubShape(TopAbs_FACE)) {
-        return false;
-    }
-    bool loops = false;
-    for (TopExp_Explorer it(profile.getShape(), TopAbs_WIRE); it.More(); it.Next()) {
-        if (!BRep_Tool::IsClosed(it.Current())) {
-            return false;
-        }
-        loops = true;
-    }
-    return loops;
+    return extrusion && extrusion->isSidedTube();
 }
 
 std::string notSided(const App::DocumentObject* tool)
@@ -623,6 +599,12 @@ App::DocumentObjectExecReturn* Split::execute()
     const std::string sub = firstSub(source->Tool);
     if (!toolObject) {
         return new App::DocumentObjectExecReturn("The Split has no plane", this);
+    }
+    // FreeCAD-CH (ops#919): a sheet object in no Body cuts only when its sides hold (a tube of
+    // the surface extrusion), as makeSplit admits it: one edited since into something else, a
+    // single planar face included, fails here rather than cut by a plane (review r5)
+    if (sub.empty() && isSheetObject(toolObject) && !sidedSheet(toolObject)) {
+        return new App::DocumentObjectExecReturn(notSided(toolObject), this);
     }
     // FreeCAD-CH (ops#919): a sheet of several faces, or of one curved face, cuts as it is
     if (sub.empty() && toolObject->isDerivedFrom<Part::Feature>()) {

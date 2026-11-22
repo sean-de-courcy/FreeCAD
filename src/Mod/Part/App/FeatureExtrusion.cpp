@@ -148,22 +148,10 @@ bool before(const gp_Pnt& a, const gp_Pnt& b)
     return false;
 }
 
-/// Whether @p wire runs the way the rule below wants: a closed wire counter-clockwise about
-/// @p dir, an open one from its end that comes first by coordinates
-bool runsTheRightWay(const TopoDS_Wire& wire, const gp_Dir& dir)
+/// A closed wire's vector area (half the sum of the cross products, here twice it), from
+/// points along each edge as the wire runs it; @p length is set to the points' perimeter
+gp_Vec vectorArea(const TopoDS_Wire& wire, double& length)
 {
-    TopoDS_Vertex first;
-    TopoDS_Vertex last;
-    TopExp::Vertices(wire, first, last);
-    if (first.IsNull() || last.IsNull()) {
-        return true;
-    }
-    const gp_Pnt start = BRep_Tool::Pnt(first);
-    const gp_Pnt end = BRep_Tool::Pnt(last);
-    if (!first.IsSame(last) && start.Distance(end) > Precision::Confusion()) {
-        return !before(end, start);
-    }
-    // The wire's vector area, from points along each edge as the wire runs it
     std::vector<gp_Pnt> points;
     for (BRepTools_WireExplorer it(wire); it.More(); it.Next()) {
         BRepAdaptor_Curve curve(it.Current());
@@ -176,12 +164,47 @@ bool runsTheRightWay(const TopoDS_Wire& wire, const gp_Dir& dir)
             points.push_back(curve.Value(reversed ? u1 + f * (u0 - u1) : u0 + f * (u1 - u0)));
         }
     }
+    length = 0.0;
+    for (std::size_t i = 0; i < points.size(); ++i) {
+        length += points[i].Distance(points[(i + 1) % points.size()]);
+    }
     gp_Vec area(0, 0, 0);
     for (std::size_t i = 1; i + 1 < points.size(); ++i) {
         area += gp_Vec(points[0], points[i]).Crossed(gp_Vec(points[0], points[i + 1]));
     }
-    return area.Dot(gp_Vec(dir)) >= 0.0;
+    return area;
 }
+
+/// Whether @p wire is closed
+bool isClosedWire(const TopoDS_Wire& wire)
+{
+    TopoDS_Vertex first;
+    TopoDS_Vertex last;
+    TopExp::Vertices(wire, first, last);
+    if (first.IsNull() || last.IsNull()) {
+        return false;
+    }
+    return first.IsSame(last)
+        || BRep_Tool::Pnt(first).Distance(BRep_Tool::Pnt(last)) <= Precision::Confusion();
+}
+
+/// Whether @p wire runs the way the rule below wants: a closed wire counter-clockwise about
+/// @p dir, an open one from its end that comes first by coordinates
+bool runsTheRightWay(const TopoDS_Wire& wire, const gp_Dir& dir)
+{
+    TopoDS_Vertex first;
+    TopoDS_Vertex last;
+    TopExp::Vertices(wire, first, last);
+    if (first.IsNull() || last.IsNull()) {
+        return true;
+    }
+    if (!isClosedWire(wire)) {
+        return !before(BRep_Tool::Pnt(last), BRep_Tool::Pnt(first));
+    }
+    double length = 0.0;
+    return vectorArea(wire, length).Dot(gp_Vec(dir)) >= 0.0;
+}
+
 /// @p sheet, extruded from the wires of @p profile, turned by a rule of the profile's geometry
 /// alone (ops#919, review r1): each closed wire counter-clockwise about @p dir, so that a
 /// tube's normals point into it whichever way its edges were drawn. An open chain has no rule
@@ -649,6 +672,41 @@ TopoShape Extrusion::baseShape() const
     return wires;
 }
 
+bool Extrusion::isSidedTube() const
+{
+    if (Solid.getValue() || (EndType.getValue() != 1 && BaseEdges.getSubValues().empty())) {
+        return false;
+    }
+    TopoShape profile;
+    try {
+        profile = baseShape();
+    }
+    catch (const Base::Exception&) {
+        return false;
+    }
+    catch (Standard_Failure&) {
+        return false;
+    }
+    if (profile.isNull() || profile.hasSubShape(TopAbs_FACE)) {
+        return false;
+    }
+    bool loops = false;
+    for (TopExp_Explorer it(profile.getShape(), TopAbs_WIRE); it.More(); it.Next()) {
+        const TopoDS_Wire& wire = TopoDS::Wire(it.Current());
+        if (!isClosedWire(wire)) {
+            return false;
+        }
+        // A loop that crosses itself into lobes of equal area (a bowtie) has no inside to turn
+        // toward (review r5)
+        double length = 0.0;
+        if (vectorArea(wire, length).Magnitude() <= 1e-6 * length * length) {
+            return false;
+        }
+        loops = true;
+    }
+    return loops;
+}
+
 void Extrusion::extrudeUpToFace(TopoShape& result, const TopoShape& profile, ExtrusionParameters params)
 {
     // FreeCAD-CH (ops#919 4b): a surface, one way, from the profile
@@ -786,7 +844,13 @@ App::DocumentObjectExecReturn* Extrusion::execute()
         // same piece whichever way an edge was drawn (ops#919, review r1). The plain extrusion
         // keeps its shape as before
         if (!params.solid && (EndType.getValue() == 1 || !BaseEdges.getSubValues().empty())) {
-            orientSheet(source, result, params.dir);
+            // The way the prism actually runs: a negative total length runs it against Dir
+            // (review r5); up to a face it runs along Dir, the face being ahead
+            gp_Dir along = params.dir;
+            if (EndType.getValue() == 0 && params.lengthFwd + params.lengthRev < 0.0) {
+                along.Reverse();
+            }
+            orientSheet(source, result, along);
         }
         this->Shape.setValue(result);
         return App::DocumentObject::StdReturn;

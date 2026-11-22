@@ -311,6 +311,48 @@ class TestSurfaceUpToSplit(unittest.TestCase):
         self.assertEqual(len(self.body.Group), 1)
         self.assertTrue(ext.Visibility)
 
+    def testNegativeLengthKeepsTheSide(self):
+        """Review r5 (NegativeLengthTube): Reversed on with LengthFwd -20 makes the same tube as
+        LengthFwd 20; the tube is turned by the way the prism runs, so the Split keeps the same
+        piece."""
+        self.block()
+        self.profile = self.sketch(hexagon())
+        ext = self.surface(self.profile, self.edgesOf(self.profile, hexagon()), length=20)
+        self.split(ext, "Front")
+        self.assertAlmostEqual(self.original.Shape.Volume, PLUG, places=4)
+        ext.Reversed = True
+        ext.LengthFwd = -20
+        self.doc.recompute()
+        bound = box(ext.Shape)
+        self.assertAlmostEqual(bound.ZMin, 0, places=6)
+        self.assertAlmostEqual(bound.ZMax, 20, places=6)
+        self.assertValid(self.original)
+        self.assertAlmostEqual(self.original.Shape.Volume, PLUG, places=4)
+
+    def testBowtieIsRefused(self):
+        """Review r5 (BowtieTubeRedrawnReversed): a loop that crosses itself into two lobes of
+        equal area has no inside to turn toward: refused."""
+        self.block()
+        bowtie = [V(4, 5, 0), V(36, 25, 0), V(36, 5, 0), V(4, 25, 0), V(4, 5, 0)]
+        sketch = self.sketch(bowtie)
+        ext = self.surface(sketch, self.edgesOf(sketch, bowtie), self.top(self.box, 20))
+        with self.assertRaisesRegex(ValueError, "isn't supported yet"):
+            PartDesign.split(self.body, ext)
+
+    def testRetooledToOneLineFails(self):
+        """Review r5 (TubeRetooledToOneLine): the tube's BaseEdges changed after the Split to one
+        line, a sheet of one planar face: the Split fails, it doesn't cut by that face's plane."""
+        self.block()
+        ext = self.hexTube()
+        self.split(ext, "Front")
+        line = [V(20, -5, 0), V(21, 35, 0)]
+        self.profile.addGeometry(Part.LineSegment(*line), False)
+        self.doc.recompute()
+        ext.BaseEdges = (self.profile, self.edgesOf(self.profile, line))
+        self.doc.recompute()
+        self.assertValid(ext)
+        self.assertFails(self.original, "isn't supported yet")
+
     def testTargetBodyMoved(self):
         """Review r1 (SheetUpToMovedBody, design 4b): the target's Body moved up 5 moves the face
         the sheet runs to (a move no link sees): the sheet runs to z 25 (1200)."""
