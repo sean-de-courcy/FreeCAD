@@ -789,7 +789,7 @@ Part::TopoShape reapplyDressUpRun(
     std::string* namingNote
 )
 {
-    DressUpRun run {base, edges, Part::TopoShape(), false, false, Part::TopoShape()};
+    DressUpRun run {base, edges, Part::TopoShape(), false, false, Part::TopoShape(), {}};
     run.keep = raw != nullptr;
     DressUpRun* outer = dressUpRun;
     dressUpRun = &run;
