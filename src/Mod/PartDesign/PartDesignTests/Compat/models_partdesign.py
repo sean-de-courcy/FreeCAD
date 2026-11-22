@@ -1152,6 +1152,49 @@ def LoftNormalToProfile(make):
     return {"volumes": {"Loft": total / (3 * n)}}
 
 
+def MitreAtLobeCorners(make):
+    """A fillet whose line and arc rounds meet in a mitre at a corner convex in the material
+    (ops#941, notes/fillet-corner-mitre-941.md; Onshape's corner is that mitre, oracle941).
+
+    Body: as BaseFeature, a ring plate of radii 2 and 9, 2 thick under z 0, with four ring-sector
+    lobes between radii 4 and 5, 60 degrees wide, 2 high, turned half a turn about X and back (the
+    last digits of a Body's placement); a Fillet of radius 0.588 on the lobes' 16 foot edges.
+    At that radius OCCT's own result is invalid (one of its narrow bands); the exact construction
+    builds the mitre: 16 new faces, each corner's rounds meeting in one edge.
+
+    The expected volume is the plate's and the lobes', plus the fill by geometry: the lines' and
+    arcs' rounds in closed form and each corner's piece by the plan integral of its height
+    (`parttests.FilletFallbackTest.mitre_fill_volume`)."""
+    from parttests.FilletFallbackTest import lobe_feet, lobed_plate, mitre_fill_volume
+
+    radius = 0.588
+    doc = make("MitreAtLobeCorners")
+    shape = lobed_plate(True)
+    base = doc.addObject("Part::Feature", "Lobes")
+    base.Shape = shape
+    body = newBody(doc, "Body")
+    body.BaseFeature = base
+    doc.recompute()
+    edges = [
+        "Edge%d" % next(i for i, e in enumerate(base.Shape.Edges, 1) if e.isSame(edge))
+        for edge in lobe_feet(base.Shape)
+    ]
+    if len(edges) != 16:
+        raise AssertionError(f"the lobes have {len(edges)} foot edges, expected 16")
+    fillet = body.newObject("PartDesign::Fillet", "FootMitre")
+    fillet.Base = (body.BaseFeature, edges)
+    fillet.Radius = radius
+    body.Tip = fillet
+    doc.recompute()
+    plate = math.pi * (9 * 9 - 2 * 2) * 2
+    lobes = 4 * (60.0 / 360.0) * math.pi * (5 * 5 - 4 * 4) * 2
+    if abs(base.Shape.Volume - (plate + lobes)) > 1e-7 * (plate + lobes):
+        raise AssertionError("the lobed plate's volume is not the plate's and the lobes'")
+    if len(fillet.Shape.Faces) - len(base.Shape.Faces) != 16:
+        raise AssertionError("FootMitre does not add 16 faces")
+    return {"volumes": {"FootMitre": plate + lobes + mitre_fill_volume(radius, steps=4000)}}
+
+
 MODELS = [
     RevolutionGroove,
     SidedVariants,
@@ -1170,4 +1213,5 @@ MODELS = [
     RevolveFreeFormProfile,
     RoundUnderLeaningWall,
     LoftNormalToProfile,
+    MitreAtLobeCorners,
 ]

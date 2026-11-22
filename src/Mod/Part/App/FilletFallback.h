@@ -27,6 +27,7 @@
 #ifndef PART_FILLETFALLBACK_H
 #define PART_FILLETFALLBACK_H
 
+#include <algorithm>
 #include <memory>
 #include <optional>
 #include <string>
@@ -89,6 +90,11 @@ struct Request
     /// caller only where OCCT failed or left a face of zero width, so that nothing OCCT builds
     /// changes
     bool pastBothFaces = false;
+    /// The fillet's mitre corners only (ops#941, notes/fillet-corner-mitre-941.md section 4): no
+    /// rim route and no route under an overhang, the strips checked below the limit too, and a
+    /// refusal before any Boolean unless every selected edge ends at two corners of
+    /// mitreCircleCorner() (closed loops of that corner kind)
+    bool mitreOnly = false;
 };
 
 /// Each face's largest tolerance, with its edges and vertices: Request::faceTolerances
@@ -199,6 +205,75 @@ struct PartExport MergedNames
     std::vector<std::pair<TopoDS_Shape, std::vector<TopoDS_Shape>>> sources;
     std::vector<std::pair<TopoDS_Shape, std::vector<TopoDS_Shape>>> origins;
 };
+
+/// A fillet's mitre corner (mitreCircleCorner()): the vertex, on the plane face the two edges
+/// share, and the mitre's top, r up the corner's third edge, where the rounds' mitre starts
+struct MitreCorner
+{
+    gp_Pnt at;
+    gp_Pnt top;
+};
+
+/** Whether the selection has a fillet's mitre corner (ops#941): a vertex of 3 edges, two of them
+ * selected, concave, a line and a circle on a plane face both walls are square to, convex in the
+ * material, the line normal to the arc within 1e-6 rad, R > 2 r on an inner arc, and the mitre's
+ * foot inside both sweeps of the construction's piece. OCCT builds the mitre there, but in narrow
+ * bands of radius inexactly or invalidly. corners, if not null, receives every such corner.
+ * Reads only plain shapes, as construct().
+ */
+PartExport bool mitreCircleCorner(
+    const TopoDS_Shape& base,
+    const std::vector<TopoDS_Shape>& edges,
+    const Request& request,
+    std::vector<MitreCorner>* corners = nullptr
+);
+
+/// How far a result's mitres are off (mitreOff()): negative where a corner has no mitre edge
+struct MitreOff
+{
+    /// The largest distance of a mitre edge's points from its two rounds
+    double rounds {-1.0};
+    /// The largest distance of a mitre edge's ends from its vertices (a mitre cut short)
+    double ends {-1.0};
+    bool found() const
+    {
+        return rounds >= 0.0 && ends >= 0.0;
+    }
+    double worst() const
+    {
+        return found() ? std::max(rounds, ends) : -1.0;
+    }
+};
+
+/** How far OCCT's (or the construction's) mitres at the corners are off (ops#941 section 4): per
+ * corner, the result's edges not of the base between a cylinder face of radius r and a torus face
+ * of minor radius r, one end at the corner's top (within r / 10); at 8 points of each, the distance
+ * to both surfaces in closed form, and at its ends the distance to its vertices. Not found (a
+ * patch, or the mitre missing or cut short at its top) where a corner has no such edge.
+ */
+PartExport MitreOff mitreOff(
+    const TopoDS_Shape& result,
+    const TopoDS_Shape& base,
+    const std::vector<MitreCorner>& corners,
+    double radius
+);
+
+/// The most mitre corners a valid fillet asks the construction for (ops#941 section 4): more are
+/// left to OCCT, so that the ask stays well within the feature's time
+constexpr std::size_t mitreCap = 64;
+
+/// How far the construction's own mitre may be off (both of mitreOff()), for a radius: five times
+/// its worst as measured, never under 1e-5
+PartExport double mitreThreshold(double radius);
+
+/** Whether OCCT's valid mitre is off by enough to ask the construction (ops#941 section 4, the
+ * visible floor, coordinator c784): not found, its ends off their vertices by over
+ * max(mitreThreshold(), 1e-5 r) (a band's mitre, cut short or misplaced: 2.6e-5 r and more as
+ * measured, against at most 1.4e-7 r elsewhere), or its points off its rounds by over
+ * max(mitreThreshold(), 1e-3 r) (OCCT's approximation of the curve is a continuum up to 7.5e-4 r
+ * at 20 deg and 100x; its worst band, 4.1e-3 r). Elsewhere OCCT's result stands.
+ */
+PartExport bool mitreAsks(const MitreOff& occt, double radius);
 
 /// What construct() makes: a shape and its history from the base, without names (kernel safety S1)
 struct PartExport Construction

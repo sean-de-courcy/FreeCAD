@@ -501,7 +501,8 @@ names it.
 | `fix/i927-drawing-holder` | fix | ops#927 | - | `integration` `20a9ad07f1` | `def5449612` (fork PR 500), 2026-11-21 | never (fork feature) |
 | `fix/i939-sweep-loft-fork-fixes` | fix | ops#939, ops#933, ops#729 | - | `integration` `20a9ad07f1` | `78d51e9d12` (fork PR 499), 2026-11-21 | never (fork fix): a Pipe sweeps every face of a multi-face profile; a two-polygon elbow loft pairs untwisted; a connected loft matches vertices that only split a straight line |
 | `fix/i935-dressup-fork-fixes` | fix | ops#935 | - | `integration` `97432aef2d` | `7fbb316bb4` (fork PR 502), 2026-11-21 | never (fork fix): dress-ups on a base of several solids, and concave rounds where a cone stands on a plane |
-| `fix/i900-fullround-torus` | fix | ops#900 | - | integration | (fork PR 501) | never (fork fix): a full round is one face per run and per corner, answering to each round's name (ops#900) |
+| `fix/i900-fullround-torus` | fix | ops#900 | - | integration | `d01198675b` (fork PR 501), 2026-11-22 | never (fork fix): a full round is one face per run and per corner, answering to each round's name (ops#900) |
+| `fix/i941-fillet-mitre` | fix | ops#941, ops#925 | - | `integration` `d01198675b` | (fork PR 504) | never (fork feature) |
 
 ## Fork-only commits in carried topics
 

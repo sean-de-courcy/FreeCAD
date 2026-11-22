@@ -97,11 +97,23 @@ PartExport void run(
 
 /** As run(), for a check of the result (work on copies only): false, with nothing noted as a stop,
  * where the limit stopped it or it could not start; a PartDesign feature then fails (kernel layer
- * step 2). Esc and the work's own errors throw as from run(). */
+ * step 2). Esc, the memory ceiling and the work's own errors throw as from run().
+ *
+ * With \a seconds over 0, the work has its own limit, in CPU seconds of its worker (the clock's
+ * backstop wallBackstop times it): past it, false, and the feature goes on. Where the feature's
+ * limit leaves less than that (in CPU time or on the clock's backstop), the work does not start:
+ * false (ops#941: an optional improvement of a result must never make the feature fail on time). */
 PartExport bool runOptional(
     const char* what,
-    const std::function<void(const Message_ProgressRange&)>& work
+    const std::function<void(const Message_ProgressRange&)>& work,
+    double seconds = 0.0
 );
+
+/** The limit of an optional improvement of a result (runOptional()'s seconds), in CPU seconds:
+ * "User parameter:BaseApp/Preferences/Mod/Part/General", float "GeometryOptionalLimit", default
+ * 30. 0 or less: the default. Past it the result stands as built, with a warning (ops#941: the
+ * fillet's exact mitre). */
+PartExport double optionalLimit();
 
 /** An exact copy of the shape, its geometry included (a binary round trip, as a file saves it),
  * for work under run() that must not read the document's shapes. BRepBuilderAPI_Copy's copy isn't
