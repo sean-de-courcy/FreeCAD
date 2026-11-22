@@ -398,6 +398,17 @@ PartExport bool preferConstruction(
     const Request& request
 );
 
+/** For each of the edges, whether the construction's analysis of a single edge takes it (a line
+ * between planes or cylinders along it, a circle between a plane and a coaxial cylinder or cone):
+ * the edges it could build, as against those only OCCT builds (ops#952). Reads only plain
+ * shapes; false where the analysis refuses or throws.
+ */
+PartExport std::vector<bool> coveredEdges(
+    const TopoDS_Shape& base,
+    const std::vector<TopoDS_Shape>& edges,
+    const Request& request
+);
+
 /** Whether a fillet's contact line on a face next to a selected edge runs along part of that face's
  * own boundary, and on across the face beyond it (ops#806): a step in the face exactly at the
  * round's tangent line, as a rib in a slot whose top is level with the rim round's lower tangent
