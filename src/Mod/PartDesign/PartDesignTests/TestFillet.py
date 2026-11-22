@@ -989,7 +989,9 @@ class TestFillet(unittest.TestCase):
             self.assertEqual(len(doc.getObject("Fillet").Shape.Edges), edges)
             self.assertEqual(len(doc.getObject("Body").Shape.Edges), edges)
         finally:
-            FreeCAD.closeDocument(doc.Name)
+            for name in list(FreeCAD.listDocuments()):
+                if name.startswith("FullRoundSave"):
+                    FreeCAD.closeDocument(name)
             if os.path.exists(path):
                 os.remove(path)
             os.rmdir(os.path.dirname(path))
