@@ -17639,8 +17639,11 @@ void finish(TopoShape& result, const Construction& construction, const TopoShape
                     std::stable_sort(ranked.begin(), end, [](const Ranked& a, const Ranked& b) {
                         return a.lowest < b.lowest;
                     });
-                    const std::string first = "Edge" + std::to_string(ranked[0].lowest);
-                    const std::string other = "Edge" + std::to_string(ranked[1].lowest);
+                    auto edgeName = [](int index) {
+                        return index > 0 ? "Edge" + std::to_string(index) : std::string("an edge");
+                    };
+                    const std::string first = edgeName(ranked[0].lowest);
+                    const std::string other = edgeName(ranked[1].lowest);
                     const std::string warning = "The round face over " + first + " and " + other
                         + " is named after " + first
                         + "'s round by the solid's edge order: the edges' history does not say "

@@ -1243,6 +1243,27 @@ class TestFillet(unittest.TestCase):
                     self.assertEqual(got, named)
                     self._assertNoNamingWarning()
 
+    def testFullRoundOfAnEdgeSplitByALaterCutRanksAtTheCutsPlace(self):
+        # Review pr503-r1 T1 (row c's rule on a split edge, not measured): PadF (x 0..30), PadB
+        # (x 0..25), then a slot x 25..28 through the top half leaving a remnant of PadF's front
+        # edge beyond it. The near piece is renamed by the cut, which is last: back
+        for picked in (("front", "back"), ("back", "front")):
+            with self.subTest(picked=picked):
+                body = self.Doc.addObject("PartDesign::Body", "Body")
+                self._pad_of_lines(body, "PadF", self._chain(self._HALVES["front"]), 20)
+                self._pad_of_lines(body, "PadB", self._chain([(0, 2), (25, 2), (25, 4), (0, 4)]), 20)
+                slot = body.newObject("PartDesign::SubtractiveBox", "Slot")
+                slot.Length, slot.Width, slot.Height = 3, 10, 20
+                slot.Placement.Base = FreeCAD.Vector(25, -3, 10)
+                slot.Refine = True
+                self.Doc.recompute()
+                self.assertTrue(slot.isValid(), slot.getStatusString())
+                ends = {"front": ((0, 0, 20), (25, 0, 20)), "back": ((0, 4, 20), (25, 4, 20))}
+                edges = [self._edge_between(slot.Shape, *ends[side]) for side in picked]
+                got = self._first_round_at_the_limit(body, slot, edges, 2.0, 1.9, self._front_or_back)
+                self.assertEqual(got, "back")
+                self._assertNoNamingWarning()
+
     def testFullRoundWithoutHistoryIsNamedByTheEdgeOrderAndWarns(self):
         # fullround-name-order-900.md 5: a Part::Box's edges carry no sketch, so neither edge is
         # known to be made first: the round of the lower base edge names the face, for either

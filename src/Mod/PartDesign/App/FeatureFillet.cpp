@@ -220,17 +220,22 @@ public:
         if (place < 0 || static_cast<size_t>(place) >= chain.size()) {
             return place;
         }
+        // A feature whose result first has the name, or has it again after one without it, made
+        // the edge anew (a slot leaving a remnant renames the piece: review pr503-r1 T1)
         int last = place;
         TopoDS_Shape previous = edgeNamed(static_cast<size_t>(place), name);
+        bool gap = previous.IsNull();
         for (size_t at = static_cast<size_t>(place) + 1; at < chain.size(); ++at) {
             const TopoDS_Shape edge = edgeNamed(at, name);
             if (edge.IsNull()) {
+                gap = true;
                 continue;
             }
-            if (!previous.IsNull() && !sameEnds(previous, edge)) {
+            if (gap || !sameEnds(previous, edge)) {
                 last = static_cast<int>(at);
             }
             previous = edge;
+            gap = false;
         }
         return last;
     }
@@ -450,6 +455,14 @@ App::DocumentObjectExecReturn* Fillet::build()
         }
         // store shape before refinement
         if (reapplying) {
+            // ops#951: the pattern instance's undecided merged face is said on the pattern's fillet
+            // (review pr503-r1 T2)
+            if (const std::string note = Part::FilletFallback::takeNamingOrder(); !note.empty()) {
+                if (auto doc = getDocument()) {
+                    const char* previous = doc->getWarningDescription(this);
+                    doc->setWarning(this, previous && *previous ? std::string(previous) + "\n" + note : note);
+                }
+            }
             auto owner = freecad_cast<Fillet*>(const_cast<DressUp*>(dressUpTriedFor(this)));
             dressUpReappliedFrom(
                 shape,
