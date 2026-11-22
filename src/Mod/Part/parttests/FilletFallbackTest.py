@@ -6963,7 +6963,8 @@ class SeveralSolidsTest(unittest.TestCase):
     def testFullRoundOnOneSolid(self):
         base = self.base()
         result = base.makeFillet(2, top_edges(base))
-        self.check(result, 2400 - 2 * fillet_section(2) * 30, 7)
+        # The two rounds are one cylinder, as Onshape's (ops#900): 6 faces, not 7
+        self.check(result, 2400 - 2 * fillet_section(2) * 30, 6)
 
     def testPicksOnTwoSolidsAreRefused(self):
         # One construction per solid is not built: OCCT's error stands
