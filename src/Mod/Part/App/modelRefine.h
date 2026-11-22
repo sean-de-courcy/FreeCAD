@@ -231,9 +231,9 @@ void revolvedEdgesToKeep(const TopoDS_Shape& shape, TopTools_MapOfShape& keep);
  * \a tool, and only those (FreeCAD-CH, ops#895): the pieces a feature cut its own tool into
  * (a helix's turns) become whole again, whatever the refine says. Every other edge and vertex
  * is kept. Named from \a shape's map through the merge's history, a merged face takes its whole
- * name back (as the refine's fallback does, ops#806). Returns false, and leaves \a shape as it
- * was, when there is nothing to merge, or the merge would change the faces' area, the volume,
- * the number of solids or the validity.
+ * name back (as the refine's fallback does, ops#806), and so does a merged edge. Returns true
+ * with \a shape as it was when no two such faces meet; false, leaving \a shape as it was, when
+ * the merge would change the faces' area, the volume, the number of solids or the validity.
  */
 PartExport bool unifyAcrossSameSurface(Part::TopoShape& shape, const TopoDS_Shape& tool, const char* op);
 }  // namespace ModelRefine

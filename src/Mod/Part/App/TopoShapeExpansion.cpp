@@ -14354,7 +14354,7 @@ bool ModelRefine::unifyAcrossSameSurface(Part::TopoShape& shape, const TopoDS_Sh
             }
         }
         if (freeEdges == 0) {
-            return false;
+            return true;  // nothing to merge: no two faces of one tool surface meet
         }
         // A cut's vertex joins the two edges it split, where both pieces are of one curve (a
         // crest cut at each turn); elsewhere it stays (the boolean's sections at a thread's root,

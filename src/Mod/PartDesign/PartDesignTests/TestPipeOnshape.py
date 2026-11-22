@@ -522,12 +522,11 @@ class TestThreadCapFollowsEdits(PipeCase):
 
 
 class TestHelixTurnNamesNeverPass(PipeCase):
-    """Batch 4's T1 (ops#640): a helix's side faces are twins, one per turn, turn 1's told apart by
-    the start cap's names. In two turns the last turn took the plain name turn 1 has in one turn,
-    so a reference on turn 1 went to turn 2 when a turn was added, silently (and back). Onshape's
-    side face is one face, and a reference to it follows. Designed: an AdditiveHelix about Z of a
-    3 x 2 rectangle (x 9..12, z 0..2 on XZ), pitch 6; a datum point at the centre of a turn's outer
-    face (r 12, area 2 pi 12 x 2, its centre on the axis at z = 4 + 6 (k - 1) for turn k)."""
+    """Batch 4's T1 (ops#640): a helix's side faces were twins, one per turn, and a reference on
+    turn 1 went to turn 2 when a turn was added, silently (and back). Since ops#895 the side face is
+    one face, as Onshape's, and a reference to it follows the edit. Designed: an AdditiveHelix
+    about Z of a 3 x 2 rectangle (x 9..12, z 0..2 on XZ), pitch 6; a datum point at the centre of
+    mass of the outer face (r 12): on the axis at z = 1 + 3 turns."""
 
     def helix(self, turns):
         profile = self.sketch("HS", models.rectangle(9, 0, 12, 2), placement=XZ)
@@ -541,75 +540,52 @@ class TestHelixTurnNamesNeverPass(PipeCase):
         self.assertTrue(helix.isValid(), helix.getStatusString())
         return helix
 
-    def outer(self, helix, k):
-        """The outer face of turn k: the B-spline face of area 2 pi 12 x 2 centred at z = 4 + 6 (k - 1)."""
-        z = 4 + 6 * (k - 1)
-        [name] = [
-            "Face%d" % (i + 1)
-            for i, f in enumerate(helix.Shape.Faces)
-            if f.Surface.__class__.__name__ == "BSplineSurface"
-            and abs(f.Area - 2 * math.pi * 12 * 2) < 3
-            and abs(f.CenterOfMass.z - z) < 0.25
-        ]
-        return name
+    def outer(self, helix):
+        """The outer face: the one B-spline face whose vertices and middle lie at r 12."""
+        names = []
+        for i, f in enumerate(helix.Shape.Faces):
+            if f.Surface.__class__.__name__ != "BSplineSurface":
+                continue
+            u0, u1, v0, v1 = f.ParameterRange
+            points = [v.Point for v in f.Vertexes] + [f.valueAt((u0 + u1) / 2, (v0 + v1) / 2)]
+            if all(abs(math.hypot(q.x, q.y) - 12) < 1e-4 for q in points):
+                names.append("Face%d" % (i + 1))
+        self.assertEqual(len(names), 1, names)
+        return names[0]
 
-    def pointOn(self, helix, k):
-        point = self.body.newObject("PartDesign::Point", "OnTurn%d" % k)
-        point.AttachmentSupport = [(helix, self.outer(helix, k))]
+    def pointOn(self, helix, turns):
+        point = self.body.newObject("PartDesign::Point", "OnOuter")
+        point.AttachmentSupport = [(helix, self.outer(helix))]
         point.MapMode = "CenterOfMass"
         self.doc.recompute()
-        self.assertAlmostEqual(point.Placement.Base.z, 4 + 6 * (k - 1), 2)
+        self.assertAlmostEqual(point.Placement.Base.z, 1 + 3 * turns, 2)
         return point
 
-    def assertNotOnTurn(self, point, k):
-        """Broken (loud), or anywhere but turn k's outer face."""
-        if point.isValid():
-            self.assertGreater(abs(point.Placement.Base.z - (4 + 6 * (k - 1))), 1,
-                               "the reference passed to turn %d's face" % k)
+    def assertFollows(self, helix, point, turns):
+        helix.Turns = turns
+        self.doc.recompute()
+        self.assertTrue(point.isValid(), point.getStatusString())
+        self.assertEqual(point.AttachmentSupport[0][1][0], self.outer(helix))
+        self.assertAlmostEqual(point.Placement.Base.z, 1 + 3 * turns, 2)
 
-    def testTurnOneDoesNotPassToTurnTwo(self):
-        """1 -> 2 turns: the point on turn 1 stays on turn 1 or breaks; it went to turn 2."""
+    def testOuterFaceFollowsASecondTurn(self):
+        """1 -> 2 turns: the point stays on the outer face, now two turns long (sweeps 16)."""
         helix = self.helix(1)
         point = self.pointOn(helix, 1)
-        helix.Turns = 2
-        self.doc.recompute()
-        self.assertNotOnTurn(point, 2)
+        self.assertFollows(helix, point, 2)
 
-    def testGoneTurnTwoDoesNotPassToTurnOne(self):
-        """2 -> 1 turn: turn 2's face is gone, so the point on it breaks; it went to turn 1."""
+    def testOuterFaceFollowsTheSecondTurnGone(self):
+        """2 -> 1 turn: the point stays on the outer face, now one turn long (sweeps 16)."""
         helix = self.helix(2)
         point = self.pointOn(helix, 2)
-        helix.Turns = 1
-        self.doc.recompute()
-        self.assertFalse(point.isValid(), "the reference on the gone turn 2 moved to turn 1")
+        self.assertFollows(helix, point, 1)
 
-    def testTurnTwoFollowsATurnAdded(self):
-        """2 -> 3 turns: the point on turn 2 stays on turn 2 (integration's twins did, by their count)."""
+    def testOuterFaceFollowsATurnAdded(self):
+        """2 -> 3 turns, then 3 -> 1.5: the point stays on the outer face."""
         helix = self.helix(2)
         point = self.pointOn(helix, 2)
-        helix.Turns = 3
-        self.doc.recompute()
-        self.assertTrue(point.isValid(), point.getStatusString())
-        self.assertAlmostEqual(point.Placement.Base.z, 10, 2)
-
-    def testTurnOneFollowsASecondTurn(self):
-        """1 -> 2 turns: the point on the one turn stays on turn 1, which sits where it was (sweeps
-        16; Onshape follows its one face). It broke, the twin count having changed."""
-        helix = self.helix(1)
-        point = self.pointOn(helix, 1)
-        helix.Turns = 2
-        self.doc.recompute()
-        self.assertTrue(point.isValid(), point.getStatusString())
-        self.assertAlmostEqual(point.Placement.Base.z, 4, 2)
-
-    def testTurnOneFollowsTheSecondTurnGone(self):
-        """2 -> 1 turn: the point on turn 1 stays on the one turn left (sweeps 16). It broke."""
-        helix = self.helix(2)
-        point = self.pointOn(helix, 1)
-        helix.Turns = 1
-        self.doc.recompute()
-        self.assertTrue(point.isValid(), point.getStatusString())
-        self.assertAlmostEqual(point.Placement.Base.z, 4, 2)
+        self.assertFollows(helix, point, 3)
+        self.assertFollows(helix, point, 1.5)
 
 
 class TestPipeHelixTurnsCountFromTheStart(PipeCase):
