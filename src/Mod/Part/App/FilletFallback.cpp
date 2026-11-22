@@ -17380,7 +17380,7 @@ struct EdgeOrigin
     int index = 0;  // the base's Edge<index>, 0 if it has none
     std::string maker;  // the tag of the feature or sketch that made it, or of its last copy
     std::string copy;  // the copy it is (a pattern instance, a boundary, a second side), or empty
-    int place = -1;  // the maker's place in the feature list (FeatureOrder), -1 unknown
+    int place = -1;  // the place of the last feature that made or changed it, -1 unknown
     std::string sketch;  // the sketch its segment key is from, empty for none
     std::array<long long, 3> segment {0, 0, 0};  // (n, m, side): g<n>, g<n>v<m>, sketch plane 0
 };
@@ -17469,15 +17469,18 @@ EdgeOrigin originOf(const TopoShape& base, const TopoDS_Shape& edge, const Featu
         origin.maker.clear();
         return origin;
     }
+    int maker = -1;  // the maker's place
     if (order) {
-        origin.place = own ? order->sketchMaker(static_cast<long>(tag), std::string(sections.front()))
-                           : order->place(static_cast<long>(tag));
+        maker = own ? order->sketchMaker(static_cast<long>(tag), std::string(sections.front()))
+                    : order->place(static_cast<long>(tag));
     }
+    // Ranked at the last feature that changed it (oracle900b row c), its segment still its maker's
+    origin.place = maker >= 0 ? order->lastChange(name, maker) : -1;
     // The segment: the innermost sources from a sketch the maker reads (with no feature list, all
     // of one tag), the smallest of their geometry IDs (3e)
     std::vector<std::string> sketches;
-    if (order && origin.place >= 0) {
-        for (long sketch : order->sketchesAt(origin.place)) {
+    if (order && maker >= 0) {
+        for (long sketch : order->sketchesAt(maker)) {
             sketches.push_back(std::to_string(sketch));
         }
     }

@@ -31,8 +31,11 @@
 #include <BRepFilletAPI_MakeFillet.hxx>
 #include <BRep_Tool.hxx>
 #include <Geom_Circle.hxx>
+#include <Precision.hxx>
+#include <TopExp.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Edge.hxx>
+#include <TopoDS_Vertex.hxx>
 #include <TopExp_Explorer.hxx>
 #include <ShapeFix_Shape.hxx>
 
@@ -212,7 +215,60 @@ public:
             : std::vector<long>();
     }
 
+    int lastChange(const Data::MappedName& name, int place) const override
+    {
+        if (place < 0 || static_cast<size_t>(place) >= chain.size()) {
+            return place;
+        }
+        int last = place;
+        TopoDS_Shape previous = edgeNamed(static_cast<size_t>(place), name);
+        for (size_t at = static_cast<size_t>(place) + 1; at < chain.size(); ++at) {
+            const TopoDS_Shape edge = edgeNamed(at, name);
+            if (edge.IsNull()) {
+                continue;
+            }
+            if (!previous.IsNull() && !sameEnds(previous, edge)) {
+                last = static_cast<int>(at);
+            }
+            previous = edge;
+        }
+        return last;
+    }
+
 private:
+    // The edge of that name in the result of the feature at  at, or null
+    TopoDS_Shape edgeNamed(size_t at, const Data::MappedName& name) const
+    {
+        const auto* feature = dynamic_cast<const Part::Feature*>(chain[at].object);
+        if (!feature) {
+            return {};
+        }
+        const Part::TopoShape shape = feature->Shape.getShape();
+        const Data::IndexedName index = shape.getIndexedName(name);
+        if (!index || std::string(index.getType()) != "Edge") {
+            return {};
+        }
+        return shape.getSubShape(TopAbs_EDGE, index.getIndex(), /*silent=*/true);
+    }
+
+    // Whether a later feature left the edge as it was: the same edge, or one with the same ends
+    static bool sameEnds(const TopoDS_Shape& a, const TopoDS_Shape& b)
+    {
+        if (a.IsSame(b)) {
+            return true;
+        }
+        TopoDS_Vertex a1, a2, b1, b2;
+        TopExp::Vertices(TopoDS::Edge(a), a1, a2);
+        TopExp::Vertices(TopoDS::Edge(b), b1, b2);
+        if (a1.IsNull() || a2.IsNull() || b1.IsNull() || b2.IsNull()) {
+            return false;
+        }
+        auto closeTo = [](const TopoDS_Vertex& u, const TopoDS_Vertex& v) {
+            return BRep_Tool::Pnt(u).Distance(BRep_Tool::Pnt(v)) <= Precision::Confusion();
+        };
+        return (closeTo(a1, b1) && closeTo(a2, b2)) || (closeTo(a1, b2) && closeTo(a2, b1));
+    }
+
     struct Entry
     {
         const App::DocumentObject* object = nullptr;

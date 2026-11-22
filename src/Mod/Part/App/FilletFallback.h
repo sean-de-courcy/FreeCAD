@@ -611,6 +611,11 @@ public:
     virtual int sketchMaker(long sketch, const std::string& section) const = 0;
     /// The tags of the sketches the feature at \a place reads
     virtual std::vector<long> sketchesAt(int place) const = 0;
+    /// The place of the last feature, from \a place on, that changed the edge named \a name in
+    /// the base (oracle900b row c: Onshape ranks an edge a later cut shortened at the cut's
+    /// place). The fork's names don't say it: a shortened edge keeps its name, so the edge of
+    /// that name is compared feature by feature
+    virtual int lastChange(const Data::MappedName& name, int place) const = 0;
 
     /// The innermost on this thread, or null
     static const FeatureOrder* current();

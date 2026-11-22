@@ -1148,7 +1148,7 @@ class TestFillet(unittest.TestCase):
         self.assertNotIn("named after", self._last_fillet.getStatusString())
 
     def testFullRoundOfAMirroredHalfRibIsNamedByTheOriginal(self):
-        # Guard, rule not measured (fullround-name-order-900.md 6.4, oracle900b row d): the half rib y 0..2 mirrored
+        # oracle900b row d (fullround-name-order-900.md 6.4): the half rib y 0..2 mirrored
         # about the sketch's H axis; the mirror's copy is made by the mirror, after the pad, so
         # the original's round (y 2) names the face, whichever edge was picked first
         for picked in ((2, -2), (-2, 2)):
@@ -1170,7 +1170,7 @@ class TestFillet(unittest.TestCase):
                 self._assertNoNamingWarning()
 
     def testFullRoundOfAPlateBullnoseIsNamedByTheSketchPlaneEdge(self):
-        # Guard, rule not measured (fullround-name-order-900.md 3f, 6.1, oracle900b row a): a plate 4 thick, its front
+        # oracle900b row a (fullround-name-order-900.md 3f, 6.1): a plate 4 thick, its front
         # side's bottom and top edges rounded at r 2 (a bullnose): the bottom edge, the sketch's
         # own, names the face, with no warning
         for picked in ((0, 4), (4, 0)):
@@ -1185,7 +1185,7 @@ class TestFillet(unittest.TestCase):
                 self._assertNoNamingWarning()
 
     def testFullRoundOfARibLeftByOneCutIsNamedByTheCutsSegment(self):
-        # Guard, rule not measured (fullround-name-order-900.md 6.2, oracle900b row b): a block
+        # oracle900b row b (fullround-name-order-900.md 6.2): a block
         # 30 x 20 x 20, one through pocket from a sketch above it with two windows, leaving the rib
         # y 8..12. Both long top edges are the pocket's; the window segment drawn first (y 8, g3,
         # against y 12, g5) names the face
@@ -1210,26 +1210,38 @@ class TestFillet(unittest.TestCase):
                 self.assertEqual(named, "front")
                 self._assertNoNamingWarning()
 
-    def testFullRoundOfAShortenedEdgeIsNamedByItsFirstMaker(self):
-        # Guard, rule not measured (fullround-name-order-900.md 6.3, oracle900b row c): PadF (the
-        # front half, x 0..30), a cut that shortens it to x 0..25, then PadB (the back half,
-        # x 0..25). The shortened front edge keeps PadF as its maker, before PadB: front
-        for picked in (("front", "back"), ("back", "front")):
-            with self.subTest(picked=picked):
-                body = self.Doc.addObject("PartDesign::Body", "Body")
-                self._pad_of_lines(body, "PadF", self._chain(self._HALVES["front"]), 20)
-                box = body.newObject("PartDesign::SubtractiveBox", "Cut")
-                box.Length, box.Width, box.Height = 10, 10, 30
-                box.Placement.Base = FreeCAD.Vector(25, -3, -5)
-                box.Refine = True
-                self.Doc.recompute()
-                pad = self._pad_of_lines(body, "PadB", self._chain([(0, 2), (25, 2), (25, 4), (0, 4)]), 20)
-                self.assertEqual(len(pad.Shape.Faces), 6)
-                ends = {"front": ((0, 0, 20), (25, 0, 20)), "back": ((0, 4, 20), (25, 4, 20))}
-                edges = [self._edge_between(pad.Shape, *ends[side]) for side in picked]
-                named = self._first_round_at_the_limit(body, pad, edges, 2.0, 1.9, self._front_or_back)
-                self.assertEqual(named, "front")
-                self._assertNoNamingWarning()
+    def testFullRoundOfAShortenedEdgeRanksAtTheCutsPlace(self):
+        # oracle900b row c: PadF (the front half, x 0..30), PadB (the back half, x 0..25) and a
+        # cut that shortens PadF's front edge to x 0..25, leaving PadB's back edge as it is. An
+        # edge ranks at the place of the last feature that made or changed it: PadF, Cut, PadB
+        # gives front; PadF, PadB, Cut gives back (PadB's round)
+        for cut_first, named in ((True, "front"), (False, "back")):
+            for picked in (("front", "back"), ("back", "front")):
+                with self.subTest(cut_first=cut_first, picked=picked):
+                    body = self.Doc.addObject("PartDesign::Body", "Body")
+                    self._pad_of_lines(body, "PadF", self._chain(self._HALVES["front"]), 20)
+
+                    def cut():
+                        box = body.newObject("PartDesign::SubtractiveBox", "Cut")
+                        box.Length, box.Width, box.Height = 10, 10, 30
+                        box.Placement.Base = FreeCAD.Vector(25, -3, -5)
+                        box.Refine = True
+                        self.Doc.recompute()
+                        return box
+
+                    def back():
+                        return self._pad_of_lines(
+                            body, "PadB", self._chain([(0, 2), (25, 2), (25, 4), (0, 4)]), 20
+                        )
+
+                    tip = (cut(), back())[1] if cut_first else (back(), cut())[1]
+                    self.assertTrue(tip.isValid(), tip.getStatusString())
+                    self.assertEqual(len(tip.Shape.Faces), 6)
+                    ends = {"front": ((0, 0, 20), (25, 0, 20)), "back": ((0, 4, 20), (25, 4, 20))}
+                    edges = [self._edge_between(tip.Shape, *ends[side]) for side in picked]
+                    got = self._first_round_at_the_limit(body, tip, edges, 2.0, 1.9, self._front_or_back)
+                    self.assertEqual(got, named)
+                    self._assertNoNamingWarning()
 
     def testFullRoundWithoutHistoryIsNamedByTheEdgeOrderAndWarns(self):
         # fullround-name-order-900.md 5: a Part::Box's edges carry no sketch, so neither edge is
