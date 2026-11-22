@@ -227,4 +227,71 @@ def HolePatternCopied(make):
     return {"volumes": {"LP": 12000 - 3 * 45 * math.pi}}
 
 
-MODELS = [StudioNewPart, SiblingCuts, MergeAccepted, SplitHalves, HolePatternCopied]
+def SurfaceTubeSplit(make):
+    """A surface from picked edges of a sketch, up to a face, and a Split by that sheet (ops#919,
+    notes/surface-upto-split-919.md 8, T2).
+
+    Block: an additive box 40 x 30 x 20 (24000). Profile, a sketch at document level on z = 0: a
+    regular hexagon of circumradius 8 centred (20, 15) and an open polyline beside it. Surface, a
+    `Part::Extrusion` of the hexagon's six edges only (`BaseEdges`), a surface up to Block's top
+    face (`EndType` UpToFace): a closed tube of six faces 8 x 20 (960). `split(Block, Surface)`:
+    Block keeps the plug (3325.5376, Front: the tube's normals point into it), a new Body the
+    block with a six-sided hole (20674.4624); the sheet is hidden."""
+    import Part
+
+    doc = make("SurfaceTubeSplit")
+    body = newBody(doc, "Block")
+    box = body.newObject("PartDesign::AdditiveBox", "Box")
+    box.Length, box.Width, box.Height = 40, 30, 20
+    doc.recompute()
+    hexagon = [
+        V(20 + 8 * math.cos(k * math.pi / 3), 15 + 8 * math.sin(k * math.pi / 3), 0)
+        for k in range(6)
+    ]
+    hexagon.append(hexagon[0])
+    line = [V(5, -5, 0), V(15, 15, 0), V(25, 15, 0), V(35, 35, 0)]
+    sketch = doc.addObject("Sketcher::SketchObject", "Profile")
+    for points in (hexagon, line):
+        for a, b in zip(points, points[1:]):
+            sketch.addGeometry(Part.LineSegment(a, b), False)
+    doc.recompute()
+
+    def among(point):
+        return any(point.distanceToPoint(p) < 1e-6 for p in hexagon)
+
+    picks = [
+        f"Edge{i}"
+        for i, edge in enumerate(sketch.Shape.Edges, 1)
+        if all(among(v.Point) for v in edge.Vertexes)
+    ]
+    top = next(
+        f"Face{i}"
+        for i, face in enumerate(box.Shape.Faces, 1)
+        if face.normalAt(0, 0).z > 0.5 and abs(face.CenterOfMass.z - 20) < 1e-6
+    )
+    surface = doc.addObject("Part::Extrusion", "Surface")
+    surface.Base = sketch
+    surface.BaseEdges = (sketch, picks)
+    surface.Dir = V(0, 0, 1)
+    surface.Solid = False
+    surface.EndType = "UpToFace"
+    surface.UpToFace = (box, top)
+    doc.recompute()
+    part = PartDesign.split(body, surface, "Front")
+    doc.recompute()
+    original, half = body.Tip, part.Tip
+    if len(picks) != 6 or not original.isValid() or not half.isValid():
+        raise AssertionError(f"SurfaceTubeSplit: {picks}, {original.Name}, {half.Name}")
+    plug = 20 * 3 * math.sqrt(3) / 2 * 64
+    # Front, where the sheet's normals point: the inside of this counter-clockwise hexagon's tube
+    return {"volumes": {"Box": 24000, original.Name: plug, half.Name: 24000 - plug}}
+
+
+MODELS = [
+    StudioNewPart,
+    SiblingCuts,
+    MergeAccepted,
+    SplitHalves,
+    HolePatternCopied,
+    SurfaceTubeSplit,
+]

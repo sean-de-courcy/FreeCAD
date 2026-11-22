@@ -211,6 +211,7 @@ from PartDesignTests.TestFilletDeleteKeepsTheSketch import (  # FreeCAD-CH, ops#
 )
 from PartDesignTests.TestBooleanRules import TestBooleanRules  # FreeCAD-CH, ops#640
 from PartDesignTests.TestSplitParts import TestSplitParts  # FreeCAD-CH, ops#640
+from PartDesignTests.TestSurfaceUpToSplit import TestSurfaceUpToSplit  # FreeCAD-CH, ops#919
 from PartDesignTests.TestOnshapeEndTypes import TestOnshapeEndTypes  # FreeCAD-CH, ops#640
 from PartDesignTests.TestProfileRegions import TestProfileRegions  # FreeCAD-CH, feat/profile-regions
 from PartDesignTests.TestDerived import TestDerived  # FreeCAD-CH, ops#640 round 6

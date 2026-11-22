@@ -119,6 +119,7 @@ set(PartDesign_TestScripts
     PartDesignTests/TestFilletDeleteKeepsTheSketch.py
     PartDesignTests/TestBooleanRules.py
     PartDesignTests/TestSplitParts.py
+    PartDesignTests/TestSurfaceUpToSplit.py
     PartDesignTests/TestRegenerate.py
     PartDesignTests/TestOnshapeEndTypes.py
     PartDesignTests/TestProfileRegions.py
