@@ -485,18 +485,6 @@ std::string seconds(double value)
     return text.str();
 }
 
-/// The work, its C++ errors kept for the caller
-void runWork(const std::shared_ptr<Call>* call)
-{
-    try {
-        Handle(CancelIndicator) indicator = new CancelIndicator(*call);
-        (*call)->work(indicator->Start());
-    }
-    catch (...) {
-        (*call)->error = std::current_exception();
-    }
-}
-
 #ifdef _WIN32
 /// The structured exceptions a worker turns into the feature's error (FreeCAD-CH, ops#958): faults
 /// of the kernel's code. Others (a C++ exception, a breakpoint, a stack overflow) are left as they
@@ -517,16 +505,19 @@ int workerFault(unsigned long code)
     }
 }
 
-/// runWork() under a structured exception handler, in a function with no object to unwind (/EHsc):
-/// the fault's code, or 0. __try is MSVC's (and clang-cl's) extension, Windows only
+/// The work alone under a structured exception handler: the fault's code, or 0. It is the innermost
+/// handler around the work, so its filter sees a fault before any catch (...) outside it: Windows
+/// Release builds compile with /EHa (FREECAD_RELEASE_SEH), where catch (...) also takes structured
+/// exceptions (CI run 45014205931). No object to unwind may live in this function (C2712). __try is
+/// MSVC's (and clang-cl's) extension, Windows only
 # if defined(__clang__)
 #  pragma clang diagnostic push
 #  pragma clang diagnostic ignored "-Wlanguage-extension-token"
 # endif
-unsigned long runGuarded(const std::shared_ptr<Call>* call)
+unsigned long invokeGuarded(const Call& call, const Message_ProgressRange& range)
 {
     __try {
-        runWork(call);
+        call.work(range);
         return 0;
     }
     __except (workerFault(GetExceptionCode())) {
@@ -536,6 +527,20 @@ unsigned long runGuarded(const std::shared_ptr<Call>* call)
 # if defined(__clang__)
 #  pragma clang diagnostic pop
 # endif
+
+/// The work, its C++ errors kept for the caller: the fault's code, or 0
+unsigned long runGuarded(const std::shared_ptr<Call>* call)
+{
+    unsigned long fault = 0;
+    try {
+        Handle(CancelIndicator) indicator = new CancelIndicator(*call);
+        fault = invokeGuarded(**call, indicator->Start());
+    }
+    catch (...) {
+        (*call)->error = std::current_exception();
+    }
+    return fault;
+}
 
 std::string faultText(unsigned long code)
 {
@@ -555,6 +560,18 @@ std::mutex armMutex;
 // Set only while a worker's work runs
 thread_local sigjmp_buf* faultJump = nullptr;
 thread_local volatile sig_atomic_t faultSignal = 0;
+
+/// The work, its C++ errors kept for the caller
+void runWork(const std::shared_ptr<Call>* call)
+{
+    try {
+        Handle(CancelIndicator) indicator = new CancelIndicator(*call);
+        (*call)->work(indicator->Start());
+    }
+    catch (...) {
+        (*call)->error = std::current_exception();
+    }
+}
 
 void faultHandler(int sig, siginfo_t* info, void* context)
 {
@@ -662,9 +679,12 @@ void runWorker(const std::shared_ptr<Call>& call)
     call->sample.open();
     call->sampleReady.store(call->sample.valid(), std::memory_order_release);
     // FreeCAD-CH (ops#958): the C runtime's SIGSEGV action, which turns an access violation into
-    // Base::AccessViolation on the main thread (SystemHandler.cpp), is per thread and unset here,
-    // and /EHsc keeps catch (...) from seeing it; on macOS and Linux the process's action ends the
-    // process from any thread: a fault in OCCT ended the process. Now it fails the call, which
+    // Base::AccessViolation on the main thread (SystemHandler.cpp), is per thread and unset here;
+    // under /EHsc (RelWithDebInfo, Debug) catch (...) doesn't see the fault, and under /EHa (Release)
+    // it takes it before any guard outside the work, so the guard is the work's innermost handler
+    // (invokeGuarded(); a catch (...) inside the work, compiled /EHa, still takes it first); on
+    // macOS and Linux the process's action ends the process from any thread: a fault in OCCT ended
+    // the process. Now it fails the call, which
     // raises it on the calling thread, and fails the feature even where a caller catches it (review
     // pr958-r1 T1). On macOS and Linux the work's frames are not unwound (their destructors don't
     // run: a leak); on Windows __except unwinds those stopped at a call site. Either way the state
