@@ -2482,6 +2482,42 @@ class BridgedRecessTest(unittest.TestCase):
                     status.startswith("The fillet's band crosses a hole or pocket on Face"), status
                 )
 
+    def testMixedRadiiArcAboveItsOwnRadiusAcrossACountersinkFails(self):
+        # Review pr968pre-r1, MixedRadiusBridge: a Part::Fillet with the plate's top rim r 1 (its
+        # arcs r 1.5, above it) and a block's top edge r 2. The rim's band crosses a countersink
+        # 0.5 from the front side, and OCCT bridges it. The arcs are above their own radius, so
+        # the larger radius elsewhere must not excuse them: the fillet fails, as with r 1 alone
+        base = Part.makeBox(60, 40, 3)
+        base = base.makeFillet(1.5, [e for e in base.Edges if abs(e.BoundBox.ZLength - 3) < 1e-9])
+        base = base.fuse(Part.makeBox(10, 10, 3, V(45, 25, 3))).removeSplitter()
+        base = base.cut(
+            Part.makeCone(2, 4, 2, V(30, 4.5, 1))
+            .fuse(Part.makeCylinder(2, 3, V(30, 4.5, 0)))
+            .removeSplitter()
+        )
+        feature = self.doc.addObject("Part::Feature", "Base")
+        feature.Shape = base
+        shape = feature.Shape
+        rim = self.topRim(shape)
+        self.assertEqual(len(rim), 8)
+        edges = []
+        for i, e in enumerate(shape.Edges, 1):
+            b = e.BoundBox
+            if any(e.isSame(x) for x in rim):
+                edges.append((i, 1.0, 1.0))
+            elif abs(b.ZMin - 6) < 1e-6 and abs(b.ZMax - 6) < 1e-6 and abs(b.YMax - 25) < 1e-6:
+                edges.append((i, 2.0, 2.0))
+        self.assertEqual(len(edges), 9)
+        fillet = self.doc.addObject("Part::Fillet", "Fillet")
+        fillet.Base = feature
+        fillet.Edges = edges
+        self.doc.recompute()
+        self.assertFalse(fillet.isValid())
+        status = fillet.getStatusString()
+        self.assertTrue(
+            status.startswith("The fillet's band crosses a hole or pocket on Face"), status
+        )
+
     def testBandOffOntoARoundAnotherPickBordersIsNotARecess(self):
         # Review pri931-r3, SplitRoundSelection: the block 40 x 20 x 5, its bottom front edge
         # rounded r 4, a groove x 20..22, z 0..2 through that round. The top front edge's band
