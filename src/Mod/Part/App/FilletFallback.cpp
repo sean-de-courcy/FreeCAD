@@ -90,6 +90,7 @@
 #include <Geom_OffsetSurface.hxx>
 #include <Geom_Plane.hxx>
 #include <Geom_RectangularTrimmedSurface.hxx>
+#include <Geom_SurfaceOfLinearExtrusion.hxx>
 #include <GeomLib.hxx>
 #include <Geom_BoundedSurface.hxx>
 #include <Geom_Surface.hxx>
@@ -97,6 +98,7 @@
 #include <GProp_GProps.hxx>
 #include <IntCurvesFace_ShapeIntersector.hxx>
 #include <Precision.hxx>
+#include <ShapeFix_Shell.hxx>
 #include <ShapeUpgrade_UnifySameDomain.hxx>
 #include <NCollection_Map.hxx>
 #include <Standard_Failure.hxx>
@@ -1413,6 +1415,10 @@ struct Tool
         TopLoc_Location location;
     };
     std::vector<Reseat> reseats;
+    /// The surfaces of faces beyond a run-off that the tool was clipped by on their own surface
+    /// (clipRunOff, a closed extrusion): the tool's faces on them merge into those faces, which
+    /// grow under the dress-up (notes/chamfer-varying-angle-942.md section 14)
+    std::vector<std::pair<Handle(Geom_Surface), TopLoc_Location>> mergeSurfaces;
     /// A curved end's surface that runs on across the tool's other end, where a selected edge
     /// continues it tangentially: that edge's tool is trimmed by it too (Case Base #105, a round cut
     /// off along a short last edge and into the one before it)
@@ -6124,9 +6130,12 @@ double areaToleranceOf(const TopoDS_Shape& face);
  * cut tool's run-off is not measured against Onshape for these edges; OCCT's result or refusal
  * then stands, as it does today)
  */
-void refuseCutRunOff(const EdgeData& data, const Tool& tool)
+void refuseCutRunOff(const EdgeData& data, const Tool& tool, int only = -1)
 {
     for (int k = 0; k < 2; ++k) {
+        if (only >= 0 && k != only) {
+            continue;
+        }
         for (TopExp_Explorer it(tool.solid, TopAbs_FACE); it.More(); it.Next()) {
             const TopoDS_Face& contact = TopoDS::Face(it.Current());
             if (!sameDomain(contact, data.faces[k])) {
@@ -6141,15 +6150,118 @@ void refuseCutRunOff(const EdgeData& data, const Tool& tool)
     }
 }
 
-/** A fused ellipse tool whose contact on the plane runs off the plane face over its far edge
- * (ops#942, notes/chamfer-varying-angle-942.md 3 b; the gaskets' ledge narrower than the chamfer):
- * Onshape's fill adds nothing past the surface of the face beyond that edge (FR1), so the tool is
- * cut to the material side of that face's whole surface. Only a face beyond that is a plane
- * containing the cylinder's axis direction, or a cylinder along it; any other face beyond the
- * run-off is refused. The closed form of the unclipped tool is checked first, and the clipped
- * tool's volume is measured. Each piece cut off holds part of the contact that ran off and none of
- * the contact on the plane face or the wall
+/** The solid bounded by a face's surface of linear extrusion along `along`: the prism of its
+ * basis curve's face, reaching past `around` by `size` both ways. Null where the basis curve is
+ * not closed or not planar, or its plane holds the generators (notes/chamfer-varying-angle-942.md
+ * section 14 rule 1)
  */
+TopoDS_Shape extrusionSide(const TopoDS_Face& face, const gp_Dir& along, const gp_Pnt& around,
+                           double size, Handle(Geom_Surface)& own)
+{
+    Handle(Geom_Surface) surface = BRep_Tool::Surface(face);
+    if (auto trimmed = Handle(Geom_RectangularTrimmedSurface)::DownCast(surface)) {
+        surface = trimmed->BasisSurface();
+    }
+    auto extrusion = Handle(Geom_SurfaceOfLinearExtrusion)::DownCast(surface);
+    if (extrusion.IsNull()) {
+        return {};
+    }
+    Handle(Geom_Curve) basis = extrusion->BasisCurve();
+    if (basis->Value(basis->FirstParameter()).Distance(basis->Value(basis->LastParameter()))
+        > linearTolerance) {
+        return {};
+    }
+    BRepBuilderAPI_MakeEdge edge(basis);
+    if (!edge.IsDone()) {
+        return {};
+    }
+    BRepBuilderAPI_MakeWire wire(edge.Edge());
+    if (!wire.IsDone()) {
+        return {};
+    }
+    BRepBuilderAPI_MakeFace section(wire.Wire(), Standard_True);
+    if (!section.IsDone()) {
+        return {};
+    }
+    BRepAdaptor_Surface sectionSurface(section.Face());
+    if (sectionSurface.GetType() != GeomAbs_Plane
+        || std::abs(sectionSurface.Plane().Axis().Direction().Dot(along)) < 1e-3) {
+        return {};
+    }
+    TopLoc_Location location;
+    BRep_Tool::Surface(face, location);
+    if (!location.IsIdentity()) {
+        return {};
+    }
+    // Its side on the face's own surface, so that the face beyond's growth merges into it (as
+    // sameDomain's one surface): v from the basis curve along the surface's direction, reaching
+    // past `around` by `size` both ways, closed by the basis curve's sections at both ends
+    const gp_Dir direction = extrusion->Direction();
+    const double middle = gp_Vec(basis->Value(basis->FirstParameter()), around).Dot(gp_Vec(direction));
+    const double v0 = middle - size;
+    const double v1 = middle + size;
+    BRepBuilderAPI_MakeFace lateral(
+        extrusion, basis->FirstParameter(), basis->LastParameter(), v0, v1, Precision::Confusion()
+    );
+    if (!lateral.IsDone()) {
+        return {};
+    }
+    // Built, not sewn: sewing copies the faces, and the lateral face must keep the face beyond's
+    // own surface. The caps share the lateral face's end edges
+    const TopoDS_Face side0 = lateral.Face();
+    BRep_Builder builder;
+    TopoDS_Shell shell;
+    builder.MakeShell(shell);
+    builder.Add(shell, side0);
+    int caps = 0;
+    for (TopExp_Explorer it(side0, TopAbs_EDGE); it.More(); it.Next()) {
+        const TopoDS_Edge& edge = TopoDS::Edge(it.Current());
+        if (BRep_Tool::IsClosed(edge, side0)) {
+            continue;  // the seam
+        }
+        BRepBuilderAPI_MakeFace cap(BRepBuilderAPI_MakeWire(edge).Wire(), Standard_True);
+        if (!cap.IsDone()) {
+            return {};
+        }
+        builder.Add(shell, cap.Face());
+        ++caps;
+    }
+    if (caps != 2) {
+        return {};
+    }
+    shell.Closed(BRep_Tool::IsClosed(shell));
+    if (!shell.Closed()) {
+        return {};
+    }
+    // The caps' orientations made consistent with the lateral face's (faces reversed, not copied)
+    ShapeFix_Shell orient(shell);
+    orient.Perform();
+    shell = orient.Shell();
+    BRepBuilderAPI_MakeSolid solid(shell);
+    if (!solid.IsDone()) {
+        return {};
+    }
+    TopoDS_Solid side = solid.Solid();
+    BRepLib::OrientClosedSolid(side);
+    if (!BRepCheck_Analyzer(side).IsValid() || volumeOf(side) <= 0) {
+        return {};
+    }
+    own = extrusion;
+    return side;
+}
+
+/** An ellipse tool whose contact on the plane runs off the plane face over its far edge (ops#942,
+ * notes/chamfer-varying-angle-942.md 3 b and section 14; the gaskets' ridges and Case Base's
+ * counterbores, narrower than the chamfer): Onshape keeps the whole rolling-ball tool, d unchanged,
+ * only on the picked edge's side of the face beyond's surface, extended (FR1 for a fill, mirrored
+ * for a cut). Only a face beyond that is a plane, a cylinder or a closed planar extrusion whose
+ * generators run along the cylinder's axis or the plane's normal, and only a fill that keeps that
+ * face's material or a cut that keeps its air; any other run-off is refused. The closed form of the
+ * unclipped tool is checked first, and the clipped tool's volume is measured. Each piece cut off
+ * holds part of the contact that ran off and none of the contact on the plane face or the wall
+ */
+double lengthAlong(const TopoDS_Edge& edge, const TopoDS_Shape& off);
+
 void clipRunOff(const Context& ctx, const EdgeData& data, Tool& tool, double size)
 {
     const TopoDS_Face& planeFace = data.faces[data.planeFace];
@@ -6177,12 +6289,38 @@ void clipRunOff(const Context& ctx, const EdgeData& data, Tool& tool, double siz
                + describe(tool.volume));
     }
     const gp_Dir axis = data.cylinderAxis.Direction();
+    auto cutBy = [](const TopoDS_Shape& shape, const TopoDS_Shape& other) {
+        BRepAlgoAPI_Cut cut(shape, other);
+        cut.SetNonDestructive(Standard_True);
+        cut.SetRunParallel(Standard_False);
+        cut.Build();
+        if (!cut.IsDone() || cut.HasErrors()) {
+            refuse("clipping a chamfer's tool by the face beyond its run-off failed");
+        }
+        return cut.Shape();
+    };
+    // The contact off the plane face: a crescent, or several; a ring (off it all round, no strip
+    // left beside the edge) is not measured (section 14)
+    const TopoDS_Shape off = cutBy(contact, planeFace);
+    for (TopExp_Explorer it(off, TopAbs_FACE); it.More(); it.Next()) {
+        int wires = 0;
+        for (TopExp_Explorer w(it.Current(), TopAbs_WIRE); w.More(); w.Next()) {
+            ++wires;
+        }
+        if (wires > 1) {
+            refuse("a chamfer's tool along a closed edge whose angle varies runs off its plane all "
+                   "round (not measured against Onshape)");
+        }
+    }
+    // The faces beyond the edges the contact runs over, along a stretch of them (as checkRunOff):
+    // only those clip, each by its own surface (rule 1, the skeptic's finding 6)
     std::vector<TopoDS_Face> beyond;
     for (TopExp_Explorer it(planeFace, TopAbs_EDGE); it.More(); it.Next()) {
-        if (it.Current().IsSame(data.edge)) {
+        const TopoDS_Edge& farEdge = TopoDS::Edge(it.Current());
+        if (farEdge.IsSame(data.edge) || lengthAlong(farEdge, off) <= 1000 * linearTolerance) {
             continue;
         }
-        for (const auto& face : ctx.list(ctx.edgeFaces, it.Current())) {
+        for (const auto& face : ctx.list(ctx.edgeFaces, farEdge)) {
             if (!face.IsSame(planeFace) && !face.IsSame(wallFace)
                 && std::none_of(beyond.begin(), beyond.end(), [&](const TopoDS_Face& f) {
                        return f.IsSame(face);
@@ -6191,66 +6329,106 @@ void clipRunOff(const Context& ctx, const EdgeData& data, Tool& tool, double siz
             }
         }
     }
+    if (beyond.empty()) {
+        refuse("a chamfer's tool runs off its plane where no face beyond cuts it");
+    }
+    // The directions a face beyond's generators were measured along (rule 1): the plane face's
+    // normal (the ridges, a cut's walls: Q-LEDGE LD1-LD3, wallAlongNormal) and, for a fill, the
+    // chamfered cylinder's axis (FR1 and #46, on square strips; on a leaning strip an
+    // extrapolation, section 14), to 1e-6 rad, so that a wall extruded along its sketch's normal
+    // counts
+    const gp_Dir planeNormal = BRepAdaptor_Surface(planeFace).Plane().Axis().Direction();
+    auto along = [](const gp_Dir& a, const gp_Dir& b) {
+        return gp_Vec(a).Crossed(gp_Vec(b)).Magnitude() <= angularTolerance * 1e3;
+    };
+    auto measuredDirection = [&](const gp_Dir& g) {
+        return along(g, planeNormal) || (!tool.cut && along(g, axis));
+    };
+    auto containsMeasured = [&](const gp_Dir& normal) {
+        return std::abs(normal.Dot(planeNormal)) <= angularTolerance * 1e3
+            || (!tool.cut && std::abs(normal.Dot(axis)) <= angularTolerance * 1e3);
+    };
+    BRepAdaptor_Curve edgeCurve(data.edge);
+    const gp_Pnt edgeMiddle =
+        edgeCurve.Value((edgeCurve.FirstParameter() + edgeCurve.LastParameter()) / 2);
+    // A fill keeps the face beyond's material (a convex far edge), a cut its air (a concave far
+    // edge): the measured pairings (rule 3); the other two are A1's refusal
+    const std::string unmeasured = tool.cut
+        ? "a chamfer's cut along a closed edge whose angle varies runs off its face there (not "
+          "measured against Onshape)"
+        : "a chamfer's fill along a closed edge whose angle varies runs off its face into a wall "
+          "there (not measured against Onshape)";
+    const std::string otherRefusal = tool.cut
+        ? "a chamfer's cut runs off its face onto a face that is neither a plane, a cylinder nor a "
+          "closed extrusion along the plane's normal"
+        : "a chamfer's fill runs off its plane onto a face that is neither a plane nor a cylinder "
+          "along the chamfered cylinder, nor a closed extrusion along it or the plane's normal";
     TopoDS_Shape clipped = tool.solid;
-    bool cut = false;
-    // A face beyond that leans (a plane off the axis direction, a cone, any other surface): not
-    // measured, so a run-off that is not cut off by the others is refused with its name (3 b)
-    bool leaning = false;
-    const std::string leaningRefusal = "a chamfer's fill runs off its plane onto a face that is "
-                                       "neither a plane nor a cylinder along the chamfered "
-                                       "cylinder";
     for (const auto& face : beyond) {
         BRepAdaptor_Surface surface(face, Standard_False);
         BRepAdaptor_Surface whole(face, Standard_True);
         gp_Pnt inFace = whole.Value((whole.FirstUParameter() + whole.LastUParameter()) / 2,
                                     (whole.FirstVParameter() + whole.LastVParameter()) / 2);
-        TopoDS_Shape material;
+        // The surface's side solid, and whether the face's material lies inside it
+        TopoDS_Shape side;
+        bool materialInside = false;
         if (surface.GetType() == GeomAbs_Plane) {
-            const gp_Dir normal = outwardNormal(face, inFace);
-            if (std::abs(normal.Dot(axis)) > angularTolerance * 1e3) {
-                material.Nullify();
-            }
-            else {
-                material = halfSpaceBeyond({surface.Plane().Location(), normal.Reversed()}, size);
+            if (containsMeasured(surface.Plane().Axis().Direction())) {
+                const gp_Dir outward = outwardNormal(face, inFace);
+                side = halfSpaceBeyond({surface.Plane().Location(), outward.Reversed()}, size);
+                materialInside = true;
             }
         }
         else if (surface.GetType() == GeomAbs_Cylinder
-                 && parallel(surface.Cylinder().Axis().Direction(), axis)) {
+                 && measuredDirection(surface.Cylinder().Axis().Direction())) {
             const gp_Cylinder cylinder = surface.Cylinder();
+            const gp_Dir direction = cylinder.Axis().Direction();
             gp_Vec radial(cylinder.Location(), inFace);
-            radial -= gp_Vec(axis) * radial.Dot(gp_Vec(axis));
-            const bool inside = gp_Vec(outwardNormal(face, inFace)).Dot(radial) > 0;
-            const TopoDS_Shape solid = BRepPrimAPI_MakeCylinder(
-                                           gp_Ax2(cylinder.Location().Translated(-gp_Vec(axis) * size),
-                                                  axis,
-                                                  cylinder.Position().XDirection()),
-                                           cylinder.Radius(),
-                                           2 * size
+            radial -= gp_Vec(direction) * radial.Dot(gp_Vec(direction));
+            materialInside = gp_Vec(outwardNormal(face, inFace)).Dot(radial) > 0;
+            const double reach = size
+                + std::abs(gp_Vec(cylinder.Location(), edgeMiddle).Dot(gp_Vec(direction)));
+            side = BRepPrimAPI_MakeCylinder(
+                       gp_Ax2(cylinder.Location().Translated(-gp_Vec(direction) * reach),
+                              direction,
+                              cylinder.Position().XDirection()),
+                       cylinder.Radius(),
+                       2 * reach
             )
-                                           .Shape();
-            if (inside) {
-                material = solid;
-            }
-            else {
-                refuse("a chamfer's fill runs off its plane onto a cylinder whose material is "
-                       "outside it");
+                       .Shape();
+        }
+        else if (surface.GetType() == GeomAbs_SurfaceOfExtrusion
+                 && measuredDirection(surface.Direction())) {
+            // The prism of the closed planar basis curve's face along the generators
+            Handle(Geom_Surface) own;
+            side = extrusionSide(face, surface.Direction(), edgeMiddle, size, own);
+            if (!side.IsNull()) {
+                // The tool's face on that surface (the side is built on it) merges into the face
+                // beyond, which grows
+                tool.mergeSurfaces.emplace_back(own, TopLoc_Location());
+                // Just behind the face, in its material
+                BRepClass3d_SolidClassifier behind(
+                    side,
+                    inFace.Translated(gp_Vec(outwardNormalAny(face, inFace)) * (-1e-4 * size)),
+                    linearTolerance
+                );
+                materialInside = behind.State() == TopAbs_IN;
             }
         }
-        if (material.IsNull()) {
-            leaning = true;
-            continue;
+        if (side.IsNull()) {
+            refuse(otherRefusal);
+        }
+        // The side holding the picked edge is kept (rule 2), clear of the surface
+        BRepClass3d_SolidClassifier atEdge(side, edgeMiddle, 10 * linearTolerance);
+        if (atEdge.State() == TopAbs_ON) {
+            refuse("a chamfer's picked edge lies on the surface of the face beyond its run-off");
+        }
+        const bool keepInside = atEdge.State() == TopAbs_IN;
+        if (keepInside != (tool.cut ? !materialInside : materialInside)) {
+            refuse(unmeasured);
         }
         // The piece past the face's surface
-        const TopoDS_Shape kept = commonOf(clipped, material);
-        const double piece = volumeOf(clipped) - volumeOf(kept);
-        if (piece <= volumeTolerance * tool.volume) {
-            continue;
-        }
-        clipped = kept;
-        cut = true;
-    }
-    if (!cut) {
-        refuse(leaning ? leaningRefusal : "a chamfer's fill runs off its plane where no face beyond cuts it");
+        clipped = keepInside ? commonOf(clipped, side) : cutBy(clipped, side);
     }
     // What is left lies on the plane face and the wall, and the pieces held only the run-off
     TopoDS_Shape left;
@@ -6273,7 +6451,7 @@ void clipRunOff(const Context& ctx, const EdgeData& data, Tool& tool, double siz
     }
     if (leftContact.IsNull()
         || areaOf(leftContact) - onFace(leftContact, planeFace) > areaToleranceOf(leftContact)) {
-        refuse(leaning ? leaningRefusal : "a chamfer's fill clipped past its plane still runs off it");
+        refuse("a chamfer's tool clipped past its plane still runs off it");
     }
     // None of the contact on the face went, nor any of the wall's: the kept contacts cover them
     if (std::abs(onFace(contact, planeFace) - areaOf(leftContact)) > areaToleranceOf(contact)) {
@@ -6524,12 +6702,12 @@ Tool ellipseTool(const Context& ctx, const EdgeData& data)
     result.source = data.edge;
     result.cut = data.convex;
     result.volume = pi * d * d * (radius + s * d / 3) * (1 + sinTilt * sinTilt / 2) / cosTilt;
-    if (concave) {
-        clipRunOff(ctx, data, result, size);
+    if (!concave) {
+        // A cut's run-off on the wall is not measured; on the plane it is clipped as a fill's
+        // (section 14)
+        refuseCutRunOff(data, result, 1 - data.planeFace);
     }
-    else {
-        refuseCutRunOff(data, result);
-    }
+    clipRunOff(ctx, data, result, size);
     // The longest leg, at the narrow side, the same on both faces
     const double leg = d * (1 + sinTilt) / cosTilt;
     result.strips.resize(2);
@@ -12755,10 +12933,13 @@ TopoDS_Shape constructShape(
     // faces, as OCCT's fillet extends those (5.6, interface point 4)
     std::vector<TrimPlane> caps;
     std::vector<std::pair<Handle(Geom_Surface), TopLoc_Location>> capSurfaces;
+    std::vector<std::pair<Handle(Geom_Surface), TopLoc_Location>> mergeSurfaces;
     std::vector<Tool::Reseat> reseats;
     for (const auto& tool : tools) {
         caps.insert(caps.end(), tool.caps.begin(), tool.caps.end());
         capSurfaces.insert(capSurfaces.end(), tool.capSurfaces.begin(), tool.capSurfaces.end());
+        capSurfaces.insert(capSurfaces.end(), tool.mergeSurfaces.begin(), tool.mergeSurfaces.end());
+        mergeSurfaces.insert(mergeSurfaces.end(), tool.mergeSurfaces.begin(), tool.mergeSurfaces.end());
         reseats.insert(reseats.end(), tool.reseats.begin(), tool.reseats.end());
     }
     // A face on an extended copy of a wall's surface that lies on the wall's own surface: back onto
@@ -12974,6 +13155,23 @@ TopoDS_Shape constructShape(
                     if (BRep_Tool::IsClosed(TopoDS::Edge(edge.Current()), face)) {
                         unlocked.Add(edge.Current());
                     }
+                }
+            }
+        }
+        // A face beyond that a clipped tool's face merges into (mergeSurfaces): its seam must not
+        // keep the growth apart (the growth crosses it where the run-off is centred)
+        for (TopExp_Explorer it(shape, TopAbs_FACE); it.More() && !mergeSurfaces.empty(); it.Next()) {
+            const TopoDS_Face& face = TopoDS::Face(it.Current());
+            TopLoc_Location location;
+            const Handle(Geom_Surface)& surface = BRep_Tool::Surface(face, location);
+            if (std::none_of(mergeSurfaces.begin(), mergeSurfaces.end(), [&](const auto& merge) {
+                    return merge.first == surface && merge.second.IsEqual(location);
+                })) {
+                continue;
+            }
+            for (TopExp_Explorer edge(face, TopAbs_EDGE); edge.More(); edge.Next()) {
+                if (BRep_Tool::IsClosed(TopoDS::Edge(edge.Current()), face)) {
+                    unlocked.Add(edge.Current());
                 }
             }
         }
