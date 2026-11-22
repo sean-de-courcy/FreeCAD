@@ -945,6 +945,20 @@ class TestChamfer(unittest.TestCase):
         wallKept(chamfer.Shape, n, -5.0)
         for name in ("Chamfer", "Body", "Base"):
             self.Doc.removeObject(name)
+        # The same with every face located (review pr509-r2f F1: a pattern's instance), as T14f:
+        # the wall's merged face has a surface of its own then; the seam is joined all the same
+        moved = shape.copy()
+        moved.Placement = FreeCAD.Placement(V(5, 3, 1), FreeCAD.Rotation(V(0, 0, 1), 30))
+        located = Part.Solid(Part.Shell(moved.Faces))
+        self.assertTrue(all(not f.Placement.isIdentity() for f in located.Faces))
+        back = moved.Placement.inverse()
+        base, chamfer = self._varyingChamfer(located, 0, foot, size=1.0)
+        self.assertTrue(chamfer.isValid(), chamfer.getStatusString())
+        result = chamfer.Shape.copy()
+        result.transformShape(back.toMatrix())
+        wallKept(result, n, -5.0)
+        for name in ("Chamfer", "Body", "Base"):
+            self.Doc.removeObject(name)
 
         t = math.radians(1)
         u, v, n = self._frame942(t)

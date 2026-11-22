@@ -13223,7 +13223,10 @@ TopoDS_Shape constructShape(
             }
         }
         // A face beyond that a clipped tool's face merges into (mergeSurfaces): its seam must not
-        // keep the growth apart (the growth crosses it where the run-off is centred)
+        // keep the growth apart (the growth crosses it where the run-off is centred). The faces
+        // are followed through the merge (`growing`): a merged face gets a surface of its own,
+        // its location built in (review pr509-r2f F1)
+        TopTools_IndexedMapOfShape growing;
         for (TopExp_Explorer it(shape, TopAbs_FACE); it.More() && !mergeSurfaces.empty(); it.Next()) {
             const TopoDS_Face& face = TopoDS::Face(it.Current());
             TopLoc_Location location;
@@ -13233,6 +13236,7 @@ TopoDS_Shape constructShape(
                 })) {
                 continue;
             }
+            growing.Add(face);
             for (TopExp_Explorer edge(face, TopAbs_EDGE); edge.More(); edge.Next()) {
                 if (BRep_Tool::IsClosed(TopoDS::Edge(edge.Current()), face)) {
                     unlocked.Add(edge.Current());
@@ -13257,21 +13261,30 @@ TopoDS_Shape constructShape(
             if (!reflex.any() || BRepCheck_Analyzer(unify.Shape()).IsValid()) {
                 shape = unify.Shape();
                 stages.emplace_back(unify.History(), shape);
+                TopTools_IndexedMapOfShape images;
+                for (int i = 1; i <= growing.Extent(); ++i) {
+                    const TopTools_ListOfShape& modified = unify.History()->Modified(growing(i));
+                    if (!modified.IsEmpty()) {
+                        for (const auto& image : modified) {
+                            images.Add(image);
+                        }
+                    }
+                    else if (!unify.History()->IsRemoved(growing(i))) {
+                        images.Add(growing(i));
+                    }
+                }
+                growing = images;
             }
         }
         // The face beyond a clipped tool's face merged into (mergeSurfaces) keeps its seam split
         // where the growth crossed it (review pr509-r2 T1: two collinear pieces, and a later
         // dress-up of that face's other edge then fails): the pieces become one edge again. Only
         // those seams' edges, and only at a vertex no other edge of the shape uses
-        if (!mergeSurfaces.empty()) {
+        if (!growing.IsEmpty()) {
             TopTools_IndexedMapOfShape seams;
             for (TopExp_Explorer it(shape, TopAbs_FACE); it.More(); it.Next()) {
                 const TopoDS_Face& face = TopoDS::Face(it.Current());
-                TopLoc_Location location;
-                const Handle(Geom_Surface)& surface = BRep_Tool::Surface(face, location);
-                if (std::none_of(mergeSurfaces.begin(), mergeSurfaces.end(), [&](const auto& merge) {
-                        return merge.first == surface && merge.second.IsEqual(location);
-                    })) {
+                if (!growing.Contains(face)) {
                     continue;
                 }
                 TopTools_IndexedMapOfShape own;
