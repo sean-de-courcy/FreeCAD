@@ -14324,7 +14324,8 @@ namespace
 Handle(BRepTools_History) joinPiecesOfOneCurve(
     const TopoDS_Shape& shape,
     const TopTools_MapOfShape& cuts,
-    TopoDS_Shape& joined
+    TopoDS_Shape& joined,
+    std::vector<TopoDS_Shape>& wholes
 )
 {
     TopTools_IndexedDataMapOfShapeListOfShape vertexEdges;
@@ -14469,6 +14470,7 @@ Handle(BRepTools_History) joinPiecesOfOneCurve(
         builder.Range(whole, first, last);
         builder.SameRange(whole, true);
         builder.SameParameter(whole, true);
+        wholes.push_back(whole);
         for (std::size_t k = 0; k < members.size(); ++k) {
             const TopoDS_Shape piece = edgeFaces.FindKey(members[k]).Oriented(TopAbs_FORWARD);
             if (k == 0) {
@@ -14515,6 +14517,81 @@ Handle(BRepTools_History) joinPiecesOfOneCurve(
     }
     joined = result;
     return history;
+}
+}  // namespace
+
+namespace
+{
+/** A joined edge whose whole name didn't come back (a slot cut the crest elsewhere, so its
+ * pieces aren't all in the join) keeps its pieces' names; the first is put to the piece at the
+ * edge's start, the lowest parameter on the curve (FreeCAD-CH, ops#895, review pr895-r3 T-D):
+ * they came in the pieces' order in the input, and an inner turn's piece carries its place among
+ * twins (`0of2`), which an edit of the turns changes. The start piece's name is the one that
+ * stays where the edge begins. */
+void firstNameFromTheStart(
+    Part::TopoShape& result,
+    const Part::TopoShape& input,
+    const Handle(BRepTools_History)& history,
+    const std::vector<TopoDS_Shape>& wholes
+)
+{
+    if (wholes.empty() || result.getHistoryAlgorithm() != App::HistoryAlgorithm::V2) {
+        return;
+    }
+    const int inputEdges = static_cast<int>(input.countSubShapes(TopAbs_EDGE));
+    for (const TopoDS_Shape& whole : wholes) {
+        const int index = result.findShape(whole);
+        if (index <= 0) {
+            continue;
+        }
+        // The input's pieces of this edge, and the one at its start
+        std::set<std::string> pieceNames;
+        int start = 0;
+        double lowest = std::numeric_limits<double>::max();
+        for (int i = 1; i <= inputEdges; ++i) {
+            const TopoDS_Shape& edge = input.findShape(TopAbs_EDGE, i);
+            const TopTools_ListOfShape& made = history->Modified(edge);
+            if (std::none_of(made.begin(), made.end(), [&](const TopoDS_Shape& s) {
+                    return s.IsSame(whole);
+                })) {
+                continue;
+            }
+            for (const auto& entry :
+                 input.getElementMappedNames(Data::IndexedName::fromConst("Edge", i))) {
+                pieceNames.insert(entry.first.toString());
+            }
+            double first = 0;
+            double last = 0;
+            BRep_Tool::Range(TopoDS::Edge(edge), first, last);
+            if (first < lowest) {
+                lowest = first;
+                start = i;
+            }
+        }
+        if (start == 0) {
+            continue;
+        }
+        const Data::IndexedName element = Data::IndexedName::fromConst("Edge", index);
+        auto names = result.getElementMappedNames(element);
+        if (names.size() < 2 || !pieceNames.contains(names.front().first.toString())) {
+            continue;  // a whole name first, or no choice
+        }
+        std::set<std::string> startNames;
+        for (const auto& entry :
+             input.getElementMappedNames(Data::IndexedName::fromConst("Edge", start))) {
+            startNames.insert(entry.first.toString());
+        }
+        const auto found = std::find_if(names.begin(), names.end(), [&](const auto& entry) {
+            return startNames.contains(entry.first.toString());
+        });
+        if (found == names.begin() || found == names.end()) {
+            continue;
+        }
+        std::rotate(names.begin(), found, found + 1);
+        for (std::size_t i = 0; i < names.size(); ++i) {
+            result.setElementName(element, names[i].first, result.Tag, &names[i].second, i == 0);
+        }
+    }
 }
 }  // namespace
 
@@ -14581,11 +14658,12 @@ bool ModelRefine::unifyAcrossSameSurface(Part::TopoShape& shape, const TopoDS_Sh
         unify.Build();
         TopoDS_Shape unified = unify.Shape();
         Handle(BRepTools_History) merges = unify.History();
+        std::vector<TopoDS_Shape> wholes;  // the joined edges
         // The cuts' pieces of one curve (a crest) joined into one edge, in the same history
         if (!unified.IsNull() && !merges.IsNull()) {
             TopoDS_Shape joined;
             if (const Handle(BRepTools_History) joins
-                = joinPiecesOfOneCurve(unified, freeVertices, joined);
+                = joinPiecesOfOneCurve(unified, freeVertices, joined, wholes);
                 !joins.IsNull()) {
                 // Merge() carries only what the face merge recorded: a shape it left as it was
                 // (a crest's piece, a face it didn't touch) takes its join history directly
@@ -14655,6 +14733,7 @@ bool ModelRefine::unifyAcrossSameSurface(Part::TopoShape& shape, const TopoDS_Sh
         result.makeShapeWithElementMap(unified, history, {fresh}, op);
         Part::restoreWholeFaceNamesSafely(result, fresh, history);
         Part::restoreWholeFaceNamesSafely(result, fresh, history, TopAbs_EDGE);
+        firstNameFromTheStart(result, fresh, merges, wholes);
         result.fixSolidOrientation();
         if (result.isClosed() != closed) {
             return false;
