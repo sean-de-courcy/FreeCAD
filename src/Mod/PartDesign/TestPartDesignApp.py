@@ -237,6 +237,7 @@ from PartDesignTests.TestBooleanScope import TestBooleanScope
 from PartDesignTests.TestImportReferences import (
     TestImportPieces,
     TestImportReferences,
+    TestImportedSketchOnAFace,
     TestStudioMoveKeepsBodies,
 )
 from PartDesignTests.TestStudioPatterns import TestStudioPatterns
