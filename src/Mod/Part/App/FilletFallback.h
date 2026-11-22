@@ -183,17 +183,21 @@ PartExport bool reflexCircleCorner(
 
 /** Where the construction merged its own faces met on one surface (ops#900): the result before the
  * merge, with its history from the base, and each element of the result that comes from elements
- * of the result before the merge, with those elements in their order there. finish() names such
- * an element as the result before the merge names its first source, and gives it each other
- * source's names too. So the names of the result before the merge stay, a reference to either of
- * two merged rounds holds by its name, and one made to the merged face goes back to the first
- * round below the limit (Onshape's, R1-R8 of ops#900)
+ * of the result before the merge, with those elements. finish() names such an element as the
+ * result before the merge names its first source, and gives it each other source's names too. So
+ * the names of the result before the merge stay, a reference to either of two merged rounds holds
+ * by its name, and one made to the merged face goes back to the first round below the limit.
+ * The first source is the round of the edge first in the body's history (Onshape's, R1-R8 and R8
+ * by order of ops#900): `origins` gives the base edges each source comes from, which finish()
+ * ranks by their names (the feature, then the sketch geometry); the sources come ranked by the
+ * base's edge index, where the names say neither
  */
 struct PartExport MergedNames
 {
     TopoDS_Shape unmerged;
     std::shared_ptr<ShapeMapper> mapper;
     std::vector<std::pair<TopoDS_Shape, std::vector<TopoDS_Shape>>> sources;
+    std::vector<std::pair<TopoDS_Shape, std::vector<TopoDS_Shape>>> origins;
 };
 
 /// What construct() makes: a shape and its history from the base, without names (kernel safety S1)

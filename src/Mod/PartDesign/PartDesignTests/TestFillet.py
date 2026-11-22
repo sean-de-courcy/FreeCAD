@@ -789,6 +789,101 @@ class TestFillet(unittest.TestCase):
         self.assertEqual(self._kinds(fillet.Shape), {"Plane": 9, "Cylinder": 12, "Toroid": 4})
         check()
 
+    # ops#900 R8 by order (oracle900r8): the merged full-round face is named after the round of
+    # the edge drawn first in the sketch, whatever the selection order; the base's own edge
+    # order is not the drawing order on a plate, for segments not drawn as one chain, or for a
+    # hole drawn before its outline (review pr501-r2, T1)
+    def _sketch_of_lines(self, body, segments, z=0.0):
+        V = FreeCAD.Vector
+        sketch = body.newObject("Sketcher::SketchObject", "Profile")
+        sketch.Placement = FreeCAD.Placement(V(0, 0, z), FreeCAD.Rotation())
+        for a, b in segments:
+            sketch.addGeometry(Part.LineSegment(V(a[0], a[1], 0), V(b[0], b[1], 0)))
+        self.Doc.recompute()
+        return sketch
+
+    def _first_round_at_the_limit(self, body, pad, edges, radius, below, where):
+        """Fillets the pad's edges at the limit, then just below it: what the merged face's first
+        name is there, as where(face) of the round it names"""
+        fillet = self._add_fillet(body, pad, edges, radius)
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+        merged = [
+            "Face%d" % i
+            for i, f in enumerate(fillet.Shape.Faces, 1)
+            if f.Surface.__class__.__name__ in ("Cylinder", "Toroid")
+        ]
+        self.assertEqual(len(merged), 1)
+        first = fillet.Shape.getElementMappedName(merged[0])
+        first = first[0] if isinstance(first, tuple) else first
+        fillet.Radius = below
+        self.Doc.recompute()
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+        self.assertIn(first, fillet.Shape.ElementMap)
+        return where(fillet.Shape.getElement(fillet.Shape.ElementMap[first]))
+
+    _RIB = {
+        "front": ((0, 0), (30, 0)),
+        "right": ((30, 0), (30, 4)),
+        "back": ((30, 4), (0, 4)),
+        "left": ((0, 4), (0, 0)),
+    }
+
+    def _rib_first_round(self, order, picked, plate):
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        if plate:
+            corners = [(-5, -8), (35, -8), (35, 12), (-5, 12)]
+            outline = [(corners[k], corners[(k + 1) % 4]) for k in range(4)]
+            base = body.newObject("PartDesign::Pad", "Plate")
+            base.Profile = self._sketch_of_lines(body, outline, -5.0)
+            base.Length = 5
+            self.Doc.recompute()
+        pad = body.newObject("PartDesign::Pad", "Pad")
+        pad.Profile = self._sketch_of_lines(body, [self._RIB[side] for side in order])
+        pad.Length = 20
+        self.Doc.recompute()
+        ends = {"front": ((0, 0, 20), (30, 0, 20)), "back": ((0, 4, 20), (30, 4, 20))}
+        edges = [self._edge_between(pad.Shape, *ends[side]) for side in picked]
+        return self._first_round_at_the_limit(
+            body, pad, edges, 2.0, 1.9, lambda f: "front" if f.CenterOfMass.y < 2 else "back"
+        )
+
+    def testFullRoundIsNamedByTheSegmentDrawnFirst(self):
+        # (order drawn, on a plate, the round it names): the long edge drawn first
+        rows = (
+            (("front", "right", "back", "left"), False, "front"),
+            (("back", "left", "front", "right"), False, "back"),
+            (("left", "back", "right", "front"), False, "back"),
+            (("right", "front", "left", "back"), False, "front"),
+            (("left", "back", "right", "front"), True, "back"),
+            (("right", "front", "left", "back"), True, "front"),
+        )
+        for order, plate, named in rows:
+            for picked in (("front", "back"), ("back", "front")):
+                with self.subTest(order=order, plate=plate, picked=picked):
+                    self.assertEqual(self._rib_first_round(order, picked, plate), named)
+
+    def testFullRoundOfARingIsNamedByTheOutlineDrawnFirst(self):
+        # A ring wall 2 thick (40 x 20 outside), both rims rounded at the limit: each run's
+        # merged face is named after the rim of the outline drawn first, the hole's included
+        outer = [(0, 0), (40, 0), (40, 20), (0, 20)]
+        inner = [(2, 2), (38, 2), (38, 18), (2, 18)]
+        loop = lambda c: [(c[k], c[(k + 1) % 4]) for k in range(4)]
+        for first, loops in (("outer", loop(outer) + loop(inner)), ("inner", loop(inner) + loop(outer))):
+            with self.subTest(first=first):
+                body = self.Doc.addObject("PartDesign::Body", "Body")
+                pad = body.newObject("PartDesign::Pad", "Pad")
+                pad.Profile = self._sketch_of_lines(body, loops)
+                pad.Length = 10
+                self.Doc.recompute()
+                edges = [
+                    self._edge_between(pad.Shape, (0, 0, 10), (40, 0, 10)),
+                    self._edge_between(pad.Shape, (2, 2, 10), (38, 2, 10)),
+                ]
+                named = self._first_round_at_the_limit(
+                    body, pad, edges, 1.0, 0.9, lambda f: "outer" if f.CenterOfMass.y < 1 else "inner"
+                )
+                self.assertEqual(named, first)
+
     def tearDown(self):
         # closing doc
         FreeCAD.closeDocument("PartDesignTestFillet")

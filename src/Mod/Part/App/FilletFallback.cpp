@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 
 #include <algorithm>
+#include <array>
+#include <cctype>
 #include <iterator>
 #include <map>
+#include <numeric>
 #include <cmath>
 #include <functional>
 #include <memory>
@@ -11130,39 +11133,40 @@ TopoDS_Shape constructShape(
         history(*mergedNames->mapper, before);
         mergedNames->sources.clear();
         // Which of a merged element's sources names it first (oracle900r8, ops#900 R8 by order):
-        // what an earlier feature made, then the round of the edge that comes first in the base's
-        // edge order (the profile segment drawn first), whatever the selection order
+        // the round of the edge first in the body's history, whatever the selection order. Here
+        // the sources are ranked by the base's edge index, and each one's base edges kept
+        // (`origins`): finish() ranks them by their names, which this base has not got
         std::vector<std::pair<TopoDS_Shape, size_t>> rank;
         auto rankOf = [&](const TopoDS_Shape& element) {
             size_t best = std::numeric_limits<size_t>::max();
-            bool own = false;
             for (const auto& [shape, r] : rank) {
                 if (shape.IsSame(element)) {
                     best = std::min(best, r);
-                    own = true;
                 }
             }
-            return own ? best : 0;
+            return best;
         };
+        mergedNames->origins.clear();
         TopTools_IndexedMapOfShape baseEdges;
         TopExp::MapShapes(base.getShape(), TopAbs_EDGE, baseEdges);
         for (size_t i = 0; i < tools.size(); ++i) {
-            size_t position = std::numeric_limits<size_t>::max();
+            if (toolStage[i] > before.size()) {
+                continue;
+            }
+            // A tool from no base edge (a corner's) is still this feature's: after every edge's
+            size_t position = static_cast<size_t>(baseEdges.Extent()) + 1;
+            std::vector<TopoDS_Shape> from;
             auto consider = [&](const TopoDS_Shape& edge) {
                 int index = edge.IsNull() ? 0 : baseEdges.FindIndex(edge);
                 if (index > 0) {
                     position = std::min(position, static_cast<size_t>(index));
+                    from.push_back(edge);
                 }
             };
             consider(tools[i].source);
             for (const auto& also : tools[i].alsoFrom) {
                 consider(also);
             }
-            if (toolStage[i] > before.size()) {
-                continue;
-            }
-            // A tool from no base edge (a corner's) is still this feature's: after every edge's
-            position = std::min(position, static_cast<size_t>(baseEdges.Extent()) + 1);
             for (TopExp_Explorer it(tools[i].solid, TopAbs_FACE); it.More(); it.Next()) {
                 for (const auto& image : imagesThrough(before, toolStage[i], it.Current())) {
                     if (image.ShapeType() != TopAbs_FACE) {
@@ -11171,6 +11175,7 @@ TopoDS_Shape constructShape(
                     for (auto type : {TopAbs_FACE, TopAbs_EDGE, TopAbs_VERTEX}) {
                         for (TopExp_Explorer sub(image, type); sub.More(); sub.Next()) {
                             rank.emplace_back(sub.Current(), position);
+                            mergedNames->origins.emplace_back(sub.Current(), from);
                         }
                     }
                 }
@@ -16340,8 +16345,70 @@ void finish(TopoShape& result, const Construction& construction, const TopoShape
         map = map->copy();
         // Every name is taken away before any is given, so that none is still another's
         using Names = std::vector<std::pair<Data::MappedName, Data::ElementIDRefs>>;
+        // The first source is the round of the edge first in the body's history (oracle900r8,
+        // ops#900 R8 by order): the feature the edge's name comes from, then the sketch geometry
+        // it was drawn as, g<n> (Onshape's ids follow the segment drawn first, also on a plate,
+        // for segments not drawn as one chain and for a hole drawn before its outline: review
+        // pr501-r2, T1). Where the names say neither, the order constructShape() gives stays
+        using Key = std::array<long long, 2>;
+        constexpr long long unknown = std::numeric_limits<long long>::max();
+        auto edgeKey = [&](const TopoDS_Shape& edge) {
+            Key key {unknown, unknown};
+            const int index = base.findShape(edge);
+            if (index <= 0) {
+                return key;
+            }
+            const Data::MappedName name = base.getMappedName(Data::IndexedName::fromConst("Edge", index));
+            if (!name) {
+                return key;
+            }
+            Data::MappedName original;
+            const long tag = base.getElementHistory(name, &original);
+            if (tag == 0 || !original) {
+                return key;
+            }
+            key[0] = std::abs(tag);
+            const std::string text = original.toString();
+            size_t digits = 1;
+            while (digits < text.size() && std::isdigit(static_cast<unsigned char>(text[digits]))) {
+                ++digits;
+            }
+            if (text.size() > 1 && text[0] == 'g' && digits > 1
+                && (digits == text.size() || text[digits] == ';')) {
+                key[1] = std::stoll(text.substr(1, digits - 1));
+            }
+            return key;
+        };
+        auto sourceKey = [&](const TopoDS_Shape& source) {
+            Key best {unknown, unknown};
+            for (const auto& [shape, edges] : merged.origins) {
+                if (shape.IsSame(source)) {
+                    for (const auto& edge : edges) {
+                        best = std::min(best, edgeKey(edge));
+                    }
+                }
+            }
+            return best;
+        };
         std::vector<std::pair<Data::IndexedName, Names>> renamed;
-        for (const auto& [element, sources] : merged.sources) {
+        for (const auto& [element, given] : merged.sources) {
+            std::vector<TopoDS_Shape> sources = given;
+            if (sources.size() > 1) {
+                std::vector<Key> keys;
+                for (const auto& source : sources) {
+                    keys.push_back(sourceKey(source));
+                }
+                std::vector<size_t> order(sources.size());
+                std::iota(order.begin(), order.end(), size_t {0});
+                std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+                    return keys[a] < keys[b];
+                });
+                std::vector<TopoDS_Shape> ranked;
+                for (size_t k : order) {
+                    ranked.push_back(sources[k]);
+                }
+                sources = std::move(ranked);
+            }
             Names names;
             for (const auto& source : sources) {
                 const int index = before.findShape(source);
