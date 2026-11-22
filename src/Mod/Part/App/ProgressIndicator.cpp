@@ -391,6 +391,8 @@ struct Call
     ThreadCpuClock clock;
     std::atomic<bool> ended {false};
     double cpuAtEnd {0.0};
+    // The work ended in a hardware fault (ops#958): its error is the fault's
+    bool faulted {false};
 
     double cpuSeconds() const
     {
@@ -663,8 +665,10 @@ void runWorker(const std::shared_ptr<Call>& call)
     // Base::AccessViolation on the main thread (SystemHandler.cpp), is per thread and unset here,
     // and /EHsc keeps catch (...) from seeing it; on macOS and Linux the process's action ends the
     // process from any thread: a fault in OCCT ended the process. Now it fails the call, which
-    // raises it on the calling thread. The work's frames are not unwound (their destructors don't
-    // run: a leak); OCC_CATCH_SIGNALS leaves no handler behind on Windows
+    // raises it on the calling thread, and fails the feature even where a caller catches it (review
+    // pr958-r1 T1). On macOS and Linux the work's frames are not unwound (their destructors don't
+    // run: a leak); on Windows __except unwinds those stopped at a call site. Either way the state
+    // they leave is not to be trusted; OCC_CATCH_SIGNALS leaves no handler behind on Windows
     unsigned long fault = 0;
     {
 #ifndef _WIN32
@@ -673,6 +677,7 @@ void runWorker(const std::shared_ptr<Call>& call)
         fault = runGuarded(&call);
     }
     if (fault != 0) {
+        call->faulted = true;
         call->error = std::make_exception_ptr(Base::AccessViolation(
             "Illegal storage access in the geometry kernel (" + faultText(fault)
             + "): the feature's shape was not built"
@@ -1807,6 +1812,20 @@ void run(const char* what, const std::function<void(const Message_ProgressRange&
     delete thread;
     if (scopeDepth > 0) {
         scopeWorkerCpu += call->cpuSeconds();
+    }
+    if (call->faulted) {
+        // Noted for the feature as a stop by the limit is (kernel-4): a caller that catches the
+        // error and builds on (a pattern's instance dropped, a retry) does so after a fault in
+        // state nothing has checked, so the feature fails whatever its code does
+        try {
+            std::rethrow_exception(call->error);
+        }
+        catch (const Base::Exception& error) {
+            if (scopeDepth > 0 && scopeFired.empty()) {
+                scopeFired = error.what();
+            }
+            throw;
+        }
     }
     if (call->error) {
         std::rethrow_exception(call->error);

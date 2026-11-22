@@ -4668,6 +4668,24 @@ TEST_F(FilletFallbackTest, workerFaultFailsTheCall)
     EXPECT_TRUE(ran);
 }
 
+TEST_F(FilletFallbackTest, workerFaultFailsTheFeatureWhenSwallowed)
+{
+    // review pr958-r1 T1: a caller that catches the fault and builds on (a pattern dropping the
+    // instance) still fails its feature, as after a stop by the limit
+    auto fault = [](const Message_ProgressRange& /*range*/) {
+        int* volatile target = nullptr;
+        *target = 1;
+    };
+    Part::KernelBudget::Scope scope(true);
+    try {
+        Part::KernelBudget::run("A swallowed fault", fault);
+    }
+    catch (const Base::Exception&) {
+        // swallowed, as FeatureTransformed's reapply does
+    }
+    EXPECT_NE(scope.fired().find("Illegal storage access"), std::string::npos) << scope.fired();
+}
+
 TEST_F(FilletFallbackTest, optionalRunStopsAtItsOwnLimit)
 {
     // skeptic 941b, 1: runOptional()'s own limit stops the work and returns false; within it, true

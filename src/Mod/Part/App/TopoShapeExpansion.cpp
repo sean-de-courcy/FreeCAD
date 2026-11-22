@@ -8851,6 +8851,20 @@ bool pinchedContourEnd(
                     || vertexFaces.FindFromKey(vertex).Extent() < 5) {
                     continue;
                 }
+                // OCCT's one stripe at the vertex (ChFi3d_Builder::PerformFilletOnVertex, case 1):
+                // where another contour reaches it too, its corner code runs, which reads no such edge
+                bool another = false;
+                for (const auto& other : contours) {
+                    if (&other == &contour) {
+                        continue;
+                    }
+                    for (const auto& edge : other) {
+                        another = another || hasVertex(edge, vertex);
+                    }
+                }
+                if (another) {
+                    continue;
+                }
                 const TopTools_ListOfShape& sides = edgeFaces.FindFromKey(end);
                 if (sides.Extent() != 2) {
                     continue;
