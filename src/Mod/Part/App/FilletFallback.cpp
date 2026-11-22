@@ -11129,33 +11129,40 @@ TopoDS_Shape constructShape(
         mergedNames->mapper = std::make_shared<ShapeMapper>();
         history(*mergedNames->mapper, before);
         mergedNames->sources.clear();
-        // Which of a merged element's sources names it first: the one on the faces of the tool of
-        // the earliest selected edge (Onshape's R8: the front round, the first edge's), never the
-        // order of the result, which follows the way the profile was drawn (review of ops#900, F1)
+        // Which of a merged element's sources names it first (oracle900r8, ops#900 R8 by order):
+        // what an earlier feature made, then the round of the edge that comes first in the base's
+        // edge order (the profile segment drawn first), whatever the selection order
         std::vector<std::pair<TopoDS_Shape, size_t>> rank;
         auto rankOf = [&](const TopoDS_Shape& element) {
             size_t best = std::numeric_limits<size_t>::max();
+            bool own = false;
             for (const auto& [shape, r] : rank) {
                 if (shape.IsSame(element)) {
                     best = std::min(best, r);
+                    own = true;
                 }
             }
-            return best;
+            return own ? best : 0;
         };
+        TopTools_IndexedMapOfShape baseEdges;
+        TopExp::MapShapes(base.getShape(), TopAbs_EDGE, baseEdges);
         for (size_t i = 0; i < tools.size(); ++i) {
             size_t position = std::numeric_limits<size_t>::max();
-            for (size_t k = 0; k < edges.size(); ++k) {
-                bool from = edges[k].IsSame(tools[i].source);
-                for (const auto& also : tools[i].alsoFrom) {
-                    from = from || edges[k].IsSame(also);
+            auto consider = [&](const TopoDS_Shape& edge) {
+                int index = edge.IsNull() ? 0 : baseEdges.FindIndex(edge);
+                if (index > 0) {
+                    position = std::min(position, static_cast<size_t>(index));
                 }
-                if (from) {
-                    position = std::min(position, k);
-                }
+            };
+            consider(tools[i].source);
+            for (const auto& also : tools[i].alsoFrom) {
+                consider(also);
             }
-            if (position == std::numeric_limits<size_t>::max() || toolStage[i] > before.size()) {
+            if (toolStage[i] > before.size()) {
                 continue;
             }
+            // A tool from no base edge (a corner's) is still this feature's: after every edge's
+            position = std::min(position, static_cast<size_t>(baseEdges.Extent()) + 1);
             for (TopExp_Explorer it(tools[i].solid, TopAbs_FACE); it.More(); it.Next()) {
                 for (const auto& image : imagesThrough(before, toolStage[i], it.Current())) {
                     if (image.ShapeType() != TopAbs_FACE) {

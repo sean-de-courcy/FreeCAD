@@ -241,9 +241,10 @@ class FilletFallbackTest(unittest.TestCase):
 
     def testFullRoundAnswersToEachRoundsName(self):
         # Onshape keeps a reference to either round on the merged face at the limit, and it goes
-        # back to its own round below; one made on the merged face goes to the front round, the
-        # first selected edge's (oracle941, R1-R8 of ops#900). So the merged face carries the names
-        # both rounds have below the limit, the front round's first, and nothing else changes name
+        # back to its own round below; one made on the merged face goes to the round of the edge
+        # first in the body's edge order, here the front one (oracle941 and oracle900r8, ops#900
+        # R1-R8). So the merged face carries the names both rounds have below the limit, the front
+        # round's first, and nothing else changes name
         box = Part.makeBox(30, 4, 20)
         box.Tag = 1
         edges = top_edges(box)
@@ -273,30 +274,85 @@ class FilletFallbackTest(unittest.TestCase):
         self.assertEqual(planes(at) - planes(below), set())
         self.assertEqual(len(planes(at)), 5)
 
-    def testFullRoundFirstNameIsTheFirstSelectedEdgesRound(self):
-        # The merged face's first name, the one a reference made on it keeps, is that of the
-        # first selected edge's round: never the order of the result, which follows the way the
-        # profile was drawn (review of ops#900, F1)
-        corners = [V(0, 0, 0), V(30, 0, 0), V(30, 4, 0), V(0, 4, 0)]
-        for drawn in (corners, list(reversed(corners))):
-            prism = Part.Face(Part.makePolygon(drawn + [drawn[0]])).extrude(V(0, 0, 20))
-            prism.Tag = 1
-            front = edge_between(prism, (0, 0, 20), (30, 0, 20))
-            back = edge_between(prism, (0, 4, 20), (30, 4, 20))
-            for edges, side in (([front, back], -1), ([back, front], 1)):
-                with self.subTest(reversed=drawn is not corners, first=side):
-                    below = prism.makeFillet(1.9, edges)
-                    at = prism.makeFillet(2, edges)
-                    merged = next(
-                        f"Face{i}"
-                        for i, f in enumerate(at.Faces, 1)
-                        if f.Surface.TypeId == "Part::GeomCylinder"
-                    )
-                    first = at.getElementMappedName(merged)
-                    first = first[0] if isinstance(first, tuple) else first
-                    index = below.ElementMap[first]
-                    y = below.getElement(index).CenterOfMass.y
-                    self.assertLess(side * (2 - y), 0)
+    # The rib 30 x 4 x 20 drawn three ways (oracle900r8, ops#900 R8 by order: V1-V5b), with the
+    # long edge of the segment drawn first: front for the first two, back for the others
+    RIBS = (
+        ("front first", [(0, 0), (30, 0), (30, 4), (0, 4)], "front"),
+        ("back first", [(0, 4), (30, 4), (30, 0), (0, 0)], "back"),
+        ("left, back, right, front", [(0, 0), (0, 4), (30, 4), (30, 0)], "back"),
+    )
+
+    def fullRoundFirstName(self, drawn, order):
+        """The first name of the merged face of the rib's full round at r 2, as the round it
+        names at r 1.9: "front" or "back", and the name itself"""
+        points = [V(x, y, 0) for x, y in drawn]
+        prism = Part.Face(Part.makePolygon(points + [points[0]])).extrude(V(0, 0, 20))
+        prism.Tag = 1
+        sides = {
+            "front": edge_between(prism, (0, 0, 20), (30, 0, 20)),
+            "back": edge_between(prism, (0, 4, 20), (30, 4, 20)),
+        }
+        edges = [sides[side] for side in order]
+        below = prism.makeFillet(1.9, edges)
+        at = prism.makeFillet(2, edges)
+        merged = [
+            f"Face{i}" for i, f in enumerate(at.Faces, 1) if f.Surface.TypeId == "Part::GeomCylinder"
+        ]
+        self.assertEqual(len(merged), 1)
+        first = at.getElementMappedName(merged[0])
+        first = first[0] if isinstance(first, tuple) else first
+        y = below.getElement(below.ElementMap[first]).CenterOfMass.y
+        return ("front" if y < 2 else "back"), first
+
+    def testFullRoundIsNamedByTheEdgeDrawnFirst(self):
+        # Onshape names the merged face after the round of the edge that comes first in the body's
+        # edge order, the segment drawn first (oracle900r8, V1, V3, V5)
+        for label, drawn, named in self.RIBS:
+            with self.subTest(drawn=label):
+                self.assertEqual(self.fullRoundFirstName(drawn, ("front", "back"))[0], named)
+
+    def testFullRoundNameIgnoresTheSelectionOrder(self):
+        # Selecting the edges the other way round gives the merged face the same name (oracle900r8,
+        # V1/V2, V3/V4, V5/V5b): the selection order only turns the face in Onshape
+        for label, drawn, named in self.RIBS:
+            with self.subTest(drawn=label):
+                forward = self.fullRoundFirstName(drawn, ("front", "back"))
+                backward = self.fullRoundFirstName(drawn, ("back", "front"))
+                self.assertEqual(backward, forward)
+                self.assertEqual(backward[0], named)
+
+    def testFullRoundOverTwoFilletsKeepsTheFirstFilletsName(self):
+        # Two fillets, one long edge each, at r 2 (oracle900r8, V6, V7): the face of the first
+        # fillet's round keeps its name, and the second's round never takes it. Onshape merges the
+        # two rounds into one face named after the first fillet's; the fork keeps two faces on one
+        # cylinder (ops#900, the merge across features is filed apart)
+        rib = Part.Face(
+            Part.makePolygon([V(0, 0, 0), V(30, 0, 0), V(30, 4, 0), V(0, 4, 0), V(0, 0, 0)])
+        ).extrude(V(0, 0, 20))
+        rib.Tag = 1
+        ends = {"front": ((0, 0, 20), (30, 0, 20)), "back": ((0, 4, 20), (30, 4, 20))}
+
+        def roundNames(shape):
+            return {
+                name
+                for name, index in shape.ElementMap.items()
+                if index.startswith("Face")
+                and shape.getElement(index).Surface.TypeId == "Part::GeomCylinder"
+            }
+
+        for first, second in (("front", "back"), ("back", "front")):
+            with self.subTest(first=first):
+                one = rib.makeFillet(2, [edge_between(rib, *ends[first])])
+                one.Tag = 2
+                (own,) = roundNames(one)
+                two = one.makeFillet(2, [edge_between(one, *ends[second])])
+                self.assertIn(own, two.ElementMap)
+                face = two.getElement(two.ElementMap[own])
+                self.assertEqual(face.Surface.TypeId, "Part::GeomCylinder")
+                y = face.CenterOfMass.y
+                self.assertLess(y if first == "front" else 4 - y, 2)
+                for name in roundNames(two) - {own}:
+                    self.assertNotEqual(two.ElementMap[name], two.ElementMap[own])
 
     def testFilletAsHighAsThePlate(self):
         plate = Part.makeBox(30, 20, 4)
