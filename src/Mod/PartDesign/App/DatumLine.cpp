@@ -85,7 +85,8 @@ void Line::onDocumentRestored()
             edge.Infinite(Standard_True);
             Part::TopoShape shape(edge);
             shape.setPlacement(Placement.getValue());
-            // With the names it was saved with (a line moved by its placement has them): the
+            // With the names it was saved with (a line an older build moved by its placement has
+            // them; since ops#930 a move names no shape): the
             // file keeps them though the edge is lost, and the line is one edge, Edge1 in both
             Part::TopoShape restored(Shape.getShape());
             if (restored.getElementMapSize() > 0) {

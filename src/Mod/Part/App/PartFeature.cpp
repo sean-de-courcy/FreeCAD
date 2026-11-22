@@ -3143,7 +3143,9 @@ void Feature::onChanged(const App::Property* prop)
         );
         if (oldTransform != newTransform && !shape.isNull() && shape.getElementMapSize() == 0) {
             // FreeCAD-CH ops#910, ops#930: a move never names a shape. A shape without names is
-            // an import's, whose map the export left out; named by a match here
+            // an import's, whose map the export left out, or a datum's (set in its constructor,
+            // before the document can name it: one element, so its index names it); named by a
+            // match here
             // (PropertyPartShape::namesByMatch(), provisional MLN names under the copy's ID), the
             // references into it take those names, and the result its own recompute sets has
             // none of them. Moved at its own recompute, before its new shape is set (a
