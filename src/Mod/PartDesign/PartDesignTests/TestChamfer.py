@@ -756,6 +756,24 @@ class TestChamfer(unittest.TestCase):
         self.assertEqual(len(planes), 1)
         self.assertGreater(planes[0].distToShape(Part.Vertex(V(R, 0, R * math.tan(self.T942))))[0], 1)
 
+    def testChamferVaryingAngleRunsOffOntoALeaningWall(self):
+        # T6 (section 3 b): T3 with the plate's wall drafted 5 deg (a cone): the fill runs off the
+        # ledge onto a face that is not measured. The construction refuses, OCCT fails as on T3, and
+        # the chamfer fails with the construction's refusal
+        V = FreeCAD.Vector
+        R = self.R942
+        lean = math.tan(math.radians(5))
+        wall = Part.makeCone(11.6 + 40 * lean, 11.6 - 20 * lean, 60, V(-0.6, 0, -40))
+        shape = wall.common(self._tiltedPlate(self.T942)).removeSplitter().fuse(
+            Part.makeCylinder(R, 40, V(0, 0, -20))).removeSplitter()
+        foot = ["Edge%d" % (i + 1) for i, e in enumerate(shape.Edges)
+                if e.Curve.TypeId == "Part::GeomEllipse" and abs(e.Curve.MinorRadius - R) < 1e-6]
+        self.assertEqual(len(foot), 1)
+        base, chamfer = self._varyingChamfer(shape, 0, foot)
+        self.assertFalse(chamfer.isValid())
+        self.assertIn("neither a plane nor a cylinder along the chamfered cylinder",
+                      chamfer.getStatusString())
+
     def testChamferVaryingAngleKeepsOtherCases(self):
         # T4: square to the cylinder (t = 0), two distances, and a box edge: WidthAt changes nothing
         V = FreeCAD.Vector
@@ -837,6 +855,210 @@ class TestChamfer(unittest.TestCase):
                 FreeCAD.closeDocument(doc.Name)
         finally:
             shutil.rmtree(folder, ignore_errors=True)
+
+    # ops#942 section 4 point 12: a hole of radius 3 through the drafted wall of a cone (radius 20 at
+    # z 0, the wall leaning in by 10 deg), its axis horizontal at z 10, away from the cone's seam.
+    # The rim is a closed edge between the cylinder and the cone; its angle varies round it
+    CONE_R0 = 20.0
+    CONE_DRAFT = math.radians(10)
+    HOLE_R = 3.0
+
+    def _coneWallHoles(self, angles=(90.0,)):
+        V = FreeCAD.Vector
+        shape = Part.makeCone(self.CONE_R0, self.CONE_R0 - 20 * math.tan(self.CONE_DRAFT), 20)
+        for degrees in angles:
+            p = math.radians(degrees)
+            along = V(math.cos(p), math.sin(p), 0)
+            shape = shape.cut(Part.makeCylinder(self.HOLE_R, 20, V(0, 0, 10) + along * 10, along))
+        return shape.removeSplitter()
+
+    def _coneWallChamfer(self, width, a=None):
+        """The test's own measure of one hole's chamfer (no fork code): the ball of radius
+        d = width tan(a / 2) rolled round the rim, at a, or at the narrowest or widest angle
+        (a = "narrowest" / "widest"), found by sampling. Its centre at each angle theta about the
+        hole's axis lies on that ruling of the cylinder of radius r + d and d inside the cone (by
+        Newton); W, L and E are its contacts and the rim's point. The volume of the region between
+        the three patches (E W on the cylinder, W L ruled, L E on the cone) by the divergence
+        theorem: trapezoid rule in theta (periodic), Gauss in the patches' other parameter.
+        Returns (volume, d, a)"""
+        r, zc = self.HOLE_R, 10.0
+        ta, ca = math.tan(self.CONE_DRAFT), math.cos(self.CONE_DRAFT)
+
+        def off(p):  # signed distance from the cone along its outward normal
+            return (math.hypot(p[0], p[1]) - (self.CONE_R0 - p[2] * ta)) * ca
+
+        def normal(p):
+            rho = math.hypot(p[0], p[1])
+            return (p[0] / rho * ca, p[1] / rho * ca, ta * ca)
+
+        def ruling(theta, radius, target):
+            # the point at angle theta about the hole's axis (+y through (0, 0, zc))
+            x, z, y = radius * math.cos(theta), zc + radius * math.sin(theta), 18.0
+            for _ in range(80):
+                f = off((x, y, z)) - target
+                slope = (off((x, y + 1e-7, z)) - off((x, y - 1e-7, z))) / 2e-7
+                step = f / slope
+                y -= step
+                if abs(step) < 1e-14:
+                    break
+            return (x, y, z)
+
+        def angleAt(theta):
+            n0 = (-math.cos(theta), 0.0, -math.sin(theta))  # the hole wall's outward normal
+            n1 = normal(ruling(theta, r, 0.0))
+            return pi - math.acos(max(-1.0, min(1.0, sum(p * q for p, q in zip(n0, n1)))))
+
+        if a in ("narrowest", "widest"):
+            angles = [angleAt(2 * pi * k / 3600) for k in range(3600)]
+            a = min(angles) if a == "narrowest" else max(angles)
+        d = width * math.tan(a / 2)
+
+        def points(theta):
+            e = ruling(theta, r, 0.0)
+            c = ruling(theta, r + d, -d)
+            n = normal(c)
+            return e, (r * math.cos(theta), c[1], zc + r * math.sin(theta)), \
+                tuple(ci + d * ni for ci, ni in zip(c, n))
+
+        def onCone(p):
+            n, f = normal(p), off(p)
+            return tuple(pi_ - f * ni for pi_, ni in zip(p, n))
+
+        def patch(e, w, l, v, k):
+            if k == 0:
+                return tuple((1 - v) * p + v * q for p, q in zip(e, w))
+            if k == 1:
+                return tuple((1 - v) * p + v * q for p, q in zip(w, l))
+            return onCone(tuple((1 - v) * p + v * q for p, q in zip(l, e)))
+
+        nodes = (-0.9324695142, -0.6612093865, -0.2386191861, 0.2386191861, 0.6612093865,
+                 0.9324695142)
+        weights = (0.1713244924, 0.3607615730, 0.4679139346, 0.4679139346, 0.3607615730,
+                   0.1713244924)
+        stations, h, dv = 720, 1e-5, 1e-6
+        total = 0.0
+        for i in range(stations):
+            theta = 2 * pi * i / stations
+            at, before, after = points(theta), points(theta - h), points(theta + h)
+            for node, weight in zip(nodes, weights):
+                v = (node + 1) / 2
+                for k in range(3):
+                    X = patch(*at, v, k)
+                    Xt = [(p - q) / (2 * h) for p, q in zip(patch(*after, v, k), patch(*before, v, k))]
+                    Xv = [(p - q) / (2 * dv) for p, q in zip(patch(*at, v + dv, k), patch(*at, v - dv, k))]
+                    cross = (Xt[1] * Xv[2] - Xt[2] * Xv[1], Xt[2] * Xv[0] - Xt[0] * Xv[2],
+                             Xt[0] * Xv[1] - Xt[1] * Xv[0])
+                    total += sum(p * q for p, q in zip(X, cross)) * weight / 2 * (2 * pi / stations)
+        return abs(total) / 3, d, a
+
+    def testChamferVaryingAngleConeWallHole(self):
+        # Section 4 point 12: the rim of a hole through a drafted wall, the ball outside the hole
+        # and inside the cone. With Narrowest angle (77.86 deg) and Widest angle (100 deg) the
+        # material cut off is the test's own integral; one face more, ruled between the ball's
+        # contacts, which lie on the hole's cylinder and on the cone
+        shape = self._coneWallHoles()
+        for widthAt, which in ((0, "narrowest"), (1, "widest")):
+            with self.subTest(which):
+                base, chamfer = self._varyingChamfer(shape, widthAt, size=1.0)
+                self.assertEqual(len(chamfer.Base[1]), 1)
+                self.assertTrue(chamfer.isValid(), chamfer.getStatusString())
+                result = chamfer.Shape
+                self.assertTrue(result.isValid())
+                self.assertEqual(len(result.Faces), len(shape.Faces) + 1)
+                expected, d, a = self._coneWallChamfer(1.0, which)
+                # The cut alone (the body's measure is good to about 4e-7 of its 20700 mm3)
+                self.assertLess(result.cut(shape).Volume, 1e-6)
+                self._assertVolume(shape.cut(result).Volume, expected)
+                new = [f for f in result.Faces if f.Surface.TypeId == "Part::GeomBSplineSurface"]
+                self.assertEqual(len(new), 1)
+                ta = math.tan(self.CONE_DRAFT)
+                rails = [e for e in new[0].Edges if not e.isSeam(new[0])]
+                self.assertEqual(len(rails), 2)
+                onHole = onCone = 0
+                for edge in rails:
+                    samples = [edge.valueAt(edge.FirstParameter + (edge.LastParameter
+                               - edge.FirstParameter) * k / 16) for k in range(16)]
+                    if all(abs(math.hypot(p.x, p.z - 10) - self.HOLE_R) < 1e-6 for p in samples):
+                        onHole += 1
+                    elif all(abs(math.hypot(p.x, p.y) - (self.CONE_R0 - p.z * ta)) < 1e-6
+                             for p in samples):
+                        onCone += 1
+                self.assertEqual((onHole, onCone), (1, 1))
+                for name in ("Chamfer", "Body", "Base"):
+                    self.Doc.removeObject(name)
+
+    def testChamferVaryingAngleSeveralEdges(self):
+        # Section 4 point 12: four holes round the cone, each rim a closed edge of its own: one tool
+        # each, four times one hole's cut. With At a reference point, one point per edge in the
+        # selection's order (each at its hole's lowest point, the widest angle); the same points in
+        # another order lie far from the edges they are for, and the chamfer fails
+        V = FreeCAD.Vector
+        shape = self._coneWallHoles((45.0, 135.0, 225.0, 315.0))
+        base, chamfer = self._varyingChamfer(shape, 0, size=1.0)
+        self.assertEqual(len(chamfer.Base[1]), 4)
+        self.assertTrue(chamfer.isValid(), chamfer.getStatusString())
+        result = chamfer.Shape
+        self.assertEqual(len(result.Faces), len(shape.Faces) + 4)
+        one, d, a = self._coneWallChamfer(1.0, "narrowest")
+        self._assertVolume(shape.cut(result).Volume, 4 * one)
+        wide, d, a = self._coneWallChamfer(1.0, "widest")
+        lowest = []
+        for name in chamfer.Base[1]:
+            edge = base.Shape.getElement(name)
+            low = min((edge.valueAt(edge.FirstParameter + (edge.LastParameter - edge.FirstParameter)
+                                    * k / 720) for k in range(720)), key=lambda p: p.z)
+            lowest.append(low)
+        chamfer.WidthAt = "At a reference point"
+        chamfer.WidthPoints = lowest
+        self.Doc.recompute()
+        self.assertTrue(chamfer.isValid(), chamfer.getStatusString())
+        self.assertLess(abs(shape.cut(chamfer.Shape).Volume - 4 * wide), 1e-4 * wide)
+        chamfer.WidthPoints = lowest[1:] + lowest[:1]
+        self.Doc.recompute()
+        self.assertFalse(chamfer.isValid())
+        self.assertIn("the reference point for edge 1 is", chamfer.getStatusString())
+
+    def testChamferVaryingAngleAtAReferencePoint(self):
+        # Section 4 points 8-10 on T1: a point at the narrow side gives Narrowest angle's chamfer, one
+        # at the wide side Widest angle's; one 1.5 off the narrow side (within w) still the narrow
+        # station's. Fails, with the message: a point further than w, no point, two for one edge
+        V = FreeCAD.Vector
+        R, t = self.R942, self.T942
+        narrow = self._ballVolume(self.W942 * math.tan((pi / 2 - t) / 2), 1)
+        wide = self._ballVolume(self.W942 * math.tan((pi / 2 + t) / 2), 1)
+        base, chamfer = self._varyingChamfer(self._varyingModel("boss"), 0)
+        edgeAt = V(R, 0, R * math.tan(t))
+        for points, expected in (([edgeAt], narrow), ([V(-R, 0, -R * math.tan(t))], wide),
+                                 ([edgeAt + V(1.5, 0, 0)], narrow)):
+            with self.subTest(points):
+                chamfer.WidthAt = "At a reference point"
+                chamfer.WidthPoints = points
+                self.Doc.recompute()
+                self.assertTrue(chamfer.isValid(), chamfer.getStatusString())
+                self._assertVolume(chamfer.Shape.Volume - base.Shape.Volume, expected)
+        for points, words in (([edgeAt + V(5, 0, 0)], "mm from it"), ([], "0 reference points"),
+                              ([edgeAt, edgeAt], "2 reference points")):
+            with self.subTest(points):
+                chamfer.WidthPoints = points
+                self.Doc.recompute()
+                self.assertFalse(chamfer.isValid())
+                self.assertIn(words, chamfer.getStatusString())
+
+    def testChamferVaryingAngleOutsideTheGate(self):
+        # Section 4 point 10: a varying edge picked with a straight edge is outside the gate: with
+        # Narrowest angle OCCT's chamfer stands, with Widest angle it fails, saying why
+        shape = self._varyingModel("boss")
+        foot = ["Edge%d" % (i + 1) for i, e in enumerate(shape.Edges)
+                if e.Curve.TypeId == "Part::GeomEllipse"]
+        line = ["Edge%d" % (i + 1) for i, e in enumerate(shape.Edges)
+                if e.Curve.TypeId == "Part::GeomLine"
+                and all(abs(v.Point.x) > 29 for v in e.Vertexes)][:1]
+        base, chamfer = self._varyingChamfer(shape, 0, foot + line)
+        self.assertTrue(chamfer.isValid(), chamfer.getStatusString())
+        chamfer.WidthAt = "Widest angle"
+        self.Doc.recompute()
+        self.assertFalse(chamfer.isValid())
+        self.assertIn("closed edge of its own", chamfer.getStatusString())
 
     def tearDown(self):
         # closing doc

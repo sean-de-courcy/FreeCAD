@@ -30,6 +30,7 @@
 #include <TopoDS.hxx>
 #include <TopoDS_Edge.hxx>
 #include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
+#include <gp_Trsf.hxx>
 #include <ShapeFix_Shape.hxx>
 #include <Standard_Version.hxx>
 
@@ -60,6 +61,8 @@ PartDesignExport std::string dressUpFailure(const char* verb, const std::string&
 PartDesignExport bool isDressUpFailure(const std::string& what);
 // FeatureDressUp.cpp (FreeCAD-CH ops#654 T3; declared where used)
 PartDesignExport bool dressUpReapplying(Part::TopoShape& base, std::vector<Part::TopoShape>& edges);
+// ops#942 (FeatureDressUp.cpp): a pattern instance's move from the seed's base
+PartDesignExport bool dressUpReapplyMove(gp_Trsf& move);
 PartDesignExport void dressUpReapplied(const Part::TopoShape& result);
 // ops#796 (FeatureDressUp.cpp): a studio step takes what its owner's try built
 PartDesignExport void dressUpReappliedFrom(const Part::TopoShape& raw,
@@ -260,6 +263,34 @@ App::DocumentObjectExecReturn* Chamfer::build()
     width.at = static_cast<Part::FilletFallback::WidthAt>(WidthAt.getValue());
     for (const auto& point : WidthPoints.getValues()) {
         width.points.emplace_back(point.x, point.y, point.z);
+    }
+    if (width.at == Part::FilletFallback::WidthAt::atPoint
+        && static_cast<Part::ChamferType>(chamferType) == Part::ChamferType::equalDistance) {
+        // The points are the Body's; the base shape is computed in its own feature's frame
+        // (notes/chamfer-varying-angle-942.md section 4 point 8)
+        const Part::TopoShape own = getBaseTopoShape(/*silent=*/true);
+        if (!own.isNull()) {
+            const gp_Trsf toOwn = own.getShape().Location().Transformation().Inverted();
+            for (auto& point : width.points) {
+                point.Transform(toOwn);
+            }
+        }
+    }
+    if (reapplying && width.at == Part::FilletFallback::WidthAt::atPoint
+        && static_cast<Part::ChamferType>(chamferType) == Part::ChamferType::equalDistance) {
+        // At a pattern's instance the points move with the edges (section 4 point 10); a studio
+        // step's part has a frame of its own, not measured, so the value fails there
+        gp_Trsf move;
+        if (!dressUpReapplyMove(move)) {
+            return new App::DocumentObjectExecReturn(QT_TRANSLATE_NOOP(
+                "Exception",
+                "Chamfer: 'At a reference point' is not available on a chamfer over several "
+                "parts; choose Narrowest angle or Widest angle"
+            ));
+        }
+        for (auto& point : width.points) {
+            point.Transform(move);
+        }
     }
     bool varying = false;
     if (static_cast<Part::ChamferType>(chamferType) == Part::ChamferType::equalDistance) {
@@ -485,8 +516,16 @@ App::DocumentObjectExecReturn* Chamfer::build()
             getFullName() << ": the chain's setbacks or the rolling ball failed (" << result->Why
                           << "), building the chamfer again with " << size << " on every edge"
         );
+        // Along an edge of varying angle the rolling ball's refusal says more than OCCT's failure
+        // with w (the cause the user can act on: notes/chamfer-varying-angle-942.md T6)
+        App::DocumentObjectExecReturn* again
+            = chamferWith(Part::ChamferType::twoDistances, size, size);
+        if (again != App::DocumentObject::StdReturn && varying && !setbacksDiffer) {
+            delete again;
+            return result;
+        }
         delete result;
-        result = chamferWith(Part::ChamferType::twoDistances, size, size);
+        result = again;
     }
     return result;
 }

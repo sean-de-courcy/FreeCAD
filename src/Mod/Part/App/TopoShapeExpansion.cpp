@@ -10676,7 +10676,8 @@ TopoShape& TopoShape::makeElementChamfer(
                         << (width.at == FilletFallback::WidthAt::widest ? "at the widest angle"
                                                                          : "at a reference point")
                         << " is built only where every picked edge is a closed edge of its own, "
-                           "between a plane and a cylinder: choose Narrowest angle"
+                           "between a plane and a cylinder or a cylinder and a cone: choose "
+                           "Narrowest angle"
                 );
             }
             if (varying) {

@@ -53,6 +53,7 @@
 #include <Bnd_Box.hxx>
 #include <GC_MakeArcOfCircle.hxx>
 #include <Geom_TrimmedCurve.hxx>
+#include <gp_Trsf.hxx>
 #include <TopoDS_Compound.hxx>
 #include <TopoDS_Vertex.hxx>
 #include <Precision.hxx>
@@ -622,8 +623,12 @@ struct DressUpRun
     // ops#951: the run's note that a merged full round's face is named by the edge order (the
     // step's own compute takes the kept shape and runs no finish(): the owner says it)
     std::string namingNote;
+    // ops#942: a pattern's instance, the move from the seed's base to it (null for a studio step)
+    const gp_Trsf* move = nullptr;
 };
 thread_local DressUpRun* dressUpRun = nullptr;
+// ops#942: the move the next reapplyDressUp() runs with (setDressUpReapplyMove)
+thread_local const gp_Trsf* nextReapplyMove = nullptr;
 
 /// ops#796: what a studio dress-up owner's try built at a step (studioDressUpOwnerRun), for the
 /// step's own compute, which follows in the same recompute on the same base and edges: the
@@ -668,6 +673,24 @@ PartDesignExport bool dressUpReapplying(Part::TopoShape& base, std::vector<Part:
     }
     base = dressUpRun->base;
     edges = dressUpRun->edges;
+    return true;
+}
+
+/// ops#942: a pattern sets the move from the seed's base to its instance for the next
+/// reapplyDressUp(), so that a chamfer's WidthPoints are moved with its edges
+PartDesignExport void setDressUpReapplyMove(const gp_Trsf* move)
+{
+    nextReapplyMove = move;
+}
+
+/// ops#942: the run's move from the seed's base to the pattern's instance; false where the run
+/// is not a pattern's (a studio step's, whose part has a frame of its own)
+PartDesignExport bool dressUpReapplyMove(gp_Trsf& move)
+{
+    if (!dressUpRun || !dressUpRun->move) {
+        return false;
+    }
+    move = *dressUpRun->move;
     return true;
 }
 
@@ -791,6 +814,8 @@ Part::TopoShape reapplyDressUpRun(
 {
     DressUpRun run {base, edges, Part::TopoShape(), false, false, Part::TopoShape(), {}};
     run.keep = raw != nullptr;
+    run.move = nextReapplyMove;
+    nextReapplyMove = nullptr;
     DressUpRun* outer = dressUpRun;
     dressUpRun = &run;
     App::DocumentObjectExecReturn* ret = nullptr;
