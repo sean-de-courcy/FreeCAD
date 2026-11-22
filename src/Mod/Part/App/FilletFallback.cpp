@@ -67,6 +67,7 @@
 #include <GeomAPI_ProjectPointOnCurve.hxx>
 #include <GeomAPI_ProjectPointOnSurf.hxx>
 #include <GeomAPI.hxx>
+#include <GeomConvert.hxx>
 #include <Geom2dAPI_Interpolate.hxx>
 #include <Geom2d_BSplineCurve.hxx>
 #include <Geom2d_Line.hxx>
@@ -250,15 +251,37 @@ bool straightCurve(const BRepAdaptor_Curve& curve, gp_Dir& along, double& speed)
     }
 }
 
+/// Set while a construction holds a tool along an ellipse (ellipseTool()): its ruled face is a
+/// rational B-spline, and its contacts end on the Boolean's curves on it, which the default
+/// integration measures 0.2 to 11 % off (ops#942: 315.42 for 316.19). Off everywhere else, so
+/// that no other construction's measures move
+thread_local bool adaptiveMeasures = false;
+
 double volumeOf(const TopoDS_Shape& shape)
 {
-    return MassProperties::volume(shape);
+    return MassProperties::volume(shape, adaptiveMeasures);
 }
 
 double areaOf(const TopoDS_Shape& shape)
 {
-    return MassProperties::area(shape);
+    return MassProperties::area(shape, adaptiveMeasures);
 }
+
+/// adaptiveMeasures for the scope's life
+struct AdaptiveMeasures
+{
+    bool previous = adaptiveMeasures;
+    explicit AdaptiveMeasures(bool on)
+    {
+        adaptiveMeasures = previous || on;
+    }
+    ~AdaptiveMeasures()
+    {
+        adaptiveMeasures = previous;
+    }
+    AdaptiveMeasures(const AdaptiveMeasures&) = delete;
+    AdaptiveMeasures& operator=(const AdaptiveMeasures&) = delete;
+};
 
 /** The volume after holds over before's, integrated over the faces that differ only: a face both
  * hold (the same face, placed and oriented the same) adds the same to both volumes about any one
@@ -1533,6 +1556,15 @@ struct EdgeData
     /// A straight edge with a cylinder parallel to it among its faces (a curved wall's end,
     /// ops#640, #150): its round is a plane fillet of the faces' traces, swept along the edge
     bool ruled = false;
+    /// A closed ellipse between a plane and a cylinder it is not square to (ops#942; analysed
+    /// only where Request::varyingAngle is set): line is false, circle is not set
+    bool ellipse = false;
+    /// ellipse: the plane (faces[planeFace]), the cylinder's axis and radius, and the tilt t
+    /// between the plane's normal and the axis, in (0, 90 deg)
+    gp_Pln plane;
+    gp_Ax1 cylinderAxis;
+    double cylinderRadius = 0.0;
+    double tilt = 0.0;
 };
 
 /// The maps the construction reads, built once
@@ -1727,6 +1759,40 @@ EdgeData analyse(const Context& ctx, const TopoDS_Edge& edge)
             || gp_Lin(cylinder.Axis()).Distance(data.circle.Location()) > linearTolerance
             || std::abs(cylinder.Radius() - data.circle.Radius()) > linearTolerance) {
             refuse("a circular edge on a cylinder that is not coaxial");
+        }
+    }
+    else if (curve.GetType() == GeomAbs_Ellipse && ctx.request.varyingAngle
+             && ctx.request.kind == Kind::Chamfer
+             && ctx.request.chamferType == ChamferType::equalDistance && data.closed) {
+        // ops#942 (notes/chamfer-varying-angle-942.md 3 a): a closed edge between a plane and a
+        // cylinder that is not square to it, chamfered by one ball rolled round it
+        data.line = false;
+        data.ellipse = true;
+        const bool plane0 = s0.GetType() == GeomAbs_Plane;
+        const bool plane1 = s1.GetType() == GeomAbs_Plane;
+        if (!(plane0 && s1.GetType() == GeomAbs_Cylinder)
+            && !(plane1 && s0.GetType() == GeomAbs_Cylinder)) {
+            refuse("an ellipse not between a plane and a cylinder");
+        }
+        data.planeFace = plane0 ? 0 : 1;
+        data.plane = (plane0 ? s0 : s1).Plane();
+        const gp_Cylinder cylinder = (plane0 ? s1 : s0).Cylinder();
+        data.cylinderAxis = cylinder.Axis();
+        data.cylinderRadius = cylinder.Radius();
+        const double cosTilt
+            = std::abs(data.plane.Axis().Direction().Dot(cylinder.Axis().Direction()));
+        data.tilt = std::acos(std::min(1.0, cosTilt));
+        if (data.tilt <= 1e-7) {
+            refuse("an ellipse on a plane square to its cylinder");
+        }
+        if (data.tilt > 80 * pi / 180) {
+            refuse("an ellipse on a plane nearly along its cylinder");
+        }
+        const gp_Elips ellipse = curve.Ellipse();
+        if (gp_Lin(cylinder.Axis()).Distance(ellipse.Location()) > linearTolerance
+            || data.plane.Distance(ellipse.Location()) > linearTolerance
+            || std::abs(ellipse.MinorRadius() - cylinder.Radius()) > linearTolerance) {
+            refuse("an ellipse that is not its plane's section of its cylinder");
         }
     }
     else {
@@ -5851,6 +5917,306 @@ bool closesIntoRing(
 }
 
 /// A revolution about the axis of a circular edge, between the meridian planes at its ends
+/// The angle between the edge's faces at the point, on the side of the ball that rolls along it:
+/// the material's at a convex edge, the air's at a concave one, under 180 deg either way
+double ballSideAngle(const EdgeData& data, const gp_Pnt& point)
+{
+    const double cosine = outwardNormal(data.faces[0], point).Dot(outwardNormal(data.faces[1], point));
+    return pi - std::acos(std::max(-1.0, std::min(1.0, cosine)));
+}
+
+/** The angle between the faces at the station that gives a chamfer along an edge of varying angle
+ * its width (Request::widthAt; notes/chamfer-varying-angle-942.md section 4): the narrowest or
+ * the widest along a tilted ellipse, in closed form (90 deg - t and 90 deg + t, on the ball's side
+ * at any edge), or at the station of the edge's reference point. Each picked edge has exactly one
+ * point, within max(w, 1e-3 of its length) of it, and each point is nearer its own edge than any
+ * other picked edge (section 4 point 10)
+ */
+double referenceAngle(const Context& ctx, const EdgeData& data)
+{
+    switch (ctx.request.widthAt) {
+        case WidthAt::narrowest:
+            return pi / 2 - data.tilt;
+        case WidthAt::widest:
+            return pi / 2 + data.tilt;
+        case WidthAt::atPoint:
+            break;
+    }
+    const auto& points = ctx.request.widthPoints;
+    if (points.size() != static_cast<std::size_t>(ctx.selected.Extent())) {
+        refuse("Chamfer: " + std::to_string(points.size()) + " reference points for "
+               + std::to_string(ctx.selected.Extent())
+               + " edges; set WidthPoints again, or choose Narrowest angle or Widest angle");
+    }
+    const int index = ctx.selected.FindIndex(data.edge);
+    auto distanceTo = [](const gp_Pnt& point, const TopoDS_Shape& edge, gp_Pnt* foot) {
+        BRepExtrema_DistShapeShape distance(BRepBuilderAPI_MakeVertex(point).Vertex(), edge);
+        if (!distance.IsDone() || distance.NbSolution() < 1) {
+            refuse("Chamfer: a reference point could not be projected onto its edge");
+        }
+        if (foot) {
+            *foot = distance.PointOnShape2(1);
+        }
+        return distance.Value();
+    };
+    const gp_Pnt& point = points[index - 1];
+    gp_Pnt foot;
+    const double away = distanceTo(point, data.edge, &foot);
+    GProp_GProps props;
+    BRepGProp::LinearProperties(data.edge, props);
+    const double reach = std::max(ctx.request.size1, 1e-3 * props.Mass());
+    if (away > reach) {
+        refuse("Chamfer: the reference point for edge " + std::to_string(index) + " is "
+               + describe(away)
+               + " mm from it; set WidthPoints again, or choose Narrowest angle or Widest angle");
+    }
+    for (int i = 1; i <= ctx.selected.Extent(); ++i) {
+        if (i != index && distanceTo(point, ctx.selected(i), nullptr) < away) {
+            refuse("Chamfer: the reference point for edge " + std::to_string(index)
+                   + " is nearer another picked edge; set WidthPoints again");
+        }
+    }
+    return ballSideAngle(data, foot);
+}
+
+/** The tool of a chamfer by equal distances along a closed ellipse between a plane and a cylinder
+ * it is not square to (ops#942, notes/chamfer-varying-angle-942.md sections 2 and 3 a): one ball
+ * of radius d = w tan(a / 2) rolled round the edge, a the reference angle (referenceAngle()). Its
+ * centre runs on the cylinder of radius R + s d and the plane offset by d; it touches the wall on
+ * W and the plane on L, and the chamfer face is ruled between them. Every one of the edge E and
+ * the rails W and L is an affine image of one circle with the same parameter, so the chamfer face
+ * is exact as a rational B-spline of degree 2 by 1.
+ *
+ * The tool is the region between the three: the ball's side of the plane and of the cylinder,
+ * cut by the ruled face run on past both rails and closed behind the edge; its faces on the plane
+ * and the cylinder are those surfaces' own. Its seam is at the edge's vertex, where the base's
+ * cylinder has its seam. Volume in closed form: pi d^2 (R + s d / 3) (1 + sin^2 t / 2) / cos t.
+ */
+Tool ellipseTool(const Context& ctx, const EdgeData& data)
+{
+    const double width = ctx.request.size1;
+    const TopoDS_Face& planeFace = data.faces[data.planeFace];
+    const TopoDS_Face& wallFace = data.faces[1 - data.planeFace];
+    const gp_Dir axis = data.cylinderAxis.Direction();
+    const gp_Pnt origin = data.cylinderAxis.Location();
+    const double radius = data.cylinderRadius;
+    const gp_Pnt vertex = data.start;
+    gp_Vec toVertex(origin, vertex);
+    toVertex -= gp_Vec(axis) * toVertex.Dot(gp_Vec(axis));
+    if (toVertex.Magnitude() < radius / 2) {
+        refuse("an ellipse's vertex off its cylinder");
+    }
+    const gp_Dir x0(toVertex);
+    const gp_Dir y0 = axis.Crossed(x0);
+    const bool concave = !data.convex;
+    // The plane's normal towards the ball; the ball outside the cylinder (s = +1) or inside
+    const gp_Dir planeOut = outwardNormal(planeFace, vertex);
+    const gp_Dir ball = concave ? planeOut : planeOut.Reversed();
+    const bool wallAway = gp_Vec(outwardNormal(wallFace, vertex)).Dot(gp_Vec(x0)) > 0;
+    const double s = wallAway == concave ? 1.0 : -1.0;
+    const double angle = referenceAngle(ctx, data);
+    if (angle <= angularTolerance || angle >= pi - 1e-6) {
+        refuse("a chamfer's reference angle near 0 or 180 deg");
+    }
+    const double d = width * std::tan(angle / 2);
+    const double sinTilt = std::sin(data.tilt);
+    const double cosTilt = std::cos(data.tilt);
+    if (radius + s * d <= linearTolerance) {
+        refuse("a chamfer's ball as large as the cylinder it rolls in");
+    }
+    const double nz = gp_Vec(ball).Dot(gp_Vec(axis));
+    if (std::abs(nz) < 1e-3) {
+        refuse("an ellipse on a plane nearly along its cylinder");
+    }
+    // An affine image of the unit circle: X(theta) = A + B cos theta + C sin theta
+    struct Affine
+    {
+        gp_XYZ a, b, c;
+    };
+    const double offsetOrigin = gp_Vec(ball).Dot(gp_Vec(vertex, origin));
+    // The point at the radius r about the axis whose height above the plane is k
+    auto onPlaneAt = [&](double k, double r) {
+        Affine f;
+        f.a = origin.XYZ() + axis.XYZ() * ((k - offsetOrigin) / nz);
+        f.b = x0.XYZ() * r - axis.XYZ() * (r * gp_Vec(ball).Dot(gp_Vec(x0)) / nz);
+        f.c = y0.XYZ() * r - axis.XYZ() * (r * gp_Vec(ball).Dot(gp_Vec(y0)) / nz);
+        return f;
+    };
+    auto combine = [](double p, const Affine& f, double q, const Affine& g, double r = 0.0,
+                      const Affine* h = nullptr) {
+        Affine out;
+        out.a = f.a * p + g.a * q;
+        out.b = f.b * p + g.b * q;
+        out.c = f.c * p + g.c * q;
+        if (h) {
+            out.a += h->a * r;
+            out.b += h->b * r;
+            out.c += h->c * r;
+        }
+        return out;
+    };
+    const double ballRadius = radius + s * d;
+    const Affine edgeCurve = onPlaneAt(0.0, radius);
+    const Affine centre = onPlaneAt(d, ballRadius);
+    // The wall's contact: the centre moved radially back onto the cylinder
+    Affine wall = centre;
+    wall.b = x0.XYZ() * radius - axis.XYZ() * (ballRadius * gp_Vec(ball).Dot(gp_Vec(x0)) / nz);
+    wall.c = y0.XYZ() * radius - axis.XYZ() * (ballRadius * gp_Vec(ball).Dot(gp_Vec(y0)) / nz);
+    // The plane's: the centre moved by d along the plane's normal
+    Affine onPlane = centre;
+    onPlane.a -= ball.XYZ() * d;
+    // The unit circle as a rational B-spline of degree 2, four quarters clamped at x0 (the edge's
+    // vertex): the faces' seams at the vertex
+    Handle(Geom_BSplineCurve) unit;
+    {
+        const double h = std::sqrt(0.5);
+        const double xs[9] = {1, 1, 0, -1, -1, -1, 0, 1, 1};
+        const double ys[9] = {0, 1, 1, 1, 0, -1, -1, -1, 0};
+        TColgp_Array1OfPnt poles(1, 9);
+        TColStd_Array1OfReal weights(1, 9);
+        for (int i = 0; i < 9; ++i) {
+            poles(i + 1) = gp_Pnt(xs[i], ys[i], 0.0);
+            weights(i + 1) = i % 2 == 0 ? 1.0 : h;
+        }
+        TColStd_Array1OfReal knots(1, 5);
+        TColStd_Array1OfInteger mults(1, 5);
+        for (int i = 0; i < 5; ++i) {
+            knots(i + 1) = i;
+            mults(i + 1) = i == 0 || i == 4 ? 3 : 2;
+        }
+        unit = new Geom_BSplineCurve(poles, weights, knots, mults, 2);
+    }
+    const int count = unit->NbPoles();
+    auto image = [&](const Affine& f, int i) {
+        const gp_Pnt& pole = unit->Pole(i);
+        return gp_Pnt(f.a + f.b * pole.X() + f.c * pole.Y());
+    };
+    // The edge itself is the image of the circle: the analysis is the base's
+    {
+        Handle(Geom_BSplineCurve) check = Handle(Geom_BSplineCurve)::DownCast(unit->Copy());
+        for (int i = 1; i <= count; ++i) {
+            check->SetPole(i, image(edgeCurve, i), unit->Weight(i));
+        }
+        for (int k = 0; k < 16; ++k) {
+            double u = unit->FirstParameter()
+                + (unit->LastParameter() - unit->FirstParameter()) * k / 16;
+            BRepExtrema_DistShapeShape distance(
+                BRepBuilderAPI_MakeVertex(check->Value(u)).Vertex(),
+                data.edge
+            );
+            if (!distance.IsDone() || distance.Value() > 1e-6 * std::max(1.0, radius)) {
+                refuse("an ellipse that is not its plane's section of its cylinder");
+            }
+        }
+    }
+    // A face ruled between two images of the circle, from the first (v = 0) to the second
+    auto ruled = [&](const Affine& from, const Affine& to) {
+        TColgp_Array2OfPnt poles(1, count, 1, 2);
+        TColStd_Array2OfReal weights(1, count, 1, 2);
+        for (int i = 1; i <= count; ++i) {
+            poles(i, 1) = image(from, i);
+            poles(i, 2) = image(to, i);
+            weights(i, 1) = unit->Weight(i);
+            weights(i, 2) = unit->Weight(i);
+        }
+        TColStd_Array1OfReal uKnots(1, unit->NbKnots());
+        TColStd_Array1OfInteger uMults(1, unit->NbKnots());
+        unit->Knots(uKnots);
+        unit->Multiplicities(uMults);
+        TColStd_Array1OfReal vKnots(1, 2);
+        TColStd_Array1OfInteger vMults(1, 2);
+        vKnots(1) = 0.0;
+        vKnots(2) = 1.0;
+        vMults(1) = 2;
+        vMults(2) = 2;
+        Handle(Geom_BSplineSurface) surface = new Geom_BSplineSurface(
+            poles, weights, uKnots, vKnots, uMults, vMults, unit->Degree(), 1
+        );
+        BRepBuilderAPI_MakeFace face(surface, Precision::Confusion());
+        if (!face.IsDone()) {
+            refuse("a chamfer's ruled face could not be made");
+        }
+        return face.Face();
+    };
+    // The ruled face run on past both rails, and closed behind the edge
+    const double runOn = 0.5;
+    const Affine wallPast = combine(1 + runOn, wall, -runOn, onPlane);
+    const Affine planePast = combine(1 + runOn, onPlane, -runOn, wall);
+    const Affine behind = combine(3.0, edgeCurve, -1.0, wall, -1.0, &onPlane);
+    BRepBuilderAPI_Sewing sewing(1e-6);
+    sewing.Add(ruled(wallPast, planePast));
+    sewing.Add(ruled(planePast, behind));
+    sewing.Add(ruled(behind, wallPast));
+    sewing.Perform();
+    TopoDS_Shape sewn = sewing.SewedShape();
+    TopoDS_Shell shell;
+    for (TopExp_Explorer it(sewn, TopAbs_SHELL); it.More(); it.Next()) {
+        if (!shell.IsNull()) {
+            refuse("a chamfer's ruled tool is not one shell");
+        }
+        shell = TopoDS::Shell(it.Current());
+    }
+    if (shell.IsNull() || !BRep_Tool::IsClosed(shell)) {
+        refuse("a chamfer's ruled tool is not closed");
+    }
+    BRepBuilderAPI_MakeSolid makeSolid(shell);
+    if (!makeSolid.IsDone()) {
+        refuse("a chamfer's ruled tool is not a solid");
+    }
+    TopoDS_Solid region = makeSolid.Solid();
+    BRepLib::OrientClosedSolid(region);
+    // The ball's side of the plane and of the cylinder, the cylinder's seam at the vertex
+    // Big enough for the region (within the edge's reach of its rails), small enough that the
+    // Booleans keep their accuracy
+    const double size = 2 * (origin.Distance(vertex) + radius + 6 * d) + 1.0;
+    TopoDS_Shape tool = commonOf(region, halfSpaceBeyond({vertex, ball}, size));
+    const TopoDS_Shape cylinder
+        = BRepPrimAPI_MakeCylinder(gp_Ax2(origin.Translated(-gp_Vec(axis) * size), axis, x0),
+                                   radius,
+                                   2 * size)
+              .Shape();
+    if (s > 0) {
+        BRepAlgoAPI_Cut cut;
+        TopTools_ListOfShape arguments;
+        arguments.Append(tool);
+        TopTools_ListOfShape tools;
+        tools.Append(cylinder);
+        cut.SetArguments(arguments);
+        cut.SetTools(tools);
+        cut.SetNonDestructive(Standard_True);
+        cut.SetRunParallel(Standard_False);
+        cut.Build();
+        if (!cut.IsDone() || cut.HasErrors()) {
+            refuse("cutting a chamfer's tool by its cylinder failed");
+        }
+        tool = cut.Shape();
+    }
+    else {
+        tool = commonOf(tool, cylinder);
+    }
+    Tool result;
+    for (TopExp_Explorer it(tool, TopAbs_SOLID); it.More(); it.Next()) {
+        if (!result.solid.IsNull()) {
+            refuse("a chamfer's tool along an ellipse is not one solid");
+        }
+        result.solid = it.Current();
+    }
+    if (result.solid.IsNull()) {
+        refuse("a chamfer's tool along an ellipse is empty");
+    }
+    result.source = data.edge;
+    result.cut = data.convex;
+    result.volume = pi * d * d * (radius + s * d / 3) * (1 + sinTilt * sinTilt / 2) / cosTilt;
+    // The longest leg, at the narrow side, the same on both faces
+    const double leg = d * (1 + sinTilt) / cosTilt;
+    result.strips.resize(2);
+    for (int k = 0; k < 2; ++k) {
+        result.strips[k].face = data.faces[k];
+        result.strips[k].width = leg;
+    }
+    return result;
+}
+
 Tool circleTool(const Context& ctx, const EdgeData& data, const VertexEnd ends[2])
 {
     const gp_Circ& circle = data.circle;
@@ -10312,6 +10678,9 @@ TopoDS_Shape constructShape(
             }
         }
     }
+    const AdaptiveMeasures adaptive(
+        std::any_of(data.begin(), data.end(), [](const EdgeData& d) { return d.ellipse; })
+    );
 
     std::vector<Tool> tools;
     ReflexCorners reflex;
@@ -10501,6 +10870,10 @@ TopoDS_Shape constructShape(
             if (chain->arcs.front()->edge.IsSame(edgeData.edge)) {
                 edgeTools.push_back(chainRingTool(ctx, *chain));
             }
+            continue;
+        }
+        if (edgeData.ellipse) {
+            edgeTools.push_back(ellipseTool(ctx, edgeData));
             continue;
         }
         bool reflexEnd = false;
@@ -18468,6 +18841,192 @@ bool constructSolid(
 }
 
 }  // namespace
+
+namespace
+{
+thread_local ChamferWidth currentWidth;
+}
+
+ChamferWidthScope::ChamferWidthScope(ChamferWidth width)
+    : previous(std::move(currentWidth))
+{
+    currentWidth = std::move(width);
+}
+
+ChamferWidthScope::~ChamferWidthScope()
+{
+    currentWidth = std::move(previous);
+}
+
+const ChamferWidth& chamferWidth()
+{
+    return currentWidth;
+}
+
+bool anglesVary(const TopoDS_Shape& baseShape, const std::vector<TopoDS_Shape>& edges)
+{
+    try {
+        TopTools_IndexedDataMapOfShapeListOfShape edgeFaces;
+        TopExp::MapShapesAndUniqueAncestors(baseShape, TopAbs_EDGE, TopAbs_FACE, edgeFaces);
+        for (const auto& shape : edges) {
+            if (shape.IsNull() || shape.ShapeType() != TopAbs_EDGE
+                || BRep_Tool::Degenerated(TopoDS::Edge(shape)) || !edgeFaces.Contains(shape)) {
+                continue;
+            }
+            const auto& faces = edgeFaces.FindFromKey(shape);
+            if (faces.Extent() != 2) {
+                continue;
+            }
+            EdgeData data;
+            data.faces[0] = TopoDS::Face(faces.First());
+            data.faces[1] = TopoDS::Face(faces.Last());
+            BRepAdaptor_Curve curve(TopoDS::Edge(shape));
+            const int stations = 9;
+            double lowest = 2 * pi;
+            double highest = -1.0;
+            for (int k = 0; k < stations; ++k) {
+                // Inside the parameter range, off its ends
+                double u = curve.FirstParameter()
+                    + (curve.LastParameter() - curve.FirstParameter()) * (k + 0.5) / stations;
+                double angle = ballSideAngle(data, curve.Value(u));
+                lowest = std::min(lowest, angle);
+                highest = std::max(highest, angle);
+            }
+            if (highest - lowest > 1e-7) {
+                return true;
+            }
+        }
+    }
+    catch (const Standard_Failure&) {
+    }
+    catch (const Base::Exception&) {
+    }
+    catch (const Refusal&) {
+    }
+    return false;
+}
+
+namespace
+{
+/// The analysed edges of a chamfer variesAlongLoneEdge() takes, or none where it doesn't
+std::vector<EdgeData> varyingEdges(const Context& ctx, const std::vector<TopoDS_Shape>& edges)
+{
+    const Request& request = ctx.request;
+    if (request.kind != Kind::Chamfer || request.chamferType != ChamferType::equalDistance
+        || request.size1 <= 0 || edges.empty()) {
+        return {};
+    }
+    std::vector<EdgeData> result;
+    std::vector<TopoDS_Vertex> vertices;
+    bool varies = false;
+    for (int i = 1; i <= ctx.selected.Extent(); ++i) {
+        const TopoDS_Edge& edge = TopoDS::Edge(ctx.selected(i));
+        TopoDS_Vertex first;
+        TopoDS_Vertex last;
+        TopExp::Vertices(edge, first, last);
+        if (first.IsNull() || !first.IsSame(last)) {
+            return {};  // an open edge: a chain or an arc, outside the gate
+        }
+        for (const auto& vertex : vertices) {
+            if (vertex.IsSame(first)) {
+                return {};  // two closed edges through one vertex: a chain
+            }
+        }
+        vertices.push_back(first);
+        EdgeData data = analyse(ctx, edge);
+        if (data.line || !data.closed) {
+            return {};
+        }
+        varies = varies || data.ellipse;
+        result.push_back(std::move(data));
+    }
+    if (!varies) {
+        return {};
+    }
+    return result;
+}
+
+/// The edges as the construction selects them: each once, in order
+void selectEdges(Context& ctx, const std::vector<TopoDS_Shape>& edges)
+{
+    for (const auto& edge : edges) {
+        if (edge.IsNull() || edge.ShapeType() != TopAbs_EDGE) {
+            refuse("not an edge");
+        }
+        if (!ctx.selected.Contains(edge)) {
+            ctx.selected.Add(edge);
+        }
+    }
+}
+}  // namespace
+
+bool variesAlongLoneEdge(
+    const TopoDS_Shape& baseShape,
+    const std::vector<TopoDS_Shape>& edges,
+    const Request& request
+)
+{
+    if (request.kind != Kind::Chamfer || request.chamferType != ChamferType::equalDistance) {
+        return false;
+    }
+    // Only edges along an ellipse can vary here: anything else costs no analysis
+    bool anyEllipse = false;
+    for (const auto& edge : edges) {
+        if (!edge.IsNull() && edge.ShapeType() == TopAbs_EDGE
+            && !BRep_Tool::Degenerated(TopoDS::Edge(edge))
+            && BRepAdaptor_Curve(TopoDS::Edge(edge)).GetType() == GeomAbs_Ellipse) {
+            anyEllipse = true;
+        }
+    }
+    if (!anyEllipse) {
+        return false;
+    }
+    try {
+        const TopoShape base(baseShape);
+        Request varying = request;
+        varying.varyingAngle = true;
+        Context ctx(base, varying);
+        selectEdges(ctx, edges);
+        return !varyingEdges(ctx, edges).empty();
+    }
+    catch (const Refusal& refusal) {
+        FC_LOG("chamfer of varying angle: not taken (" << refusal.reason << ")");
+    }
+    catch (const Standard_Failure&) {
+    }
+    catch (const Base::Exception&) {
+    }
+    return false;
+}
+
+double longestLeg(
+    const TopoDS_Shape& baseShape,
+    const std::vector<TopoDS_Shape>& edges,
+    const Request& request
+)
+{
+    double leg = request.size1;
+    try {
+        const TopoShape base(baseShape);
+        Request varying = request;
+        varying.varyingAngle = true;
+        Context ctx(base, varying);
+        selectEdges(ctx, edges);
+        for (const auto& data : varyingEdges(ctx, edges)) {
+            if (data.ellipse) {
+                const double d = request.size1 * std::tan(referenceAngle(ctx, data) / 2);
+                leg = std::max(leg, d * (1 + std::sin(data.tilt)) / std::cos(data.tilt));
+            }
+        }
+    }
+    catch (const Refusal&) {
+    }
+    catch (const Standard_Failure&) {
+    }
+    catch (const Base::Exception&) {
+    }
+    return leg;
+}
 
 bool preferConstruction(
     const TopoDS_Shape& baseShape,

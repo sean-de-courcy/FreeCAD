@@ -1031,7 +1031,7 @@ std::vector<const char*> ownerParameters(const DressUp* step)
 {
     if (step->isDerivedFrom<Chamfer>()) {
         return {"ChamferType", "Size", "Size2", "Angle", "FlipDirection", "UseAllEdges",
-                "TangentPropagation", "Refine"};
+                "TangentPropagation", "Refine", "WidthAt", "WidthPoints"};
     }
     return {"Radius", "UseAllEdges", "TangentPropagation", "Refine"};
 }

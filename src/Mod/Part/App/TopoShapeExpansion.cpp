@@ -8779,6 +8779,9 @@ std::shared_ptr<DressUpOutcome> buildDressUp(
                     return;
                 }
                 request.contour.clear();
+                // ops#942: the ellipse kind is the preferred construction's alone; OCCT's checks
+                // below analyse the edges as before
+                request.varyingAngle = false;
             }
             out.failed = buildDressUpFailed(*maker, out.occtError, request.contour);
             // A face of zero width (ops#298): the exact construction builds it at the limit
@@ -10648,6 +10651,39 @@ TopoShape& TopoShape::makeElementChamfer(
         if (setbacksDiffer) {
             request.setbacks = setbacks;
         }
+        // FreeCAD-CH ops#942 (notes/chamfer-varying-angle-942.md 3 c, 4): every picked edge a
+        // closed contour of its own, one of them along which the faces' angle varies: Onshape's
+        // chamfer is one ball rolled round it, which the construction builds before OCCT, with
+        // the width where PartDesign::Chamfer's WidthAt puts it (ChamferWidthScope)
+        const FilletFallback::ChamferWidth& width = FilletFallback::chamferWidth();
+        bool varying = false;
+        if (chamferType == ChamferType::equalDistance && !setbacksDiffer) {
+            request.widthAt = width.at;
+            request.widthPoints = width.points;
+            std::vector<TopoDS_Shape> plain;
+            plain.reserve(inputEdges.size());
+            for (const auto& edge : inputEdges) {
+                plain.push_back(edge.getShape());
+            }
+            varying = FilletFallback::variesAlongLoneEdge(input.getShape(), plain, request);
+            if (!varying && width.at != FilletFallback::WidthAt::narrowest
+                && FilletFallback::anglesVary(input.getShape(), plain)) {
+                // Never a silent width on both faces all round for the other values (section 4
+                // point 10)
+                FC_THROWM(
+                    Base::CADKernelError,
+                    "The chamfer's width "
+                        << (width.at == FilletFallback::WidthAt::widest ? "at the widest angle"
+                                                                         : "at a reference point")
+                        << " is built only where every picked edge is a closed edge of its own, "
+                           "between a plane and a cylinder: choose Narrowest angle"
+                );
+            }
+            if (varying) {
+                request.varyingAngle = true;
+                request.limitOnly = false;
+            }
+        }
         // FreeCAD-CH (ops#762): a contour through a kink, as the fillet's
         std::string kinkAt;
         std::vector<std::vector<TopoDS_Shape>> runs;
@@ -10688,7 +10724,33 @@ TopoShape& TopoShape::makeElementChamfer(
             );
         }
         FilletFallback::takeInvalidResult();
-        auto outcome = buildDressUp(mkChamferPtr, input, inputEdges, request, "The chamfer");
+        auto outcome
+            = buildDressUp(mkChamferPtr, input, inputEdges, request, "The chamfer", varying);
+        if (varying) {
+            if (outcome->preferred && finishConstruction(*this, *outcome, input, op)) {
+                return *this;
+            }
+            if (width.at != FilletFallback::WidthAt::narrowest) {
+                FC_THROWM(
+                    Base::CADKernelError,
+                    "The chamfer along an edge whose faces' angle varies could not be built with "
+                    "its width "
+                        << (width.at == FilletFallback::WidthAt::widest ? "at the widest angle"
+                                                                         : "at a reference point")
+                        << ": " << (outcome->preferred ? "naming its result failed" : outcome->reason)
+                );
+            }
+            // The narrowest angle: OCCT's chamfer, the width on both faces all round, stands where
+            // it builds, as before (a chamfer that builds today never starts failing)
+            FC_LOG("chamfer along an edge of varying angle: the construction refused ("
+                   << (outcome->preferred ? "naming its result failed" : outcome->reason)
+                   << "); OCCT's width on both faces stands");
+            if (outcome->preferred) {
+                request.varyingAngle = false;
+                request.limitOnly = true;
+                outcome = buildDressUp(mkChamferPtr, input, inputEdges, request, "The chamfer");
+            }
+        }
         if (outcome->failed || outcome->thin || outcome->invalid || outcome->cusp || outcome->ring
             || !outcome->wrongWay.empty()) {
             if (setbacksDiffer && outcome->constructed && outcome->construction.newRule) {
