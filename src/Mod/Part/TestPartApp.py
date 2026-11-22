@@ -49,6 +49,7 @@ from parttests.FilletFallbackTest import (
     ConeFootTest,
     MitreCornerTest,  # ops#941
     MitreAskTimeTest,  # ops#941
+    PinchedVertexTest,  # ops#953
     CornerWithACircleTest,
     BlendEndTrimTest,
     CurvedEndTrimTest,

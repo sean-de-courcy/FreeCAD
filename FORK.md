@@ -507,7 +507,8 @@ names it.
 | `fix/i956-brep-notation` | fix | ops#956 | - | integration | `189bbf271e` (fork PR 511), 2026-11-22 | never (fork fix): text BRep in a document save is written in the default notation, so unbounded parameter ranges read back (ops#956) |
 | `fix/i936-chamfer-curved-end` | fix | ops#936 | - | `integration` `a737a8565d` | `78fbf437c4` (fork PR 505), 2026-11-22 | never (fork fix): a chamfer whose edge ends on curved faces, the plain wedge run on through the part; a wall's round on a floor split at its foot |
 | `fix/i919-uptoface-split` | fix | ops#919 | - | `integration` `d01198675b` | `e810f519d9` (fork PR 506), 2026-11-22 | never (fork feature) |
-| `fix/i951-fullround-name-order` | fix | ops#951 | - | integration | (fork PR 503) | never (fork fix): a merged full round is named by the feature list's order, then the segment drawn first (ops#951, on ops#900) |
+| `fix/i951-fullround-name-order` | fix | ops#951 | - | integration | `bcf7ad1195` (fork PR 503), 2026-11-22 | never (fork fix): a merged full round is named by the feature list's order, then the segment drawn first (ops#951, on ops#900) |
+| `fix/i958-worker-net-953-guard` | fix | ops#958, ops#953 | - | `integration` `bcf7ad1195` | (fork PR 510) | never (fork feature) |
 
 ## Fork-only commits in carried topics
 

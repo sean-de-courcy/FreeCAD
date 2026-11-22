@@ -7596,3 +7596,68 @@ class WallOnASplitFloorTest(unittest.TestCase):
         except Exception:
             return
         self.assertTrue(result.isValid())
+
+
+class PinchedVertexTest(unittest.TestCase):
+    """ops#953: a fillet or chamfer edge ending at a vertex of 5 faces where one other face (a floor
+    that touches itself there) holds both edges the round's end lands on: OCCT 8.0.1's builder reads
+    an edge it never set and the process ended (notes/fillet-pinched-vertex-953.md). The guard sends
+    it to the exact construction alone, or to an error naming the vertex. Designed model: the split
+    floor (three 20 x 20 x 3 boxes about the origin, the quadrant x < 0, y > 0 empty) and a wall 4
+    wide, 5 high and 18 deep standing on it at x 0..4, leaning by `lean` in y over its height."""
+
+    TOP = 3.0
+
+    def model(self, lean):
+        step = Part.makeBox(20, 20, self.TOP).fuse(
+            [Part.makeBox(20, 20, self.TOP, V(-20, -20, 0)), Part.makeBox(20, 20, self.TOP, V(0, -20, 0))]
+        )
+        profile = Part.Face(
+            Part.makePolygon(
+                [V(0, 0, self.TOP), V(4, 0, self.TOP), V(4, lean, self.TOP + 5), V(0, lean, self.TOP + 5), V(0, 0, self.TOP)]
+            )
+        )
+        return step.fuse(profile.extrude(V(0, -18, 0))).removeSplitter()
+
+    def edge(self, body, x):
+        # The wall's front edge at x, from its foot (0 or 4, 0, 3) up
+        found = [
+            e
+            for e in body.Edges
+            if e.Curve.TypeId == "Part::GeomLine"
+            and e.BoundBox.XLength < 1e-9
+            and abs(e.BoundBox.XMin - x) < 1e-9
+            and abs(e.BoundBox.YMax) < 1e-9
+            and abs(e.BoundBox.ZMin - self.TOP) < 1e-9
+            and e.BoundBox.ZLength > 4.9
+        ]
+        self.assertEqual(len(found), 1)
+        return found[0]
+
+    def testUprightWallIsTheClosedForm(self):
+        # The round along the wall's convex vertical edge, 5 high, where two faces meet square removes
+        # (1 - pi / 4) r^2 5
+        body = self.model(0.0)
+        result = body.makeFillet(1.0, [self.edge(body, 0.0)])
+        self.assertTrue(result.isValid())
+        self.assertEqual(len(result.Solids), 1)
+        self.assertAlmostEqual(body.Volume - result.Volume, (1 - math.pi / 4) * 5, delta=1e-6)
+
+    def testLeaningWallIsItsMirrorEdge(self):
+        # The wall is its own mirror in x = 2 and the round touches only the wall and the floor's
+        # plane: the pinched edge at x 0 removes what the plain edge at x 4 removes (OCCT's, unguarded)
+        body = self.model(-2.0)
+        pinched = body.makeFillet(1.0, [self.edge(body, 0.0)])
+        plain = body.makeFillet(1.0, [self.edge(body, 4.0)])
+        self.assertTrue(pinched.isValid())
+        self.assertEqual(len(pinched.Faces), len(plain.Faces))
+        self.assertAlmostEqual(pinched.Volume - body.Volume, plain.Volume - body.Volume, delta=1e-6)
+        self.assertGreater(body.Volume - pinched.Volume, 1.0)
+
+    def testChamferIsRefusedNamingTheVertex(self):
+        # The construction refuses a vertex of 6 edges: an error, and the process goes on
+        body = self.model(-2.0)
+        with self.assertRaises(Exception) as caught:
+            body.makeChamfer(1.0, [self.edge(body, 0.0)])
+        self.assertIn("touches itself", str(caught.exception))
+        self.assertIn("(0, 0, 3)", str(caught.exception))

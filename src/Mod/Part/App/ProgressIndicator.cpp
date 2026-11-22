@@ -74,6 +74,7 @@
 # include <cxxabi.h>
 # include <dlfcn.h>
 # include <execinfo.h>
+# include <setjmp.h>
 # include <signal.h>
 #endif
 
@@ -390,6 +391,8 @@ struct Call
     ThreadCpuClock clock;
     std::atomic<bool> ended {false};
     double cpuAtEnd {0.0};
+    // The work ended in a hardware fault (ops#958): its error is the fault's
+    bool faulted {false};
 
     double cpuSeconds() const
     {
@@ -482,18 +485,227 @@ std::string seconds(double value)
     return text.str();
 }
 
+#ifdef _WIN32
+/// The structured exceptions a worker turns into the feature's error (FreeCAD-CH, ops#958): faults
+/// of the kernel's code. Others (a C++ exception, a breakpoint, a stack overflow) are left as they
+/// are
+int workerFault(unsigned long code)
+{
+    switch (code) {
+        case EXCEPTION_ACCESS_VIOLATION:
+        case EXCEPTION_IN_PAGE_ERROR:
+        case EXCEPTION_ARRAY_BOUNDS_EXCEEDED:
+        case EXCEPTION_DATATYPE_MISALIGNMENT:
+        case EXCEPTION_ILLEGAL_INSTRUCTION:
+        case EXCEPTION_PRIV_INSTRUCTION:
+        case EXCEPTION_INT_DIVIDE_BY_ZERO:
+            return EXCEPTION_EXECUTE_HANDLER;
+        default:
+            return EXCEPTION_CONTINUE_SEARCH;
+    }
+}
+
+/// The work alone under a structured exception handler: the fault's code, or 0. It is the innermost
+/// handler around the work, so its filter sees a fault before any catch (...) outside it: Windows
+/// Release builds compile with /EHa (FREECAD_RELEASE_SEH), where catch (...) also takes structured
+/// exceptions (CI run 45014205931). No object to unwind may live in this function (C2712). __try is
+/// MSVC's (and clang-cl's) extension, Windows only
+# if defined(__clang__)
+#  pragma clang diagnostic push
+#  pragma clang diagnostic ignored "-Wlanguage-extension-token"
+# endif
+unsigned long invokeGuarded(const Call& call, const Message_ProgressRange& range)
+{
+    __try {
+        call.work(range);
+        return 0;
+    }
+    __except (workerFault(GetExceptionCode())) {
+        return GetExceptionCode();
+    }
+}
+# if defined(__clang__)
+#  pragma clang diagnostic pop
+# endif
+
+/// The work, its C++ errors kept for the caller: the fault's code, or 0
+unsigned long runGuarded(const std::shared_ptr<Call>* call)
+{
+    unsigned long fault = 0;
+    try {
+        Handle(CancelIndicator) indicator = new CancelIndicator(*call);
+        fault = invokeGuarded(**call, indicator->Start());
+    }
+    catch (...) {
+        (*call)->error = std::current_exception();
+    }
+    return fault;
+}
+
+std::string faultText(unsigned long code)
+{
+    std::ostringstream text;
+    text << "structured exception 0x" << std::hex << code;
+    return text.str();
+}
+#else
+// FreeCAD-CH (ops#958): on macOS and Linux a fault's signal action is the process's (the crash
+// reporter's, Base/CrashReporter/Writer.cpp, or Linux's SystemHandler), and ends the process from any
+// thread. The worker's guard: a handler, installed before each worker starts where another replaced
+// it, that jumps back into runGuarded() on a guarded worker and hands every other fault to the
+// action that was there before
+constexpr std::array<int, 4> faultSignals {SIGSEGV, SIGBUS, SIGILL, SIGFPE};
+std::array<struct sigaction, faultSignals.size()> previousActions {};
+std::mutex armMutex;
+// Set only while a worker's work runs
+thread_local sigjmp_buf* faultJump = nullptr;
+thread_local volatile sig_atomic_t faultSignal = 0;
+
+/// The work, its C++ errors kept for the caller
+void runWork(const std::shared_ptr<Call>* call)
+{
+    try {
+        Handle(CancelIndicator) indicator = new CancelIndicator(*call);
+        (*call)->work(indicator->Start());
+    }
+    catch (...) {
+        (*call)->error = std::current_exception();
+    }
+}
+
+void faultHandler(int sig, siginfo_t* info, void* context)
+{
+    if (sigjmp_buf* jump = faultJump) {
+        faultJump = nullptr;
+        faultSignal = sig;
+        siglongjmp(*jump, 1);
+    }
+    for (size_t i = 0; i < faultSignals.size(); ++i) {
+        if (faultSignals[i] != sig) {
+            continue;
+        }
+        const struct sigaction& previous = previousActions[i];
+        if ((previous.sa_flags & SA_SIGINFO) != 0) {
+            previous.sa_sigaction(sig, info, context);
+        }
+        else if (previous.sa_handler == SIG_DFL) {
+            signal(sig, SIG_DFL);
+            raise(sig);
+        }
+        else if (previous.sa_handler != SIG_IGN) {
+            previous.sa_handler(sig);
+        }
+        return;
+    }
+}
+
+/// On the calling thread, before a worker starts
+void armFaultHandlers()
+{
+    std::lock_guard<std::mutex> lock(armMutex);
+    for (size_t i = 0; i < faultSignals.size(); ++i) {
+        struct sigaction current {};
+        if (sigaction(faultSignals[i], nullptr, &current) != 0) {
+            continue;
+        }
+        if ((current.sa_flags & SA_SIGINFO) != 0 && current.sa_sigaction == faultHandler) {
+            continue;
+        }
+        previousActions[i] = current;
+        struct sigaction guard {};
+        guard.sa_sigaction = faultHandler;
+        guard.sa_flags = SA_SIGINFO | SA_ONSTACK;
+        sigemptyset(&guard.sa_mask);
+        sigaction(faultSignals[i], &guard, nullptr);
+    }
+}
+
+/// runWork() where a fault jumps back here: the fault's signal, or 0. The jump restores the mask.
+/// No object to unwind lives here
+unsigned long runGuarded(const std::shared_ptr<Call>* call)
+{
+    sigjmp_buf jump;
+    if (sigsetjmp(jump, 1) != 0) {
+        return static_cast<unsigned long>(faultSignal);
+    }
+    faultSignal = 0;
+    faultJump = &jump;
+    runWork(call);
+    faultJump = nullptr;
+    return 0;
+}
+
+std::string faultText(unsigned long sig)
+{
+    return "signal " + std::to_string(sig);
+}
+
+/// The worker's own stack for the handler, so that a fault near the stack's end reaches it
+class AlternateStack
+{
+public:
+    AlternateStack()
+        : memory(stackBytes)
+    {
+        stack_t stack {};
+        stack.ss_sp = memory.data();
+        stack.ss_size = memory.size();
+        installed = sigaltstack(&stack, nullptr) == 0;
+    }
+    ~AlternateStack()
+    {
+        if (installed) {
+            stack_t stack {};
+            stack.ss_flags = SS_DISABLE;
+            sigaltstack(&stack, nullptr);
+        }
+    }
+    AlternateStack(const AlternateStack&) = delete;
+    AlternateStack(AlternateStack&&) = delete;
+    AlternateStack& operator=(const AlternateStack&) = delete;
+    AlternateStack& operator=(AlternateStack&&) = delete;
+
+private:
+    static constexpr size_t stackBytes = 256U * 1024U;
+    std::vector<char> memory;
+    bool installed {false};
+};
+#endif
+
 void runWorker(const std::shared_ptr<Call>& call)
 {
     onWorker = true;
     call->clock.open();
     call->sample.open();
     call->sampleReady.store(call->sample.valid(), std::memory_order_release);
-    try {
-        Handle(CancelIndicator) indicator = new CancelIndicator(call);
-        call->work(indicator->Start());
+    // FreeCAD-CH (ops#958): the C runtime's SIGSEGV action, which turns an access violation into
+    // Base::AccessViolation on the main thread (SystemHandler.cpp), is per thread and unset here;
+    // under /EHsc (RelWithDebInfo, Debug) catch (...) doesn't see the fault, and under /EHa (Release)
+    // it takes it before any guard outside the work, so the guard is the work's innermost handler
+    // (invokeGuarded(); a catch (...) inside the work, compiled /EHa, still takes it first); on
+    // macOS and Linux the process's action ends the process from any thread: a fault in OCCT ended
+    // the process. Now it fails the call, which
+    // raises it on the calling thread, and fails the feature even where a caller catches it (review
+    // pr958-r1 T1). On macOS and Linux the work's frames are not unwound (their destructors don't
+    // run: a leak); on Windows __except unwinds those stopped at a call site. Either way the state
+    // they leave is not to be trusted; OCC_CATCH_SIGNALS leaves no handler behind on Windows
+    unsigned long fault = 0;
+    {
+#ifndef _WIN32
+        AlternateStack alternate;
+#endif
+        fault = runGuarded(&call);
     }
-    catch (...) {
-        call->error = std::current_exception();
+    if (fault != 0) {
+        call->faulted = true;
+        call->error = std::make_exception_ptr(Base::AccessViolation(
+            "Illegal storage access in the geometry kernel (" + faultText(fault)
+            + "): the feature's shape was not built"
+        ));
+        // The captures may be half built: kept, never destroyed (a second fault there would be
+        // outside the guard)
+        // NOLINTNEXTLINE(cppcoreguidelines-owning-memory)
+        static_cast<void>(new std::function<void(const Message_ProgressRange&)>(std::move(call->work)));
     }
     // The work's captures (makers, shapes) are freed here, on this thread
     call->work = nullptr;
@@ -1516,6 +1728,9 @@ void run(const char* what, const std::function<void(const Message_ProgressRange&
 
     auto call = std::make_shared<Call>();
     call->work = work;
+#ifndef _WIN32
+    armFaultHandlers();
+#endif
     QThread* thread = QThread::create([call]() { runWorker(call); });
     thread->setStackSize(workerStackSize);
     thread->start();
@@ -1617,6 +1832,20 @@ void run(const char* what, const std::function<void(const Message_ProgressRange&
     delete thread;
     if (scopeDepth > 0) {
         scopeWorkerCpu += call->cpuSeconds();
+    }
+    if (call->faulted) {
+        // Noted for the feature as a stop by the limit is (kernel-4): a caller that catches the
+        // error and builds on (a pattern's instance dropped, a retry) does so after a fault in
+        // state nothing has checked, so the feature fails whatever its code does
+        try {
+            std::rethrow_exception(call->error);
+        }
+        catch (const Base::Exception& error) {
+            if (scopeDepth > 0 && scopeFired.empty()) {
+                scopeFired = error.what();
+            }
+            throw;
+        }
     }
     if (call->error) {
         std::rethrow_exception(call->error);

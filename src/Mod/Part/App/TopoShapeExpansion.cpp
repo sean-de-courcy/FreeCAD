@@ -8810,6 +8810,99 @@ std::vector<std::vector<TopoDS_Shape>> makerContours(BRepFilletAPI_LocalOperatio
     return contours;
 }
 
+/** FreeCAD-CH (ops#953): whether one of OCCT's contours ends at a vertex where OCCT 8.0.1's fillet
+ * and chamfer builder reads an edge it never set, an access violation (notes/fillet-pinched-vertex-953.md).
+ * At a contour's end V, the edges at V of the end edge's two faces, other than the end edge, are
+ * where the round's end lands; where one other face holds both (it touches itself at V) and V has
+ * 5 faces or more, `ChFi3d_Builder::PerformIntersectionAtEnd` takes its one-corner branch, written
+ * for 3 faces, and copies `Edge[2]`, which only 4 faces set (ChFi3d_Builder_C1.cxx 2153-2168,
+ * 2575-2579, 2955). Read on the maker's contours before it builds.
+ *
+ * @param where If not null and the answer is true, receives the vertex, for the error message
+ */
+bool pinchedContourEnd(
+    const TopoDS_Shape& base,
+    const std::vector<std::vector<TopoDS_Shape>>& contours,
+    std::string* where
+)
+{
+    TopTools_IndexedDataMapOfShapeListOfShape vertexFaces;
+    TopTools_IndexedDataMapOfShapeListOfShape edgeFaces;
+    TopExp::MapShapesAndUniqueAncestors(base, TopAbs_VERTEX, TopAbs_FACE, vertexFaces);
+    TopExp::MapShapesAndUniqueAncestors(base, TopAbs_EDGE, TopAbs_FACE, edgeFaces);
+    auto hasVertex = [](const TopoDS_Shape& edge, const TopoDS_Shape& vertex) {
+        for (TopExp_Explorer it(edge, TopAbs_VERTEX); it.More(); it.Next()) {
+            if (it.Current().IsSame(vertex)) {
+                return true;
+            }
+        }
+        return false;
+    };
+    for (const auto& contour : contours) {
+        for (const auto& end : contour) {
+            for (TopExp_Explorer vx(end, TopAbs_VERTEX); vx.More(); vx.Next()) {
+                const TopoDS_Shape& vertex = vx.Current();
+                // An end of the contour: on this edge only (a closed contour has none)
+                int on = 0;
+                for (const auto& edge : contour) {
+                    on += hasVertex(edge, vertex) ? 1 : 0;
+                }
+                if (on != 1 || !vertexFaces.Contains(vertex) || !edgeFaces.Contains(end)
+                    || vertexFaces.FindFromKey(vertex).Extent() < 5) {
+                    continue;
+                }
+                // OCCT's one stripe at the vertex (ChFi3d_Builder::PerformFilletOnVertex, case 1):
+                // where another contour reaches it too, its corner code runs, which reads no such edge
+                bool another = false;
+                for (const auto& other : contours) {
+                    if (&other == &contour) {
+                        continue;
+                    }
+                    for (const auto& edge : other) {
+                        another = another || hasVertex(edge, vertex);
+                    }
+                }
+                if (another) {
+                    continue;
+                }
+                const TopTools_ListOfShape& sides = edgeFaces.FindFromKey(end);
+                if (sides.Extent() != 2) {
+                    continue;
+                }
+                // Each side's other edges at the vertex, and the faces beyond them
+                std::vector<TopTools_IndexedMapOfShape> beyond(2);
+                int k = 0;
+                for (const auto& side : sides) {
+                    for (TopExp_Explorer ed(side, TopAbs_EDGE); ed.More(); ed.Next()) {
+                        const TopoDS_Shape& arc = ed.Current();
+                        if (arc.IsSame(end) || !hasVertex(arc, vertex) || !edgeFaces.Contains(arc)) {
+                            continue;
+                        }
+                        for (const auto& face : edgeFaces.FindFromKey(arc)) {
+                            if (!face.IsSame(sides.First()) && !face.IsSame(sides.Last())) {
+                                beyond[k].Add(face);
+                            }
+                        }
+                    }
+                    ++k;
+                }
+                for (int i = 1; i <= beyond[0].Extent(); ++i) {
+                    if (beyond[1].Contains(beyond[0](i))) {
+                        if (where) {
+                            const gp_Pnt at = BRep_Tool::Pnt(TopoDS::Vertex(vertex));
+                            std::ostringstream text;
+                            text << "at (" << at.X() << ", " << at.Y() << ", " << at.Z() << ")";
+                            *where = text.str();
+                        }
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    return false;
+}
+
 /** A dress-up over a kink in one of OCCT's contours (FilletFallback::kinkedContour(), ops#762),
  * where OCCT's valid result leaves a tooth: the exact construction alone, below the limit too,
  * under the feature's time limit. It rounds the selection and what OCCT's contours add to it
@@ -9629,6 +9722,23 @@ TopoShape& TopoShape::makeElementFillet(
                 << "), where OCCT's round leaves a tooth; its exact construction refused: " << reason
         );
     }
+    // FreeCAD-CH (ops#953): a contour ending where a face touches itself at a vertex of 5 faces or
+    // more crashes OCCT's fillet (an access violation): the exact construction alone, or an error
+    std::string pinchedAt;
+    if (pinchedContourEnd(input.getShape(), makerContours(*mkFillet), &pinchedAt)) {
+        std::string reason;
+        if (constructOverKink(
+                *this, input, inputEdges, request, makerContours(*mkFillet), "The fillet", op, reason
+            )) {
+            return *this;
+        }
+        FC_THROWM(
+            Base::CADKernelError,
+            "The fillet ends at a vertex where a face touches itself ("
+                << pinchedAt << "), where OCCT's fillet crashes; its exact construction refused: "
+                << reason
+        );
+    }
     std::string notchAt;
     if (FilletFallback::contactOnPartOfAnEdge(input.getShape(), contourEdges, request, &notchAt)) {
         struct Alone
@@ -10117,6 +10227,25 @@ TopoShape& TopoShape::makeElementChamfer(
                 "The chamfer runs over a slight corner between its edges ("
                     << kinkAt
                     << "), where OCCT's chamfer leaves a tooth; its exact construction refused: "
+                    << reason
+            );
+        }
+        // FreeCAD-CH (ops#953): a contour ending at a pinched vertex, as the fillet's
+        std::string pinchedAt;
+        if (pinchedContourEnd(input.getShape(), makerContours(mkChamfer), &pinchedAt)) {
+            if (setbacksDiffer && !uniform) {
+                continue;
+            }
+            std::string reason;
+            if (constructOverKink(
+                    *this, input, inputEdges, request, makerContours(mkChamfer), "The chamfer", op, reason
+                )) {
+                return *this;
+            }
+            FC_THROWM(
+                Base::CADKernelError,
+                "The chamfer ends at a vertex where a face touches itself ("
+                    << pinchedAt << "), where OCCT's chamfer crashes; its exact construction refused: "
                     << reason
             );
         }
