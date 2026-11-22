@@ -5979,6 +5979,157 @@ double referenceAngle(const Context& ctx, const EdgeData& data)
     return ballSideAngle(data, foot);
 }
 
+/** A fused ellipse tool whose contact on the plane runs off the plane face over its far edge
+ * (ops#942, notes/chamfer-varying-angle-942.md 3 b; the gaskets' ledge narrower than the chamfer):
+ * Onshape's fill adds nothing past the surface of the face beyond that edge (FR1), so the tool is
+ * cut to the material side of that face's whole surface. Only a face beyond that is a plane
+ * containing the cylinder's axis direction, or a cylinder along it; any other face beyond the
+ * run-off is refused. The closed form of the unclipped tool is checked first, and the clipped
+ * tool's volume is measured. Each piece cut off holds part of the contact that ran off and none of
+ * the contact on the plane face or the wall
+ */
+double areaToleranceOf(const TopoDS_Shape& face);
+
+void clipRunOff(const Context& ctx, const EdgeData& data, Tool& tool, double size)
+{
+    const TopoDS_Face& planeFace = data.faces[data.planeFace];
+    const TopoDS_Face& wallFace = data.faces[1 - data.planeFace];
+    // The tool's contact on the plane, and how much of it lies on the plane face
+    TopoDS_Shape contact;
+    for (TopExp_Explorer it(tool.solid, TopAbs_FACE); it.More(); it.Next()) {
+        if (sameDomain(TopoDS::Face(it.Current()), planeFace)) {
+            contact = it.Current();
+        }
+    }
+    if (contact.IsNull()) {
+        refuse("a chamfer's tool along an ellipse has no face on its plane");
+    }
+    const double contactArea = areaOf(contact);
+    auto onFace = [&](const TopoDS_Shape& shape, const TopoDS_Face& face) {
+        return areaOf(commonOf(shape, face));
+    };
+    if (contactArea - onFace(contact, planeFace) <= areaToleranceOf(contact)) {
+        return;  // on its face all round
+    }
+    const double measured = volumeOf(tool.solid);
+    if (std::abs(measured - tool.volume) > volumeTolerance * 10 * tool.volume) {
+        refuse("a tool's volume " + describe(measured) + " differs from its closed form "
+               + describe(tool.volume));
+    }
+    const gp_Dir axis = data.cylinderAxis.Direction();
+    std::vector<TopoDS_Face> beyond;
+    for (TopExp_Explorer it(planeFace, TopAbs_EDGE); it.More(); it.Next()) {
+        if (it.Current().IsSame(data.edge)) {
+            continue;
+        }
+        for (const auto& face : ctx.list(ctx.edgeFaces, it.Current())) {
+            if (!face.IsSame(planeFace) && !face.IsSame(wallFace)
+                && std::none_of(beyond.begin(), beyond.end(), [&](const TopoDS_Face& f) {
+                       return f.IsSame(face);
+                   })) {
+                beyond.push_back(TopoDS::Face(face));
+            }
+        }
+    }
+    TopoDS_Shape clipped = tool.solid;
+    bool cut = false;
+    for (const auto& face : beyond) {
+        BRepAdaptor_Surface surface(face, Standard_False);
+        BRepAdaptor_Surface whole(face, Standard_True);
+        gp_Pnt inFace = whole.Value((whole.FirstUParameter() + whole.LastUParameter()) / 2,
+                                    (whole.FirstVParameter() + whole.LastVParameter()) / 2);
+        TopoDS_Shape material;
+        if (surface.GetType() == GeomAbs_Plane) {
+            const gp_Dir normal = outwardNormal(face, inFace);
+            if (std::abs(normal.Dot(axis)) > angularTolerance * 1e3) {
+                material.Nullify();
+            }
+            else {
+                material = halfSpaceBeyond({surface.Plane().Location(), normal.Reversed()}, size);
+            }
+        }
+        else if (surface.GetType() == GeomAbs_Cylinder
+                 && parallel(surface.Cylinder().Axis().Direction(), axis)) {
+            const gp_Cylinder cylinder = surface.Cylinder();
+            gp_Vec radial(cylinder.Location(), inFace);
+            radial -= gp_Vec(axis) * radial.Dot(gp_Vec(axis));
+            const bool inside = gp_Vec(outwardNormal(face, inFace)).Dot(radial) > 0;
+            const TopoDS_Shape solid = BRepPrimAPI_MakeCylinder(
+                                           gp_Ax2(cylinder.Location().Translated(-gp_Vec(axis) * size),
+                                                  axis,
+                                                  cylinder.Position().XDirection()),
+                                           cylinder.Radius(),
+                                           2 * size
+            )
+                                           .Shape();
+            if (inside) {
+                material = solid;
+            }
+            else {
+                refuse("a chamfer's fill runs off its plane onto a cylinder whose material is "
+                       "outside it");
+            }
+        }
+        // The piece past the face's surface
+        const TopoDS_Shape kept = material.IsNull() ? clipped : commonOf(clipped, material);
+        const double piece = volumeOf(clipped) - volumeOf(kept);
+        if (piece <= volumeTolerance * tool.volume) {
+            continue;
+        }
+        if (material.IsNull()) {
+            refuse("a chamfer's fill runs off its plane onto a face that is neither a plane nor a "
+                   "cylinder along the chamfered cylinder");
+        }
+        clipped = kept;
+        cut = true;
+    }
+    if (!cut) {
+        refuse("a chamfer's fill runs off its plane where no face beyond cuts it");
+    }
+    // What is left lies on the plane face and the wall, and the pieces held only the run-off
+    TopoDS_Shape left;
+    int solids = 0;
+    for (TopExp_Explorer it(clipped, TopAbs_SOLID); it.More(); it.Next()) {
+        left = it.Current();
+        ++solids;
+    }
+    if (solids != 1) {
+        refuse("a chamfer's fill clipped past its plane is not one solid");
+    }
+    TopoDS_Shape leftContact;
+    for (TopExp_Explorer it(left, TopAbs_FACE); it.More(); it.Next()) {
+        if (sameDomain(TopoDS::Face(it.Current()), planeFace)) {
+            if (!leftContact.IsNull()) {
+                refuse("a chamfer's clipped fill has two faces on its plane");
+            }
+            leftContact = it.Current();
+        }
+    }
+    if (leftContact.IsNull()
+        || areaOf(leftContact) - onFace(leftContact, planeFace) > areaToleranceOf(leftContact)) {
+        refuse("a chamfer's fill clipped past its plane still runs off it");
+    }
+    // None of the contact on the face went, nor any of the wall's: the kept contacts cover them
+    if (std::abs(onFace(contact, planeFace) - areaOf(leftContact)) > areaToleranceOf(contact)) {
+        refuse("clipping a chamfer's fill past its plane cut its contact on the face");
+    }
+    auto wallContact = [&](const TopoDS_Shape& solid) {
+        double area = 0.0;
+        for (TopExp_Explorer it(solid, TopAbs_FACE); it.More(); it.Next()) {
+            if (sameDomain(TopoDS::Face(it.Current()), wallFace)) {
+                area += areaOf(it.Current());
+            }
+        }
+        return area;
+    };
+    const double wallBefore = wallContact(tool.solid);
+    if (std::abs(wallContact(left) - wallBefore) > 1e-6 * std::max(1.0, wallBefore)) {
+        refuse("clipping a chamfer's fill past its plane cut its contact on the wall");
+    }
+    tool.solid = left;
+    tool.volume = volumeOf(left);
+}
+
 /** The tool of a chamfer by equal distances along a closed ellipse between a plane and a cylinder
  * it is not square to (ops#942, notes/chamfer-varying-angle-942.md sections 2 and 3 a): one ball
  * of radius d = w tan(a / 2) rolled round the edge, a the reference angle (referenceAngle()). Its
@@ -6207,6 +6358,9 @@ Tool ellipseTool(const Context& ctx, const EdgeData& data)
     result.source = data.edge;
     result.cut = data.convex;
     result.volume = pi * d * d * (radius + s * d / 3) * (1 + sinTilt * sinTilt / 2) / cosTilt;
+    if (concave) {
+        clipRunOff(ctx, data, result, size);
+    }
     // The longest leg, at the narrow side, the same on both faces
     const double leg = d * (1 + sinTilt) / cosTilt;
     result.strips.resize(2);
@@ -9571,6 +9725,49 @@ bool exactSection(const TopoDS_Edge& edge, const TopTools_ListOfShape& faces)
 /// tool face the face is an image of, with its edges and vertices, before the Booleans: a tolerance
 /// elsewhere in the base (an earlier rounded corner, an imported part's edge) doesn't hide a merge,
 /// nor does the merge's own raising of its faces'
+/** Inside a construction with a tool along an ellipse only (adaptiveMeasures; ops#942): an edge
+ * whose tolerance is no more than its vertices', each of which ends on a free-form face of the
+ * result (a split rim's piece ending on the chamfer's ruled B-spline face, where the Boolean's
+ * approximate section raised the vertex), grew to its ends, not over a face merged away
+ */
+bool grownToItsEnds(const TopoDS_Edge& edge,
+                    const TopTools_IndexedDataMapOfShapeListOfShape& edgeFaces)
+{
+    if (!adaptiveMeasures) {
+        return false;
+    }
+    TopoDS_Vertex first;
+    TopoDS_Vertex last;
+    TopExp::Vertices(edge, first, last);
+    if (first.IsNull() || last.IsNull()) {
+        return false;
+    }
+    for (const TopoDS_Vertex& vertex : {first, last}) {
+        if (BRep_Tool::Tolerance(edge) > BRep_Tool::Tolerance(vertex) + linearTolerance) {
+            return false;
+        }
+        bool freeForm = false;
+        for (int i = 1; i <= edgeFaces.Extent() && !freeForm; ++i) {
+            const TopoDS_Edge& other = TopoDS::Edge(edgeFaces.FindKey(i));
+            TopoDS_Vertex a;
+            TopoDS_Vertex b;
+            TopExp::Vertices(other, a, b);
+            if (!vertex.IsSame(a) && !vertex.IsSame(b)) {
+                continue;
+            }
+            for (const auto& face : edgeFaces(i)) {
+                const GeomAbs_SurfaceType type
+                    = BRepAdaptor_Surface(TopoDS::Face(face), Standard_False).GetType();
+                freeForm = freeForm || type == GeomAbs_BSplineSurface;
+            }
+        }
+        if (!freeForm) {
+            return false;
+        }
+    }
+    return true;
+}
+
 TopoDS_Edge grownEdge(
     const TopoDS_Shape& result,
     const TopoDS_Shape& base,
@@ -9594,7 +9791,7 @@ TopoDS_Edge grownEdge(
                 tolerance ? *tolerance : BRep_Tool::Tolerance(TopoDS::Face(face))
             );
         }
-        if (BRep_Tool::Tolerance(edge) > 2 * faceTolerance) {
+        if (BRep_Tool::Tolerance(edge) > 2 * faceTolerance && !grownToItsEnds(edge, edgeFaces)) {
             return edge;
         }
     }

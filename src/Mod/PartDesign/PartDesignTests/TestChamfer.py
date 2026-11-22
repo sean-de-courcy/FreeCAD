@@ -615,6 +615,11 @@ class TestChamfer(unittest.TestCase):
     R942 = 10.0
     W942 = 2.0
     T942 = math.radians(20)
+    # T3's fill: 72.6404 less the part outside the plate's cylinder, by the integral of section 6
+    # (midpoint rule over theta and the triangle, 1600 x 800 x 800: 66.06024; the exact sweep cut by
+    # the plate's cylinder: 66.06017). Onshape's VA-E reading is +66.0214, 5.9e-4 of it apart
+    # (notes/chamfer-varying-angle-942.md section 7)
+    RUNOFF942 = 66.0602
 
     @staticmethod
     def _tiltedPlate(tilt, half=30.0, depth=30.0):
@@ -720,6 +725,36 @@ class TestChamfer(unittest.TestCase):
         self._assertBall("hole", 0, -1, 1, 0.980581, 2.0)
         self.Doc.removeObject("Chamfer")
         self._assertBall("hole", 1, -1, 1, 2.0, 4.079213)
+
+    def testChamferVaryingAngleRunsOffTheLedge(self):
+        # T3 (section 3 b): T1's boss on a round plate of radius 11.6 whose axis is at x = -0.6, the
+        # ledge 1.064 wide in the plane at the narrow side: the fill runs off it over the plate's
+        # rim and is cut off by the plate's wall, run on. One face more; the ledge a crescent; the
+        # volume T1's less the part outside the plate's cylinder (RUNOFF942, the fork's integral)
+        V = FreeCAD.Vector
+        R = self.R942
+        plate = Part.makeCylinder(11.6, 60, V(-0.6, 0, -40)).common(self._tiltedPlate(self.T942))
+        shape = plate.removeSplitter().fuse(Part.makeCylinder(R, 40, V(0, 0, -20))).removeSplitter()
+        foot = ["Edge%d" % (i + 1) for i, e in enumerate(shape.Edges)
+                if e.Curve.TypeId == "Part::GeomEllipse" and abs(e.Curve.MinorRadius - R) < 1e-6]
+        self.assertEqual(len(foot), 1)
+        base, chamfer = self._varyingChamfer(shape, 0, foot)
+        self.assertTrue(chamfer.isValid(), chamfer.getStatusString())
+        result = chamfer.Shape
+        self.assertTrue(result.isValid())
+        self.assertEqual(len(result.Faces), len(shape.Faces) + 1)
+        # The fill alone (the body's own measure is good to about 4e-7 of its 18900 mm3, 6e-3 here)
+        self.assertLess(shape.cut(result).Volume, 1e-6)
+        self._assertVolume(result.cut(shape).Volume, self.RUNOFF942)
+        # The plate's wall is one face, grown above the rim; the ledge one face, off the boss's foot
+        walls = [f for f in result.Faces if f.Surface.TypeId == "Part::GeomCylinder"
+                 and abs(f.Surface.Radius - 11.6) < 1e-6]
+        self.assertEqual(len(walls), 1)
+        self.assertGreater(walls[0].BoundBox.ZMax, 11.0 * math.tan(self.T942))
+        planes = [f for f in result.Faces if f.Surface.TypeId == "Part::GeomPlane"
+                  and abs(f.Surface.Axis.z) < 0.99]
+        self.assertEqual(len(planes), 1)
+        self.assertGreater(planes[0].distToShape(Part.Vertex(V(R, 0, R * math.tan(self.T942))))[0], 1)
 
     def testChamferVaryingAngleKeepsOtherCases(self):
         # T4: square to the cylinder (t = 0), two distances, and a box edge: WidthAt changes nothing

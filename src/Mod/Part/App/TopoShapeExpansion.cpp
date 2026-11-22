@@ -10744,7 +10744,7 @@ TopoShape& TopoShape::makeElementChamfer(
             // it builds, as before (a chamfer that builds today never starts failing)
             FC_LOG("chamfer along an edge of varying angle: the construction refused ("
                    << (outcome->preferred ? "naming its result failed" : outcome->reason)
-                   << "); OCCT's width on both faces stands");
+                   << "); OCCT's chamfer, the width on both faces, as before");
             if (outcome->preferred) {
                 request.varyingAngle = false;
                 request.limitOnly = true;
