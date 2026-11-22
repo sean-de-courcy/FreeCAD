@@ -82,6 +82,13 @@
 #include "ProfileRegions.h"
 using namespace PartDesign;
 
+namespace Part
+{
+/// FreeCAD-CH ops#963 B: a loft's flat B-spline faces as planes and straight edges as lines, the
+/// topology, its order and so the names kept (TopoShapeExpansion.cpp, makeElementLoft's last step)
+PartExport void makeLoftCanonical(TopoShape& loft);
+}  // namespace Part
+
 namespace
 {
 // ops#655: Onshape's loft start and end condition "Normal to profile" (notes/loft-options.md)
@@ -2033,6 +2040,10 @@ App::DocumentObjectExecReturn* Loft::execute()
                     EndMagnitude.getValue(),
                     legacy
                 );
+                // ops#963 B: the conditions rebuild every side as a B-spline; a flat one is a plane
+                // again, as makeElementLoft left it and as Onshape's is, so refine merges it with
+                // the faces in its plane (a circular pattern's copies of it)
+                Part::makeLoftCanonical(shell);
             }
             shells.push_back(shell);
         }
