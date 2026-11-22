@@ -214,6 +214,8 @@ std::optional<double> upToNext(
 
 namespace PartDesign
 {
+// FeatureExtrude.cpp: an own up-to reference must lie on the instance's base (ops#963 A)
+void requireOwnOnBase(const TopoDS_Shape& reference, const TopoDS_Shape& base);
 
 /* TRANSLATOR PartDesign::Hole */
 
@@ -2153,6 +2155,9 @@ struct HoleRun
     gp_Trsf toSeed;
     TopoShape base;
     TopoShape tool;
+    /// FreeCAD-CH ops#963 A: the up-to face is one the pattern's originals made, so at the
+    /// instance it is the instance's own copy: read where the seed reads it (unmoved), on the base
+    bool ownUpTo = false;
 };
 thread_local HoleRun* holeRun = nullptr;
 }  // namespace
@@ -2269,7 +2274,16 @@ App::DocumentObjectExecReturn* Hole::execute()
                     QT_TRANSLATE_NOOP("Exception", "Select the face or plane the hole goes up to.")
                 );
             }
-            if (holeRun) {
+            if (holeRun && holeRun->ownUpTo) {
+                // ops#963 A: the instance's own copy of a face the pattern made, carried back onto
+                // the seed, is the seed's face: the seed's own distance, the copy on the base
+                TopoShape face;
+                getUpToFaceFromLinkSub(face, UpToFace);
+                face.move(invObjLoc);
+                requireOwnOnBase(face.getShape(), holeRun->base.getShape());
+                length = getStartReferenceOffset(profileshape, UpToFace, holeDirection, 0.0, invObjLoc);
+            }
+            else if (holeRun) {
                 // At a pattern's instance (ops#654 T3): the distance from the instance's profile
                 // to the face, as the seed's moved there (a distance a motion keeps)
                 const gp_Trsf toInstance = holeRun->toSeed.Inverted();
@@ -3281,10 +3295,11 @@ PartDesignExport TopoShape reapplyHole(
     Hole* hole,
     const gp_Trsf& toSeed,
     const TopoShape& base,
+    bool ownUpTo,
     std::string& why
 )
 {
-    HoleRun run {toSeed, base, TopoShape()};
+    HoleRun run {toSeed, base, TopoShape(), ownUpTo};
     HoleRun* outer = holeRun;
     holeRun = &run;
     App::DocumentObjectExecReturn* ret = nullptr;

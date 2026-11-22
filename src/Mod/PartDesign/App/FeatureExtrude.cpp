@@ -36,6 +36,8 @@
 #include <BRep_Tool.hxx>
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
+#include <BRepBuilderAPI_MakeVertex.hxx>
+#include <BRepClass_FaceClassifier.hxx>
 #include <BRepAlgoAPI_Common.hxx>
 #include <BRepAlgoAPI_Section.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
@@ -95,6 +97,8 @@ namespace PartDesign
 {
 // FeatureSketchBased.cpp: whether an extrusion along `dir` up to `upToFace` goes the other way
 bool upToFaceBehind(const TopoShape& upToFace, const TopoShape& profile, const gp_Dir& dir);
+// Below: an own up-to reference must lie on the instance's base (ops#963 A; FeatureHole.cpp too)
+void requireOwnOnBase(const TopoDS_Shape& reference, const TopoDS_Shape& base);
 }  // namespace PartDesign
 
 const char* FeatureExtrude::SideTypesEnums[] = {"One side", "Two sides", "Symmetric", nullptr};
@@ -1171,8 +1175,45 @@ struct ReapplyRun
     TopoShape base;         ///< the base at the instance, carried onto the seed (feature's frame)
     std::string partLabel;  ///< the pattern's part, for messages
     TopoShape tool;         ///< the tool made (out)
+    /// FreeCAD-CH ops#963 A (notes/reapply-own-upto-963.md): the up-to references one of the
+    /// pattern's originals made, as ReapplyOwn bits (FeatureTransformed.cpp decides them). At the
+    /// instance such a reference is the instance's own copy, which carried back onto the seed is
+    /// the seed's reference itself: it is read unmoved (toSeed not applied), and it must lie on the
+    /// base carried back (else the instance's copy isn't there)
+    unsigned own = 0;
 };
 thread_local ReapplyRun* reapplyRun = nullptr;
+
+/// ReapplyRun::own's bits, one per up-to property (FeatureTransformed.cpp has the same values)
+enum ReapplyOwn : unsigned
+{
+    OwnUpToFace = 1,
+    OwnUpToFace2 = 2,
+    OwnUpToShape = 4,
+    OwnUpToShape2 = 8,
+};
+
+/// Whether prop, one of feature's up-to properties, holds a reference that the pattern re-running
+/// feature made itself (ops#963 A)
+bool reapplyOwn(const FeatureExtrude& feature, const App::Property& prop)
+{
+    if (!reapplyRun || !reapplyRun->own) {
+        return false;
+    }
+    const unsigned bit = &prop == &feature.UpToFace ? OwnUpToFace
+        : &prop == &feature.UpToFace2               ? OwnUpToFace2
+        : &prop == &feature.UpToShape               ? OwnUpToShape
+        : &prop == &feature.UpToShape2              ? OwnUpToShape2
+                                                    : 0u;
+    return (reapplyRun->own & bit) != 0;
+}
+
+/// ops#963 A: an own reference at a pattern's instance must lie on the instance's base carried back
+/// (PartDesign::requireOwnOnBase below)
+void requireOwnOnRunBase(const TopoDS_Shape& reference)
+{
+    PartDesign::requireOwnOnBase(reference, reapplyRun->base.getShape());
+}
 
 /** A studio owner's "Up to next" for one region against the one part it meets (FreeCAD-CH ops#654
  * S2, notes/onshape-facts.md O8h): the region's sweep ahead (reach long) split by the part, keeping
@@ -1615,7 +1656,7 @@ App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions opt
             if (const auto plane = upToPlaneForBlindSide(UpToFace, sketchshape)) {
                 gp_Dir faceNormal = plane->Direction();
                 faceNormal.Transform(invTrsf);
-                if (reapplyRun) {
+                if (reapplyRun && !reapplyOwn(*this, UpToFace)) {
                     faceNormal.Transform(reapplyRun->toSeed);
                 }
                 gp_Dir sketchNormal(SketchVector.x, SketchVector.y, SketchVector.z);
@@ -1633,16 +1674,33 @@ App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions opt
             const gp_Pnt onProfile = BRep_Tool::Pnt(TopoDS::Vertex(profileVertex.getShape()));
             // The signed length along `along` from the profile to the plane through `target`
             // (global) parallel to the profile plane
-            auto distanceTo = [&](gp_Pnt target, const gp_Dir& along) {
+            // An own reference (ops#963 A) is read unmoved, and its copy must be on the base: an
+            // up-to vertex's point is tested here; an up-to face's plane origin is not (it can lie
+            // off the face, a ring's centre: review pr963a-r1 T1), the face itself is, below
+            auto distanceTo = [&](gp_Pnt target,
+                                  const gp_Dir& along,
+                                  const App::Property& from,
+                                  bool guardPoint = true) {
                 target.Transform(invTrsf);
-                if (reapplyRun) {
+                if (reapplyRun && reapplyOwn(*this, from)) {
+                    if (guardPoint) {
+                        requireOwnOnRunBase(BRepBuilderAPI_MakeVertex(target).Vertex());
+                    }
+                }
+                else if (reapplyRun) {
                     target.Transform(reapplyRun->toSeed);
                 }
                 const double cosine = gp_Vec(along).Dot(gp_Vec(profileNormal));
                 return gp_Vec(onProfile, target).Dot(gp_Vec(profileNormal)) / cosine;
             };
             if (planeEnd) {
-                const double length = distanceTo(*planeEnd, dir);
+                if (reapplyOwn(*this, UpToFace)) {
+                    TopoShape face;
+                    getUpToFaceFromLinkSub(face, UpToFace);
+                    face.move(invObjLoc);
+                    requireOwnOnRunBase(face.getShape());
+                }
+                const double length = distanceTo(*planeEnd, dir, UpToFace, false);
                 if (std::fabs(length) < Precision::Confusion()
                     || std::fabs(length) - offset1 < Precision::Confusion()) {
                     planeEnd.reset();
@@ -1659,7 +1717,7 @@ App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions opt
             }
             // The signed length along `along` from the profile to the vertex's plane
             auto lengthTo = [&](const App::PropertyLinkSub& link, const gp_Dir& along, double offset) {
-                const double length = distanceTo(upToVertexPoint(link), along);
+                const double length = distanceTo(upToVertexPoint(link), along, link);
                 if (std::fabs(length) < Precision::Confusion()) {
                     throw Base::ValueError(QT_TRANSLATE_NOOP(
                         "Exception",
@@ -2275,14 +2333,20 @@ TopoShape FeatureExtrude::generateSingleExtrusionSide(
         if (method == "UpToFace") {
             getUpToFaceFromLinkSub(upToShape, upToFacePropHandle);
             upToShape.move(invObjLoc);
-            if (reapplyRun) {
+            if (reapplyOwn(*this, upToFacePropHandle)) {
+                requireOwnOnRunBase(upToShape.getShape());  // ops#963 A: the instance's own, unmoved
+            }
+            else if (reapplyRun) {
                 upToShape = upToShape.makeElementTransform(reapplyRun->toSeed);
             }
         }
         else if (method == "UpToShape") {
             faceCount = getUpToShapeFromLinkSubList(upToShape, upToShapePropHandle);
             upToShape.move(invObjLoc);
-            if (reapplyRun) {
+            if (reapplyOwn(*this, upToShapePropHandle)) {
+                requireOwnOnRunBase(upToShape.getShape());  // ops#963 A: the instance's own, unmoved
+            }
+            else if (reapplyRun) {
                 upToShape = upToShape.makeElementTransform(reapplyRun->toSeed);
             }
             if (faceCount == 0) {
@@ -2457,6 +2521,66 @@ bool FeatureExtrude::shapeMadeUnderPlacement() const
 namespace PartDesign
 {
 
+/// ops#963 A: an own reference at a pattern's instance (in the frame of base, the instance's base carried
+/// back onto the seed) must lie on that base: a point inside each of its faces (a vertex: the point) on the base. Otherwise the
+/// instance's copy of it isn't there (its maker failed at that instance, or comes after it in the
+/// pattern's Originals) and the run stops, loudly, rather than run to where it would be
+void requireOwnOnBase(const TopoDS_Shape& reference, const TopoDS_Shape& base)
+{
+    const char* missing = QT_TRANSLATE_NOOP(
+        "Exception",
+        "its up-to reference is made by the pattern, and the instance's copy of it isn't there"
+    );
+    if (base.IsNull() || reference.IsNull()) {
+        throw Base::ValueError(missing);
+    }
+    Bnd_Box box;
+    BRepBndLib::Add(base, box);
+    const double tol = std::max(1e-6, 1e-7 * std::sqrt(box.SquareExtent()));
+    std::vector<gp_Pnt> points;
+    for (TopExp_Explorer x(reference, TopAbs_FACE); x.More(); x.Next()) {
+        const TopoDS_Face& face = TopoDS::Face(x.Current());
+        BRepAdaptor_Surface surface(face);
+        const double u0 = surface.FirstUParameter();
+        const double u1 = surface.LastUParameter();
+        const double v0 = surface.FirstVParameter();
+        const double v1 = surface.LastVParameter();
+        bool found = false;
+        // A point classified inside (an annular or L-shaped face doesn't hold its centre)
+        for (int i = 1; i < 8 && !found; ++i) {
+            for (int j = 1; j < 8 && !found; ++j) {
+                const gp_Pnt2d uv(u0 + (u1 - u0) * i / 8, v0 + (v1 - v0) * j / 8);
+                BRepClass_FaceClassifier inside(face, uv, Precision::Confusion());
+                if (inside.State() == TopAbs_IN) {
+                    points.push_back(surface.Value(uv.X(), uv.Y()));
+                    found = true;
+                }
+            }
+        }
+        if (!found) {
+            throw Base::ValueError(missing);
+        }
+    }
+    if (points.empty()) {
+        for (TopExp_Explorer x(reference, TopAbs_VERTEX); x.More(); x.Next()) {
+            points.push_back(BRep_Tool::Pnt(TopoDS::Vertex(x.Current())));
+        }
+    }
+    // On the base's boundary: a distance to the solid itself is 0 for a point inside it
+    BRep_Builder builder;
+    TopoDS_Compound faces;
+    builder.MakeCompound(faces);
+    for (TopExp_Explorer x(base, TopAbs_FACE); x.More(); x.Next()) {
+        builder.Add(faces, x.Current());
+    }
+    for (const gp_Pnt& point : points) {
+        BRepExtrema_DistShapeShape distance(BRepBuilderAPI_MakeVertex(point).Vertex(), faces);
+        if (!distance.IsDone() || distance.Value() > tol) {
+            throw Base::ValueError(missing);
+        }
+    }
+}
+
 /** FreeCAD-CH ops#654 T3: feature's tool re-solved at a pattern's instance (ReapplyRun above), in
  * the feature's own frame; null with why when it can't be made there. Declared where used
  * (FeatureTransformed.cpp) */
@@ -2465,10 +2589,11 @@ PartDesignExport TopoShape reapplyExtrusion(
     const gp_Trsf& toSeed,
     const TopoShape& base,
     const std::string& partLabel,
+    unsigned own,
     std::string& why
 )
 {
-    ReapplyRun run {toSeed, base, partLabel, TopoShape()};
+    ReapplyRun run {toSeed, base, partLabel, TopoShape(), own};
     ReapplyRun* outer = reapplyRun;
     reapplyRun = &run;
     App::DocumentObjectExecReturn* ret = nullptr;

@@ -40,6 +40,11 @@
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
+#include <BRepAdaptor_Surface.hxx>
+#include <BRepClass_FaceClassifier.hxx>
+#include <gp_Pnt2d.hxx>
+#include <unordered_set>
+#include <TopoDS_Compound.hxx>
 
 
 #include <array>
@@ -557,6 +562,9 @@ struct ReapplyItem
     Hole* hole = nullptr;                  ///< a hole re-run at each instance
     DressUp* dressUp = nullptr;            ///< a chamfer or fillet re-run on each instance's edges
     gp_Trsf toPattern;                     ///< rerun's own frame to the pattern's
+    /// ops#963 A: rerun's (or hole's) up-to references one of this pattern's originals made, as
+    /// FeatureExtrude.cpp's ReapplyOwn bits (a hole: OwnUpToFace): read unmoved at each instance
+    unsigned own = 0;
     Part::TopoShape tool;                  ///< the seed's tool, in the pattern's frame
     bool additive = true;
     std::vector<InnerLevel> levels;  ///< the patterns among the originals it is in, innermost first
@@ -662,6 +670,292 @@ struct ReapplyCollector
     ToolCollector& tools;
     bool reapplyOn = false;        ///< this pattern's Reapply
     std::vector<gp_Trsf> outer;    ///< this pattern's instances (the original left out)
+    /// ops#963 A (notes/reapply-own-upto-963.md): this pattern's own originals (a studio owner and
+    /// its step both), and what it reaches through the patterns among them (those patterns too)
+    std::unordered_set<const App::DocumentObject*> direct;
+    std::unordered_set<const App::DocumentObject*> nested;
+
+    /// Fills direct and nested from the pattern's Originals, before any item is collected (an
+    /// item's up-to face may be made by an original listed after it)
+    void collectOriginals(const std::vector<App::DocumentObject*>& originals)
+    {
+        std::vector<App::DocumentObject*> inner;
+        for (auto original : originals) {
+            if (auto pattern = freecad_cast<Transformed*>(original)) {
+                inner.push_back(pattern);
+                continue;
+            }
+            direct.insert(original);
+            if (auto owner = studioOwnerOfOriginal(original)) {
+                direct.insert(owner);
+                FeatureAddSub* step = nullptr;
+                if (studioStepOf(owner, pattern, body, step).empty() && step) {
+                    direct.insert(step);
+                }
+            }
+        }
+        for (std::size_t i = 0; i < inner.size() && i < 256; ++i) {
+            if (!nested.insert(inner[i]).second) {
+                continue;
+            }
+            for (auto original : static_cast<Transformed*>(inner[i])->Originals.getValues()) {
+                if (freecad_cast<Transformed*>(original)) {
+                    inner.push_back(original);
+                    continue;
+                }
+                nested.insert(original);
+                if (auto owner = studioOwnerOfOriginal(original)) {
+                    nested.insert(owner);
+                }
+            }
+        }
+    }
+
+    /// A point inside face (a few, spread over it), in its own placement
+    static std::vector<gp_Pnt> insidePoints(const TopoDS_Face& face, int wanted)
+    {
+        std::vector<gp_Pnt> points;
+        BRepAdaptor_Surface surface(face);
+        const double u0 = surface.FirstUParameter();
+        const double u1 = surface.LastUParameter();
+        const double v0 = surface.FirstVParameter();
+        const double v1 = surface.LastVParameter();
+        for (int i = 1; i < 8 && static_cast<int>(points.size()) < wanted; ++i) {
+            for (int j = 1; j < 8 && static_cast<int>(points.size()) < wanted; ++j) {
+                const double u = u0 + (u1 - u0) * ((i * 3) % 8) / 8;
+                const double v = v0 + (v1 - v0) * ((j * 5) % 8) / 8;
+                BRepClass_FaceClassifier inside(face, gp_Pnt2d(u, v), Precision::Confusion());
+                if (inside.State() == TopAbs_IN) {
+                    points.push_back(surface.Value(u, v));
+                }
+            }
+        }
+        return points;
+    }
+
+    /// Whether every point is on shape, within tol
+    static bool pointsOn(const std::vector<gp_Pnt>& points, const TopoDS_Shape& shape, double tol)
+    {
+        if (points.empty() || shape.IsNull()) {
+            return false;
+        }
+        for (const gp_Pnt& point : points) {
+            BRepExtrema_DistShapeShape distance(BRepBuilderAPI_MakeVertex(point).Vertex(), shape);
+            if (!distance.IsDone() || distance.Value() > tol) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /// The points that tell where element lies: its vertices and, of a face, points inside it
+    static std::vector<gp_Pnt> pointsOf(const TopoDS_Shape& element)
+    {
+        std::vector<gp_Pnt> points;
+        for (TopExp_Explorer x(element, TopAbs_VERTEX); x.More(); x.Next()) {
+            points.push_back(BRep_Tool::Pnt(TopoDS::Vertex(x.Current())));
+        }
+        for (TopExp_Explorer x(element, TopAbs_FACE); x.More(); x.Next()) {
+            const auto inside = insidePoints(TopoDS::Face(x.Current()), 3);
+            points.insert(points.end(), inside.begin(), inside.end());
+        }
+        return points;
+    }
+
+    /// The element of obj's shape as the document places it, or a null shape
+    static TopoDS_Shape documentElement(App::DocumentObject* obj, const std::string& sub)
+    {
+        try {
+            auto shape = Part::Feature::getTopoShape(
+                obj,
+                Part::ShapeOption::ResolveLink | Part::ShapeOption::Transform
+            );
+            return shape.isNull() ? TopoDS_Shape() : shape.getSubShape(sub.c_str(), true);
+        }
+        catch (const Base::Exception&) {
+            return {};
+        }
+        catch (const Standard_Failure&) {
+            return {};
+        }
+    }
+
+    /** ops#963 A: whether reader's up-to element (obj, sub) is one this pattern's originals made:
+     * 1 own (read unmoved at each instance), 0 outside (the same element at every instance, moved
+     * back by toSeed: Onshape O6), with why when it can't be told (a refusal). The maker is the
+     * earliest member of the Body, or original, that holds the element where it is now, walking
+     * its history back to its end (faces to faces, the linked object first): a face of the plate
+     * kept in a pocket's shape is the plate's, a wall the pocket made is the pocket's, wherever the
+     * link points. Not geometry alone: a part a circular pattern turns onto itself holds an
+     * outside face's turned twin too */
+    int ownElement(
+        App::DocumentObject* reader,
+        App::DocumentObject* obj,
+        const std::string& sub,
+        const std::vector<InnerLevel>& levels,
+        std::string& why
+    )
+    {
+        const std::string name = quoted(reader);
+        const std::string unavailable = " can only be copied (Reapply off)";
+        if (!obj) {
+            return 0;
+        }
+        auto inBody = [&](const App::DocumentObject* holder) {
+            return direct.count(holder) || nested.count(holder)
+                || (body && Body::findBodyOf(holder) == body && Body::isSolidFeature(holder));
+        };
+        if (sub.empty()) {
+            // A whole object: the part at that feature, which may hold the originals' faces
+            if (obj == body || direct.count(obj) || nested.count(obj)) {
+                why = "Reapply isn't available for an extrusion up to a whole object the pattern "
+                      "changes yet: " + name + unavailable;
+                return -1;
+            }
+            // Only a solid feature's shape is the part at that feature: a datum plane, a sketch or
+            // another non-solid member after an original is the same at every instance (outside;
+            // review pr963a-r1 T2)
+            if (body && Body::findBodyOf(obj) == body && Body::isSolidFeature(obj)) {
+                const auto group = body->Group.getValues();
+                auto at = [&](const App::DocumentObject* o) {
+                    return std::ranges::find(group, o) - group.begin();
+                };
+                for (auto original : direct) {
+                    if (Body::findBodyOf(original) == body && at(original) < at(obj)) {
+                        why = "Reapply isn't available for an extrusion up to a whole object made "
+                              "after one of the pattern's originals yet: " + name + unavailable;
+                        return -1;
+                    }
+                }
+            }
+            return 0;
+        }
+        const TopoDS_Shape element = documentElement(obj, sub);
+        if (element.IsNull()) {
+            return 0;  // the run says what is missing
+        }
+        Bnd_Box box;
+        BRepBndLib::Add(element, box);
+        if (body) {
+            BRepBndLib::Add(body->Shape.getShape().getShape(), box);
+        }
+        const double tol = std::max(1e-6, 1e-7 * std::sqrt(box.SquareExtent()));
+        const std::vector<gp_Pnt> points = pointsOf(element);
+        App::DocumentObject* maker = inBody(obj) ? obj : nullptr;
+        const bool face = element.ShapeType() == TopAbs_FACE;
+        const bool sameType = face || element.ShapeType() == TopAbs_VERTEX;
+        if (sameType) {
+            for (const auto& item : Part::Feature::getElementHistory(obj, sub.c_str(), true, true)) {
+                if (!item.obj || item.obj == obj || !inBody(item.obj)) {
+                    continue;
+                }
+                std::string there = item.index ? item.index.toString() : std::string();
+                if (there.empty() && item.element) {
+                    there = Data::ELEMENT_MAP_PREFIX + item.element.toString();
+                }
+                if (there.empty()) {
+                    continue;
+                }
+                const TopoDS_Shape held = documentElement(item.obj, there);
+                if (!held.IsNull() && held.ShapeType() == element.ShapeType()
+                    && pointsOn(points, held, tol)) {
+                    maker = item.obj;  // earlier, and still where the element is: the maker so far
+                }
+            }
+        }
+        if (!maker || (!direct.count(maker) && !nested.count(maker))) {
+            return 0;
+        }
+        if (nested.count(maker) || !levels.empty()) {
+            why = "Reapply isn't available yet for an extrusion up to an element made by an "
+                  "original reached through another pattern: " + name + unavailable;
+            return -1;
+        }
+        if (face) {
+            // A face refine merged from the original's face and one already there (the pocket's
+            // wall and the plate's side in one plane): the history follows one of them, so it is
+            // told by the maker's base, where the face is partly there already
+            if (auto feature = freecad_cast<PartDesign::Feature*>(maker)) {
+                if (const App::DocumentObject* baseObject = feature->getBaseObject(/*silent=*/true)) {
+                    const TopoDS_Shape base = Part::Feature::getTopoShape(
+                        baseObject,
+                        Part::ShapeOption::ResolveLink | Part::ShapeOption::Transform
+                    ).getShape();
+                    BRep_Builder builder;
+                    TopoDS_Compound faces;
+                    builder.MakeCompound(faces);
+                    for (TopExp_Explorer x(base, TopAbs_FACE); x.More(); x.Next()) {
+                        builder.Add(faces, x.Current());
+                    }
+                    for (const gp_Pnt& point : insidePoints(TopoDS::Face(element), 9)) {
+                        if (pointsOn({point}, faces, tol)) {
+                            why = "Reapply isn't available yet for an extrusion up to a face that "
+                                + quoted(maker) + " and an earlier feature made together: " + name
+                                + unavailable;
+                            return -1;
+                        }
+                    }
+                }
+            }
+        }
+        return 1;
+    }
+
+    /// ops#963 A: reader's up-to references (its sides' up-to face, vertex or shape) one of this
+    /// pattern's originals made, as ReapplyOwn bits (FeatureExtrude.cpp), or why it is refused
+    std::string ownBits(
+        App::DocumentObject* reader,
+        const std::vector<InnerLevel>& levels,
+        const App::PropertyLinkSub* face1,
+        const App::PropertyLinkSubList* shape1,
+        const App::PropertyLinkSub* face2,
+        const App::PropertyLinkSubList* shape2,
+        unsigned& own
+    )
+    {
+        own = 0;
+        std::string why;
+        auto link = [&](const App::PropertyLinkSub* prop, unsigned bit) {
+            if (!prop || !why.empty()) {
+                return;
+            }
+            const auto& subs = prop->getSubValues();
+            const std::string sub = subs.empty() ? std::string() : subs.front();
+            if (ownElement(reader, prop->getValue(), sub, levels, why) == 1) {
+                own |= bit;
+            }
+        };
+        auto list = [&](const App::PropertyLinkSubList* prop, unsigned bit) {
+            if (!prop || !why.empty()) {
+                return;
+            }
+            int owned = 0;
+            int outside = 0;
+            for (const auto& [obj, subs] : prop->getSubListValues()) {
+                const std::vector<std::string> each = subs.empty() ? std::vector<std::string> {""} : subs;
+                for (const std::string& sub : each) {
+                    const int kind = ownElement(reader, obj, sub, levels, why);
+                    if (!why.empty()) {
+                        return;
+                    }
+                    (kind == 1 ? owned : outside) += 1;
+                }
+            }
+            if (owned && outside) {
+                why = "Reapply isn't available yet for an extrusion up to a shape the pattern makes "
+                      "partly: " + quoted(reader) + " can only be copied (Reapply off)";
+                return;
+            }
+            if (owned) {
+                own |= bit;
+            }
+        };
+        link(face1, 1u);
+        list(shape1, 4u);
+        link(face2, 2u);
+        list(shape2, 8u);
+        return why;
+    }
 
     std::string add(
         App::DocumentObject* original,
@@ -842,6 +1136,24 @@ struct ReapplyCollector
             || (twoSides && !blind(ext->Type2.getValueAsString()))) {
             it.rerun = ext;
             it.toPattern = toolFrame(seed, computer);
+            // ops#963 A: which up-to references the pattern makes itself
+            auto upToFace = [](const std::string& type) {
+                return type == "UpToFace" || type == "UpToVertex";
+            };
+            const std::string type1 = ext->Type.getValueAsString();
+            const std::string type2 = twoSides ? ext->Type2.getValueAsString() : std::string();
+            if (std::string why = ownBits(
+                    computer,
+                    levels,
+                    upToFace(type1) ? &ext->UpToFace : nullptr,
+                    type1 == "UpToShape" ? &ext->UpToShape : nullptr,
+                    upToFace(type2) ? &ext->UpToFace2 : nullptr,
+                    type2 == "UpToShape" ? &ext->UpToShape2 : nullptr,
+                    it.own
+                );
+                !why.empty()) {
+                return why;
+            }
         }
         out.push_back(it);
         return {};
@@ -911,6 +1223,13 @@ struct ReapplyCollector
         it.tool = it.additive ? tool.fuse : tool.cut;
         it.hole = hole;
         it.toPattern = toolFrame(seed, hole);
+        // ops#963 A: an up-to face the pattern makes itself
+        if (depth == "UpToFace") {
+            if (std::string why = ownBits(hole, levels, &hole->UpToFace, nullptr, nullptr, nullptr, it.own);
+                !why.empty()) {
+                return why;
+            }
+        }
         out.push_back(it);
         return {};
     }
@@ -1018,6 +1337,7 @@ PartDesignExport Part::TopoShape reapplyExtrusion(
     const gp_Trsf& toSeed,
     const Part::TopoShape& base,
     const std::string& partLabel,
+    unsigned own,
     std::string& why
 );
 
@@ -1026,6 +1346,7 @@ PartDesignExport Part::TopoShape reapplyHole(
     Hole* hole,
     const gp_Trsf& toSeed,
     const Part::TopoShape& base,
+    bool ownUpTo,
     std::string& why
 );
 PartDesignExport Part::TopoShape reapplyDressUp(
@@ -1870,9 +2191,19 @@ App::DocumentObjectExecReturn* Transformed::execute()
                 // contributing nothing (R2); each pattern among the originals following its own
                 // Reapply (R3)
                 ReapplyCollector reapplied {
-                    *this, body, trsfInv, fromDocument, nameInstances, collector, reapply, instances
+                    *this,
+                    body,
+                    trsfInv,
+                    fromDocument,
+                    nameInstances,
+                    collector,
+                    reapply,
+                    instances,
+                    {},
+                    {}
                 };
                 std::vector<ReapplyItem> items;
+                reapplied.collectOriginals(originals);
                 for (auto original : originals) {
                     std::string why = reapplied.add(original, {}, items, 0);
                     if (!why.empty()) {
@@ -1893,6 +2224,9 @@ App::DocumentObjectExecReturn* Transformed::execute()
                 if (rerun || (adds && removes)) {
                     const std::string partName = body ? quoted(body) : std::string("the part");
                     const long tag = namingTag() ? namingTag() : getID();
+                    // ops#963 A: the originals, or their instances, that failed and contribute
+                    // nothing: a warning on the pattern, which is never silent about them
+                    std::vector<std::string> notMade;
                     // Re-run by patterns among the originals only (R3, the outer ones copying
                     // what they made): made once, where the innermost of them makes it, against
                     // the part at that pattern's place (unverified on Onshape for a tool that
@@ -1925,8 +2259,8 @@ App::DocumentObjectExecReturn* Transformed::execute()
                         Part::TopoShape made;
                         try {
                             made = it->rerun
-                                ? reapplyExtrusion(it->rerun, toSeed, base, partName, why)
-                                : reapplyHole(it->hole, toSeed, base, why);
+                                ? reapplyExtrusion(it->rerun, toSeed, base, partName, it->own, why)
+                                : reapplyHole(it->hole, toSeed, base, it->own != 0, why);
                         }
                         catch (const Standard_Failure& e) {
                             why = e.GetMessageString();
@@ -1935,7 +2269,12 @@ App::DocumentObjectExecReturn* Transformed::execute()
                             why = e.what();
                         }
                         if (made.isNull()) {
-                            it = items.erase(it);  // it contributes nothing (R2)
+                            // It contributes nothing (R2), and says so (ops#963 A: never silent)
+                            notMade.push_back(
+                                quoted(it->named) + " isn't made at any instance of " + quoted(by)
+                                + " (" + why + ")"
+                            );
+                            it = items.erase(it);
                             continue;
                         }
                         it->tool = made.makeElementTransform(it->toPattern);
@@ -2037,8 +2376,8 @@ App::DocumentObjectExecReturn* Transformed::execute()
                                     const Part::TopoShape base = supportShape.makeElementTransform(back);
                                     std::string why;
                                     Part::TopoShape made = item.rerun
-                                        ? reapplyExtrusion(item.rerun, toSeed, base, partName, why)
-                                        : reapplyHole(item.hole, toSeed, base, why);
+                                        ? reapplyExtrusion(item.rerun, toSeed, base, partName, item.own, why)
+                                        : reapplyHole(item.hole, toSeed, base, item.own != 0, why);
                                     if (made.isNull()) {
                                         // An instance that fails contributes nothing, with no
                                         // message (oracle 9, R2)
@@ -2152,6 +2491,32 @@ App::DocumentObjectExecReturn* Transformed::execute()
                                 quoted(items[index].named) + " can't be made at any instance ("
                                     + firstWhy[index] + ")",
                                 this
+                            );
+                        }
+                    }
+                    if (!madeSome && !notMade.empty()) {
+                        return new App::DocumentObjectExecReturn(notMade.front(), this);
+                    }
+                    for (std::size_t index = 0; index < items.size(); ++index) {
+                        if (failed[index] > 0) {
+                            notMade.push_back(
+                                quoted(items[index].named) + " isn't made at "
+                                + std::to_string(failed[index]) + " of "
+                                + std::to_string(instancesRun) + " instances (" + firstWhy[index]
+                                + ")"
+                            );
+                        }
+                    }
+                    if (!notMade.empty()) {
+                        if (App::Document* doc = getDocument()) {
+                            std::string text;
+                            for (const std::string& line : notMade) {
+                                text += (text.empty() ? "" : "\n") + line;
+                            }
+                            const char* previous = doc->getWarningDescription(this);
+                            doc->setWarning(
+                                this,
+                                previous && *previous ? std::string(previous) + "\n" + text : text
                             );
                         }
                     }

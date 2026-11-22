@@ -31,9 +31,13 @@
   and adds nothing; a MultiTransform's step, which has none of its own, stays valid.
 - Centered and Skip instances (rank 8, E-1); Distance as the spacing keeps it when the count
   changes (B3-6).
-- Reapply on: an original that makes nothing at every instance contributes nothing, with no
-  message, while another original is made; a pattern that makes nothing at all is refused
-  (ops#640, a replica's circular pattern; Onshape builds it).
+- Reapply on: an original that makes nothing at every instance contributes nothing, with a
+  warning (Onshape gives none), while another original is made; a pattern that makes nothing at
+  all is refused (ops#640, a replica's circular pattern; Onshape builds it).
+- Reapply on, an up-to face or vertex another original of the pattern made (ops#963 A): each
+  instance reads its own copy of it; a maker listed after its reader, a face made together with
+  an earlier feature, are a warning or a refusal; an outside face stays the same face at every
+  instance (Onshape O6).
 
 Designed models, built by each test:
 - Block: a 40 x 20 x 10 pad, x -20..20, y -10..10, z 0..10: 8000.
@@ -50,6 +54,7 @@ import math
 import unittest
 
 import FreeCAD as App
+import Part
 
 from PartDesignTests.Scenarios import models
 
@@ -461,12 +466,14 @@ class TestPatternRules(unittest.TestCase):
 
     def testReapplyOriginalMakingNothingAtEveryInstanceIsDropped(self):
         """Onshape (ops#640, a replica's circular pattern): with Reapply on, an original whose
-        re-run fails at every instance contributes nothing there, with no message, while another
-        original is made. Tunnel and Hole turned 180 deg: the Hole at (0, -15), -20; the Tunnel's
+        re-run fails at every instance contributes nothing there, while another original is made.
+        Onshape gives no message; the fork warns (ops#963 A: never silent about a dropped
+        instance). Tunnel and Hole turned 180 deg: the Hole at (0, -15), -20; the Tunnel's
         instance makes nothing (before: refused, "can't be made at any instance")."""
         self.tunnelled()
         pattern = self.halfTurn([self.tunnel, self.hole], reapply=True)
         self.assertValid(pattern)
+        self.assertWarning(pattern, "isn't made at 1 of 1 instances")
         self.assertBody(self.seeded - 20)
         self.assertFalse(self.inside(0, -15, 2.5))
         self.assertTrue(self.inside(-15, 0, 2))
@@ -493,6 +500,382 @@ class TestPatternRules(unittest.TestCase):
         pattern = self.halfTurn([self.tunnel], reapply=True)
         self.assertFailed(pattern, "can't be made at any instance")
         self.assertFailed(pattern, "instance 2")
+
+
+    # -- Reapply: an up-to reference another original made (ops#963 A) ---------------------------
+
+    def walled(self, half=50):
+        """The plate 100 x 2 half x 10 about the origin, z 0..10 (100000 for half 50), and the
+        Pocket 10 x 10, x 30..40, y -5..5, 6 deep from the top (-600): its walls x = 30 and x = 40,
+        y = +-5, its floor z = 4. self.wall is the Pocket's wall on x = 30 (60 = 10 x 6)."""
+        self.block(-50, -half, 50, half)
+        pocketSketch = models.sketch(
+            self.doc, "PocketSketch", models.rectangle(30, -5, 40, 5), self.body, z=10
+        )
+        self.pocket = models.pocket(self.body, pocketSketch, 6, name="WallPocket")
+        self.recompute()
+        self.assertBody(100 * 2 * half * 10 - 600)
+        self.wall = self.faceOf(self.pocket, V(30, 0, 7), 60)
+
+    def faceOf(self, feature, centre, area):
+        faces = [
+            index + 1
+            for index, face in enumerate(feature.Shape.Faces)
+            if (face.CenterOfMass - centre).Length < 1e-9 and abs(face.Area - area) < 1e-6
+        ]
+        self.assertEqual(len(faces), 1, f"{feature.Name}: {faces}")
+        return f"Face{faces[0]}"
+
+    def xSketch(self, name, x, geometry):
+        """A sketch on the plane x = x: sketch x along y, sketch y along z, its normal +x."""
+        return models.sketch(
+            self.doc,
+            name,
+            geometry,
+            self.body,
+            placement=App.Placement(V(x, 0, 0), App.Rotation(V(1, 1, 1), 120)),
+        )
+
+    def barUpTo(self, link, kind="UpToFace", added=40):
+        """The Bar: a 4 x 2 pad (y -2..2, z 6..8) from the plane x = 35 towards -x, up to link
+        (the Pocket's wall x = 30): x 30..35 inside the Pocket, +40. Reversed is whichever way
+        this build's sketch normal needs."""
+        sketch = self.xSketch("BarSketch", 35, models.rectangle(-2, 6, 2, 8))
+        bar = self.body.newObject("PartDesign::Pad", "Bar")
+        bar.Profile = sketch
+        bar.Type = kind
+        bar.UpToFace = link
+        before = self.body.Shape.Volume
+        for reversed_ in (True, False):
+            bar.Reversed = reversed_
+            self.recompute()
+            if bar.isValid() and abs(self.body.Shape.Volume - before - added) < 1e-6:
+                break
+        self.assertValid(bar)
+        self.assertBody(before + added)
+        return bar
+
+    def quarterTurns(self, originals, reapply=True):
+        """A polar pattern about Z, 4 over 360 deg, refined."""
+        pattern = self.body.newObject("PartDesign::PolarPattern", "PolarPattern")
+        pattern.Originals = originals
+        pattern.Axis = self.axis("Z_Axis")
+        pattern.Angle = 360
+        pattern.Occurrences = 4
+        pattern.Refine = True
+        pattern.Reapply = reapply
+        self.body.Tip = pattern
+        self.recompute()
+        return pattern
+
+    def assertNoWarning(self, feature):
+        self.assertNotIn("Warning", feature.State, feature.getStatusString())
+
+    def assertWarning(self, feature, *texts):
+        self.assertTrue(feature.isValid(), feature.getStatusString())
+        self.assertIn("Warning", feature.State)
+        for text in texts:
+            self.assertIn(text, feature.getStatusString())
+
+    def testReapplyUpToAWallAnotherOriginalMade(self):
+        """ops#963 A (scripts/repro_963_reapply_upto_face.py): the Bar ends on the Pocket's wall;
+        both turned a quarter four times, Reapply on. Each instance's Bar ends on its own
+        instance's wall, as Onshape's Reapply features (the team's studio): 100000 - 4 x 600 +
+        4 x 40 = 97760, 6 + 4 x (5 of the pocket + 5 of the bar) = 46 faces, no warning. Before:
+        97680 and 36 faces (the instances at 90 and 270 deg dropped, silently)."""
+        self.walled()
+        bar = self.barUpTo((self.pocket, [self.wall]))
+        pattern = self.quarterTurns([self.pocket, bar])
+        self.assertValid(pattern)
+        self.assertNoWarning(pattern)
+        self.assertBody(97760)
+        self.assertEqual(len(self.body.Shape.Faces), 46)
+        for x, y in ((32.5, 0), (0, 32.5), (-32.5, 0), (0, -32.5)):
+            self.assertTrue(self.inside(x, y, 7), f"no bar at ({x}, {y})")
+
+    def testReapplyUpToAWallControlOff(self):
+        """The same with Reapply off (each instance a copy): 97760 too."""
+        self.walled()
+        bar = self.barUpTo((self.pocket, [self.wall]))
+        pattern = self.quarterTurns([self.pocket, bar], reapply=False)
+        self.assertValid(pattern)
+        self.assertBody(97760)
+
+    def testReapplyUpToAFloorControl(self):
+        """A column up to the Pocket's floor (a 4 x 4 pad x 33..37, y -2..2 from the top down to
+        z = 4, +96), which a turn about Z leaves in its plane: 100000 - 2400 + 4 x 96 = 97984,
+        Reapply on, as before ops#963."""
+        self.walled()
+        floor = self.faceOf(self.pocket, V(35, 0, 4), 100)
+        sketch = models.sketch(
+            self.doc, "ColumnSketch", models.rectangle(33, -2, 37, 2), self.body, z=10
+        )
+        column = self.body.newObject("PartDesign::Pad", "Column")
+        column.Profile = sketch
+        column.Type = "UpToFace"
+        column.UpToFace = (self.pocket, [floor])
+        self.body.Tip = column
+        for reversed_ in (True, False):
+            column.Reversed = reversed_
+            self.recompute()
+            if column.isValid() and abs(column.Shape.Volume - 100000 + 600 - 96) < 1e-6:
+                break
+        self.assertBody(100000 - 600 + 96)
+        pattern = self.quarterTurns([self.pocket, column])
+        self.assertValid(pattern)
+        self.assertNoWarning(pattern)
+        self.assertBody(97984)
+
+    def testReapplyUpToTheWallPickedOnALaterFeature(self):
+        """The wall picked on a later feature's shape (the usual pick in the GUI: the tip), here a
+        stud padded elsewhere after the Pocket (4 x 4 x 5 at x -32..-28, y -2..2, +80): the face's
+        maker is still the Pocket, so each instance's Bar ends on its own wall: 97760 + 80."""
+        self.walled()
+        stud = self.topPad("Stud", -32, -2, -28, 2)
+        self.recompute()
+        self.assertBody(100000 - 600 + 80)
+        wall = self.faceOf(stud, V(30, 0, 7), 60)
+        sketch = self.xSketch("BarSketch", 35, models.rectangle(-2, 6, 2, 8))
+        bar = self.body.newObject("PartDesign::Pad", "Bar")
+        bar.Profile = sketch
+        bar.Type = "UpToFace"
+        bar.UpToFace = (stud, [wall])
+        for reversed_ in (True, False):
+            bar.Reversed = reversed_
+            self.recompute()
+            if bar.isValid() and abs(self.body.Shape.Volume - 100000 + 600 - 80 - 40) < 1e-6:
+                break
+        self.assertBody(100000 - 600 + 80 + 40)
+        pattern = self.quarterTurns([self.pocket, bar])
+        self.assertValid(pattern)
+        self.assertNoWarning(pattern)
+        self.assertBody(97760 + 80)
+
+    def testReapplyUpToAVertexAnotherOriginalMade(self):
+        """Up to a vertex the Pocket made, its wall's corner (30, 5, 4): the plane x = 30 at each
+        instance, as the wall: 97760, no warning (the own path and its guard, FeatureExtrude.cpp
+        distanceTo). Integration gets 97760 here too: the vertex it carries back gives a plane
+        (x = +-5, -30) whose longer bar runs only through solid."""
+        self.walled()
+        vertices = [
+            index + 1
+            for index, vertex in enumerate(self.pocket.Shape.Vertexes)
+            if (vertex.Point - V(30, 5, 4)).Length < 1e-9
+        ]
+        self.assertEqual(len(vertices), 1)
+        bar = self.barUpTo((self.pocket, [f"Vertex{vertices[0]}"]), kind="UpToVertex")
+        pattern = self.quarterTurns([self.pocket, bar])
+        self.assertValid(pattern)
+        self.assertNoWarning(pattern)
+        self.assertBody(97760)
+
+    def testReapplyMakerMissingAtAnInstanceWarns(self):
+        """The plate 100 x 50 (y -25..25, 50000): turned a quarter, the Pocket lies off it (y
+        30..40) and cuts nothing, so that instance has no wall and its Bar isn't made there (the
+        guard: the instance's own copy of the wall must be on the part). The pattern warns (Onshape:
+        that instance's feature fails and contributes nothing). The Pocket and the Bar at 0 and 180
+        deg: 50000 - 2 x 600 + 2 x 40 = 48880. (The Originals are read in the Body's order, so a
+        maker can't be listed after its reader. With the plate's edge at y = 30, in the turned
+        wall's plane, the guard finds the wall on the plate's side and the bar runs to it.)"""
+        self.walled(half=25)
+        bar = self.barUpTo((self.pocket, [self.wall]))
+        pattern = self.quarterTurns([self.pocket, bar])
+        self.assertWarning(pattern, "isn't made at 2 of 3", "isn't there")
+        self.assertBody(48880)
+        self.assertTrue(self.inside(-32.5, 0, 7))
+        self.assertFalse(self.inside(0, 32.5, 7))
+
+    def testReapplyUpToAFaceMadeTogetherWithTheBaseIsRefused(self):
+        """A Boss on the plate's top flush with its side (x 40..50, y -5..5, z 10..15, refined):
+        its side x = 50 merges with the plate's into one face, which neither alone made. A pad up
+        to that face (from x = 45, inside the Boss) can't be told own or outside: refused."""
+        self.block(-50, -50, 50, 50)
+        boss = self.topPad("Boss", 40, -5, 50, 5)
+        boss.Refine = True
+        self.recompute()
+        side = self.faceOf(boss, V(50, 0, 75 / 14), 100 * 10 + 10 * 5)
+        sketch = self.xSketch("RibSketch", 45, models.rectangle(-2, 11, 2, 13))
+        rib = self.body.newObject("PartDesign::Pad", "Rib")
+        rib.Profile = sketch
+        rib.Type = "UpToFace"
+        rib.UpToFace = (boss, [side])
+        self.recompute()
+        pattern = self.quarterTurns([boss, rib])
+        self.assertFailed(pattern, "made together")
+
+    def testReapplyUpToAnOutsideFaceWithATurnedTwin(self):
+        """Onshape O6q (oracle963b, 11-22): an outside face stays the same face at every instance
+        of a quarter turn too, even on a part the turn maps onto itself. The plate is square, so a quarter turn maps
+        its side x = 50 onto y = 50. A pad up to the plate's side (an outside face: the plate made
+        it) from x = 35 in the Pocket (y -2..2, z 6..8; x 35..40 in the Pocket's air, +40) stays
+        outside: at each instance it re-runs up to the seed's face carried back, never its turned
+        twin. At 90 and 270 deg that face is parallel to the pad: not made, with a warning (Onshape
+        makes the whole pattern an error there, PATTERN_FEATURE_FAILED; the same geometry: only
+        the seed's bar). With the twin read as own every instance would have its bar (97760)."""
+        self.walled()
+        side = self.faceOf(self.blockPad, V(50, 0, 5), 1000)
+        bar = self.barUpTo((self.blockPad, [side]), added=40)
+        pattern = self.quarterTurns([self.pocket, bar])
+        self.assertWarning(pattern, "isn't made at 2 of 3", "parallel")
+        self.assertNotAlmostEqual(self.body.Shape.Volume, 97760, places=4)
+        self.assertFalse(self.inside(0, 37.5, 7))
+
+    def testReapplyHoleUpToAWallAnotherOriginalMade(self):
+        """A hole up to the Pocket's wall: d 2, from the plane x = 20 at (y 0, z 5) towards +x, up
+        to x = 30 (pi x 10 removed). Each instance's hole ends on its own wall: 100000 - 2400 -
+        4 x 10 pi, no warning."""
+        self.walled()
+        sketch = self.xSketch("HoleSketch", 20, [models.circle(0, 5, 1)])
+        hole = self.body.newObject("PartDesign::Hole", "Hole")
+        hole.Profile = sketch
+        hole.Diameter = 2
+        hole.DrillPoint = "Flat"
+        hole.DepthType = "UpToFace"
+        hole.UpToFace = (self.pocket, [self.wall])
+        want = 100000 - 600 - 10 * math.pi
+        for reversed_ in (False, True):
+            hole.Reversed = reversed_
+            self.recompute()
+            if hole.isValid() and abs(self.body.Shape.Volume - want) < 1e-6:
+                break
+        self.assertBody(want)
+        pattern = self.quarterTurns([self.pocket, hole])
+        self.assertValid(pattern)
+        self.assertNoWarning(pattern)
+        self.assertBody(100000 - 2400 - 40 * math.pi)
+
+    def testReapplyUpToARingCapAnotherOriginalMade(self):
+        """Review pr963a-r1 T1: an ellipse pad (centre (30, 20), semi-axes 4 and 2) from the
+        plate's top up to the top of a ring Boss (radii 8 and 4 about (30, 0), z 10..20), both
+        turned a quarter four times, Reapply on. An ellipse takes the up-to plane's blind shortcut
+        (ops#751), and the ring's top plane has its origin at the ring's centre, in its hole, off
+        the face: the face itself is on each instance's part, so every instance's pad is made,
+        no warning: 100000 + 4 x 480 pi (rings) + 4 x 80 pi (pads). Before: the point guard ran
+        on the plane's origin and dropped the instances at 90, 180 and 270 deg."""
+        self.block(-50, -50, 50, 50)
+        ringSketch = models.sketch(
+            self.doc,
+            "RingSketch",
+            [models.circle(30, 0, 8), models.circle(30, 0, 4)],
+            self.body,
+            z=10,
+        )
+        ring = models.pad(self.body, ringSketch, 10, name="Ring")
+        self.recompute()
+        top = self.faceOf(ring, V(30, 0, 20), 48 * math.pi)
+        ellipse = Part.Ellipse(V(34, 20, 0), V(30, 22, 0), V(30, 20, 0))
+        sketch = models.sketch(self.doc, "EllipseSketch", [ellipse], self.body, z=10)
+        pad = self.body.newObject("PartDesign::Pad", "EllipsePad")
+        pad.Profile = sketch
+        pad.Type = "UpToFace"
+        pad.UpToFace = (ring, [top])
+        self.recompute()
+        self.assertValid(pad)
+        self.assertBody(100000 + 480 * math.pi + 80 * math.pi)
+        pattern = self.quarterTurns([ring, pad])
+        self.assertValid(pattern)
+        self.assertNoWarning(pattern)
+        self.assertBody(100000 + 4 * 480 * math.pi + 4 * 80 * math.pi)
+        for x, y in ((30, 20), (-20, 30), (-30, -20), (20, -30)):
+            self.assertTrue(self.inside(x, y, 15), f"no pad at ({x}, {y})")
+
+    def testReapplyUpToAWholeDatumPlaneAfterAnOriginal(self):
+        """Review pr963a-r1 T2: a 10 x 10 pad (x -40..-30, y 20..30) from the plate's top up to a
+        datum plane z = 25 as a whole object (UpToShape), the datum made after the Pocket (x
+        -40..-30, y -5..5, 6 deep); both patterned along X, 3 over 40, Reapply on. The pattern
+        neither makes nor moves the datum plane, so it is outside: each instance's pad ends on z =
+        25, no warning: 100000 + 3 x (1500 - 600). Before: refused as a whole object made after
+        an original."""
+        self.block(-50, -50, 50, 50)
+        pocketSketch = models.sketch(
+            self.doc, "PocketSketch", models.rectangle(-40, -5, -30, 5), self.body, z=10
+        )
+        pocket = models.pocket(self.body, pocketSketch, 6, name="Pocket")
+        datum = self.body.newObject("PartDesign::Plane", "DatumPlane")
+        datum.AttachmentSupport = [(models.originFeature(self.body, "XY_Plane"), "")]
+        datum.MapMode = "FlatFace"
+        datum.AttachmentOffset = App.Placement(V(0, 0, 25), App.Rotation())
+        sketch = models.sketch(
+            self.doc, "PadSketch", models.rectangle(-40, 20, -30, 30), self.body, z=10
+        )
+        pad = self.body.newObject("PartDesign::Pad", "Pad")
+        pad.Profile = sketch
+        pad.Type = "UpToShape"
+        pad.UpToShape = [(datum, [""])]
+        self.recompute()
+        self.assertValid(pad)
+        self.assertBody(100000 - 600 + 1500)
+        pattern = self.body.newObject("PartDesign::LinearPattern", "LinearPattern")
+        pattern.Originals = [pocket, pad]
+        pattern.Direction = self.axis("X_Axis")
+        pattern.Mode = "Extent"
+        pattern.Length = 40
+        pattern.Occurrences = 3
+        pattern.Reapply = True
+        self.body.Tip = pattern
+        self.recompute()
+        self.assertValid(pattern)
+        self.assertNoWarning(pattern)
+        self.assertBody(100000 + 3 * (1500 - 600))
+        for x in (-35, -15, 5):
+            self.assertTrue(self.inside(x, 25, 20), f"no pad at x {x}")
+
+
+    def testReapplyUpToAnOwnFaceThePatternMoves(self):
+        """Review pr963a-r2 SideCap: a Block (x -10..10, y -30..-20, z 10..20) and a pad from the
+        plane y = -50 along +y up to the Block's side y = -30 (20 long; an ellipse, semi-axes 4 and
+        2 about (x 0, z 15): the blind shortcut; a 10 x 6 rectangle: the up-to prism), both patterned
+        along Y, 2 over 60, Reapply on. The second instance's pad ends on its own Block's side (y =
+        30): 100000 + 2 x 2000 + 2 x 20 x area, no warning. Integration carries the seed's face to
+        the instance and the pad runs to y = -30 there, the wrong length (105256.6 against 105005.3
+        for the ellipse)."""
+        for ellipse in (True, False):
+            with self.subTest(ellipse=ellipse):
+                if hasattr(self, "body"):
+                    App.closeDocument(self.doc.Name)
+                    self.doc = App.newDocument("PartDesignTestPatternRules")
+                self.block(-50, -50, 50, 50)
+                block = self.topPad("SideBlock", -10, -30, 10, -20)
+                block.Length = 10
+                self.recompute()
+                side = self.faceOf(block, V(0, -30, 15), 200)
+                if ellipse:
+                    geometry = [Part.Ellipse(V(4, -15, 0), V(0, -13, 0), V(0, -15, 0))]
+                    area = 8 * math.pi
+                else:
+                    geometry = models.rectangle(-5, -18, 5, -12)
+                    area = 60
+                sketch = models.sketch(
+                    self.doc,
+                    "SideSketch",
+                    geometry,
+                    self.body,
+                    placement=App.Placement(V(0, -50, 0), App.Rotation(V(1, 0, 0), -90)),
+                )
+                pad = self.body.newObject("PartDesign::Pad", "SidePad")
+                pad.Profile = sketch
+                pad.Type = "UpToFace"
+                pad.UpToFace = (block, [side])
+                want = 100000 + 2000 + 20 * area
+                for reversed_ in (False, True):
+                    pad.Reversed = reversed_
+                    self.recompute()
+                    if pad.isValid() and abs(self.body.Shape.Volume - want) < 1e-6:
+                        break
+                self.assertBody(want)
+                pattern = self.body.newObject("PartDesign::LinearPattern", "LinearPattern")
+                pattern.Originals = [block, pad]
+                pattern.Direction = self.axis("Y_Axis")
+                pattern.Mode = "Extent"
+                pattern.Length = 60
+                pattern.Occurrences = 2
+                pattern.Reapply = True
+                self.body.Tip = pattern
+                self.recompute()
+                self.assertValid(pattern)
+                self.assertNoWarning(pattern)
+                self.assertBody(100000 + 2 * 2000 + 2 * 20 * area)
+                self.assertTrue(self.inside(0, 20, 15), "no pad at the second instance")
 
 
 if __name__ == "__main__":
