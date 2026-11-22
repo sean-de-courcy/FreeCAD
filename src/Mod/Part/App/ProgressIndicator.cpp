@@ -515,7 +515,11 @@ int workerFault(unsigned long code)
 }
 
 /// runWork() under a structured exception handler, in a function with no object to unwind (/EHsc):
-/// the fault's code, or 0
+/// the fault's code, or 0. __try is MSVC's (and clang-cl's) extension, Windows only
+# if defined(__clang__)
+#  pragma clang diagnostic push
+#  pragma clang diagnostic ignored "-Wlanguage-extension-token"
+# endif
 unsigned long runGuarded(const std::shared_ptr<Call>* call)
 {
     __try {
@@ -526,6 +530,9 @@ unsigned long runGuarded(const std::shared_ptr<Call>* call)
         return GetExceptionCode();
     }
 }
+# if defined(__clang__)
+#  pragma clang diagnostic pop
+# endif
 #endif
 
 void runWorker(const std::shared_ptr<Call>& call)
