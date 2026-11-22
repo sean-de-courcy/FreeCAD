@@ -5730,8 +5730,10 @@ std::vector<gp_Pnt> planeCrossings(
             for (int i = 1; i <= intersection.NbPoints(); ++i) {
                 const gp_Pnt point = intersection.Point(i);
                 GeomAPI_ProjectPointOnCurve onEdge(point, curve, first, last);
+                // The point on the edge itself: the one-way cut and the twist and scale origin
+                // find it on the path within tieTolerance (review pr974-r1, T1)
                 if (onEdge.NbPoints() > 0 && onEdge.LowerDistance() < tolerance) {
-                    add(point);
+                    add(onEdge.NearestPoint());
                 }
             }
         }
