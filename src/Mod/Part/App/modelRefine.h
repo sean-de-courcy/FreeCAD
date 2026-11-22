@@ -42,6 +42,10 @@
 
 #include <Mod/Part/PartGlobal.h>
 
+namespace Part
+{
+class TopoShape;
+}
 
 namespace ModelRefine
 {
@@ -222,6 +226,16 @@ private:
 // The edges of the cone, torus and sphere faces of `shape` that the face uniter would leave
 // unmerged (FreeCAD-CH, ops#931): makeElementRefine's UnifySameDomain fallback keeps them.
 void revolvedEdgesToKeep(const TopoDS_Shape& shape, TopTools_MapOfShape& keep);
+
+/** Merges the faces of \a shape that meet at an edge and lie on the same surface of a face of
+ * \a tool, and only those (FreeCAD-CH, ops#895): the pieces a feature cut its own tool into
+ * (a helix's turns) become whole again, whatever the refine says. Every other edge and vertex
+ * is kept. Named from \a shape's map through the merge's history, a merged face takes its whole
+ * name back (as the refine's fallback does, ops#806). Returns false, and leaves \a shape as it
+ * was, when there is nothing to merge, or the merge would change the faces' area, the volume,
+ * the number of solids or the validity.
+ */
+PartExport bool unifyAcrossSameSurface(Part::TopoShape& shape, const TopoDS_Shape& tool, const char* op);
 }  // namespace ModelRefine
 
 /* excerpt from GeomAbs_SurfaceType.hxx

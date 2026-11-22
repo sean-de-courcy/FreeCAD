@@ -14201,3 +14201,110 @@ Data::MappedElement TopoShape::chooseMatchingSubShapeByPlaneOrLine(
 }
 
 }  // namespace Part
+
+bool ModelRefine::unifyAcrossSameSurface(Part::TopoShape& shape, const TopoDS_Shape& tool, const char* op)
+{
+    using Part::TopoShape;
+    if (shape.isNull() || tool.IsNull()) {
+        return false;
+    }
+    try {
+        // A topology-only copy, as the refine's (ops#354): the merge adds curves on surface to
+        // the boundary edges, which must not reach the shapes this one shares its edges with
+        TopoShape fresh(shape);
+        fresh.setShape(BRepBuilderAPI_Copy(shape.getShape(), false).Shape(), false);
+        // The surfaces of the tool's faces, with their locations
+        std::vector<std::pair<Handle(Geom_Surface), TopLoc_Location>> surfaces;
+        for (TopExp_Explorer xp(tool, TopAbs_FACE); xp.More(); xp.Next()) {
+            TopLoc_Location location;
+            const Handle(Geom_Surface)& surface
+                = BRep_Tool::Surface(TopoDS::Face(xp.Current()), location);
+            if (!surface.IsNull()) {
+                surfaces.emplace_back(surface, location);
+            }
+        }
+        // The tool surface a face lies on, -1 for none
+        auto surfaceOf = [&surfaces](const TopoDS_Shape& face) {
+            TopLoc_Location location;
+            const Handle(Geom_Surface)& surface = BRep_Tool::Surface(TopoDS::Face(face), location);
+            for (std::size_t i = 0; i < surfaces.size(); ++i) {
+                if (surfaces[i].first == surface && surfaces[i].second.IsEqual(location)) {
+                    return static_cast<int>(i);
+                }
+            }
+            return -1;
+        };
+        TopTools_IndexedDataMapOfShapeListOfShape edgeFaces;
+        TopExp::MapShapesAndUniqueAncestors(fresh.getShape(), TopAbs_EDGE, TopAbs_FACE, edgeFaces);
+        TopTools_MapOfShape keep;
+        TopTools_MapOfShape freeVertices;
+        int freeEdges = 0;
+        for (int i = 1; i <= edgeFaces.Extent(); ++i) {
+            const TopTools_ListOfShape& faces = edgeFaces(i);
+            const int first = faces.Extent() == 2 ? surfaceOf(faces.First()) : -1;
+            if (first >= 0 && !faces.First().IsSame(faces.Last()) && surfaceOf(faces.Last()) == first) {
+                ++freeEdges;
+                for (TopExp_Explorer xv(edgeFaces.FindKey(i), TopAbs_VERTEX); xv.More(); xv.Next()) {
+                    freeVertices.Add(xv.Current());
+                }
+            }
+            else {
+                keep.Add(edgeFaces.FindKey(i));
+            }
+        }
+        if (freeEdges == 0) {
+            return false;
+        }
+        for (TopExp_Explorer xv(fresh.getShape(), TopAbs_VERTEX); xv.More(); xv.Next()) {
+            if (!freeVertices.Contains(xv.Current())) {
+                keep.Add(xv.Current());
+            }
+        }
+        ShapeUpgrade_UnifySameDomain unify(fresh.getShape(), true, true, false);
+        unify.KeepShapes(keep);
+        unify.Build();
+        const TopoDS_Shape& unified = unify.Shape();
+        auto props = [](const TopoDS_Shape& s, bool volume) {
+            GProp_GProps gprops;
+            if (volume) {
+                BRepGProp::VolumeProperties(s, gprops);
+            }
+            else {
+                BRepGProp::SurfaceProperties(s, gprops);
+            }
+            return gprops.Mass();
+        };
+        auto same = [](double a, double b) {
+            return std::fabs(a - b) <= 1e-7 * std::fabs(b) + Precision::Confusion();
+        };
+        auto count = [](const TopoDS_Shape& s, TopAbs_ShapeEnum type) {
+            int n = 0;
+            for (TopExp_Explorer xp(s, type); xp.More(); xp.Next()) {
+                ++n;
+            }
+            return n;
+        };
+        const bool closed = shape.isClosed();
+        if (unified.IsNull() || count(unified, TopAbs_FACE) >= count(shape.getShape(), TopAbs_FACE)
+            || count(unified, TopAbs_SOLID) != count(shape.getShape(), TopAbs_SOLID)
+            || !same(props(unified, false), props(shape.getShape(), false))
+            || (closed
+                && !same(std::fabs(props(unified, true)), std::fabs(props(shape.getShape(), true))))
+            || !BRepCheck_Analyzer(unified).IsValid()) {
+            return false;
+        }
+        const Part::MapperHistory history(unify.History());
+        TopoShape result(shape.Tag, shape.Hasher, shape.getHistoryAlgorithm());
+        result.makeShapeWithElementMap(unified, history, {fresh}, op);
+        Part::restoreWholeFaceNamesSafely(result, fresh, history);
+        result.fixSolidOrientation();
+        if (result.isClosed() != closed) {
+            return false;
+        }
+        shape = result;
+        return true;
+    }
+    catch (const Standard_Failure&) {
+        return false;
+    }
+}

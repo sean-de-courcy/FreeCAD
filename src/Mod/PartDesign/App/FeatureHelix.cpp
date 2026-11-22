@@ -22,12 +22,26 @@
  *                                                                         *
  ***************************************************************************/
 
+#include <algorithm>
+#include <cmath>
 #include <limits>
 #include <BRepAdaptor_Surface.hxx>
 #include <Mod/Part/App/FCBRepAlgoAPI_Common.h>
 #include <Mod/Part/App/FCBRepAlgoAPI_Cut.h>
 #include <Mod/Part/App/FCBRepAlgoAPI_Fuse.h>
+#include <BRepAlgoAPI_Splitter.hxx>
 #include <BRepBndLib.hxx>
+#include <BRepBuilderAPI_MakeEdge.hxx>
+#include <BRepCheck_Analyzer.hxx>
+#include <BRepLib.hxx>
+#include <BRepTools.hxx>
+#include <BRep_Tool.hxx>
+#include <Geom2d_Line.hxx>
+#include <Geom_Surface.hxx>
+#include <ShapeAnalysis_ShapeTolerance.hxx>
+#include <TopExp_Explorer.hxx>
+#include <gp_Dir2d.hxx>
+#include <gp_Pnt2d.hxx>
 #include <BRepBuilderAPI_MakeSolid.hxx>
 #include <BRepBuilderAPI_Sewing.hxx>
 #include <BRepClass3d_SolidClassifier.hxx>
@@ -54,6 +68,7 @@
 
 #include <Mod/Part/App/TopoShape.h>
 #include <Mod/Part/App/FaceMakerCheese.h>
+#include <Mod/Part/App/modelRefine.h>
 
 #include "FeatureHelix.h"
 #include "App/Document.h"
@@ -158,6 +173,85 @@ struct MapperPipeCaps: Part::MapperMaker
     TopTools_DataMapOfShapeListOfShape starts;
     TopTools_DataMapOfShapeListOfShape ends;
 };
+
+/** The sweep on a one-edge path with its side faces cut at each whole turn (ops#895), named as a
+ * split of \a sweep. A sweep face spans the turns along V, the path's parameter (GeomFill: U
+ * runs along the profile), so turn k is the iso-curve at k / turns of V's range: none at the
+ * caps, none for a last turn shorter than a thousandth. Fused with a base whose wall it lies on,
+ * a face over several turns meets the wall's cylinder over several periods, and OCCT's boolean
+ * gets it wrong (5 turns: an edge tolerance of 38 mm; 10 turns: no solid); one turn per piece
+ * is what the per-turn path gave. Returns a null shape when the cut doesn't give one solid
+ * with each side face in as many pieces as turns.
+ */
+Part::TopoShape imprintTurns(const Part::TopoShape& sweep, double turns)
+{
+    const int cuts = static_cast<int>(std::ceil(turns - 1e-3)) - 1;
+    if (cuts < 1) {
+        return sweep;
+    }
+    TopTools_ListOfShape tools;
+    int sides = 0;
+    int caps = 0;
+    for (TopExp_Explorer xp(sweep.getShape(), TopAbs_FACE); xp.More(); xp.Next()) {
+        const TopoDS_Face& face = TopoDS::Face(xp.Current());
+        if (BRepAdaptor_Surface(face, false).GetType() == GeomAbs_Plane) {
+            ++caps;
+            continue;
+        }
+        ++sides;
+        double u0 = 0;
+        double u1 = 0;
+        double v0 = 0;
+        double v1 = 0;
+        BRepTools::UVBounds(face, u0, u1, v0, v1);
+        const Handle(Geom_Surface) surface = BRep_Tool::Surface(face);
+        for (int k = 1; k <= cuts; ++k) {
+            const double v = v0 + (v1 - v0) * k / turns;
+            Handle(Geom2d_Line) line = new Geom2d_Line(gp_Pnt2d(u0, v), gp_Dir2d(1, 0));
+            BRepBuilderAPI_MakeEdge edge(line, surface, 0.0, u1 - u0);
+            if (!edge.IsDone()) {
+                return {};
+            }
+            TopoDS_Edge cut = edge.Edge();
+            BRepLib::BuildCurve3d(cut);
+            tools.Append(cut);
+        }
+    }
+    if (sides == 0 || caps != 2) {
+        return {};
+    }
+    BRepAlgoAPI_Splitter splitter;
+    TopTools_ListOfShape arguments;
+    arguments.Append(sweep.getShape());
+    splitter.SetArguments(arguments);
+    splitter.SetTools(tools);
+    splitter.SetNonDestructive(Standard_True);
+    splitter.Build();
+    if (!splitter.IsDone() || splitter.HasErrors()) {
+        return {};
+    }
+    Part::TopoShape split(sweep.Tag, sweep.Hasher, sweep.getHistoryAlgorithm());
+    split.makeElementShape(splitter, {sweep}, Part::OpCodes::Split);
+    if (split.countSubShapes(TopAbs_SOLID) != 1) {
+        return {};
+    }
+    Part::TopoShape solid = split.getSubTopoShape(TopAbs_SOLID, 1);
+    if (static_cast<int>(solid.countSubShapes(TopAbs_FACE)) != caps + sides * (cuts + 1)
+        || !BRepCheck_Analyzer(solid.getShape()).IsValid()) {
+        return {};
+    }
+    return solid;
+}
+
+/// The largest tolerance of a shape's edges and vertices
+double largestTolerance(const TopoDS_Shape& shape)
+{
+    if (shape.IsNull()) {
+        return 0.0;
+    }
+    ShapeAnalysis_ShapeTolerance tolerance;
+    return tolerance.Tolerance(shape, 1, TopAbs_SHAPE);
+}
 }  // namespace
 
 // we purposely use not FLT_MAX because this would not be computable
@@ -462,19 +556,6 @@ App::DocumentObjectExecReturn* Helix::execute()
 
         base.move(invObjLoc);
 
-        TopoDS_Shape result;
-
-        // generate the helix path
-        TopoDS_Shape path;
-        if (Angle.getValue() == 0.) {
-            // breaking the path at each turn prevents an OCC issue
-            path = generateHelixPath();
-        }
-        else {
-            // don't break the path or the generated solid is invalid
-            path = generateHelixPath(1000.);
-        }
-
         TopoDS_Shape face = sketchshape;
         face.Move(invObjLoc);
         if (nameResult) {
@@ -482,146 +563,218 @@ App::DocumentObjectExecReturn* Helix::execute()
             face = profile.getShape();
         }
 
-        Bnd_Box bounds;
-        BRepBndLib::Add(path, bounds);
-        double size = sqrt(bounds.SquareExtent());
-        ShapeFix_ShapeTolerance fix;
-        fix.LimitTolerance(path, Precision::Confusion() * 1e-6 * size);  // needed to produce valid
-                                                                         // Pipe for very big parts
-        // We introduce final part tolerance with the second call to LimitTolerance below, however
-        // OCCT has a bug where the side-walls of the Pipe disappear with very large (km range)
-        // pieces increasing a tiny bit of extra tolerance to the path fixes this. This will in any
-        // case be less than the tolerance lower limit below, but sufficient to avoid the bug
+        // One face per profile edge, as Onshape's (ops#895): the sweep runs on a one-edge path,
+        // its side faces are cut at each turn for the boolean (imprintTurns()), and the pieces
+        // are merged again after it. When that attempt fails (no solid, several, or a tolerance
+        // the inputs don't explain), the helix is built as before: a path broken at each turn,
+        // whose faces stay one per turn. V1 documents keep that build; so does a path of more
+        // than 1000 turns, which makeSpiralHelix() breaks anyway.
+        const bool canImprint = nameResult && Turns.getValue() <= 1000.0;
+        for (int attempt = canImprint ? 0 : 1; attempt < 2; ++attempt) {
+            const bool imprint = attempt == 0;
+            try {
+                TopoDS_Shape result;
 
-        BRepOffsetAPI_MakePipe
-            mkPS(TopoDS::Wire(path), face, GeomFill_Trihedron::GeomFill_IsFrenet, Standard_False);
-        result = mkPS.Shape();
-        // V2: the side faces are generated from the profile's edges, the caps from its face
-        TopoShape named = makeTopoShape(false);
-        if (nameResult) {
-            named.makeShapeWithElementMap(
-                result,
-                MapperPipeCaps(mkPS, face),
-                {profile},
-                Part::OpCodes::Pipe
-            );
-        }
+                // generate the helix path
+                TopoDS_Shape path;
+                if (!imprint && Angle.getValue() == 0.) {
+                    // breaking the path at each turn prevents an OCC issue (the boolean's: see
+                    // imprintTurns())
+                    path = generateHelixPath();
+                }
+                else {
+                    // don't break the path or the generated solid is invalid
+                    path = generateHelixPath(1000.);
+                }
 
-        BRepClass3d_SolidClassifier SC(result);
-        SC.PerformInfinitePoint(Precision::Confusion());
-        if (SC.State() == TopAbs_IN) {
-            result.Reverse();
-            if (nameResult) {
-                named.setShape(result, false);  // the same sub-shapes: the names stay
-            }
-        }
+                Bnd_Box bounds;
+                BRepBndLib::Add(path, bounds);
+                double size = sqrt(bounds.SquareExtent());
+                ShapeFix_ShapeTolerance fix;
+                fix.LimitTolerance(path, Precision::Confusion() * 1e-6 * size);  // needed to produce
+                                                                                 // valid Pipe for
+                                                                                 // very big parts
+                // We introduce final part tolerance with the second call to LimitTolerance below,
+                // however OCCT has a bug where the side-walls of the Pipe disappear with very large
+                // (km range) pieces increasing a tiny bit of extra tolerance to the path fixes
+                // this. This will in any case be less than the tolerance lower limit below, but
+                // sufficient to avoid the bug
 
-        fix.LimitTolerance(
-            result,
-            Precision::Confusion() * size * Tolerance.getValue()
-        );  // significant precision reduction due to helical approximation - needed to allow fusion
-            // to succeed
-
-        // try to auto-fix possible invalid result
-        ShapeFix_Solid fixer;
-        fixer.Init(TopoDS::Solid(result));
-        if (fixer.Perform()) {
-            result = fixer.Solid();
-            if (nameResult) {
-                TopoShape fixed = makeTopoShape(false);
-                fixed.makeShapeWithElementMap(result, Part::MapperHistory(fixer), {named});
-                named = fixed;
-            }
-        }
-
-        if (nameResult) {
-            AddSubShape.setValue(named);
-        }
-        else {
-            AddSubShape.setValue(result);
-        }
-
-        if (base.isNull()) {
-
-            if (getAddSubType() == FeatureAddSub::Type::Subtractive) {
-                return new App::DocumentObjectExecReturn(
-                    QT_TRANSLATE_NOOP("Exception", "Error: There is nothing to subtract")
+                BRepOffsetAPI_MakePipe mkPS(
+                    TopoDS::Wire(path),
+                    face,
+                    GeomFill_Trihedron::GeomFill_IsFrenet,
+                    Standard_False
                 );
-            }
+                result = mkPS.Shape();
+                // V2: the side faces are generated from the profile's edges, the caps from its face
+                TopoShape named = makeTopoShape(false);
+                if (nameResult) {
+                    named.makeShapeWithElementMap(
+                        result,
+                        MapperPipeCaps(mkPS, face),
+                        {profile},
+                        Part::OpCodes::Pipe
+                    );
+                }
 
-            if (!isSingleSolidRuleSatisfied(result)) {
-                return new App::DocumentObjectExecReturn(QT_TRANSLATE_NOOP(
-                    "Exception",
-                    "Result has multiple solids: enable 'Allow Compound' in the active body."
-                ));
-            }
+                BRepClass3d_SolidClassifier SC(result);
+                SC.PerformInfinitePoint(Precision::Confusion());
+                if (SC.State() == TopAbs_IN) {
+                    result.Reverse();
+                    if (nameResult) {
+                        named.setShape(result, false);  // the same sub-shapes: the names stay
+                    }
+                }
 
-            // store shape before refinement
-            if (nameResult) {
-                this->rawShape = named;
-                Shape.setValue(getSolid(named));
+                fix.LimitTolerance(
+                    result,
+                    Precision::Confusion() * size * Tolerance.getValue()
+                );  // significant precision reduction due to helical approximation - needed to
+                    // allow fusion to succeed
+
+                // try to auto-fix possible invalid result
+                ShapeFix_Solid fixer;
+                fixer.Init(TopoDS::Solid(result));
+                if (fixer.Perform()) {
+                    result = fixer.Solid();
+                    if (nameResult) {
+                        TopoShape fixed = makeTopoShape(false);
+                        fixed.makeShapeWithElementMap(result, Part::MapperHistory(fixer), {named});
+                        named = fixed;
+                    }
+                }
+
+                // The boolean's tool: the sweep cut at each turn. It is also the AddSubShape,
+                // which a pattern fuses with its base the same way.
+                TopoShape tool = nameResult ? named : TopoShape(result);
+                if (imprint) {
+                    tool = imprintTurns(named, Turns.getValue());
+                    if (tool.isNull()) {
+                        continue;
+                    }
+                }
+                AddSubShape.setValue(tool);
+
+                if (base.isNull()) {
+
+                    if (getAddSubType() == FeatureAddSub::Type::Subtractive) {
+                        return new App::DocumentObjectExecReturn(
+                            QT_TRANSLATE_NOOP("Exception", "Error: There is nothing to subtract")
+                        );
+                    }
+
+                    if (!isSingleSolidRuleSatisfied(result)) {
+                        return new App::DocumentObjectExecReturn(QT_TRANSLATE_NOOP(
+                            "Exception",
+                            "Result has multiple solids: enable 'Allow Compound' in the active "
+                            "body."
+                        ));
+                    }
+
+                    // store shape before refinement; alone, the sweep is whole
+                    if (nameResult) {
+                        this->rawShape = named;
+                        Shape.setValue(getSolid(named));
+                    }
+                    else {
+                        this->rawShape = result;
+                        Shape.setValue(getSolid(result));
+                    }
+                    return App::DocumentObject::StdReturn;
+                }
+
+                Part::TopoShape boolOp = makeTopoShape(false);
+                boolOp.makeElementBoolean(
+                    getBooleanMaker(),
+                    {base, tool},
+                    nullptr,
+                    -1.0,
+                    Part::ElementMapPolicy::Propagate,
+                    booleanInputCheck(),
+                    &booleanInputsValid
+                );
+                // An Intersect that shares no volume with its base leaves the base as it was,
+                // healthy, with Onshape's info, as a Revolve's and an Extrude's (hands-on R7,
+                // ops#640 rank 20, H3)
+                if (getBooleanOperation() == BooleanOperation::Common
+                    && (boolOp.isNull() || !boolOp.hasSubShape(TopAbs_SOLID))) {
+                    if (auto doc = getDocument(); doc && !SiblingOf.getValue()) {
+                        static const std::string text = "Selected tools and targets do not intersect";
+                        const char* previous = doc->getWarningDescription(this);
+                        doc->setWarning(
+                            this,
+                            previous && *previous ? std::string(previous) + "\n" + text : text
+                        );
+                    }
+                    this->rawShape = TopoShape();
+                    Shape.setValue(base);
+                    return App::DocumentObject::StdReturn;
+                }
+
+                if (!isSingleSolidRuleSatisfied(boolOp.getShape())) {
+                    if (imprint) {
+                        continue;
+                    }
+                    return new App::DocumentObjectExecReturn(QT_TRANSLATE_NOOP(
+                        "Exception",
+                        "Result has multiple solids: enable 'Allow Compound' in the active body."
+                    ));
+                }
+
+                TopoShape solid = getSolid(boolOp);
+                // lets check if the result is a solid
+                if (solid.isNull()) {
+                    if (imprint) {
+                        continue;
+                    }
+                    return new App::DocumentObjectExecReturn(
+                        QT_TRANSLATE_NOOP("Exception", "Resulting shape is not a solid")
+                    );
+                }
+
+                if (imprint) {
+                    // the boolean's failure on a long face is a tolerance of millimetres (38 mm on
+                    // a thread of 5 turns over 0.8 mm); where a thread runs out through a face, a
+                    // vertex there takes 1e-3 mm for inputs of 6e-5, and the result is right
+                    const double inputs = std::max(
+                        largestTolerance(base.getShape()),
+                        largestTolerance(tool.getShape())
+                    );
+                    if (largestTolerance(solid.getShape()) > 100.0 * inputs + Precision::Confusion()) {
+                        continue;
+                    }
+                    // the turns' pieces whole again, before the refine and its rawShape
+                    ModelRefine::unifyAcrossSameSurface(solid, tool.getShape(), Part::OpCodes::Refine);
+                }
+
+                // store shape before refinement
+                this->rawShape = solid;
+                solid = refineShapeIfActive(solid);
+                if (!isSingleSolidRuleSatisfied(solid.getShape())) {
+                    return new App::DocumentObjectExecReturn(QT_TRANSLATE_NOOP(
+                        "Exception",
+                        "Result has multiple solids: enable 'Allow Compound' in the active body."
+                    ));
+                }
+
+                Shape.setValue(solid);
+                return App::DocumentObject::StdReturn;
             }
-            else {
-                this->rawShape = result;
-                Shape.setValue(getSolid(result));
+            catch (const Standard_Failure&) {
+                if (!imprint) {
+                    throw;
+                }
             }
-            return App::DocumentObject::StdReturn;
+            catch (const Base::Exception&) {
+                if (!imprint) {
+                    throw;
+                }
+            }
         }
-
-        Part::TopoShape boolOp = makeTopoShape(false);
-        boolOp.makeElementBoolean(
-            getBooleanMaker(),
-            {base, nameResult ? named : TopoShape(result)},
-            nullptr,
-            -1.0,
-            Part::ElementMapPolicy::Propagate,
-            booleanInputCheck(),
-            &booleanInputsValid
+        return new App::DocumentObjectExecReturn(
+            QT_TRANSLATE_NOOP("Exception", "Error: the helix could not be built")
         );
-        // An Intersect that shares no volume with its base leaves the base as it was, healthy, with
-        // Onshape's info, as a Revolve's and an Extrude's (hands-on R7, ops#640 rank 20, H3)
-        if (getBooleanOperation() == BooleanOperation::Common
-            && (boolOp.isNull() || !boolOp.hasSubShape(TopAbs_SOLID))) {
-            if (auto doc = getDocument(); doc && !SiblingOf.getValue()) {
-                static const std::string text = "Selected tools and targets do not intersect";
-                const char* previous = doc->getWarningDescription(this);
-                doc->setWarning(
-                    this,
-                    previous && *previous ? std::string(previous) + "\n" + text : text
-                );
-            }
-            this->rawShape = TopoShape();
-            Shape.setValue(base);
-            return App::DocumentObject::StdReturn;
-        }
-
-        if (!isSingleSolidRuleSatisfied(boolOp.getShape())) {
-            return new App::DocumentObjectExecReturn(QT_TRANSLATE_NOOP(
-                "Exception",
-                "Result has multiple solids: enable 'Allow Compound' in the active body."
-            ));
-        }
-
-        TopoShape solid = getSolid(boolOp);
-        // lets check if the result is a solid
-        if (solid.isNull()) {
-            return new App::DocumentObjectExecReturn(
-                QT_TRANSLATE_NOOP("Exception", "Resulting shape is not a solid")
-            );
-        }
-
-        // store shape before refinement
-        this->rawShape = solid;
-        solid = refineShapeIfActive(solid);
-        if (!isSingleSolidRuleSatisfied(solid.getShape())) {
-            return new App::DocumentObjectExecReturn(QT_TRANSLATE_NOOP(
-                "Exception",
-                "Result has multiple solids: enable 'Allow Compound' in the active body."
-            ));
-        }
-
-        Shape.setValue(solid);
-        return App::DocumentObject::StdReturn;
     }
     catch (Standard_Failure& e) {
 
