@@ -16660,7 +16660,8 @@ TopoDS_Shape constructThroughWedge(
             refuse("a chamfer run on through the part whose end face is degenerate at the vertex");
         }
         gp_Pnt point = BRep_Tool::Pnt(vertex);
-        if (outwardNormalAny(endFace, point).Dot(awayFrom(data.edge, vertex)) <= 1e-3) {
+        // awayFrom runs from the vertex into the edge: a free end faces the other way
+        if (outwardNormalAny(endFace, point).Dot(awayFrom(data.edge, vertex)) >= -1e-3) {
             refuse("a chamfer run on through the part whose end is not free");
         }
         endFaces.push_back(endFace);
@@ -16717,6 +16718,9 @@ TopoDS_Shape constructThroughWedge(
     }
     std::vector<Stage> stages;
     stages.emplace_back(whole.History(), shape);
+    // At the limit the chamfer's plane leaves the face it covers at one point of its rim, where the
+    // cut splits the new ellipse on the end face's surface in two: one edge more than Onshape's
+    // (debt: ShapeUpgrade_UnifySameDomain merges ellipse pieces only into a B-spline)
     // As measured (#4, #45): the strip covers one of the edge's faces whole, and the cut changes no
     // face but the edge's, faces on their planes (#45's far leg), and the end faces. A strip that
     // keeps part of both faces, or a run on into other faces (an edge crossed by a hole, past which
