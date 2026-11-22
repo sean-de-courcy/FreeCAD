@@ -2391,6 +2391,97 @@ class BridgedRecessTest(unittest.TestCase):
                 right = plain if sink is None else plain.cut(sink)
                 self.assertLess(symmetric_difference(fillet.Shape, right), 1e-6)
 
+    @staticmethod
+    def cornerPlate(small, sink=False):
+        """ops#968: the plate 60 x 40 x 3, its vertical edges rounded r 5 but the one at x 0, y 40,
+        rounded r small; with rimBlock()'s countersink at x 30, y 5 (its rim 1 mm from the front
+        side, a cone r 4 at the top to r 2 at depth 2, then a through hole r 2)"""
+        plate = Part.makeBox(60, 40, 3)
+        vertical = [e for e in plate.Edges if abs(e.BoundBox.ZLength - 3) < 1e-9]
+        corner = [e for e in vertical if e.BoundBox.XMax < 1e-9 and e.BoundBox.YMin > 40 - 1e-9]
+        plate = plate.makeFillet(5, [e for e in vertical if not e.isSame(corner[0])])
+        corner = [
+            e
+            for e in plate.Edges
+            if e.BoundBox.XMax < 1e-9 and e.BoundBox.YMin > 40 - 1e-9 and e.BoundBox.ZLength > 1
+        ]
+        plate = plate.makeFillet(small, corner)
+        if sink:
+            plate = plate.cut(
+                Part.makeCone(2, 4, 2, V(30, 5, 1))
+                .fuse(Part.makeCylinder(2, 3, V(30, 5, 0)))
+                .removeSplitter()
+            )
+        return plate
+
+    @staticmethod
+    def topRim(shape):
+        """The top face's outer loop: its 4 lines and 4 arcs"""
+        top = next(
+            f
+            for f in shape.Faces
+            if f.Surface.TypeId == "Part::GeomPlane"
+            and abs(f.BoundBox.ZMin - 3) < 1e-9
+            and abs(f.BoundBox.ZMax - 3) < 1e-9
+        )
+        return list(top.OuterWire.Edges)
+
+    def testRimWithACornerArcBelowTheRadiusBuilds(self):
+        # ops#968 (NS88 Case Vial Well #74): the corner r 1 is convex and below the round's r 1.6,
+        # so the ball's centre circle there would have a negative radius: OCCT's round over it is
+        # a B-spline, and right, not a bridge. The top face is the outline offset inwards by 1.6,
+        # where the small arc vanishes into a sharp corner: (60 - 2R)(40 - 2R) - 3(1 - pi/4)(5 - R)^2
+        R = 1.6
+        shape = self.cornerPlate(1)
+        rim = self.topRim(shape)
+        self.assertEqual(len(rim), 8)
+        fillet = filleted_in_a_body(self.doc, shape, self.topRim, R)
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+        result = fillet.Shape
+        self.assertTrue(result.isValid())
+        self.assertEqual(len(result.Solids), 1)
+        self.assertEqual(len(result.Faces), len(shape.Faces) + 8)
+        top = [
+            f
+            for f in result.Faces
+            if f.Surface.TypeId == "Part::GeomPlane"
+            and abs(f.BoundBox.ZMin - 3) < 1e-9
+            and abs(f.BoundBox.ZMax - 3) < 1e-9
+        ]
+        self.assertEqual(len(top), 1)
+        area = (60 - 2 * R) * (40 - 2 * R) - 3 * (1 - math.pi / 4) * (5 - R) ** 2
+        self.assertAlmostEqual(top[0].Area, area, delta=1e-3)
+        # A round removes material only
+        self.assertLess(result.Volume, shape.Volume)
+        self.assertAlmostEqual(result.common(shape).Volume, result.Volume, delta=1e-6)
+
+    def testRimWithEveryArcAtOrAboveTheRadiusBuildsAsBefore(self):
+        # ops#968's controls: the radius below the small arc (r 0.8), no small arc, and the arc
+        # equal to the radius (a sphere): built, as before
+        for small, R in ((1, 0.8), (5, 1.6), (1.6, 1.6)):
+            with self.subTest(small=small, R=R):
+                shape = self.cornerPlate(small)
+                fillet = filleted_in_a_body(self.doc, shape, self.topRim, R)
+                self.assertTrue(fillet.isValid(), fillet.getStatusString())
+                self.assertEqual(len(fillet.Shape.Faces), len(shape.Faces) + 8)
+                self.assertNotIn(
+                    "Part::GeomBSplineSurface", {f.Surface.TypeId for f in fillet.Shape.Faces}
+                )
+
+    def testRimWithEveryArcAtOrAboveTheRadiusAcrossACountersinkFails(self):
+        # ops#968: the check still runs on a rim loop whose arcs are all at or above the radius,
+        # the arc equal to it included: the round r 2's band crosses the countersink's rim, where
+        # OCCT bridges it with a B-spline, and the fillet is refused, as in rimBlock()'s case
+        for small in (5, 2):
+            with self.subTest(small=small):
+                shape = self.cornerPlate(small, sink=True)
+                fillet = filleted_in_a_body(self.doc, shape, self.topRim, 2)
+                self.assertFalse(fillet.isValid())
+                status = fillet.getStatusString()
+                self.assertTrue(
+                    status.startswith("The fillet's band crosses a hole or pocket on Face"), status
+                )
+
     def testBandOffOntoARoundAnotherPickBordersIsNotARecess(self):
         # Review pri931-r3, SplitRoundSelection: the block 40 x 20 x 5, its bottom front edge
         # rounded r 4, a groove x 20..22, z 0..2 through that round. The top front edge's band
