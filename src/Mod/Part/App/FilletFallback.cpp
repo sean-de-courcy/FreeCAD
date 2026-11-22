@@ -169,6 +169,10 @@ constexpr double volumeTolerance = 1e-6;
 const char* const tangentChainRefusal
     = "OCCT's contour runs on along a tangent chain onto an unselected edge";
 
+/// The refusal of a chamfer that ends on a face that is not a plane (classifyEnd()): where it is
+/// the reason, constructThroughWedge() is tried (ops#936)
+const char* const chamferCurvedEndRefusal = "a chamfer's end face that is not a plane";
+
 /// Thrown inside the construction when it refuses; caught by build()
 struct Refusal
 {
@@ -1989,6 +1993,134 @@ void foldFarFaces(const Context& ctx,
     }
 }
 
+/// ops#938, Heat Wire Clip #10 (Wall Fillet 1): a wall's edge standing on a floor that is two or
+/// more faces of one plane meeting at its foot, with faces behind that plane (a step's concave
+/// corner right under the wall's corner, so that the floor's pieces on either side touch only at
+/// the vertex: 6 edges, 6 faces). The tool, bounded by the floor's plane, never reaches what lies
+/// behind it, as on a floor of one face: the faces wholly behind the plane are left out, with the
+/// edges in the plane or behind it among them, and the floor counts as one face. The edge's faces
+/// must each meet the floor in one edge at the vertex, which are kept; anything else stays
+/// refused. Called only for a vertex that would be refused
+void foldFloorPieces(const Context& ctx,
+                     const EdgeData& data,
+                     const TopoDS_Vertex& vertex,
+                     std::vector<TopoDS_Shape>& edges,
+                     std::vector<TopoDS_Shape>& faces)
+{
+    // A convex edge between two planes only (review of fix935 2 r1, T2 and T3): a concave edge's
+    // fill reaches behind the floor's plane, and an edge between cylinders can take the preferred
+    // construction where OCCT builds, which must not move
+    if (!data.convex || !data.line) {
+        return;
+    }
+    for (const auto& face : data.faces) {
+        if (BRepAdaptor_Surface(face, Standard_False).GetType() != GeomAbs_Plane) {
+            return;
+        }
+    }
+    gp_Pnt point = BRep_Tool::Pnt(vertex);
+    gp_Dir away = awayFrom(data.edge, vertex);
+    auto ownIndex = [&](const TopoDS_Shape& face) {
+        return face.IsSame(data.faces[0]) ? 0 : face.IsSame(data.faces[1]) ? 1 : -1;
+    };
+    auto among = [](const TopoDS_Shape& face, const std::vector<TopoDS_Shape>& list) {
+        return std::any_of(list.begin(), list.end(), [&](const TopoDS_Shape& f) {
+            return f.IsSame(face);
+        });
+    };
+    // The floor: the plane faces through the vertex that are not the edge's, not along it, on one
+    // plane with one outward side
+    std::vector<TopoDS_Shape> floor;
+    gp_Pln plane;
+    gp_Dir toward;
+    for (const auto& face : faces) {
+        if (ownIndex(face) >= 0) {
+            continue;
+        }
+        BRepAdaptor_Surface surface(TopoDS::Face(face), Standard_False);
+        if (surface.GetType() != GeomAbs_Plane) {
+            continue;
+        }
+        gp_Pln candidate = surface.Plane();
+        double side = candidate.Axis().Direction().Dot(away);
+        if (std::abs(side) < 1e-6 || candidate.Distance(point) > linearTolerance) {
+            continue;
+        }
+        if (floor.empty()) {
+            plane = candidate;
+            toward = side > 0 ? candidate.Axis().Direction() : candidate.Axis().Direction().Reversed();
+            floor.push_back(face);
+        }
+        else if (oneSurface(TopoDS::Face(floor.front()), TopoDS::Face(face), point)) {
+            floor.push_back(face);
+        }
+    }
+    if (floor.size() < 2) {
+        return;
+    }
+    std::vector<TopoDS_Shape> behind;
+    for (const auto& face : faces) {
+        if (ownIndex(face) >= 0 || among(face, floor)) {
+            continue;
+        }
+        if (!whollyBeyond(TopoDS::Face(face), point, toward)) {
+            return;
+        }
+        behind.push_back(face);
+    }
+    std::vector<TopoDS_Shape> keptEdges {data.edge};
+    TopoDS_Shape keptFloor;
+    int bottoms[2] = {0, 0};
+    for (const auto& edge : edges) {
+        if (edge.IsSame(data.edge)) {
+            continue;
+        }
+        if (ctx.selected.Contains(edge)) {
+            return;
+        }
+        auto ofEdge = ctx.list(ctx.edgeFaces, edge);
+        if (ofEdge.size() != 2) {
+            return;
+        }
+        int floorHits = 0;
+        int own = -1;
+        TopoDS_Shape floorFace;
+        for (const auto& face : ofEdge) {
+            if (among(face, floor)) {
+                ++floorHits;
+                floorFace = face;
+            }
+            else if (ownIndex(face) >= 0) {
+                own = ownIndex(face);
+            }
+            else if (!among(face, behind)) {
+                return;
+            }
+        }
+        if (own >= 0) {
+            // The wall's foot along one of its faces
+            if (floorHits != 1) {
+                return;
+            }
+            ++bottoms[own];
+            keptEdges.push_back(edge);
+            if (keptFloor.IsNull()) {
+                keptFloor = floorFace;
+            }
+            continue;
+        }
+        // Between the floor and the faces behind it, in the plane; or behind it, between those
+        if (floorHits > 0 && !edgeInPlane(TopoDS::Edge(edge), plane)) {
+            return;
+        }
+    }
+    if (bottoms[0] != 1 || bottoms[1] != 1) {
+        return;
+    }
+    edges = std::move(keptEdges);
+    faces = {data.faces[0], data.faces[1], keptFloor};
+}
+
 struct VertexEnd
 {
     VertexClass kind = VertexClass::Refuse;
@@ -2600,6 +2732,10 @@ VertexEnd classify(
     foldSplits(ctx, data, vertex, edges, faces);
     if (!(edges.size() == 2 && faces.size() == 2) && (edges.size() != 3 || faces.size() != 3)) {
         foldFarFaces(ctx, data, vertex, edges, faces);
+        if (!(edges.size() == 2 && faces.size() == 2) && (edges.size() != 3 || faces.size() != 3)
+            && (edges.size() != 4 || faces.size() != 4)) {
+            foldFloorPieces(ctx, data, vertex, edges, faces);
+        }
     }
     // A vertex inside a curve, between two edges on the same two faces (a circle split at its
     // cylinder's seam, as a fused stadium's half circle): only a tangent continuation
@@ -2667,7 +2803,7 @@ VertexEnd classify(
         // off by an end blend's B-spline face, as Onshape's): the face's surface, extended past
         // the face, bounds the tool, as OCCT's own fillet ends there below the limit (lineTool)
         if (ctx.request.kind != Kind::Fillet) {
-            end.reason = "a chamfer's end face that is not a plane";
+            end.reason = chamferCurvedEndRefusal;
             return end;
         }
         gp_Pnt2d uv = BRep_Tool::Parameters(vertex, endFace);
@@ -13076,10 +13212,11 @@ Recorder::~Recorder()
     innermostRecorder = outer;
 }
 
-void Recorder::add(int edges, int corners, bool rolledOn)
+void Recorder::add(int edges, int corners, bool rolledOn, bool ranThrough)
 {
     if (Recorder* recorder = innermostRecorder) {
         recorder->rolled = recorder->rolled || rolledOn;
+        recorder->ran = recorder->ran || ranThrough;
         ++recorder->builds;
         recorder->edges += edges;
         recorder->corners += corners;
@@ -16456,6 +16593,205 @@ bool construct(
 namespace
 {
 
+/** A chamfer of one straight edge between two planes whose both ends lie on faces that are not
+ * planes, where the strip covers its face whole (ops#936; notes/chamfer-curved-end-936.md): Onshape's
+ * result is the base less the plain wedge run on along the edge's line through the whole part
+ * (Test_Tube_Feeder #4, a half cylinder's flat edge chamfered by its radius; Test Tube Feeder #45, a
+ * half tube's end edge chamfered by its outer radius, where the wedge crosses the bore and cuts the
+ * far leg too). Only where what the wedge removes is one solid, the strip connected to the edge;
+ * the width where it falls in two pieces is not measured
+ */
+TopoDS_Shape constructThroughWedge(
+    const TopoDS_Shape& baseShape,
+    const std::vector<TopoDS_Shape>& edges,
+    const Request& request,
+    ShapeMapper& mapper
+)
+{
+    if (request.kind != Kind::Chamfer || !request.widerScope) {
+        refuse("not a chamfer where OCCT failed");
+    }
+    const TopoShape base(baseShape);
+    if (countSolids(baseShape) != 1) {
+        refuse("the base is not one solid");
+    }
+    Context ctx(base, request);
+    for (const auto& edge : edges) {
+        if (edge.IsNull() || edge.ShapeType() != TopAbs_EDGE) {
+            refuse("not an edge");
+        }
+        ctx.selected.Add(edge);
+    }
+    for (const auto& edge : request.contour) {
+        if (!ctx.selected.Contains(edge)) {
+            refuse(tangentChainRefusal);
+        }
+    }
+    if (ctx.selected.Extent() != 1) {
+        refuse("a chamfer run on through the part on more than one edge");
+    }
+    EdgeData data = analyse(ctx, TopoDS::Edge(ctx.selected(1)));
+    if (!data.line || !data.convex) {
+        refuse("a chamfer run on through the part on an edge that is not straight and convex");
+    }
+    for (const auto& face : data.faces) {
+        if (BRepAdaptor_Surface(face, Standard_False).GetType() != GeomAbs_Plane) {
+            refuse("a chamfer run on through the part beside a face that is not a plane");
+        }
+    }
+    // Both ends free, on a face that is not a plane: three faces at the vertex, the third the end
+    // face, and the edge leaving the material there
+    TopoDS_Vertex first;
+    TopoDS_Vertex last;
+    TopExp::Vertices(data.edge, first, last);
+    std::vector<TopoDS_Face> endFaces;
+    for (const auto& vertex : {first, last}) {
+        auto faces = ctx.list(ctx.vertexFaces, vertex);
+        TopoDS_Face endFace;
+        int others = 0;
+        for (const auto& shape : faces) {
+            if (!shape.IsSame(data.faces[0]) && !shape.IsSame(data.faces[1])) {
+                endFace = TopoDS::Face(shape);
+                ++others;
+            }
+        }
+        if (faces.size() != 3 || others != 1) {
+            refuse("a chamfer run on through the part with more than one end face at a vertex");
+        }
+        if (BRepAdaptor_Surface(endFace, Standard_False).GetType() == GeomAbs_Plane) {
+            refuse("a chamfer run on through the part with a plane at one end");
+        }
+        // As classifyEnd: no normal at a degenerate point (a cone's apex, a sphere's pole)
+        BRepAdaptor_Surface surface(endFace, Standard_False);
+        gp_Pnt2d uv = BRep_Tool::Parameters(vertex, endFace);
+        gp_Pnt onSurface;
+        gp_Vec du;
+        gp_Vec dv;
+        surface.D1(uv.X(), uv.Y(), onSurface, du, dv);
+        if (du.Crossed(dv).Magnitude() < linearTolerance) {
+            refuse("a chamfer run on through the part whose end face is degenerate at the vertex");
+        }
+        gp_Pnt point = BRep_Tool::Pnt(vertex);
+        // awayFrom runs from the vertex into the edge: a free end faces the other way
+        if (outwardNormalAny(endFace, point).Dot(awayFrom(data.edge, vertex)) >= -1e-3) {
+            refuse("a chamfer run on through the part whose end is not free");
+        }
+        endFaces.push_back(endFace);
+    }
+    // The wedge: the edge's section, swept along its line a base size past both ends
+    Section section = sectionAt(ctx, data, data.first);
+    gp_Dir direction(gp_Vec(data.start, data.end));
+    const double length = data.start.Distance(data.end);
+    gp_Vec step(direction);
+    gp_Trsf move;
+    move.SetTranslation(step * -ctx.scale);
+    TopoDS_Face face = TopoDS::Face(section.face().Moved(TopLoc_Location(move)));
+    TopoDS_Shape wedge
+        = BRepPrimAPI_MakePrism(face, step * (length + 2 * ctx.scale), Standard_True).Shape();
+    TopoDS_Shape removed = commonOf(baseShape, wedge);
+    if (countSolids(removed) != 1) {
+        refuse(
+            "what a chamfer run on through the part removes is "
+            + std::to_string(countSolids(removed)) + " pieces"
+        );
+    }
+    const double toolVolume = volumeOf(removed);
+    BRepAlgoAPI_Cut whole;
+    TopTools_ListOfShape arguments;
+    arguments.Append(baseShape);
+    TopTools_ListOfShape tools;
+    tools.Append(wedge);
+    whole.SetArguments(arguments);
+    whole.SetTools(tools);
+    whole.SetNonDestructive(Standard_True);
+    whole.SetRunParallel(Standard_False);
+    whole.Build();
+    if (!whole.IsDone() || whole.HasErrors()) {
+        refuse("cutting a chamfer run on through the part failed");
+    }
+    TopoDS_Shape shape = whole.Shape();
+    if (countSolids(shape) != 1) {
+        refuse("the result is not one solid");
+    }
+    if (!BRepCheck_Analyzer(shape).IsValid()) {
+        refuse("the result is not valid");
+    }
+    if (!thinFace(shape, baseShape).IsNull()) {
+        refuse("the result has a face of zero width");
+    }
+    const double baseVolume = volumeOf(baseShape);
+    const double bound = volumeTolerance * (baseVolume + toolVolume);
+    double change = baseVolume - volumeOf(shape);
+    if (std::abs(change - toolVolume) > bound) {
+        change = MassProperties::volume(baseShape, true) - MassProperties::volume(shape, true);
+    }
+    if (std::abs(change - toolVolume) > bound) {
+        refuse("the cut removed " + describe(change) + " instead of " + describe(toolVolume));
+    }
+    std::vector<Stage> stages;
+    stages.emplace_back(whole.History(), shape);
+    // At the limit the chamfer's plane leaves the face it covers at one point of its rim, where the
+    // cut splits the new ellipse on the end face's surface in two: one edge more than Onshape's
+    // (debt: ShapeUpgrade_UnifySameDomain merges ellipse pieces only into a B-spline)
+    // As measured (#4, #45): the strip covers one of the edge's faces whole, and the cut changes no
+    // face but the edge's, faces on their planes (#45's far leg), and the end faces. A strip that
+    // keeps part of both faces, or a run on into other faces (an edge crossed by a hole, past which
+    // the wedge would chamfer the collinear edge on to the part's end), is not known from Onshape
+    // (skeptic of the design, findings 2 and 3)
+    if (!imagesThrough(stages, 0, data.faces[0]).empty()
+        && !imagesThrough(stages, 0, data.faces[1]).empty()) {
+        refuse("a chamfer run on through the part whose strip covers neither face whole");
+    }
+    for (TopExp_Explorer it(baseShape, TopAbs_FACE); it.More(); it.Next()) {
+        const TopoDS_Face& face = TopoDS::Face(it.Current());
+        auto images = imagesThrough(stages, 0, face);
+        if (images.size() == 1 && images.front().IsSame(face)) {
+            continue;
+        }
+        bool allowed = std::any_of(endFaces.begin(), endFaces.end(), [&](const TopoDS_Face& f) {
+            return f.IsSame(face);
+        });
+        for (const auto& own : data.faces) {
+            allowed = allowed || own.IsSame(face) || sameDomain(own, face);
+        }
+        if (!allowed) {
+            refuse("a chamfer run on through the part reaches a face beyond its own and its ends'");
+        }
+    }
+    // The history: the base's elements are modified into their images; the wedge's faces' other
+    // images are generated by the edge
+    TopTools_IndexedMapOfShape baseImages;
+    for (auto type : {TopAbs_FACE, TopAbs_EDGE, TopAbs_VERTEX}) {
+        for (TopExp_Explorer it(baseShape, type); it.More(); it.Next()) {
+            const TopoDS_Shape& element = it.Current();
+            auto images = imagesThrough(stages, 0, element);
+            for (const auto& image : images) {
+                baseImages.Add(image);
+            }
+            if (images.size() == 1 && images.front().IsSame(element)) {
+                continue;
+            }
+            for (const auto& image : images) {
+                mapper.insert(MappingStatus::Modified, element, image);
+            }
+        }
+    }
+    TopTools_IndexedMapOfShape named;
+    for (TopExp_Explorer it(wedge, TopAbs_FACE); it.More(); it.Next()) {
+        for (const auto& image : imagesThrough(stages, 0, it.Current())) {
+            if (image.ShapeType() == TopAbs_FACE && !baseImages.Contains(image)
+                && !named.Contains(image)) {
+                named.Add(image);
+                mapper.insert(MappingStatus::Generated, data.edge, image);
+            }
+        }
+    }
+    if (named.IsEmpty()) {
+        refuse("a chamfer run on through the part left no face of its own");
+    }
+    return shape;
+}
+
 bool constructSolid(
     const TopoDS_Shape& base,
     const std::vector<TopoDS_Shape>& edges,
@@ -16624,6 +16960,38 @@ bool constructSolid(
     }
     catch (...) {
         why = "an unknown exception";
+    }
+    // A chamfer whose ends lie on faces that are not planes: the plain wedge run on through the
+    // part (ops#936). Only where that was the refusal: nothing built before changes
+    if (why == chamferCurvedEndRefusal) {
+        std::string wedgeWhy;
+        try {
+            auto mapper = std::make_shared<ShapeMapper>();
+            TopoDS_Shape shape = constructThroughWedge(base, edges, request, *mapper);
+            TopTools_IndexedMapOfShape selected;
+            for (const auto& edge : edges) {
+                selected.Add(edge);
+            }
+            out.shape = shape;
+            out.mapper = mapper;
+            out.edges = selected.Extent();
+            out.corners = 0;
+            out.ranThrough = true;
+            return true;
+        }
+        catch (const Refusal& refusal) {
+            wedgeWhy = refusal.reason;
+        }
+        catch (const Standard_Failure& e) {
+            wedgeWhy = std::string("OCCT: ") + e.GetMessageString();
+        }
+        catch (const Base::Exception& e) {
+            wedgeWhy = e.what();
+        }
+        catch (const std::exception& e) {
+            wedgeWhy = e.what();
+        }
+        why += " (run on through the part: " + wedgeWhy + ")";
     }
     // A round that ends against a planar face facing it (under an overhang): OCCT's own round on
     // the piece of the base in front of that face. Where it doesn't apply, the reason above stands
@@ -17106,7 +17474,12 @@ void finish(TopoShape& result, const Construction& construction, const TopoShape
         FC_LOG("rim rounds not built directly: " << construction.rimRefusal);
     }
     FC_LOG("built exactly: " << construction.edges << " edges, " << construction.corners << " corners");
-    Recorder::add(construction.edges, construction.corners, construction.rolledOn);
+    Recorder::add(
+        construction.edges,
+        construction.corners,
+        construction.rolledOn,
+        construction.ranThrough
+    );
 }
 
 bool build(

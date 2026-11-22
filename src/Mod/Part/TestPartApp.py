@@ -44,6 +44,7 @@ from parttests.FilletFallbackTest import (
     ArcEndTwoWallsTest,
     BaseToleranceTest,
     BridgedRecessTest,
+    ChamferRunThroughTest,  # ops#936
     CornerBandRetryTest,  # ops#925
     ConeFootTest,
     MitreCornerTest,  # ops#941
@@ -77,6 +78,7 @@ from parttests.FilletFallbackTest import (
     RoundAlongASplineEdgeTest,
     SeveralSolidsTest,
     WallOnAChamferedRimTest,
+    WallOnASplitFloorTest,  # ops#938
     TangentLineStepTest,
     TightWallArcTest,
     VolumeSignTest,

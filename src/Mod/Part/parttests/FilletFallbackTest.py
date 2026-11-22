@@ -7391,3 +7391,208 @@ MITRE_ON_ROUNDS = 1e-4
 # The visible floor on OCCT's mitre, per unit of radius (mitreAsks(), ops#941 section 4): below it
 # OCCT's result stands
 MITRE_VISIBLE_FLOOR = 1e-3
+
+
+class ChamferRunThroughTest(unittest.TestCase):
+    """ops#936: a chamfer of a straight edge between two planes whose both ends lie on cylinders,
+    wide enough that its strip covers its end face whole (Test_Tube_Feeder #4, Test Tube Feeder
+    #45). Onshape's result is the body less the plain wedge run on along the edge's line through
+    the whole part: no face and no edge more; on a half tube the wedge crosses the bore and cuts
+    the far leg too. Designed: a half cylinder (R 10, length 30) whose half disc's diameter is
+    chamfered by R, and a half tube (r 6, R 10) whose end edge across one leg is chamfered by R.
+    Removed (the wedge y >= 0, z >= 0, y + z <= R over the half disc or ring in z = 0):
+    pi R^3 / 2 - 2 R^3 / 3 and pi R (R^2 - r^2) / 2 - 2 (R^3 - r^3) / 3"""
+
+    R, r, L = 10.0, 6.0, 30.0
+
+    def half(self, shape):
+        """The half y >= 0, the flat one face (a 180 degree cylinder has two, split at its axis)"""
+        box = Part.makeBox(2 * self.R + 2, self.R + 1, self.L, V(-self.R - 1, 0, 0))
+        return shape.common(box).removeSplitter()
+
+    def half_cylinder(self):
+        return self.half(Part.makeCylinder(self.R, self.L))
+
+    def half_tube(self):
+        tube = Part.makeCylinder(self.R, self.L).cut(Part.makeCylinder(self.r, self.L + 2, V(0, 0, -1)))
+        return self.half(tube)
+
+    def end_edges(self, body):
+        return [
+            e
+            for e in body.Edges
+            if e.Curve.TypeId == "Part::GeomLine"
+            and e.BoundBox.ZMax < 1e-9
+            and e.BoundBox.YMax < 1e-9
+        ]
+
+    def wedge(self, width):
+        """The plain wedge along the x axis, run on past the part"""
+        section = Part.Face(
+            Part.makePolygon([V(-50, 0, 0), V(-50, width, 0), V(-50, 0, width), V(-50, 0, 0)])
+        )
+        return section.extrude(V(100, 0, 0))
+
+    def check(self, body, edge, removed):
+        result = body.makeChamfer(self.R, [edge])
+        self.assertTrue(result.isValid())
+        self.assertEqual(len(result.Solids), 1)
+        self.assertAlmostEqual(body.Volume - result.Volume, removed, delta=1e-6 * body.Volume)
+        expected = body.cut(self.wedge(self.R))
+        self.assertLess(result.cut(expected).Volume + expected.cut(result).Volume, 1e-6)
+        # Onshape: no face and no edge more. Here one edge more: the ellipse on the cylinder is split
+        # where the chamfer's plane leaves the covered face's rim at a point (debt, ops#936)
+        self.assertEqual(len(result.Faces), len(body.Faces))
+        self.assertEqual(len(result.Edges), len(body.Edges) + 1)
+        return result
+
+    def testHalfCylinderFlatEdge(self):
+        body = self.half_cylinder()
+        edges = self.end_edges(body)
+        self.assertEqual(len(edges), 1)
+        R = self.R
+        self.check(body, edges[0], math.pi * R**3 / 2 - 2 * R**3 / 3)
+
+    def testHalfTubeWedgeCrossesTheBore(self):
+        body = self.half_tube()
+        edges = [e for e in self.end_edges(body) if e.BoundBox.XMin > 0]
+        self.assertEqual(len(edges), 1)
+        R, r = self.R, self.r
+        result = self.check(body, edges[0], math.pi * R * (R * R - r * r) / 2 - 2 * (R**3 - r**3) / 3)
+        # The far leg is cut too
+        far = Part.makeBox(R, R, self.L, V(-R, 0, 0))
+        self.assertGreater(body.common(far).Volume - result.common(far).Volume, 1.0)
+
+    def testHalfTubePartChamfer(self):
+        # Part::Chamfer builds what makeChamfer does: its lost-material check doesn't refuse the
+        # far leg's cut (review r1, T1)
+        body = self.half_tube()
+        edge = [e for e in self.end_edges(body) if e.BoundBox.XMin > 0][0]
+        doc = FreeCAD.newDocument("ChamferRunThrough")
+        try:
+            base = doc.addObject("Part::Feature", "Base")
+            base.Shape = body
+            feature = doc.addObject("Part::Chamfer", "Chamfer")
+            feature.Base = base
+            index = next(i for i, e in enumerate(body.Edges, 1) if e.isSame(edge))
+            feature.Edges = [(index, self.R, self.R)]
+            doc.recompute()
+            self.assertTrue(feature.isValid(), feature.getStatusString())
+            expected = body.cut(self.wedge(self.R))
+            result = feature.Shape
+            self.assertTrue(result.isValid())
+            self.assertLess(result.cut(expected).Volume + expected.cut(result).Volume, 1e-6)
+        finally:
+            FreeCAD.closeDocument(doc.Name)
+
+    def testHalfTubeNarrowStripKeepsTheFarLeg(self):
+        # Width 5 < r: the strip on the half ring is in two pieces; not measured in Onshape. OCCT
+        # builds it or the dress-up refuses; the far leg is never cut
+        body = self.half_tube()
+        edge = [e for e in self.end_edges(body) if e.BoundBox.XMin > 0][0]
+        try:
+            result = body.makeChamfer(5.0, [edge])
+        except Exception:
+            return
+        far = Part.makeBox(self.R, self.R, self.L, V(-self.R, 0, 0))
+        self.assertAlmostEqual(result.common(far).Volume, body.common(far).Volume, delta=1e-6)
+
+    def testEdgeBetweenTwoHolesKeepsTheRest(self):
+        # The top front edge of a 40 x 20 x 10 block crossed by two vertical holes of radius 2 at
+        # x 10 and 30; its piece between them chamfered 3: the wedge run on would chamfer the
+        # edge's collinear pieces to the block's ends too, which Onshape is not known to do
+        # (skeptic of the design, finding 2). Refused, or OCCT's own; the outer pieces stay sharp
+        block = Part.makeBox(40, 20, 10)
+        for x in (10, 30):
+            block = block.cut(Part.makeCylinder(2, 12, V(x, 0, -1)))
+        block = block.removeSplitter()
+        edges = [
+            e
+            for e in block.Edges
+            if e.Curve.TypeId == "Part::GeomLine"
+            and e.BoundBox.YMax < 1e-9
+            and e.BoundBox.ZMin > 10 - 1e-9
+            and 11 < e.BoundBox.XMin < 13
+        ]
+        self.assertEqual(len(edges), 1)
+        try:
+            result = block.makeChamfer(3.0, edges)
+        except Exception:
+            return
+        ends = Part.makeBox(7, 20, 10).fuse(Part.makeBox(7, 20, 10, V(33, 0, 0)))
+        self.assertAlmostEqual(result.common(ends).Volume, block.common(ends).Volume, delta=1e-6)
+
+
+class WallOnASplitFloorTest(unittest.TestCase):
+    """ops#938 (Heat Wire Clip #10, Wall Fillet 1): a wall's two end edges rounded just past half
+    its width, so the two rounds overlap and its end face vanishes, where one edge's foot is a
+    vertex of 6 edges: the floor is a step's top in three quadrants about it, whose pieces on
+    either side of the wall touch only there, and the step's concave corner runs on below it. The
+    tool is bounded by the floor's plane as on a floor of one face: the result above it is the
+    wall less the union of the two corner tools. Designed: the wall 3.9375 wide and 5 high on a
+    step 3 high, r 2"""
+
+    w, r, h, top = 3.9375, 2.0, 5.0, 3.0
+
+    def body(self):
+        step = Part.makeBox(20, 20, self.top, V(0, 0, 0)).fuse(
+            [Part.makeBox(20, 20, self.top, V(-20, -20, 0)), Part.makeBox(20, 20, self.top, V(0, -20, 0))]
+        )
+        return step.fuse(Part.makeBox(self.w, 20, self.h, V(0, -20, self.top))).removeSplitter()
+
+    def ends(self, body):
+        return [
+            e
+            for e in body.Edges
+            if e.Curve.TypeId == "Part::GeomLine"
+            and abs(e.BoundBox.YMax) < 1e-9
+            and abs(e.BoundBox.YMin) < 1e-9
+            and e.BoundBox.ZMin > self.top - 1e-9
+            and e.BoundBox.ZLength > 1
+        ]
+
+    def removed(self):
+        """The two corner tools' union, times the height: each r^2 (1 - pi / 4), less their overlap
+        where both reach, x in [w - r, r] between the arcs and the end face"""
+        r, w = self.r, self.w
+        arc = lambda c: lambda x: -r + math.sqrt(r * r - (x - c) ** 2)
+        a, b = arc(r), arc(w - r)
+        overlap = gauss_legendre(lambda x: -max(a(x), b(x)), w - r, r)
+        return self.h * (2 * r * r * (1 - math.pi / 4) - overlap)
+
+    def testSixEdgeFoot(self):
+        body = self.body()
+        ends = self.ends(body)
+        self.assertEqual(len(ends), 2)
+        foot = [v for v in ends[0].Vertexes + ends[1].Vertexes if (v.Point - V(0, 0, self.top)).Length < 1e-9]
+        self.assertEqual(len(foot), 1)
+        self.assertEqual(sum(1 for e in body.Edges if any(q.isSame(foot[0]) for q in e.Vertexes)), 6)
+        result = body.makeFillet(self.r, ends)
+        self.assertTrue(result.isValid())
+        self.assertEqual(len(result.Solids), 1)
+        self.assertAlmostEqual(body.Volume - result.Volume, self.removed(), delta=1e-6 * body.Volume)
+        # Nothing below the floor changes
+        below = Part.makeBox(60, 60, self.top, V(-30, -30, 0))
+        self.assertAlmostEqual(result.common(below).Volume, body.common(below).Volume, delta=1e-7)
+
+    def testConcaveFootStaysRefused(self):
+        # A wall's concave corner (an L) whose foot is a vertex of 6 edges on a floor notched in a
+        # V under it: the fill reaches behind the floor's plane, so the fold does not apply (review
+        # of fix935 2 r1, T2). Refused, or OCCT's own; never folded
+        floor = Part.makeBox(40, 40, self.top, V(-20, -20, 0))
+        notch = Part.Face(Part.makePolygon([V(0, 0, -1), V(-20, 8, -1), V(-20, -8, -1), V(0, 0, -1)]))
+        floor = floor.cut(notch.extrude(V(0, 0, self.top + 2)))
+        wall = Part.makeBox(10, 2, 5, V(0, 0, self.top)).fuse(Part.makeBox(2, 10, 5, V(0, 0, self.top)))
+        body = floor.fuse(wall).removeSplitter()
+        corner = [
+            e
+            for e in body.Edges
+            if e.Curve.TypeId == "Part::GeomLine"
+            and (e.BoundBox.Center - V(2, 2, self.top + 2.5)).Length < 1e-6
+        ]
+        self.assertEqual(len(corner), 1)
+        try:
+            result = body.makeFillet(1.0, corner)
+        except Exception:
+            return
+        self.assertTrue(result.isValid())

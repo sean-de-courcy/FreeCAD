@@ -504,7 +504,8 @@ names it.
 | `fix/i900-fullround-torus` | fix | ops#900 | - | integration | `d01198675b` (fork PR 501), 2026-11-22 | never (fork fix): a full round is one face per run and per corner, answering to each round's name (ops#900) |
 | `fix/i941-fillet-mitre` | fix | ops#941, ops#925 | - | `integration` `d01198675b` | `a737a8565d` (fork PR 504), 2026-11-22 | never (fork feature) |
 | `fix/i930-sweep-spine-import` | fix | ops#930 | - | `integration` `a737a8565d` | `0f8c201e7f` (fork PR 507), 2026-11-22 | never (fork fix): an imported sketch on a face keeps the references into it (ops#930) |
-| `fix/i956-brep-notation` | fix | ops#956 | - | integration | (fork PR 511) | never (fork fix): text BRep in a document save is written in the default notation, so unbounded parameter ranges read back (ops#956) |
+| `fix/i956-brep-notation` | fix | ops#956 | - | integration | `189bbf271e` (fork PR 511), 2026-11-22 | never (fork fix): text BRep in a document save is written in the default notation, so unbounded parameter ranges read back (ops#956) |
+| `fix/i936-chamfer-curved-end` | fix | ops#936 | - | `integration` `a737a8565d` | (fork PR 505) | never (fork fix): a chamfer whose edge ends on curved faces, the plain wedge run on through the part; a wall's round on a floor split at its foot |
 
 ## Fork-only commits in carried topics
 

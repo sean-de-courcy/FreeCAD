@@ -586,6 +586,27 @@ class TestChamfer(unittest.TestCase):
         self.assertTrue(shape.isInside(V(5 - 0.55, 1, 0.01), 1e-9, True))
         self.assertTrue(shape.isInside(V(15 + 0.55, 1, 0.01), 1e-9, True))
 
+    def testChamferHalfTubeRunsThroughInPartDesign(self):
+        # As FilletFallbackTest.ChamferRunThroughTest (ops#936, Test Tube Feeder #45): a half tube
+        # (r 6, R 10, length 30), its end edge across one leg chamfered 10. The wedge runs on
+        # across the bore and cuts the far leg too; the lost-material check must not refuse that
+        # far leg's cut (review r1, T1)
+        tube = models.ChamferRunThroughTest()
+        R, r, L = tube.R, tube.r, tube.L
+        shape = tube.half_tube()
+        chamfer, _ = models.dressed_in_a_body(
+            self.Doc, "Chamfer", shape, ((r, 0, 0), (R, 0, 0)), R
+        )
+        self.assertTrue(chamfer.isValid(), chamfer.getStatusString())
+        result = chamfer.Shape
+        self.assertTrue(result.isValid())
+        self.assertEqual(len(result.Solids), 1)
+        removed = math.pi * R * (R * R - r * r) / 2 - 2 * (R**3 - r**3) / 3
+        expected = math.pi * (R * R - r * r) * L / 2 - removed
+        self.assertAlmostEqual(result.Volume, expected, delta=1e-6 * expected)
+        far = Part.makeBox(R, R, L, FreeCAD.Vector(-R, 0, 0))
+        self.assertGreater(shape.common(far).Volume - result.common(far).Volume, 1.0)
+
     def tearDown(self):
         # closing doc
         FreeCAD.closeDocument("PartDesignTestChamfer")
