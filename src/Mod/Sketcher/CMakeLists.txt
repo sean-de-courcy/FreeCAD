@@ -38,6 +38,7 @@ set(Sketcher_TestScripts
     SketcherTests/TestSketchExtend.py
     SketcherTests/TestSketchPattern.py
     SketcherTests/TestSketchDxf.py
+    SketcherTests/TestSketchSolveRepeatable.py
 )
 
 if(BUILD_GUI)
