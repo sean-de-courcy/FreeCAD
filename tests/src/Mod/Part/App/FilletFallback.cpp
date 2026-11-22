@@ -18,6 +18,7 @@
 #include <App/ElementNamingUtils.h>
 #include <Base/Exception.h>
 #include <Mod/Part/App/FilletFallback.h>
+#include <Mod/Part/App/KernelBudget.h>
 #include <Mod/Part/App/MassProperties.h>
 #include <Mod/Part/App/TopoShape.h>
 #include <Mod/Part/App/TopoShapeOpCode.h>
@@ -48,6 +49,8 @@
 #include <BRep_Builder.hxx>
 #include <ShapeFix_ShapeTolerance.hxx>
 #include <BRep_Tool.hxx>
+#include <chrono>
+#include <Message_ProgressRange.hxx>
 #include <GC_MakeArcOfCircle.hxx>
 #include <GeomAPI_Interpolate.hxx>
 #include <GProp_GProps.hxx>
@@ -4515,7 +4518,7 @@ FF::Request mitreFillet(double r)
 
 std::size_t mitreCorners(const TopoDS_Shape& shape, double r1, double r2, double r)
 {
-    std::vector<gp_Pnt> corners;
+    std::vector<FF::MitreCorner> corners;
     FF::mitreCircleCorner(shape, lobeFeet(shape, r1, r2), mitreFillet(r), &corners);
     return corners.size();
 }
@@ -4588,4 +4591,79 @@ TEST_F(FilletFallbackTest, mitreScopeTakesOnlyWholeLoops)
     std::string reason;
     EXPECT_FALSE(FF::construct(shape, edges, request, out, &reason));
     EXPECT_NE(reason.find("closed loops"), std::string::npos) << reason;
+}
+
+TEST_F(FilletFallbackTest, mitreOffMeasuresEachCornersOwnMitre)
+{
+    // OCCT's fillet of a lobe at r 0.55, outside its bands: every corner's mitre found, on its
+    // rounds and ending on its vertices, and not asked (skeptic 941b, 3)
+    TopoDS_Shape shape = lobeOnPlate(4, 5, 15, 75);
+    const double r = 0.55;
+    std::vector<FF::MitreCorner> corners;
+    ASSERT_TRUE(FF::mitreCircleCorner(shape, lobeFeet(shape, 4, 5), mitreFillet(r), &corners));
+    ASSERT_EQ(corners.size(), 4u);
+    for (const auto& corner : corners) {
+        EXPECT_NEAR(corner.top.Z() - corner.at.Z(), r, 1e-12);
+    }
+    BRepFilletAPI_MakeFillet fillet(shape);
+    for (const auto& edge : lobeFeet(shape, 4, 5)) {
+        fillet.Add(r, TopoDS::Edge(edge));
+    }
+    fillet.Build();
+    ASSERT_TRUE(fillet.IsDone());
+    const FF::MitreOff off = FF::mitreOff(fillet.Shape(), shape, corners, r);
+    ASSERT_TRUE(off.found());
+    EXPECT_LT(off.rounds, 1e-5);
+    EXPECT_LT(off.ends, 1e-6);
+    EXPECT_FALSE(FF::mitreAsks(off, r));
+    // The base itself has no mitre at its corners: not found, so asked
+    EXPECT_FALSE(FF::mitreOff(shape, shape, corners, r).found());
+    EXPECT_TRUE(FF::mitreAsks(FF::mitreOff(shape, shape, corners, r), r));
+    // A corner whose top lies elsewhere has none of these mitres: the wall arc's contact edge (a
+    // cylinder of the arc's radius) and the next corner's mitre don't count for it
+    std::vector<FF::MitreCorner> moved = corners;
+    moved[0].top.SetZ(moved[0].top.Z() + r);
+    EXPECT_FALSE(FF::mitreOff(fillet.Shape(), shape, moved, r).found());
+}
+
+TEST_F(FilletFallbackTest, mitreAsksPastTheVisibleFloor)
+{
+    // ops#941 section 4: ends off their vertices by over 1e-5 r, or points off the rounds by over
+    // 1e-3 r, and never under the construction's own threshold; not found is asked
+    const double r = 5.0;
+    auto off = [](double rounds, double ends) {
+        FF::MitreOff value;
+        value.rounds = rounds;
+        value.ends = ends;
+        return value;
+    };
+    EXPECT_FALSE(FF::mitreAsks(off(9e-4 * r, 0.0), r));
+    EXPECT_TRUE(FF::mitreAsks(off(1.1e-3 * r, 0.0), r));
+    EXPECT_FALSE(FF::mitreAsks(off(0.0, 0.9e-5 * r), r));
+    EXPECT_TRUE(FF::mitreAsks(off(0.0, 2e-5 * r), r));
+    EXPECT_TRUE(FF::mitreAsks(FF::MitreOff(), r));
+    // At r 0.5 the threshold's 1e-5 is the floor of the ends
+    EXPECT_FALSE(FF::mitreAsks(off(0.0, 0.9e-5), 0.5));
+    EXPECT_TRUE(FF::mitreAsks(off(0.0, 1.1e-5), 0.5));
+}
+
+TEST_F(FilletFallbackTest, optionalRunStopsAtItsOwnLimit)
+{
+    // skeptic 941b, 1: runOptional()'s own limit stops the work and returns false; within it, true
+    using namespace std::chrono;
+    auto spin = [](double seconds) {
+        return [seconds](const Message_ProgressRange& range) {
+            const auto until = steady_clock::now() + duration<double>(seconds);
+            volatile double x = 0.0;
+            while (steady_clock::now() < until && !range.UserBreak()) {
+                for (int i = 0; i < 1000; ++i) {
+                    x = x + std::sqrt(static_cast<double>(i));
+                }
+            }
+        };
+    };
+    const auto start = steady_clock::now();
+    EXPECT_FALSE(Part::KernelBudget::runOptional("A spin", spin(20.0), 0.3));
+    EXPECT_LT(duration<double>(steady_clock::now() - start).count(), 10.0);
+    EXPECT_TRUE(Part::KernelBudget::runOptional("A spin", spin(0.05), 5.0));
 }

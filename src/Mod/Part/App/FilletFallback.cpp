@@ -2118,6 +2118,39 @@ double mitreLineReach(double R, double r, bool inner)
     return inner ? R - std::sqrt((R - r) * (R - r) - r * r) : std::sqrt((R + r) * (R + r) - r * r) - R;
 }
 
+/** The volume of a fillet's mitre piece (section 2): the plan integral of its height, in the frame
+ * of the corner (the arc's axis at the origin, the line's wall the plane y = 0, the piece at
+ * y > 0), by the midpoint rule over y and the radius rho (256 x 256 steps: within 1e-5 of it on the
+ * lobe model). The round's height at the distance e from its wall is f(e) = r - sqrt(r^2 - (r -
+ * e)^2). Outer arc: min(f(y), f(rho - R)) for sqrt(R^2 + y^2) <= rho <= R + r. Inner arc:
+ * min(f(y), f(R - rho)) for R - r <= rho <= R, and f(y) behind the arc's wall up to the line's end
+ * plane, R < rho < sqrt(R^2 + y^2)
+ */
+double mitrePieceVolume(double R, double r, bool inner)
+{
+    constexpr int steps = 256;
+    auto f = [r](double e) {
+        return e >= r ? 0.0 : r - std::sqrt(std::max(0.0, r * r - (r - e) * (r - e)));
+    };
+    double total = 0.0;
+    for (int i = 0; i < steps; ++i) {
+        const double y = (i + 0.5) * r / steps;
+        const double lo = inner ? R - r : std::sqrt(R * R + y * y);
+        const double hi = inner ? std::sqrt(R * R + y * y) : R + r;
+        const double step = (hi - lo) / steps;
+        double sum = 0.0;
+        for (int j = 0; j < steps; ++j) {
+            const double rho = lo + (j + 0.5) * step;
+            const double height = inner ? (rho <= R ? std::min(f(y), f(R - rho)) : f(y))
+                                        : std::min(f(y), f(rho - R));
+            // dx dy, with x = sqrt(rho^2 - y^2)
+            sum += height * rho / std::sqrt(rho * rho - y * y);
+        }
+        total += sum * step * r / steps;
+    }
+    return total;
+}
+
 /** A fillet's corner where a line's round and an arc's round meet in a mitre (ops#941,
  * notes/fillet-corner-mitre-941.md sections 2 and 3): concave edges, a line and a circle, on a
  * plane face both walls are square to, at a vertex convex in the material, the line normal to the
@@ -6743,7 +6776,8 @@ void noteFusedRun(
  * limit). The piece is the common part of the two tools run on past the vertex: each tool's end
  * face there swept on (an arc's revolved further about its axis, a line's extruded further).
  * Each sweep lies beyond its tool's end plane, so the piece is interior-disjoint from both tools.
- * Swept twice as far, the piece must not change: the miter ends inside the sweeps
+ * A chamfer's piece, swept twice as far, must not change: the miter ends inside the sweeps. A
+ * fillet's has the foot test (mitreFootAngle(), mitreLineReach()) and its plan integral instead
  */
 Tool miterTool(
     const Context& ctx,
@@ -6931,10 +6965,34 @@ Tool miterTool(
     tool.source = vertex;
     tool.miter = true;
     tool.volume = volumeOf(tool.solid);
-    if (fillet && tool.volume <= linearTolerance * reach * reach) {
-        behindFactor = 0.0;
-        tool.solid = pieceOf(reach);
-        tool.volume = volumeOf(tool.solid);
+    // A fillet's piece against its plan integral (section 2): a piece cut short would pass the
+    // fuse and the volume checks after it, since its volume is measured. OCCT's common part comes
+    // out empty, or short by up to 2e-3, at some radii and scales with the arc's sweep started
+    // a given way behind its end plane: other starts, the planes coinciding last
+    if (fillet) {
+        const double expected = mitrePieceVolume(arcRadius, r, innerArc);
+        // Adaptive: the mitre's edge is a B-spline, where the fixed rule is not exact
+        auto matches = [&]() {
+            return tool.volume > linearTolerance * reach * reach
+                && std::abs(MassProperties::volume(tool.solid, true) - expected) <= 1e-4 * expected;
+        };
+        for (double factor : {0.1, 0.02, 0.0}) {
+            if (matches()) {
+                break;
+            }
+            behindFactor = factor;
+            tool.solid = pieceOf(reach);
+            tool.volume = volumeOf(tool.solid);
+        }
+        if (tool.volume <= linearTolerance * reach * reach) {
+            refuse("no miter at a concave corner with a circle");
+        }
+        if (!matches()) {
+            std::ostringstream text;
+            text << "the mitre's piece at a concave corner with a circle is not the rounds' common part ("
+                 << MassProperties::volume(tool.solid, true) << " against " << expected << ")";
+            refuse(text.str());
+        }
     }
     if (tool.volume <= linearTolerance * reach * reach) {
         refuse("no miter at a concave corner with a circle");
@@ -9518,8 +9576,10 @@ TopoDS_Shape constructShape(
             TopoDS_Vertex vertices[2];
             TopExp::Vertices(edgeData.edge, vertices[0], vertices[1]);
             for (const auto& vertex : vertices) {
-                if (classify(ctx, data, edgeData, vertex).kind != VertexClass::Corner2Union) {
-                    refuse(mitreLoopRefusal);
+                const VertexEnd end = classify(ctx, data, edgeData, vertex);
+                if (end.kind != VertexClass::Corner2Union) {
+                    // A mitre corner whose foot lies past a sweep says so (skeptic 941b, 10)
+                    refuse(end.reason == mitreFootRefusal ? mitreFootRefusal : mitreLoopRefusal);
                 }
             }
         }
@@ -12095,7 +12155,7 @@ bool mitreCircleCorner(
     const TopoDS_Shape& baseShape,
     const std::vector<TopoDS_Shape>& edges,
     const Request& request,
-    std::vector<gp_Pnt>* corners
+    std::vector<MitreCorner>* corners
 )
 {
     if (request.kind != Kind::Fillet || request.size1 <= 0
@@ -12145,7 +12205,11 @@ bool mitreCircleCorner(
                 if (mitreCornerRefusal(ctx, a, b, vertex, shared).empty()) {
                     found = true;
                     if (corners) {
-                        corners->push_back(BRep_Tool::Pnt(vertex));
+                        // Both walls are square to the shared face: the top is r over the vertex
+                        const gp_Pnt at = BRep_Tool::Pnt(vertex);
+                        corners->push_back(
+                            {at, at.Translated(gp_Vec(outwardNormal(shared, at)) * request.size1)}
+                        );
                     }
                 }
             }
@@ -12163,16 +12227,27 @@ bool mitreCircleCorner(
 double mitreThreshold(double radius)
 {
     // Five times the construction's own worst, 7.5e-7 r, over the lobe model at 1x, 10x, 100x and
-    // spans 20, 60, 120 deg; never under 1e-5 (ops#941 section 4, as measured: OCCT's error is a
-    // continuum there, 2e-5 R even at its best at 10x and 100x, so the threshold follows what the
-    // construction delivers, not a population of good OCCT mitres)
+    // spans 20, 60, 120 deg; never under 1e-5 (ops#941 section 4, as measured)
     return std::max(1e-5, 4e-6 * radius);
 }
 
-double mitreOff(
+bool mitreAsks(const MitreOff& occt, double radius)
+{
+    // The visible floor (ops#941 section 4; coordinator c784): OCCT's error is a continuum set by
+    // the scale and the span, and only a band's mitre, cut short or misplaced, has its ends off its
+    // vertices. Asking past mitreThreshold() alone took about 3 in 4 such fillets at 10x and up
+    if (!occt.found()) {
+        return true;
+    }
+    const double threshold = mitreThreshold(radius);
+    return occt.ends > std::max(threshold, 1e-5 * radius)
+        || occt.rounds > std::max(threshold, 1e-3 * radius);
+}
+
+MitreOff mitreOff(
     const TopoDS_Shape& result,
     const TopoDS_Shape& base,
-    const std::vector<gp_Pnt>& corners,
+    const std::vector<MitreCorner>& corners,
     double radius
 )
 {
@@ -12180,6 +12255,18 @@ double mitreOff(
     TopExp::MapShapes(base, TopAbs_EDGE, baseEdges);
     TopTools_IndexedDataMapOfShapeListOfShape edgeFaces;
     TopExp::MapShapesAndUniqueAncestors(result, TopAbs_EDGE, TopAbs_FACE, edgeFaces);
+    // A round of the fillet's radius: a cylinder of radius r, a torus of minor radius r (not the
+    // arc's wall, a cylinder of the arc's radius)
+    const double same = 1e-6 * std::max(1.0, radius);
+    auto round = [&](const BRepAdaptor_Surface& surface) {
+        if (surface.GetType() == GeomAbs_Cylinder) {
+            return std::abs(surface.Cylinder().Radius() - radius) <= same;
+        }
+        if (surface.GetType() == GeomAbs_Torus) {
+            return std::abs(surface.Torus().MinorRadius() - radius) <= same;
+        }
+        return false;
+    };
     // The distance of a point from a face's cylinder or torus, in closed form
     auto offSurface = [](const BRepAdaptor_Surface& surface, const gp_Pnt& p) {
         if (surface.GetType() == GeomAbs_Cylinder) {
@@ -12193,7 +12280,9 @@ double mitreOff(
         const double rho = gp_Lin(axis).Distance(p);
         return std::abs(std::hypot(rho - t.MajorRadius(), h) - t.MinorRadius());
     };
-    double worst = 0.0;
+    MitreOff off;
+    off.rounds = 0.0;
+    off.ends = 0.0;
     for (const auto& corner : corners) {
         bool seen = false;
         for (int i = 1; i <= edgeFaces.Extent(); ++i) {
@@ -12205,15 +12294,16 @@ double mitreOff(
             BRepAdaptor_Surface s1(TopoDS::Face(edgeFaces(i).Last()), Standard_False);
             const bool pair = (s0.GetType() == GeomAbs_Cylinder && s1.GetType() == GeomAbs_Torus)
                 || (s0.GetType() == GeomAbs_Torus && s1.GetType() == GeomAbs_Cylinder);
-            if (!pair) {
+            if (!pair || !round(s0) || !round(s1)) {
                 continue;
             }
             TopoDS_Vertex v0;
             TopoDS_Vertex v1;
             TopExp::Vertices(edge, v0, v1);
+            // This corner's mitre: it starts at the corner's top, on its third edge
             if (v0.IsNull() || v1.IsNull()
-                || std::min(BRep_Tool::Pnt(v0).Distance(corner), BRep_Tool::Pnt(v1).Distance(corner))
-                    > 2 * radius) {
+                || std::min(BRep_Tool::Pnt(v0).Distance(corner.top), BRep_Tool::Pnt(v1).Distance(corner.top))
+                    > 0.1 * radius) {
                 continue;
             }
             seen = true;
@@ -12222,21 +12312,21 @@ double mitreOff(
             const double l = curve.LastParameter();
             for (int k = 0; k < 8; ++k) {
                 const gp_Pnt p = curve.Value(f + (l - f) * (k + 0.5) / 8.0);
-                worst = std::max({worst, offSurface(s0, p), offSurface(s1, p)});
+                off.rounds = std::max({off.rounds, offSurface(s0, p), offSurface(s1, p)});
             }
             for (double u : {f, l}) {
                 const gp_Pnt p = curve.Value(u);
-                worst = std::max(
-                    worst,
+                off.ends = std::max(
+                    off.ends,
                     std::min(p.Distance(BRep_Tool::Pnt(v0)), p.Distance(BRep_Tool::Pnt(v1)))
                 );
             }
         }
         if (!seen) {
-            return -1.0;
+            return {};
         }
     }
-    return worst;
+    return off;
 }
 
 TopTools_DataMapOfShapeReal faceTolerances(const TopoDS_Shape& shape)

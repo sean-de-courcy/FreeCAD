@@ -8613,6 +8613,9 @@ struct DressUpOutcome
     /// (FilletFallback::reflexCircleCorner()), where its rounds don't meet in Onshape's mitre:
     /// the exact construction, or an error
     bool reflexFirst {false};
+    /// The mitre corners' scope was asked on OCCT's invalid result (ops#941), and refused or
+    /// built a mitre that was off: the reverse order's result is not asked again
+    bool mitreAsked {false};
     FilletFallback::Construction construction;
     std::string reason;
 };
@@ -8693,11 +8696,12 @@ std::shared_ptr<DressUpOutcome> buildDressUp(
                 // an arc's corner (one of its narrow bands of radius): the mitre corners' scope
                 // first (it refuses before any Boolean unless the selection is closed loops of
                 // them), then the construction as below
-                std::vector<gp_Pnt> mitres;
+                std::vector<FilletFallback::MitreCorner> mitres;
                 if (out.invalid && !out.cusp && !out.turns && !out.ring
                     && FilletFallback::mitreCircleCorner(base, edges, request, &mitres)) {
                     FilletFallback::Request mitreRequest = request;
                     mitreRequest.mitreOnly = true;
+                    out.mitreAsked = true;
                     out.constructed = FilletFallback::construct(
                         base,
                         edges,
@@ -8706,7 +8710,19 @@ std::shared_ptr<DressUpOutcome> buildDressUp(
                         &out.reason
                     );
                     if (out.constructed) {
-                        return;
+                        // Its own mitre measured, as where OCCT's valid result is replaced
+                        const auto own = FilletFallback::mitreOff(
+                            out.construction.shape,
+                            base,
+                            mitres,
+                            request.size1
+                        );
+                        if (own.found() && own.worst() <= FilletFallback::mitreThreshold(request.size1)) {
+                            return;
+                        }
+                        out.constructed = false;
+                        out.construction = FilletFallback::Construction();
+                        out.reason = "the construction's own mitre is off its rounds";
                     }
                     FC_LOG("fillet mitre: OCCT's result is invalid, the mitre corners refused: "
                            << out.reason);
@@ -9754,8 +9770,9 @@ TopoShape& TopoShape::makeElementFillet(
     // would fail: a line's and an arc's rounds meeting in a mitre at a corner, in OCCT's narrow
     // bands of radius (ops#925), build in the reverse order
     const bool failsAsIs = outcome->failed || (outcome->invalid && !outcome->constructed);
-    // The reverse order's result was taken: the mitre corners' scope, where it applies, has just
-    // refused on the first order's invalid result, and is not asked again (ops#941)
+    // The reverse order's result was taken where the mitre corners' scope has just refused on the
+    // first order's invalid result: it is not asked again (ops#941). Where OCCT's first order
+    // failed outright, it was not asked, and is asked on the second's valid result
     bool retried = false;
     if (failsAsIs && (!outcome->constructed || outcome->construction.newRule)
         && inputEdges.size() > 1) {
@@ -9799,8 +9816,8 @@ TopoShape& TopoShape::makeElementFillet(
             mkFillet = again;
             input = againInput;
             inputEdges = againEdges;
+            retried = outcome->mitreAsked;
             outcome = second;
-            retried = true;
         }
     }
     if (outcome->preferred) {
@@ -9853,62 +9870,99 @@ TopoShape& TopoShape::makeElementFillet(
         }
     }
     // FreeCAD-CH (ops#941): where a line's and an arc's concave rounds meet in a mitre, OCCT's
-    // valid mitre can be off its rounds in narrow bands of radius. Measured on OCCT's result; where
-    // it is off, the mitre corners' scope is asked, under an optional budget (a fillet that builds
-    // today never fails on time for it), and its result stands only where its own mitre is nearer.
-    // Anything else (it refused, the budget, naming it failed) leaves OCCT's result, with no error
+    // valid mitre can be off its rounds in narrow bands of radius. Measured on OCCT's result; past
+    // the visible floor (mitreAsks()), the mitre corners' scope is asked on exact copies, under its
+    // own time limit within the feature's (a fillet that builds today never fails on time for it),
+    // and its result stands only where its own mitre is nearer. Anything else (it refused, its time,
+    // naming it failed) leaves OCCT's result: with a warning where its time ran out
     if (!outcome->failed && !outcome->thin && !outcome->invalid && !outcome->constructed
         && !retried && radius1 == radius2) {
-        std::vector<gp_Pnt> mitres;
-        if (FilletFallback::mitreCircleCorner(input.getShape(), edgeShapes, request, &mitres)
-            && mitres.size() <= FilletFallback::mitreCap) {
+        std::vector<FilletFallback::MitreCorner> mitres;
+        FilletFallback::MitreOff occtOff;
+        bool asks = false;
+        try {
+            asks = FilletFallback::mitreCircleCorner(input.getShape(), edgeShapes, request, &mitres)
+                && mitres.size() <= FilletFallback::mitreCap;
+            if (asks) {
+                // Closed forms on at most one edge per corner: on this thread
+                occtOff = FilletFallback::mitreOff(mkFillet->Shape(), input.getShape(), mitres, radius1);
+                asks = FilletFallback::mitreAsks(occtOff, radius1);
+            }
+        }
+        catch (const Standard_Failure& e) {
+            FC_LOG("fillet mitre: not measured: " << e.GetMessageString());
+            asks = false;
+        }
+        if (asks) {
+            // An exact copy of the base: a worker stopped at its time runs on abandoned, and OCCT's
+            // result, which shares the base's faces, is then the feature's and is meshed for the
+            // redraw (skeptic 941b, 2)
+            const TopoDS_Shape baseCopy = KernelBudget::exactCopy(input.getShape());
+            TopTools_IndexedMapOfShape inputEdgeMap;
+            TopTools_IndexedMapOfShape copyEdgeMap;
+            TopExp::MapShapes(input.getShape(), TopAbs_EDGE, inputEdgeMap);
+            TopExp::MapShapes(baseCopy, TopAbs_EDGE, copyEdgeMap);
+            std::vector<TopoDS_Shape> edgeCopies;
+            for (const auto& edge : edgeShapes) {
+                const int index = inputEdgeMap.FindIndex(edge);
+                if (index > 0 && index <= copyEdgeMap.Extent()) {
+                    edgeCopies.push_back(copyEdgeMap(index));
+                }
+            }
             struct Ask
             {
                 DressUpOutcome outcome;
-                double occtOff {-1.0};
-                double ownOff {-1.0};
+                FilletFallback::MitreOff own;
             };
             auto ask = std::make_shared<Ask>();
             FilletFallback::Request mitreRequest = request;
             mitreRequest.mitreOnly = true;
-            const bool ran = KernelBudget::runOptional(
-                "The fillet's mitre",
-                [ask,
-                 occt = mkFillet->Shape(),
-                 base = input.getShape(),
-                 edgeShapes,
-                 mitreRequest,
-                 mitres,
-                 radius1](const Message_ProgressRange& /*range*/) {
-                    ask->occtOff = FilletFallback::mitreOff(occt, base, mitres, radius1);
-                    if (ask->occtOff >= 0 && ask->occtOff <= FilletFallback::mitreThreshold(radius1)) {
-                        return;
-                    }
-                    ask->outcome.constructed = FilletFallback::construct(
-                        base,
-                        edgeShapes,
-                        mitreRequest,
-                        ask->outcome.construction,
-                        &ask->outcome.reason
-                    );
-                    if (ask->outcome.constructed) {
-                        ask->ownOff = FilletFallback::mitreOff(
-                            ask->outcome.construction.shape,
-                            base,
-                            mitres,
-                            radius1
+            const double seconds = KernelBudget::optionalLimit();
+            const bool ran = edgeCopies.size() == edgeShapes.size()
+                && KernelBudget::runOptional(
+                    "The fillet's exact mitre",
+                    [ask, baseCopy, edgeCopies, mitreRequest, mitres, radius1](
+                        const Message_ProgressRange& /*range*/
+                    ) {
+                        ask->outcome.constructed = FilletFallback::construct(
+                            baseCopy,
+                            edgeCopies,
+                            mitreRequest,
+                            ask->outcome.construction,
+                            &ask->outcome.reason
                         );
-                    }
+                        if (ask->outcome.constructed) {
+                            ask->own = FilletFallback::mitreOff(
+                                ask->outcome.construction.shape,
+                                baseCopy,
+                                mitres,
+                                radius1
+                            );
+                        }
+                    },
+                    seconds
+                );
+            FC_LOG("fillet mitre: " << mitres.size() << " corners, OCCT's off " << occtOff.rounds
+                                    << " / ends " << occtOff.ends << ", ran " << ran << ", built "
+                                    << ask->outcome.constructed << ", its off " << ask->own.worst()
+                                    << " " << ask->outcome.reason);
+            if (!ran) {
+                // Never silent: OCCT's mitre stands where the construction would have replaced it
+                FC_WARN("The fillet's exact mitre was not built within its time ("
+                        << seconds << " s of CPU, Part preference GeometryOptionalLimit, or what is left "
+                        << "of the feature's): OCCT's mitre stands, off its rounds by up to "
+                        << occtOff.worst() << " mm");
+            }
+            else if (ask->outcome.constructed && ask->own.found()
+                     && ask->own.worst() <= FilletFallback::mitreThreshold(radius1)
+                     && (!occtOff.found() || ask->own.worst() < occtOff.worst())) {
+                // Named against the copy of the base, which carries the input's element map: the
+                // copy's subshapes are the input's in the same order
+                TopoShape inputCopy(input);
+                inputCopy.setShape(baseCopy, false);
+                if (finishConstruction(*this, ask->outcome, inputCopy, op)) {
+                    return *this;
                 }
-            );
-            FC_LOG("fillet mitre: " << mitres.size() << " corners, ran " << ran << ", OCCT's off "
-                                    << ask->occtOff << ", built " << ask->outcome.constructed
-                                    << ", its off " << ask->ownOff << " " << ask->outcome.reason);
-            if (ran && ask->outcome.constructed && ask->ownOff >= 0
-                && ask->ownOff <= FilletFallback::mitreThreshold(radius1)
-                && (ask->occtOff < 0 || ask->ownOff < ask->occtOff)
-                && finishConstruction(*this, ask->outcome, input, op)) {
-                return *this;
             }
         }
     }

@@ -468,6 +468,8 @@ thread_local std::string scopeFired;
 // runOptional(): a stop by the limit is the caller's to report, and was it one
 thread_local bool limitStopIsOptional = false;
 thread_local bool limitStopped = false;
+// runOptional()'s own limit, in CPU seconds of its worker (0: none but the feature's)
+thread_local double optionalSeconds = 0.0;
 
 // Large: OCCT recurses deeply, and a secondary thread gets 512 KB on macOS by default
 constexpr unsigned workerStackSize = 64U * 1024U * 1024U;
@@ -1237,6 +1239,17 @@ double limit()
     return value;
 }
 
+double optionalLimit()
+{
+    const double value = App::GetApplication()
+                             .GetParameterGroupByPath("User parameter:BaseApp/Preferences/Mod/Part/General")
+                             ->GetFloat("GeometryOptionalLimit", 30.0);
+    if (!std::isfinite(value) || value <= 0.0) {
+        return 30.0;
+    }
+    return std::min(value, 1e6);
+}
+
 double memoryLimit()
 {
     const double value = App::GetApplication()
@@ -1487,6 +1500,19 @@ void run(const char* what, const std::function<void(const Message_ProgressRange&
             + " already: the feature is not built"
         ));
     }
+    // runOptional()'s own limit (ops#941): not started where the feature's limit leaves less, so
+    // that its own limit, and never the feature's, is the one that stops it
+    const double ownLimit = limitStopIsOptional ? optionalSeconds : 0.0;
+    const auto ownWall = std::chrono::duration_cast<Clock::duration>(
+        std::chrono::duration<double>(wallBackstop * ownLimit)
+    );
+    if (ownLimit > 0.0 && limited
+        && (scopeSpent() + ownLimit >= scopeLimit || started + ownWall >= scopeDeadline)) {
+        throw limitStop(Base::CADKernelError(
+            name + " was not started: the feature's geometry has less than " + seconds(ownLimit)
+            + " s of its limit left"
+        ));
+    }
 
     auto call = std::make_shared<Call>();
     call->work = work;
@@ -1531,7 +1557,11 @@ void run(const char* what, const std::function<void(const Message_ProgressRange&
         try {
             waitProcessing(call, launcher, name, step, [&]() {
                 cancelled = Base::Sequencer().wasCanceled();
-                timeout = !cancelled && limited && scopeOverLimit(call->cpuSeconds());
+                timeout = !cancelled
+                    && ((limited && scopeOverLimit(call->cpuSeconds()))
+                        || (ownLimit > 0.0
+                            && (call->cpuSeconds() >= ownLimit
+                                || Clock::now() - started >= ownWall)));
                 overMemory = cancelled || timeout ? 0.0 : grownPast(memoryStart, memoryCeiling);
                 return cancelled || timeout || overMemory > 0.0;
             });
@@ -1593,17 +1623,24 @@ void run(const char* what, const std::function<void(const Message_ProgressRange&
     }
 }
 
-bool runOptional(const char* what, const std::function<void(const Message_ProgressRange&)>& work)
+bool runOptional(
+    const char* what,
+    const std::function<void(const Message_ProgressRange&)>& work,
+    double seconds
+)
 {
     struct Restore
     {
         bool optional = limitStopIsOptional;
+        double own = optionalSeconds;
         ~Restore()
         {
             limitStopIsOptional = optional;
+            optionalSeconds = own;
         }
     } restore;
     limitStopIsOptional = true;
+    optionalSeconds = seconds > 0.0 ? seconds : 0.0;
     limitStopped = false;
     try {
         run(what, work, Inputs::Owned);

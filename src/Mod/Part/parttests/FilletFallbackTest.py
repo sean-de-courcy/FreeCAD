@@ -7222,6 +7222,78 @@ class MitreCornerTest(unittest.TestCase):
                 self.assertTrue(fillet.Shape.isValid())
 
 
+def off_surface(surface, point):
+    """The distance of the point from a cylinder or a torus, in closed form (a trimmed face's
+    distance would reach its boundary, the mitre edge itself)"""
+    axis = surface.Axis
+    rel = point - surface.Center
+    h = rel.dot(axis)
+    rho = (rel - axis * h).Length
+    if type(surface).__name__ == "Cylinder":
+        return abs(rho - surface.Radius)
+    return abs(math.hypot(rho - surface.MajorRadius, h) - surface.MinorRadius)
+
+
+class MitreAskTimeTest(unittest.TestCase):
+    """ops#941 (skeptic 941b, 1): where OCCT's valid mitre is off, the construction is asked under
+    its own time limit (GeometryOptionalLimit, CPU seconds), inside the feature's; past it, or where
+    the feature's limit leaves less, OCCT's result stands with a warning, and the feature builds.
+    r 0.42 on the exact base: OCCT's result is valid, its mitre off its rounds by about 7e-4."""
+
+    RADIUS = 0.42
+    PARAMS = "User parameter:BaseApp/Preferences/Mod/Part/General"
+
+    def setUp(self):
+        self.doc = FreeCAD.newDocument("MitreAskTimeTest")
+        self.params = FreeCAD.ParamGet(self.PARAMS)
+        self.had = {
+            name: self.params.GetFloat(name, -12345.0)
+            for name in ("GeometryOptionalLimit", "GeometryTimeLimit")
+        }
+        self.running = Part.kernelBudget()["abandonedRunning"]
+
+    def tearDown(self):
+        FreeCAD.closeDocument(self.doc.Name)
+        for name, value in self.had.items():
+            if value == -12345.0:
+                self.params.RemFloat(name)
+            else:
+                self.params.SetFloat(name, value)
+        # A construction stopped at its limit runs on, abandoned, on its own copies
+        deadline = time.time() + 400
+        while Part.kernelBudget()["abandonedRunning"] > self.running and time.time() < deadline:
+            time.sleep(0.1)
+
+    def mitreOff(self):
+        fillet = filleted_in_a_body(self.doc, lobed_plate(False), lobe_feet, self.RADIUS)
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+        shape = fillet.Shape
+        self.assertTrue(shape.isValid())
+        off = 0.0
+        for e in shape.Edges:
+            if type(e.Curve).__name__ in ("Line", "Circle"):
+                continue
+            faces = shape.ancestorsOfType(e, Part.Face)
+            step = (e.LastParameter - e.FirstParameter) / 8
+            for k in range(9):
+                point = e.valueAt(e.FirstParameter + k * step)
+                off = max(off, max(off_surface(f.Surface, point) for f in faces))
+        return off
+
+    def testTheConstructionWithinItsLimit(self):
+        self.assertLess(self.mitreOff(), 1e-5)
+
+    def testItsOwnLimitKeepsOcctsResult(self):
+        # 0.05 s of CPU: the construction (about 2 s) is stopped
+        self.params.SetFloat("GeometryOptionalLimit", 0.05)
+        self.assertGreater(self.mitreOff(), 1e-4)
+
+    def testTheFeaturesLimitLeftKeepsOcctsResult(self):
+        # A feature's limit of 20 s leaves less than the ask's 30: it is not started
+        self.params.SetFloat("GeometryTimeLimit", 20.0)
+        self.assertGreater(self.mitreOff(), 1e-4)
+
+
 # How far the construction's mitre edges may lie off their rounds (ops#941): the Boolean's
 # intersection curve of the cylinder and the torus is an approximation (measured: work notes)
 MITRE_ON_ROUNDS = 1e-4
