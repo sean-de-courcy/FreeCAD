@@ -7391,3 +7391,111 @@ MITRE_ON_ROUNDS = 1e-4
 # The visible floor on OCCT's mitre, per unit of radius (mitreAsks(), ops#941 section 4): below it
 # OCCT's result stands
 MITRE_VISIBLE_FLOOR = 1e-3
+
+
+class ChamferRunThroughTest(unittest.TestCase):
+    """ops#936: a chamfer of a straight edge between two planes whose both ends lie on cylinders,
+    wide enough that its strip covers its end face whole (Test_Tube_Feeder #4, Test Tube Feeder
+    #45). Onshape's result is the body less the plain wedge run on along the edge's line through
+    the whole part: no face and no edge more; on a half tube the wedge crosses the bore and cuts
+    the far leg too. Designed: a half cylinder (R 10, length 30) whose half disc's diameter is
+    chamfered by R, and a half tube (r 6, R 10) whose end edge across one leg is chamfered by R.
+    Removed (the wedge y >= 0, z >= 0, y + z <= R over the half disc or ring in z = 0):
+    pi R^3 / 2 - 2 R^3 / 3 and pi R (R^2 - r^2) / 2 - 2 (R^3 - r^3) / 3"""
+
+    R, r, L = 10.0, 6.0, 30.0
+
+    def half(self, shape):
+        """The half y >= 0, the flat one face (a 180 degree cylinder has two, split at its axis)"""
+        box = Part.makeBox(2 * self.R + 2, self.R + 1, self.L, V(-self.R - 1, 0, 0))
+        return shape.common(box).removeSplitter()
+
+    def half_cylinder(self):
+        return self.half(Part.makeCylinder(self.R, self.L))
+
+    def half_tube(self):
+        tube = Part.makeCylinder(self.R, self.L).cut(Part.makeCylinder(self.r, self.L + 2, V(0, 0, -1)))
+        return self.half(tube)
+
+    def end_edges(self, body):
+        return [
+            e
+            for e in body.Edges
+            if e.Curve.TypeId == "Part::GeomLine"
+            and e.BoundBox.ZMax < 1e-9
+            and e.BoundBox.YMax < 1e-9
+        ]
+
+    def wedge(self, width):
+        """The plain wedge along the x axis, run on past the part"""
+        section = Part.Face(
+            Part.makePolygon([V(-50, 0, 0), V(-50, width, 0), V(-50, 0, width), V(-50, 0, 0)])
+        )
+        return section.extrude(V(100, 0, 0))
+
+    def check(self, body, edge, removed):
+        result = body.makeChamfer(self.R, [edge])
+        self.assertTrue(result.isValid())
+        self.assertEqual(len(result.Solids), 1)
+        self.assertAlmostEqual(body.Volume - result.Volume, removed, delta=1e-6 * body.Volume)
+        expected = body.cut(self.wedge(self.R))
+        self.assertLess(result.cut(expected).Volume + expected.cut(result).Volume, 1e-6)
+        # Onshape: no face and no edge more
+        self.assertEqual(len(result.Faces), len(body.Faces))
+        self.assertEqual(len(result.Edges), len(body.Edges))
+        return result
+
+    def testHalfCylinderFlatEdge(self):
+        body = self.half_cylinder()
+        edges = self.end_edges(body)
+        self.assertEqual(len(edges), 1)
+        R = self.R
+        self.check(body, edges[0], math.pi * R**3 / 2 - 2 * R**3 / 3)
+
+    def testHalfTubeWedgeCrossesTheBore(self):
+        body = self.half_tube()
+        edges = [e for e in self.end_edges(body) if e.BoundBox.XMin > 0]
+        self.assertEqual(len(edges), 1)
+        R, r = self.R, self.r
+        result = self.check(body, edges[0], math.pi * R * (R * R - r * r) / 2 - 2 * (R**3 - r**3) / 3)
+        # The far leg is cut too
+        far = Part.makeBox(R, R, self.L, V(-R, 0, 0))
+        self.assertGreater(body.common(far).Volume - result.common(far).Volume, 1.0)
+
+    def testHalfTubeNarrowStripKeepsTheFarLeg(self):
+        # Width 5 < r: the strip on the half ring is in two pieces; not measured in Onshape. OCCT
+        # builds it or the dress-up refuses; the far leg is never cut
+        body = self.half_tube()
+        edge = [e for e in self.end_edges(body) if e.BoundBox.XMin > 0][0]
+        try:
+            result = body.makeChamfer(5.0, [edge])
+        except Exception:
+            return
+        far = Part.makeBox(self.R, self.R, self.L, V(-self.R, 0, 0))
+        self.assertAlmostEqual(result.common(far).Volume, body.common(far).Volume, delta=1e-6)
+
+    def testEdgeBetweenTwoHolesKeepsTheRest(self):
+        # The top front edge of a 40 x 20 x 10 block crossed by two vertical holes of radius 2 at
+        # x 10 and 30; its piece between them chamfered 3: the wedge run on would chamfer the
+        # edge's collinear pieces to the block's ends too, which Onshape is not known to do
+        # (skeptic of the design, finding 2). Refused, or OCCT's own; the outer pieces stay sharp
+        block = Part.makeBox(40, 20, 10)
+        for x in (10, 30):
+            block = block.cut(Part.makeCylinder(2, 12, V(x, 0, -1)))
+        block = block.removeSplitter()
+        edges = [
+            e
+            for e in block.Edges
+            if e.Curve.TypeId == "Part::GeomLine"
+            and e.BoundBox.YMax < 1e-9
+            and e.BoundBox.ZMin > 10 - 1e-9
+            and 11 < e.BoundBox.XMin < 13
+        ]
+        self.assertEqual(len(edges), 1)
+        try:
+            result = block.makeChamfer(3.0, edges)
+        except Exception:
+            return
+        ends = Part.makeBox(7, 20, 10).fuse(Part.makeBox(7, 20, 10, V(33, 0, 0)))
+        self.assertAlmostEqual(result.common(ends).Volume, block.common(ends).Volume, delta=1e-6)
+
