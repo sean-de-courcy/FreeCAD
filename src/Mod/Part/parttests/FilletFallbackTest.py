@@ -7676,12 +7676,12 @@ class MixedCoverageTest(unittest.TestCase):
 
     R, H, a, b, cy = 2.0, 10.0, 10.0, 6.0, 2.0
 
-    def base(self):
+    def base(self, lx=30.0):
         top = 2 * self.R
         x0 = self.a * math.sqrt(1 - ((top - self.cy) / self.b) ** 2)
         t0 = math.atan2((top - self.cy) / self.b, x0 / self.a)
         arc = Part.ArcOfEllipse(Part.Ellipse(V(0, self.cy, 0), self.a, self.b), t0, math.pi - t0)
-        points = [V(-x0, top, 0), V(-x0, 0, 0), V(30, 0, 0), V(30, top, 0), V(x0, top, 0)]
+        points = [V(-x0, top, 0), V(-x0, 0, 0), V(lx, 0, 0), V(lx, top, 0), V(x0, top, 0)]
         lines = [Part.makeLine(points[i], points[i + 1]) for i in range(4)]
         face = Part.Face(Part.Wire(Part.__sortEdges__(lines + [arc.toShape()])))
         return face.extrude(V(0, 0, self.H)), x0
@@ -7708,6 +7708,18 @@ class MixedCoverageTest(unittest.TestCase):
             self.assertEqual(len(result.Solids), 1)
             self.assertAlmostEqual(result.Volume - body.Volume, pair.Volume - body.Volume + corner, delta=1e-6)
             self.assertLess(result.cut(stepwise).Volume + stepwise.cut(result).Volume, 1e-6)
+
+    def testOverlappingBandsStayRefused(self):
+        # The plane y = 4 shortened until the pair's band (2 from x = lx) and the ellipse edge's
+        # (its setback 1.022142 from x0) overlap by 1e-3: the pair then the edge builds, the edge
+        # then the pair fails, so the order shows (review r1, T1). The selection fails as before
+        body0, x0 = self.base()
+        lx = x0 + 2 + 1.022142 - 1e-3
+        body, _ = self.base(lx)
+        top = 2 * self.R
+        edges = [self.edge_at(body, lx, 0), self.edge_at(body, lx, top), self.edge_at(body, x0, top)]
+        with self.assertRaises(Exception):
+            body.makeFillet(self.R, edges)
 
     def testGroupsMeetingAtAVertexStayRefused(self):
         # The top edge along y = 4 (between two planes: covered) meets the ellipse's edge at

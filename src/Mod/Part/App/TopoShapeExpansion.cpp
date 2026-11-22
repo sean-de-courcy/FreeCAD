@@ -9646,6 +9646,10 @@ void makeFilletRollingBall(
 
 namespace
 {
+/// Set while the rim split rounds its rest on its stage: the split by coverage doesn't run there,
+/// so that a rest which failed there still falls through to the whole selection (review r1, T3)
+thread_local bool inRimSplitRest = false;
+
 /** ops#952 (NS88 Labyrinth Fillet 3): a fillet whose selection mixes edges OCCT fails on, which
  * the exact construction builds, with edges the construction doesn't cover (a line on an extruded
  * ellipse), which OCCT builds alone. Built as one unit it fails both ways; the two groups one
@@ -9683,7 +9687,7 @@ bool roundCoveredFirst(
     for (size_t i = 0; i < edges.size(); ++i) {
         (covered[i] ? first : rest).push_back(edges[i]);
     }
-    if (first.empty() || rest.empty()) {
+    if (inRimSplitRest || first.empty() || rest.empty()) {
         return false;
     }
     TopTools_IndexedMapOfShape firstVertices;
@@ -9761,13 +9765,39 @@ bool roundCoveredFirst(
         if (!FilletFallback::takeInvalidResult().empty()) {
             return false;
         }
+        // The feature's lost-material check skips a result the construction rolled on over a
+        // tangent edge (Recorder::rolledOn()): the rest's OCCT round is checked here (review r1,
+        // T2)
+        if (const std::string lost = Part::lostMaterial(built, stage, later, radius); !lost.empty()) {
+            FC_LOG("fillet by coverage: the rest " << lost);
+            return false;
+        }
+        // The other order builds too, to the same volume: two groups whose bands meet build in
+        // one order only, or differ (review r1, T1)
+        std::vector<TopoShape> firstLater;
+        for (const auto& edge : first) {
+            const int index = copyOn(alone, TopoDS::Edge(edge.getShape()));
+            if (index <= 0) {
+                FC_LOG("fillet by coverage: an edge of the first group is not on the rest's result");
+                return false;
+            }
+            firstLater.push_back(alone.getSubTopoShape(TopAbs_EDGE, index));
+        }
+        TopoShape reverse(result.Tag, result.Hasher, result.getHistoryAlgorithm());
+        reverse.makeElementFillet(alone, firstLater, radius, radius, op);
+        if (!FilletFallback::takeInvalidResult().empty()) {
+            return false;
+        }
         const double base = volume(shape);
         const double onBase = volume(alone) - base;
         const double onStage = volume(built) - volume(stage);
+        const double change = std::abs(volume(built) - base);
         const double allowance = std::max(1e-6 * std::abs(onBase), 1e-9 * std::abs(base));
-        if (!(std::abs(onStage - onBase) <= allowance)) {
+        if (!(std::abs(onStage - onBase) <= allowance)
+            || !(std::abs(volume(reverse) - volume(built)) <= std::max(allowance, 1e-7 * change))) {
             FC_LOG("fillet by coverage: the rest changes " << onStage << " on the first group's "
-                   "result, " << onBase << " on the base");
+                   "result, " << onBase << " on the base; the other order "
+                   << volume(reverse) - base << " against " << volume(built) - base);
             return false;
         }
         FC_LOG("fillet by coverage: " << first.size() << " edges, then " << rest.size());
@@ -9993,6 +10023,18 @@ TopoShape& TopoShape::makeElementFillet(
             }
             if (named && rest.size() == split->rest.size()) {
                 try {
+                    struct InRest
+                    {
+                        bool outer = inRimSplitRest;
+                        InRest()
+                        {
+                            inRimSplitRest = true;
+                        }
+                        ~InRest()
+                        {
+                            inRimSplitRest = outer;
+                        }
+                    } inRest;
                     makeElementFillet(stage, rest, radius1, radius2, op);
                     // (OCCT's invalid result for the rest, which its construction refused, is
                     // not an error there: it is noted)
