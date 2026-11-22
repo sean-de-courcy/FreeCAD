@@ -1210,7 +1210,7 @@ bool reapplyOwn(const FeatureExtrude& feature, const App::Property& prop)
 
 /// ops#963 A: an own reference at a pattern's instance must lie on the instance's base carried back
 /// (PartDesign::requireOwnOnBase below)
-void requireOwnOnBase(const TopoDS_Shape& reference)
+void requireOwnOnRunBase(const TopoDS_Shape& reference)
 {
     PartDesign::requireOwnOnBase(reference, reapplyRun->base.getShape());
 }
@@ -1678,7 +1678,7 @@ App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions opt
             auto distanceTo = [&](gp_Pnt target, const gp_Dir& along, const App::Property& from) {
                 target.Transform(invTrsf);
                 if (reapplyRun && reapplyOwn(*this, from)) {
-                    requireOwnOnBase(BRepBuilderAPI_MakeVertex(target).Vertex());
+                    requireOwnOnRunBase(BRepBuilderAPI_MakeVertex(target).Vertex());
                 }
                 else if (reapplyRun) {
                     target.Transform(reapplyRun->toSeed);
@@ -1691,7 +1691,7 @@ App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions opt
                     TopoShape face;
                     getUpToFaceFromLinkSub(face, UpToFace);
                     face.move(invObjLoc);
-                    requireOwnOnBase(face.getShape());
+                    requireOwnOnRunBase(face.getShape());
                 }
                 const double length = distanceTo(*planeEnd, dir, UpToFace);
                 if (std::fabs(length) < Precision::Confusion()
@@ -2327,7 +2327,7 @@ TopoShape FeatureExtrude::generateSingleExtrusionSide(
             getUpToFaceFromLinkSub(upToShape, upToFacePropHandle);
             upToShape.move(invObjLoc);
             if (reapplyOwn(*this, upToFacePropHandle)) {
-                requireOwnOnBase(upToShape.getShape());  // ops#963 A: the instance's own, unmoved
+                requireOwnOnRunBase(upToShape.getShape());  // ops#963 A: the instance's own, unmoved
             }
             else if (reapplyRun) {
                 upToShape = upToShape.makeElementTransform(reapplyRun->toSeed);
@@ -2337,7 +2337,7 @@ TopoShape FeatureExtrude::generateSingleExtrusionSide(
             faceCount = getUpToShapeFromLinkSubList(upToShape, upToShapePropHandle);
             upToShape.move(invObjLoc);
             if (reapplyOwn(*this, upToShapePropHandle)) {
-                requireOwnOnBase(upToShape.getShape());  // ops#963 A: the instance's own, unmoved
+                requireOwnOnRunBase(upToShape.getShape());  // ops#963 A: the instance's own, unmoved
             }
             else if (reapplyRun) {
                 upToShape = upToShape.makeElementTransform(reapplyRun->toSeed);
