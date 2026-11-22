@@ -1878,8 +1878,13 @@ bool isAnalytic(GeomAbs_SurfaceType type)
 }
 
 // Whether OCCT builds the chain's round from analytic surfaces: each edge a line or a circle
-// between a plane and a plane or a cylinder, and the edges meeting only tangentially (no corner)
-bool roundsAnalytically(const TopoDS_Shape& base, const TopTools_IndexedMapOfShape& chain)
+// between a plane and a plane or a cylinder, the edges meeting only tangentially (no corner), and
+// no arc too small for the radius
+bool roundsAnalytically(
+    const TopoDS_Shape& base,
+    const TopTools_IndexedMapOfShape& chain,
+    double radius
+)
 {
     TopTools_IndexedDataMapOfShapeListOfShape facesOfEdges;
     TopExp::MapShapesAndAncestors(base, TopAbs_EDGE, TopAbs_FACE, facesOfEdges);
@@ -1910,6 +1915,40 @@ bool roundsAnalytically(const TopoDS_Shape& base, const TopTools_IndexedMapOfSha
         }
         if (planes == 0) {
             return false;
+        }
+        // An arc smaller than the radius, where the ball rolls on the side of the wall's axis
+        // (above a convex arc, as a rim's small rounded corner, or below a concave one), has no
+        // torus: the ball's centre circle would have a negative radius. OCCT's round there is a
+        // B-spline, and right (ops#968). An arc equal to the radius gives a sphere.
+        if (curve == GeomAbs_Circle) {
+            const BRepAdaptor_Curve arc(edge);
+            const gp_Circ circle = arc.Circle();
+            if (circle.Radius() < radius - Precision::Confusion()) {
+                const double middle = (arc.FirstParameter() + arc.LastParameter()) / 2.0;
+                const gp_Vec radial(circle.Location(), arc.Value(middle));
+                const bool convex = ChFi3d::DefineConnectType(
+                                        edge,
+                                        TopoDS::Face(faces(1)),
+                                        TopoDS::Face(faces(2)),
+                                        std::sin(Precision::Angular()),
+                                        false
+                                    )
+                    == ChFiDS_Convex;
+                for (int k = 1; k <= 2; ++k) {
+                    const TopoDS_Face& face = TopoDS::Face(faces(k));
+                    if (BRepAdaptor_Surface(face).GetType() != GeomAbs_Cylinder) {
+                        continue;
+                    }
+                    // The ball lies inside a convex edge's solid, outside a concave one's
+                    const gp_Vec normal = normalAt(edge, face, middle);
+                    if (normal.Magnitude() <= gp::Resolution()) {
+                        return false;
+                    }
+                    if ((convex ? -1.0 : 1.0) * normal.Dot(radial) < 0.0) {
+                        return false;
+                    }
+                }
+            }
         }
         // A band running on across a smooth edge onto the next face (a floor ending in a round)
         // leaves OCCT's analytic cases: its round there is a B-spline, and right. A smooth edge
@@ -2259,7 +2298,7 @@ std::string bridgedRecess(
     // As filledPocket() does: if the analysis throws, the check is skipped with a warning
     try {
         const auto chain = chainOf(before, edges);
-        if (chain.Extent() == 0 || !roundsAnalytically(before, chain)) {
+        if (chain.Extent() == 0 || !roundsAnalytically(before, chain, radius)) {
             return {};
         }
         // OCCT's bridge lies in the band, within the round's reach of its edges (lostMaterial())
