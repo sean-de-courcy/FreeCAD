@@ -40,6 +40,11 @@
 #include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
 #include <gp_Lin.hxx>
 #include <algorithm>
+#include <Geom2d_TrimmedCurve.hxx>
+#include <Geom2d_Line.hxx>
+#include <functional>
+#include <BRepTools_ReShape.hxx>
+#include <BRepTools_History.hxx>
 #include <array>
 #include <cmath>
 #include <charconv>
@@ -1987,7 +1992,8 @@ std::vector<std::size_t> orderByRanks(const std::vector<std::vector<long>>& rank
 /// one-point constructors build Extrema's grid of the geometry again for every point, which took
 /// time in the square of the pieces where a split's many pieces lie on one long face (a helix's
 /// 30 turns: 3.5 s of twinOrder). Initialized once, with the same bounds and tolerances as those
-/// constructors (the curve's or the surface's own, or the range given), so the same answers.
+/// constructors (the curve's or the surface's own, or the range given; for a surface the
+/// tolerance Precision::Confusion(): review pr895-r2, T-A), so the same answers.
 class Projector
 {
 public:
@@ -2014,7 +2020,7 @@ public:
             double v1 = 0;
             double v2 = 0;
             surface->Bounds(u1, u2, v1, v2);
-            onSurface.Init(surface, u1, u2, v1, v2);
+            onSurface.Init(surface, u1, u2, v1, v2, Precision::Confusion());
         }
     }
     bool onACurve() const
@@ -14303,6 +14309,215 @@ Data::MappedElement TopoShape::chooseMatchingSubShapeByPlaneOrLine(
 
 }  // namespace Part
 
+namespace
+{
+/** The pieces of one curve that a tool's cuts split (a helix's crest), joined into one edge on
+ * that curve (FreeCAD-CH, ops#895): UnifySameDomain joins B-spline edges only with
+ * ConcatBSplines, which rebuilt the curve and did so at some turn counts and scales only (8, 12,
+ * 16 and 20 turns, 600 mm, 4 m kept pieces; 14, 17 and 18 failed the merge: review pr895-r2,
+ * T-B). Joined here are the edges that meet at one of `cuts` only, lie on one curve handle at
+ * one location, bound the same two faces with one pcurve each (no seam) and, end to end, cover
+ * a range without gaps. The joined edge is that curve over the pieces' range, with their
+ * pcurves. Returns the joins' history (each piece modified into its joined edge, the faces
+ * rebuilt around it) and the result in `joined`; a null history, `joined` untouched, when
+ * nothing is joined or a face of the result has no source in the history. */
+Handle(BRepTools_History) joinPiecesOfOneCurve(
+    const TopoDS_Shape& shape,
+    const TopTools_MapOfShape& cuts,
+    TopoDS_Shape& joined
+)
+{
+    TopTools_IndexedDataMapOfShapeListOfShape vertexEdges;
+    TopTools_IndexedDataMapOfShapeListOfShape edgeFaces;
+    TopExp::MapShapesAndUniqueAncestors(shape, TopAbs_VERTEX, TopAbs_EDGE, vertexEdges);
+    TopExp::MapShapesAndUniqueAncestors(shape, TopAbs_EDGE, TopAbs_FACE, edgeFaces);
+    const int count = edgeFaces.Extent();
+    std::vector<int> parent(count + 1);
+    std::iota(parent.begin(), parent.end(), 0);
+    std::function<int(int)> root = [&](int i) {
+        return parent[i] == i ? i : parent[i] = root(parent[i]);
+    };
+    auto facesOf = [&](const TopoDS_Shape& edge) -> const TopTools_ListOfShape& {
+        return edgeFaces.FindFromKey(edge);
+    };
+    auto sameFaces = [&](const TopoDS_Shape& a, const TopoDS_Shape& b) {
+        const TopTools_ListOfShape& fa = facesOf(a);
+        const TopTools_ListOfShape& fb = facesOf(b);
+        if (fa.Extent() != 2 || fb.Extent() != 2 || fa.First().IsSame(fa.Last())) {
+            return false;
+        }
+        return (fa.First().IsSame(fb.First()) && fa.Last().IsSame(fb.Last()))
+            || (fa.First().IsSame(fb.Last()) && fa.Last().IsSame(fb.First()));
+    };
+    bool any = false;
+    for (int i = 1; i <= vertexEdges.Extent(); ++i) {
+        if (!cuts.Contains(vertexEdges.FindKey(i)) || vertexEdges(i).Extent() != 2) {
+            continue;
+        }
+        const TopoDS_Edge& a = TopoDS::Edge(vertexEdges(i).First());
+        const TopoDS_Edge& b = TopoDS::Edge(vertexEdges(i).Last());
+        if (a.IsSame(b)) {
+            continue;
+        }
+        TopLoc_Location la;
+        TopLoc_Location lb;
+        double f = 0;
+        double l = 0;
+        const Handle(Geom_Curve) ca = BRep_Tool::Curve(a, la, f, l);
+        const Handle(Geom_Curve) cb = BRep_Tool::Curve(b, lb, f, l);
+        if (ca.IsNull() || ca != cb || !la.IsEqual(lb) || !sameFaces(a, b)
+            || !BRep_Tool::SameParameter(a) || !BRep_Tool::SameParameter(b)) {
+            continue;
+        }
+        parent[root(edgeFaces.FindIndex(a))] = root(edgeFaces.FindIndex(b));
+        any = true;
+    }
+    if (!any) {
+        return {};
+    }
+    std::map<int, std::vector<int>> groups;
+    for (int i = 1; i <= count; ++i) {
+        groups[root(i)].push_back(i);
+    }
+    BRep_Builder builder;
+    BRepTools_ReShape reshape;
+    std::vector<std::pair<TopoDS_Shape, TopoDS_Shape>> joins;  // piece, joined edge
+    for (const auto& [key, members] : groups) {
+        if (members.size() < 2) {
+            continue;
+        }
+        TopLoc_Location location;
+        Handle(Geom_Curve) curve;
+        double first = std::numeric_limits<double>::max();
+        double last = -std::numeric_limits<double>::max();
+        double covered = 0;
+        double tolerance = 0;
+        TopoDS_Vertex start;
+        TopoDS_Vertex end;
+        for (int index : members) {
+            const TopoDS_Edge piece = TopoDS::Edge(edgeFaces.FindKey(index).Oriented(TopAbs_FORWARD));
+            double f = 0;
+            double l = 0;
+            curve = BRep_Tool::Curve(piece, location, f, l);
+            TopoDS_Vertex a;
+            TopoDS_Vertex b;
+            TopExp::Vertices(piece, a, b);
+            if (f < first) {
+                first = f;
+                start = a;
+            }
+            if (l > last) {
+                last = l;
+                end = b;
+            }
+            covered += l - f;
+            tolerance = std::max(tolerance, BRep_Tool::Tolerance(piece));
+        }
+        if (start.IsNull() || end.IsNull() || start.IsSame(end)
+            || std::fabs(covered - (last - first)) > 1e-9 * std::max(1.0, std::fabs(last - first))) {
+            continue;  // closed, or with a gap or an overlap
+        }
+        // Each face's pcurve of the pieces: one and the same, on no seam
+        const TopTools_ListOfShape& faces = facesOf(edgeFaces.FindKey(members.front()));
+        std::vector<std::pair<TopoDS_Face, Handle(Geom2d_Curve)>> pcurves;
+        bool usable = true;
+        for (const TopoDS_Shape& faceShape : faces) {
+            const TopoDS_Face& face = TopoDS::Face(faceShape);
+            Handle(Geom2d_Curve) common;
+            for (int index : members) {
+                const TopoDS_Edge& piece = TopoDS::Edge(edgeFaces.FindKey(index));
+                double f = 0;
+                double l = 0;
+                Handle(Geom2d_Curve) pcurve = BRep_Tool::CurveOnSurface(piece, face, f, l);
+                if (pcurve.IsNull() || BRep_Tool::IsClosed(piece, face)) {
+                    usable = false;
+                    break;
+                }
+                // The split gives each piece its own copy of the pcurve: one line (an iso-line
+                // of the face) counts as one pcurve
+                while (auto trimmed = Handle(Geom2d_TrimmedCurve)::DownCast(pcurve)) {
+                    pcurve = trimmed->BasisCurve();
+                }
+                if (!common.IsNull() && pcurve != common) {
+                    const auto line = Handle(Geom2d_Line)::DownCast(pcurve);
+                    const auto other = Handle(Geom2d_Line)::DownCast(common);
+                    if (line.IsNull() || other.IsNull()
+                        || line->Value(0.0).Distance(other->Value(0.0)) > Precision::PConfusion()
+                        || line->Value(1.0).Distance(other->Value(1.0)) > Precision::PConfusion()) {
+                        usable = false;
+                        break;
+                    }
+                    continue;
+                }
+                common = pcurve;
+            }
+            if (!usable) {
+                break;
+            }
+            pcurves.emplace_back(face, common);
+        }
+        if (!usable) {
+            continue;
+        }
+        TopoDS_Edge whole;
+        builder.MakeEdge(whole, curve, location, tolerance);
+        for (const auto& [face, pcurve] : pcurves) {
+            builder.UpdateEdge(whole, pcurve, face, tolerance);
+        }
+        builder.Add(whole, start.Oriented(TopAbs_FORWARD));
+        builder.Add(whole, end.Oriented(TopAbs_REVERSED));
+        builder.Range(whole, first, last);
+        builder.SameRange(whole, true);
+        builder.SameParameter(whole, true);
+        for (std::size_t k = 0; k < members.size(); ++k) {
+            const TopoDS_Shape piece = edgeFaces.FindKey(members[k]).Oriented(TopAbs_FORWARD);
+            if (k == 0) {
+                reshape.Replace(piece, whole);
+            }
+            else {
+                reshape.Remove(piece);
+            }
+            joins.emplace_back(piece, whole);
+        }
+    }
+    if (joins.empty()) {
+        return {};
+    }
+    const TopoDS_Shape result = reshape.Apply(shape);
+    Handle(BRepTools_History) history = reshape.History();
+    auto holds = [](const TopTools_ListOfShape& list, const TopoDS_Shape& shape) {
+        return std::any_of(list.begin(), list.end(), [&](const TopoDS_Shape& s) {
+            return s.IsSame(shape);
+        });
+    };
+    for (const auto& [piece, whole] : joins) {
+        if (!holds(history->Modified(piece), whole)) {
+            history->AddModified(piece, whole);
+        }
+    }
+    // Every face of the result has a source: the face itself, or one the history modified
+    TopTools_IndexedMapOfShape before;
+    TopExp::MapShapes(shape, TopAbs_FACE, before);
+    TopTools_MapOfShape traced;
+    for (int i = 1; i <= before.Extent(); ++i) {
+        traced.Add(before(i));
+        for (const TopoDS_Shape& made : history->Modified(before(i))) {
+            traced.Add(made);
+        }
+    }
+    for (TopExp_Explorer xp(result, TopAbs_FACE); xp.More(); xp.Next()) {
+        if (!traced.Contains(xp.Current())) {
+            return {};
+        }
+    }
+    if (!BRepCheck_Analyzer(result).IsValid()) {
+        return {};
+    }
+    joined = result;
+    return history;
+}
+}  // namespace
+
 bool ModelRefine::unifyAcrossSameSurface(Part::TopoShape& shape, const TopoDS_Shape& tool, const char* op)
 {
     using Part::TopoShape;
@@ -14356,39 +14571,53 @@ bool ModelRefine::unifyAcrossSameSurface(Part::TopoShape& shape, const TopoDS_Sh
         if (freeEdges == 0) {
             return true;  // nothing to merge: no two faces of one tool surface meet
         }
-        // A cut's vertex joins the two edges it split, where both pieces are of one curve (a
-        // crest cut at each turn); elsewhere it stays (the boolean's sections at a thread's root,
-        // a curve per turn: joined, their boundaries moved the volume by 1.4e-7 of the part)
-        TopTools_IndexedDataMapOfShapeListOfShape vertexEdges;
-        TopExp::MapShapesAndUniqueAncestors(fresh.getShape(), TopAbs_VERTEX, TopAbs_EDGE, vertexEdges);
-        auto oneCurve = [&](const TopoDS_Shape& vertex) {
-            std::vector<TopoDS_Edge> others;
-            for (const TopoDS_Shape& edge : vertexEdges.FindFromKey(vertex)) {
-                if (keep.Contains(edge)) {
-                    others.push_back(TopoDS::Edge(edge));
-                }
-            }
-            if (others.size() != 2) {
-                return false;
-            }
-            TopLoc_Location firstPlace;
-            TopLoc_Location secondPlace;
-            double from = 0;
-            double to = 0;
-            const Handle(Geom_Curve) first = BRep_Tool::Curve(others[0], firstPlace, from, to);
-            const Handle(Geom_Curve) second = BRep_Tool::Curve(others[1], secondPlace, from, to);
-            return !first.IsNull() && first == second && firstPlace.IsEqual(secondPlace);
-        };
         for (TopExp_Explorer xv(fresh.getShape(), TopAbs_VERTEX); xv.More(); xv.Next()) {
-            if (!freeVertices.Contains(xv.Current()) || !oneCurve(xv.Current())) {
+            if (!freeVertices.Contains(xv.Current())) {
                 keep.Add(xv.Current());
             }
         }
-        // B-spline edges too, through the vertices left free above only
-        ShapeUpgrade_UnifySameDomain unify(fresh.getShape(), true, true, true);
+        ShapeUpgrade_UnifySameDomain unify(fresh.getShape(), true, true, false);
         unify.KeepShapes(keep);
         unify.Build();
-        const TopoDS_Shape& unified = unify.Shape();
+        TopoDS_Shape unified = unify.Shape();
+        Handle(BRepTools_History) merges = unify.History();
+        // The cuts' pieces of one curve (a crest) joined into one edge, in the same history
+        if (!unified.IsNull() && !merges.IsNull()) {
+            TopoDS_Shape joined;
+            if (const Handle(BRepTools_History) joins
+                = joinPiecesOfOneCurve(unified, freeVertices, joined);
+                !joins.IsNull()) {
+                // Merge() carries only what the face merge recorded: a shape it left as it was
+                // (a crest's piece, a face it didn't touch) takes its join history directly
+                TopTools_IndexedMapOfShape untouched;
+                TopTools_IndexedMapOfShape all;
+                TopExp::MapShapes(fresh.getShape(), all);
+                for (int i = 1; i <= all.Extent(); ++i) {
+                    if (!merges->IsRemoved(all(i)) && merges->Modified(all(i)).IsEmpty()
+                        && merges->Generated(all(i)).IsEmpty()) {
+                        untouched.Add(all(i));
+                    }
+                }
+                merges->Merge(joins);
+                for (int i = 1; i <= untouched.Extent(); ++i) {
+                    const TopoDS_Shape& kept = untouched(i);
+                    for (const TopoDS_Shape& made : joins->Modified(kept)) {
+                        const TopTools_ListOfShape& now = merges->Modified(kept);
+                        if (std::none_of(now.begin(), now.end(), [&](const TopoDS_Shape& s) {
+                                return s.IsSame(made);
+                            })) {
+                            merges->AddModified(kept, made);
+                        }
+                    }
+                    // a piece is modified into its joined edge, not removed (the reshape
+                    // removes all but the first: Remove() would drop that modification)
+                    if (joins->IsRemoved(kept) && joins->Modified(kept).IsEmpty()) {
+                        merges->Remove(kept);
+                    }
+                }
+                unified = joined;
+            }
+        }
         auto props = [](const TopoDS_Shape& s, bool volume) {
             GProp_GProps gprops;
             if (volume) {
@@ -14399,8 +14628,11 @@ bool ModelRefine::unifyAcrossSameSurface(Part::TopoShape& shape, const TopoDS_Sh
             }
             return gprops.Mass();
         };
+        // The faces keep their surfaces, so the geometry can't change: the gate catches a face
+        // lost or doubled (1e-2 of the area and more). Gauss integration over a long B-spline
+        // face and over its pieces differs by up to 3e-7 (a helix of 3 turns), hence 1e-6.
         auto same = [](double a, double b) {
-            return std::fabs(a - b) <= 1e-7 * std::fabs(b) + Precision::Confusion();
+            return std::fabs(a - b) <= 1e-6 * std::fabs(b) + Precision::Confusion();
         };
         auto count = [](const TopoDS_Shape& s, TopAbs_ShapeEnum type) {
             int n = 0;
@@ -14418,7 +14650,7 @@ bool ModelRefine::unifyAcrossSameSurface(Part::TopoShape& shape, const TopoDS_Sh
             || !BRepCheck_Analyzer(unified).IsValid()) {
             return false;
         }
-        const Part::MapperHistory history(unify.History());
+        const Part::MapperHistory history(merges);
         TopoShape result(shape.Tag, shape.Hasher, shape.getHistoryAlgorithm());
         result.makeShapeWithElementMap(unified, history, {fresh}, op);
         Part::restoreWholeFaceNamesSafely(result, fresh, history);
