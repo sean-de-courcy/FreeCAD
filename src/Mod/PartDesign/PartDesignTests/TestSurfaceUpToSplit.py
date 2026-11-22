@@ -258,24 +258,6 @@ class TestSurfaceUpToSplit(unittest.TestCase):
         self.assertAlmostEqual(self.original.Shape.Volume, PLUG, places=4)
         self.assertAlmostEqual(self.half.Shape.Volume, HOLED, places=4)
 
-    def testOpenSheetSideAfterAMove(self):
-        """Review r2 (OpenSheetSideAfterTilt): an open polyline (20, -5), (20.5, 15), (21, 35) up to
-        the top splits the block; moving its far end to (19, 35) tilts the sheet without turning
-        it: each part keeps its side of the line (an open chain keeps its last result's way)."""
-        self.block()
-        line = [V(20, -5, 0), V(20.5, 15, 0), V(21, 35, 0)]
-        sketch = self.sketch(line)
-        ext = self.surface(sketch, self.edgesOf(sketch, line), self.top(self.box, 20))
-        self.split(ext, "Front")
-        keptLeft = box(self.original.Shape).XMin < 1e-6
-        sketch.moveGeometry(1, 2, V(19, 35, 0), False)
-        self.doc.recompute()
-        self.assertValid(self.original)
-        self.assertValid(self.half)
-        self.assertEqual(box(self.original.Shape).XMin < 1e-6, keptLeft)
-        self.assertEqual(box(self.half.Shape).XMin < 1e-6, not keptLeft)
-        total = self.original.Shape.Volume + self.half.Shape.Volume
-        self.assertAlmostEqual(total, BLOCK, places=4)
 
     def testFaceProfileIsNotTurned(self):
         """Review r2 (FaceProfileTurnedOver): a face as the profile makes a solid even with Solid
@@ -313,6 +295,21 @@ class TestSurfaceUpToSplit(unittest.TestCase):
         self.doc.recompute()
         for a, b in zip(plain.Shape.Faces, picked.Shape.Faces):
             self.assertTrue(a.normalAt(0, 0).isEqual(b.normalAt(0, 0), 1e-9))
+
+    def testOpenSheetSplitIsRefused(self):
+        """Reviews r2 and r3: an open polyline's sheet up to the top divides the block, but it has
+        no inside: which part would keep which piece follows the way its edges run, which a move
+        (OpenSheetSideAfterTilt), a redraw, a turned Placement or a copy turned silently. The
+        Split refuses it, loudly, before anything changes."""
+        self.block()
+        line = [V(20, -5, 0), V(20.5, 15, 0), V(21, 35, 0)]
+        sketch = self.sketch(line)
+        ext = self.surface(sketch, self.edgesOf(sketch, line), self.top(self.box, 20))
+        self.assertValid(ext)
+        with self.assertRaisesRegex(ValueError, "is an open sheet"):
+            PartDesign.split(self.body, ext)
+        self.assertEqual(len(self.body.Group), 1)
+        self.assertTrue(ext.Visibility)
 
     def testTargetBodyMoved(self):
         """Review r1 (SheetUpToMovedBody, design 4b): the target's Body moved up 5 moves the face
@@ -455,8 +452,7 @@ class TestSurfaceUpToSplit(unittest.TestCase):
     def testSlantedTarget(self):
         """T3 (SU2): the polyline up to the slanted top z = 20 + 0.25 x: three faces whose far
         edges lie in that plane, also past the face (the plane is whole), area 22.3607 x 22.5
-        + 10 x 25 + 22.3607 x 27.5 = 1368.034; the block split by it in two, each piece the
-        block's part over its side of the polyline (built here independently)."""
+        + 10 x 25 + 22.3607 x 27.5 = 1368.034. The Split refuses this open sheet (no inside)."""
         base = self.slab()
         sketch = self.sketch(POLYLINE)
         names = self.edgesOf(sketch, POLYLINE)
@@ -468,20 +464,9 @@ class TestSurfaceUpToSplit(unittest.TestCase):
             p = vertex.Point
             if p.z > 1e-6:
                 self.assertAlmostEqual(p.z, 20 + 0.25 * p.x, places=6)
-        self.split(ext)
-        total = self.original.Shape.Volume + self.half.Shape.Volume
-        self.assertAlmostEqual(total, base.Shape.Volume, places=4)
-        # The plan polygons each side of the polyline within the block, under the slab's top
-        left = [V(0, 0, 0), V(7.5, 0, 0), V(15, 15, 0), V(25, 15, 0), V(32.5, 30, 0), V(0, 30, 0)]
-        right = [V(7.5, 0, 0), V(40, 0, 0), V(40, 30, 0), V(32.5, 30, 0), V(25, 15, 0),
-                 V(15, 15, 0)]
-        pieces = []
-        for plan in (left, right):
-            prism = Part.Face(Part.makePolygon(plan + [plan[0]])).extrude(V(0, 0, 40))
-            pieces.append(prism.common(base.Shape).Volume)
-        got = sorted([self.original.Shape.Volume, self.half.Shape.Volume])
-        self.assertAlmostEqual(got[0], min(pieces), places=4)
-        self.assertAlmostEqual(got[1], max(pieces), places=4)
+        # An open sheet: no inside, so the Split refuses it (reviews r2, r3)
+        with self.assertRaisesRegex(ValueError, "is an open sheet"):
+            PartDesign.split(self.body, ext)
 
     def faceSlanted(self, feature):
         def test(face):

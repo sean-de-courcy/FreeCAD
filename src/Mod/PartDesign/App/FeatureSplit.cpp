@@ -29,6 +29,8 @@
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <TopTools_ListOfShape.hxx>
 #include <TopoDS.hxx>
+#include <TopoDS_Edge.hxx>
+#include <TopoDS_Vertex.hxx>
 #include <gp_Ax3.hxx>
 #include <gp_Pnt2d.hxx>
 #include <gp_Trsf.hxx>
@@ -165,6 +167,57 @@ void checkSheet(const TopoDS_Shape& sheet, const std::string& name)
     }
 }
 
+/// How many loops the free edges of @p sheet make: the edges of one face only, seams aside
+int freeLoops(const TopoDS_Shape& sheet)
+{
+    TopTools_IndexedDataMapOfShapeListOfShape edgeFaces;
+    TopExp::MapShapesAndUniqueAncestors(sheet, TopAbs_EDGE, TopAbs_FACE, edgeFaces);
+    std::vector<TopoDS_Edge> free;
+    for (int i = 1; i <= edgeFaces.Extent(); ++i) {
+        const TopoDS_Edge& edge = TopoDS::Edge(edgeFaces.FindKey(i));
+        const TopTools_ListOfShape& owners = edgeFaces(i);
+        if (owners.Extent() != 1 || BRep_Tool::Degenerated(edge)
+            || BRep_Tool::IsClosed(edge, TopoDS::Face(owners.First()))) {
+            continue;
+        }
+        free.push_back(edge);
+    }
+    // Loops by shared end points: each edge starts its own group, joined through its vertices
+    std::vector<int> group(free.size());
+    for (std::size_t i = 0; i < free.size(); ++i) {
+        group[i] = static_cast<int>(i);
+    }
+    auto root = [&group](int i) {
+        while (group[i] != i) {
+            i = group[i] = group[group[i]];
+        }
+        return i;
+    };
+    std::vector<std::pair<gp_Pnt, int>> ends;
+    for (std::size_t i = 0; i < free.size(); ++i) {
+        TopoDS_Vertex first;
+        TopoDS_Vertex last;
+        TopExp::Vertices(free[i], first, last);
+        for (const TopoDS_Vertex& vertex : {first, last}) {
+            if (vertex.IsNull()) {
+                continue;
+            }
+            const gp_Pnt point = BRep_Tool::Pnt(vertex);
+            for (const auto& [other, j] : ends) {
+                if (point.Distance(other) <= Precision::Confusion()) {
+                    group[root(static_cast<int>(i))] = root(j);
+                }
+            }
+            ends.emplace_back(point, static_cast<int>(i));
+        }
+    }
+    int loops = 0;
+    for (std::size_t i = 0; i < free.size(); ++i) {
+        loops += root(static_cast<int>(i)) == static_cast<int>(i) ? 1 : 0;
+    }
+    return loops;
+}
+
 /// A point inside @p face, as surface parameters; false when none is found
 bool pointInside(const TopoDS_Face& face, double& u, double& v)
 {
@@ -239,6 +292,16 @@ TopoShape splitBySheet(
         throw Base::ValueError(
             sheetName + " cuts " + partName + " into " + std::to_string(solids.Extent())
             + " pieces; a split into more than two parts is not supported"
+        );
+    }
+    // A sheet whose free edges make one loop (a disc: an open chain's sheet, one face) has no
+    // inside: which part keeps which piece would follow the way its edges were drawn, which a
+    // move, a redraw or a copy can turn silently (ops#919, reviews r2 and r3). Refused until a
+    // Split chooses its piece by something that holds through those (the coordinator's ruling)
+    if (freeLoops(sheet.getShape()) == 1) {
+        throw Base::ValueError(
+            sheetName + " is an open sheet (its free edges make one loop): a Split by it is not "
+            "supported yet; a closed tube, or a sheet of one planar face, is"
         );
     }
     // Each piece of a sheet face, to that face as the sheet runs it
