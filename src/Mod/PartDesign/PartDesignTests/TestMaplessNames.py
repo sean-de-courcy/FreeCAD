@@ -392,7 +392,7 @@ class TestDatumNamesAfterReopen(unittest.TestCase):
         doc.saveAs(os.path.join(self.folder, "points.FCStd"))
         names = dict(doc.getObject("Mid").Shape.ElementMap)
         # No names: a datum's shape is set before the document can name it, and since ops#930 a
-        # move (its attachment) names no shape; the vertex is Vertex1 by its index. (Before, the
+        # move by its attachment names no shape; the vertex is Vertex1 by its index. (Before, the
         # move named it by a match, an MLN name: the case of ops#633, which a file of an older
         # build still holds, and which the open keeps.)
         self.assertEqual(names, {})

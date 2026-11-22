@@ -105,6 +105,7 @@
 #include <Base/Tools.h>
 #include <Mod/Material/App/MaterialManager.h>
 
+#include "AttachExtension.h"
 #include "Geometry.h"
 #include "KernelBudget.h"
 #include "MassProperties.h"
@@ -3141,21 +3142,28 @@ void Feature::onChanged(const App::Property* prop)
             App::Property::NoRecompute,
             &this->Shape
         );
-        if (oldTransform != newTransform && !shape.isNull() && shape.getElementMapSize() == 0) {
-            // FreeCAD-CH ops#910, ops#930: a move never names a shape. A shape without names is
-            // an import's, whose map the export left out, or a datum's (set in its constructor,
-            // before the document can name it: one element, so its index names it); named by a
-            // match here
+        auto attachment = getExtensionByType<AttachExtension>(true);
+        const bool attached = attachment
+            && attachment->MapMode.getValue() != Attacher::mmDeactivated;
+        if (oldTransform != newTransform && !shape.isNull() && shape.getElementMapSize() == 0
+            && (this->isRecomputing() || attached)) {
+            // FreeCAD-CH ops#910, ops#930: moved at its own recompute, or by its attachment, a
+            // shape without names stays without them. It is an import's, whose map the export
+            // left out, or an attached datum's (set in its constructor, before the document can
+            // name it: one element, so its index names it). Named by a match here
             // (PropertyPartShape::namesByMatch(), provisional MLN names under the copy's ID), the
             // references into it take those names, and the result its own recompute sets has
-            // none of them. Moved at its own recompute, before its new shape is set (a
-            // PartDesign feature takes its sketch's Placement, a Placement a file doesn't give
-            // back bit for bit): "Face10 moved and Face10 sits where it was" (ops#910). Moved by
+            // none of them. At its own recompute, before its new shape is set (a PartDesign
+            // feature takes its sketch's Placement, a Placement a file doesn't give back bit for
+            // bit): "Face10 moved and Face10 sits where it was" (ops#910). By its attachment at
             // another object's recompute (a sketch on a face re-attached while its support
             // recomputes): a sweep's spine took the MLN name and the sketch read it as a
             // geometry index, "Invalid shape name edge1" (ops#930). Unnamed, the elements keep
             // their index and fingerprint until the object's own recompute names them, as a
-            // copy whose Placement stays does.
+            // copy whose Placement stays does. Another move (a Placement expression or a script,
+            // outside the object's recompute) still names by a match: a copy-on-change copy's
+            // primitive placed by an expression takes the names of the value it replaces, which
+            // its link's retarget reads (variant_retarget.py, VariantBoltHolesFillet).
             this->Shape.aboutToSetValue();
             this->Shape._Shape.setTransform(newTransform);
             this->Shape.hasSetValue();
