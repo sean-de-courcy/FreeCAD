@@ -2482,11 +2482,72 @@ class BridgedRecessTest(unittest.TestCase):
                     status.startswith("The fillet's band crosses a hole or pocket on Face"), status
                 )
 
-    def testMixedRadiiArcAboveItsOwnRadiusAcrossACountersinkFails(self):
-        # Review pr968pre-r1, MixedRadiusBridge: a Part::Fillet with the plate's top rim r 1 (its
-        # arcs r 1.5, above it) and a block's top edge r 2. The rim's band crosses a countersink
-        # 0.5 from the front side, and OCCT bridges it. The arcs are above their own radius, so
-        # the larger radius elsewhere must not excuse them: the fillet fails, as with r 1 alone
+    @staticmethod
+    def pocketBlock(hole=False):
+        """Review pr516-r3: the block 60 x 40 x 6 with a pocket 30 x 20 (x 15..45, y 10..30, floor
+        z 2), its corners r 1; with a through hole r 1.5 in the floor at x 30, y 12.2, 0.7 from the
+        pocket's front wall"""
+        tool = Part.makeBox(30, 20, 5, V(15, 10, 2))
+        tool = tool.makeFillet(1, [e for e in tool.Edges if abs(e.BoundBox.ZLength - 5) < 1e-9])
+        block = Part.makeBox(60, 40, 6).cut(tool)
+        if hole:
+            block = block.cut(Part.makeCylinder(1.5, 2, V(30, 12.2, 0)))
+        return block
+
+    @staticmethod
+    def floorRim(shape):
+        """The pocket floor's outer loop: its 4 lines and 4 concave arcs"""
+        floor = next(
+            f
+            for f in shape.Faces
+            if f.Surface.TypeId == "Part::GeomPlane"
+            and abs(f.BoundBox.ZMin - 2) < 1e-9
+            and abs(f.BoundBox.ZMax - 2) < 1e-9
+        )
+        return list(floor.OuterWire.Edges)
+
+    def testPocketFloorArcBelowTheRadiusBuilds(self):
+        # ops#968 on the concave side: the floor's arcs r 1 are below the round's r 1.6, the ball
+        # rolls on their axis side, and OCCT's round there is a B-spline. The floor is the pocket's
+        # outline offset inwards by R, with sharp corners: (30 - 2R)(20 - 2R)
+        R = 1.6
+        shape = self.pocketBlock()
+        self.assertEqual(len(self.floorRim(shape)), 8)
+        fillet = filleted_in_a_body(self.doc, shape, self.floorRim, R)
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+        floor = [
+            f
+            for f in fillet.Shape.Faces
+            if f.Surface.TypeId == "Part::GeomPlane"
+            and abs(f.BoundBox.ZMin - 2) < 1e-9
+            and abs(f.BoundBox.ZMax - 2) < 1e-9
+        ]
+        self.assertEqual(len(floor), 1)
+        self.assertAlmostEqual(floor[0].Area, (30 - 2 * R) * (20 - 2 * R), delta=1e-3)
+        # A concave round adds material only
+        self.assertGreater(fillet.Shape.Volume, shape.Volume)
+        self.assertAlmostEqual(fillet.Shape.common(shape).Volume, shape.Volume, delta=1e-6)
+
+    def testPocketFloorArcBelowTheRadiusAcrossAHoleFails(self):
+        # Review pr516-r3, PocketFloorSmallArcHole: the same round's band crosses the floor's hole,
+        # far from the small arcs, and OCCT bridges it. The arcs' own B-spline rounds are excused,
+        # the bridge is not: the fillet fails
+        shape = self.pocketBlock(hole=True)
+        self.assertEqual(len(self.floorRim(shape)), 8)
+        fillet = filleted_in_a_body(self.doc, shape, self.floorRim, 1.6)
+        self.assertFalse(fillet.isValid())
+        status = fillet.getStatusString()
+        self.assertTrue(
+            status.startswith("The fillet's band crosses a hole or pocket on Face"), status
+        )
+
+    def testMixedRadiiAcrossACountersinkFails(self):
+        # A Part::Fillet with the plate's top rim at rim_r (its arcs r 1.5) and a block's top edge
+        # at block_r; the rim's band crosses a countersink 0.5 from the front side, where OCCT
+        # bridges it. Review pr968pre-r1, MixedRadiusBridge (rim 1, block 2): the arcs are above
+        # their own radius, and the larger radius elsewhere must not excuse them. Review
+        # pr968pre-r2, P6 (rim 2, block 1.6): the arcs are below every radius, and only their own
+        # rounds are excused, not the bridge far from them. The fillet fails in both
         base = Part.makeBox(60, 40, 3)
         base = base.makeFillet(1.5, [e for e in base.Edges if abs(e.BoundBox.ZLength - 3) < 1e-9])
         base = base.fuse(Part.makeBox(10, 10, 3, V(45, 25, 3))).removeSplitter()
@@ -2495,28 +2556,32 @@ class BridgedRecessTest(unittest.TestCase):
             .fuse(Part.makeCylinder(2, 3, V(30, 4.5, 0)))
             .removeSplitter()
         )
-        feature = self.doc.addObject("Part::Feature", "Base")
-        feature.Shape = base
-        shape = feature.Shape
-        rim = self.topRim(shape)
-        self.assertEqual(len(rim), 8)
-        edges = []
-        for i, e in enumerate(shape.Edges, 1):
-            b = e.BoundBox
-            if any(e.isSame(x) for x in rim):
-                edges.append((i, 1.0, 1.0))
-            elif abs(b.ZMin - 6) < 1e-6 and abs(b.ZMax - 6) < 1e-6 and abs(b.YMax - 25) < 1e-6:
-                edges.append((i, 2.0, 2.0))
-        self.assertEqual(len(edges), 9)
-        fillet = self.doc.addObject("Part::Fillet", "Fillet")
-        fillet.Base = feature
-        fillet.Edges = edges
-        self.doc.recompute()
-        self.assertFalse(fillet.isValid())
-        status = fillet.getStatusString()
-        self.assertTrue(
-            status.startswith("The fillet's band crosses a hole or pocket on Face"), status
-        )
+        for rim_r, block_r in ((1.0, 2.0), (2.0, 1.6)):
+            with self.subTest(rim_r=rim_r, block_r=block_r):
+                feature = self.doc.addObject("Part::Feature", "Base")
+                feature.Shape = base
+                shape = feature.Shape
+                rim = self.topRim(shape)
+                self.assertEqual(len(rim), 8)
+                edges = []
+                for i, e in enumerate(shape.Edges, 1):
+                    b = e.BoundBox
+                    if any(e.isSame(x) for x in rim):
+                        edges.append((i, rim_r, rim_r))
+                    elif (
+                        abs(b.ZMin - 6) < 1e-6 and abs(b.ZMax - 6) < 1e-6 and abs(b.YMax - 25) < 1e-6
+                    ):
+                        edges.append((i, block_r, block_r))
+                self.assertEqual(len(edges), 9)
+                fillet = self.doc.addObject("Part::Fillet", "Fillet")
+                fillet.Base = feature
+                fillet.Edges = edges
+                self.doc.recompute()
+                self.assertFalse(fillet.isValid())
+                status = fillet.getStatusString()
+                self.assertTrue(
+                    status.startswith("The fillet's band crosses a hole or pocket on Face"), status
+                )
 
     def testBandOffOntoARoundAnotherPickBordersIsNotARecess(self):
         # Review pri931-r3, SplitRoundSelection: the block 40 x 20 x 5, its bottom front edge
