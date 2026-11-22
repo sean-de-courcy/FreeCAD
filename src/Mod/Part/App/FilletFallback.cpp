@@ -17525,9 +17525,15 @@ EdgeOrigin originOf(const TopoShape& base, const TopoDS_Shape& edge, const Featu
     return origin;
 }
 
-// Which of two base edges was made first (section 4): -1 a, 1 b, nothing where the names don't say
+// Which of two base edges was made first (section 4): -1 a, 1 b, 0 the same edge, nothing where the
+// names don't say
 std::optional<int> firstMade(const EdgeOrigin& a, const EdgeOrigin& b)
 {
+    // Two sources of one base edge (a round running into a wall) are its round either way: a tie,
+    // kept in their order (review pr503-r2 L1)
+    if (a.index > 0 && a.index == b.index) {
+        return 0;
+    }
     if (a.maker.empty() || b.maker.empty()) {
         return std::nullopt;
     }

@@ -1264,6 +1264,26 @@ class TestFillet(unittest.TestCase):
                 self.assertEqual(got, "back")
                 self._assertNoNamingWarning()
 
+    def testFullRoundEndingInAWallHasNoNamingWarning(self):
+        # review pr503-r2 L1: PadF, PadB, then a taller wall across the rib's end (x 30..35). The
+        # round runs into the wall, so two of the merged face's sources come from one base edge: a
+        # tie, not an undecided order. PadF's edge is made first: the front round, no warning
+        for picked in (("front", "back"), ("back", "front")):
+            with self.subTest(picked=picked):
+                body = self.Doc.addObject("PartDesign::Body", "Body")
+                self._pad_of_lines(body, "PadF", self._chain(self._HALVES["front"]), 20)
+                self._pad_of_lines(body, "PadB", self._chain(self._HALVES["back"]), 20)
+                wall = self._pad_of_lines(
+                    body, "Wall", self._chain([(30, -5), (35, -5), (35, 9), (30, 9)]), 30
+                )
+                self.Doc.recompute()
+                self.assertTrue(wall.isValid(), wall.getStatusString())
+                ends = {"front": ((0, 0, 20), (30, 0, 20)), "back": ((0, 4, 20), (30, 4, 20))}
+                edges = [self._edge_between(wall.Shape, *ends[side]) for side in picked]
+                got = self._first_round_at_the_limit(body, wall, edges, 2.0, 1.9, self._front_or_back)
+                self.assertEqual(got, "front")
+                self._assertNoNamingWarning()
+
     def testFullRoundWithoutHistoryIsNamedByTheEdgeOrderAndWarns(self):
         # fullround-name-order-900.md 5: a Part::Box's edges carry no sketch, so neither edge is
         # known to be made first: the round of the lower base edge names the face, for either

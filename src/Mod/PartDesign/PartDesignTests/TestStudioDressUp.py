@@ -368,8 +368,9 @@ class TestStudioDressUp(unittest.TestCase):
     def testAFullRoundNamedByTheEdgeOrderWarnsOnTheOwner(self):
         """ops#951 (review pr503-r1 T2): B with a rib y 10..12 padded on, both cut back to x 28 by
         one box: the two top long edges were last changed by the same cut, from two sketches, so
-        the merged full round (r 6) is named by the solid's edge order. The step takes its owner's
-        kept shape and runs no naming of its own: the owner says it."""
+        the merged full round (r 6) is named by the solid's edge order, and the owner says so (a
+        step that takes its owner's kept shape runs no naming of its own; here the exact
+        construction builds it, nothing is kept, and the step warns too)."""
         b = self.body("B")
         pad(b, "BRib", sketch(b, "BRibSk", xyPlane(b), (20, 10, 30, 12)), 10)
         cut = b.newObject("PartDesign::SubtractiveBox", "BCut")

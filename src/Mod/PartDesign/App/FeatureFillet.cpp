@@ -465,8 +465,14 @@ App::DocumentObjectExecReturn* Fillet::build()
                     dressUpReappliedNote(note);
                 }
                 else if (auto doc = getDocument()) {
-                    const char* previous = doc->getWarningDescription(this);
-                    doc->setWarning(this, previous && *previous ? std::string(previous) + "\n" + note : note);
+                    // Once, whatever the number of instances and the pattern's recomputes (review
+                    // pr503-r2 L2)
+                    const std::string previous = doc->getWarningDescription(this)
+                        ? doc->getWarningDescription(this)
+                        : "";
+                    if (previous.find(note) == std::string::npos) {
+                        doc->setWarning(this, previous.empty() ? note : previous + "\n" + note);
+                    }
                 }
             }
             dressUpReappliedFrom(
