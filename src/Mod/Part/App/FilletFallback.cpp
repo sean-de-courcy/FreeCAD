@@ -1063,7 +1063,8 @@ enum class VertexClass
     /// lies opposite the material. Nothing of either end face may be left. Also a chamfer's
     /// concave edges at a vertex convex in the material (ops#640, #15): the tools are fused, and
     /// the wedge of air between their end planes takes the miter piece (miterTool), as Onshape's
-    /// sharp miter
+    /// sharp miter; and a fillet's concave line and arc there, the line normal to the arc
+    /// (mitreCornerRefusal(), ops#941): the piece is the rounds' mitre, as Onshape's (oracle941)
     Corner2Union,
     /// Two convex edges at a vertex reflex in the plane face they share, where an edge is a
     /// circle (FSLC #50; fillet-tight-arc 8): Onshape's mitre, the higher round kept where both
@@ -1383,8 +1384,13 @@ struct Tool
     /// merge into them. Its volume is then measured, after the revolution's closed form is checked
     std::vector<TopoDS_Face> overflowFaces;
     /// The miter piece at a concave corner with a circle: its faces merge into the tools' faces
-    /// they continue (one cone, one plane, as Onshape's sharp miter)
+    /// they continue (one cone, one plane, as Onshape's sharp miter; a fillet's: one cylinder,
+    /// one torus, ops#941). Its volume is measured
     bool miter = false;
+    /// A fillet's mitre piece (ops#941): the plane face its two edges share. Each round's contact
+    /// edge on that face is split where the tool's end plane meets it; OCCT's mitre has one edge
+    /// there, so the new edges on it are merged too (constructShape(), the merging of the result)
+    TopoDS_Face mitreFace;
     /// A round rolled on over a tangent edge onto the next face (rollOn): a concave edge's fills
     /// air only, a convex edge's removes material only, as its construction assumes
     bool rolled = false;
@@ -2089,6 +2095,96 @@ bool equalDistances(const Request& request)
                 <= linearTolerance * std::max(1.0, request.size1));
 }
 
+/// How far a line may be off the normal of the arc at a mitre corner (mitreCornerRefusal()), in
+/// radians: a line 1e-8 off radial must not fall back to OCCT's in-band result
+constexpr double mitreSquareness = 1e-6;
+
+const char* const mitreLoopRefusal
+    = "the mitre corners' scope takes only closed loops of a line's and an arc's concave rounds";
+
+const char* const mitreFootRefusal
+    = "the mitre's foot lies past the end of a round at a concave corner with a circle";
+
+/// How far past the arc's end the mitre's foot lies, as an angle about the arc's axis: the foot is
+/// on the plate at R + r (outer arc) or R - r (inner arc), r from the line's wall (section 2)
+double mitreFootAngle(double R, double r, bool inner)
+{
+    return std::asin(r / (inner ? R - r : R + r));
+}
+
+/// How far past the corner, along the line, the mitre's foot lies (section 2)
+double mitreLineReach(double R, double r, bool inner)
+{
+    return inner ? R - std::sqrt((R - r) * (R - r) - r * r) : std::sqrt((R + r) * (R + r) - r * r) - R;
+}
+
+/** A fillet's corner where a line's round and an arc's round meet in a mitre (ops#941,
+ * notes/fillet-corner-mitre-941.md sections 2 and 3): concave edges, a line and a circle, on a
+ * plane face both walls are square to, at a vertex convex in the material, the line normal to the
+ * arc at the vertex, R > 2 r on an inner arc (the material outside the arc), and the mitre's foot
+ * inside both sweeps of the piece (miterTool(): it turns the arc's tool by at least
+ * min((1 + 2 r) / R, 0.45 span) and runs the line's on by at least 1 + 2 r). Empty where it is
+ * one, else the refusal. Onshape's corner there is that mitre, the fill behind an inner arc's wall
+ * included (oracle941, notes/onshape-facts.md MC1)
+ */
+std::string mitreCornerRefusal(
+    const Context& ctx,
+    const EdgeData& a,
+    const EdgeData& b,
+    const TopoDS_Vertex& vertex,
+    const TopoDS_Face& shared
+)
+{
+    const std::string plain = "a concave fillet at a corner with a circle";
+    if (ctx.request.kind != Kind::Fillet || a.convex || b.convex || a.line == b.line || a.ruled
+        || b.ruled || shared.IsNull()) {
+        return plain;
+    }
+    const EdgeData& line = a.line ? a : b;
+    const EdgeData& arc = a.line ? b : a;
+    if (arc.closed) {
+        return plain;
+    }
+    double linePar = 0.0;
+    double arcPar = 0.0;
+    const gp_Dir lineAway = awayFrom(line.edge, vertex, &linePar);
+    const gp_Dir arcAway = awayFrom(arc.edge, vertex, &arcPar);
+    if (std::abs(dihedralAt(line, linePar) - pi / 2) > angularTolerance
+        || std::abs(dihedralAt(arc, arcPar) - pi / 2) > angularTolerance) {
+        return plain;
+    }
+    // Convex in the material: each edge leaves the vertex away from the face's side of the other
+    if (-inwardIn(shared, line.edge, linePar).Dot(arcAway) < angularTolerance
+        || -inwardIn(shared, arc.edge, arcPar).Dot(lineAway) < angularTolerance) {
+        return plain;
+    }
+    if (std::abs(lineAway.Dot(arcAway)) > mitreSquareness) {
+        return plain;
+    }
+    // The arc's wall: a cylinder about the arc's axis, the material inside it (an outer arc) or
+    // outside it (an inner arc)
+    const TopoDS_Face& wall = arc.faces[0].IsSame(shared) ? arc.faces[1] : arc.faces[0];
+    if (wall.IsNull() || BRepAdaptor_Surface(wall, Standard_False).GetType() != GeomAbs_Cylinder) {
+        return plain;
+    }
+    const gp_Pnt at = BRep_Tool::Pnt(vertex);
+    const gp_Dir axis = arc.circle.Axis().Direction();
+    gp_Vec radial(arc.circle.Location(), at);
+    radial -= gp_Vec(axis) * radial.Dot(gp_Vec(axis));
+    const bool inner = gp_Vec(outwardNormal(wall, at)).Dot(radial) < 0;
+    const double R = arc.circle.Radius();
+    const double r = ctx.request.size1;
+    if (r <= 0 || (inner && R <= 2 * r)) {
+        return plain;
+    }
+    if (arc.last - arc.first < mitreFootAngle(R, r, inner) / (0.9 * 0.45)
+        || mitreFootAngle(R, r, inner) > 0.9 * (1.0 + 2 * r) / R
+        || mitreLineReach(R, r, inner) > 0.9 * (1.0 + 2 * r)) {
+        return mitreFootRefusal;
+    }
+    return {};
+}
+
 /// A two-edge corner where an edge is a circle (VertexClass::Corner2Union), or the reason why not
 VertexEnd classifyUnionCorner(
     const Context& ctx,
@@ -2115,7 +2211,8 @@ VertexEnd classifyUnionCorner(
         return end;
     }
     // Concave edges (ops#640, #15): a chamfer's, at a corner convex in the material (oracle 9d's
-    // keyhole groove: a sharp miter); Onshape's concave fillets there are not known yet
+    // keyhole groove: a sharp miter); a fillet's where a line meets an arc square to it (ops#941,
+    // oracle941: the rounds' mitre)
     const bool concave = !data.convex;
     if (ctx.request.kind == Kind::Chamfer && !equalDistances(ctx.request)) {
         end.reason = "a two-distance or distance-angle chamfer at a corner";
@@ -2158,10 +2255,15 @@ VertexEnd classifyUnionCorner(
         end.trims = {{BRepAdaptor_Curve(data.edge).Value(here), away.Reversed()}};
         return end;
     }
-    // Onshape's concave fillets at a corner convex in the material are not known yet
+    // A concave fillet at a corner convex in the material: Onshape's rounds meet in a mitre
+    // (oracle941) where a line meets an arc square to it (mitreCornerRefusal()); the piece is
+    // the chamfer's (miterTool), with the fill behind an inner arc's wall
     if (concave && ctx.request.kind != Kind::Chamfer) {
-        end.reason = "a concave fillet at a corner with a circle";
-        return end;
+        std::string refusal = mitreCornerRefusal(ctx, data, *other, vertex, shared);
+        if (!refusal.empty()) {
+            end.reason = std::move(refusal);
+            return end;
+        }
     }
     // Convex edges at a vertex reflex in the shared face: each edge leaves the vertex away from
     // the face's side of the other (FSLC #50): Onshape's mitre (Corner2Reflex)
@@ -6634,7 +6736,8 @@ void noteFusedRun(
     }
 }
 
-/** The miter piece at a chamfer's concave corner with a circle (ops#640, #15): the two tools end
+/** The miter piece at a concave corner with a circle, a chamfer's (ops#640, #15) or a fillet's
+ * where a line meets an arc square to it (ops#941; for a fillet, see the comments inside): the two tools end
  * on the planes through the vertex normal to their edges, and leave a wedge of air between those
  * planes, where Onshape's chamfers meet in a sharp miter (oracle 9d: no patch, at and past the
  * limit). The piece is the common part of the two tools run on past the vertex: each tool's end
@@ -6643,11 +6746,17 @@ void noteFusedRun(
  * Swept twice as far, the piece must not change: the miter ends inside the sweeps
  */
 Tool miterTool(
+    const Context& ctx,
     const std::vector<Tool>& tools,
     const std::vector<EdgeData>& data,
     const TopoDS_Vertex& vertex
 )
 {
+    // A fillet's mitre (ops#941): the rounds' fills run on and meet where the cylinder and the
+    // torus cross. At an inner arc the line's fill behind the arc's wall is not cut by the arc's
+    // round, which has no height there: the arc's side is extended by the ring behind its wall
+    const bool fillet = ctx.request.kind == Kind::Fillet;
+    const double r = ctx.request.size1;
     struct Side
     {
         const EdgeData* data = nullptr;
@@ -6696,11 +6805,44 @@ Tool miterTool(
     if (sides.size() != 2) {
         refuse("a concave corner with a circle without two selected edges");
     }
+    TopoDS_Face shared;
+    for (const auto& mine : sides[0].data->faces) {
+        for (const auto& theirs : sides[1].data->faces) {
+            if (mine.IsSame(theirs)) {
+                shared = mine;
+            }
+        }
+    }
+    if (shared.IsNull()) {
+        refuse("a concave corner with a circle whose edges share no face");
+    }
+    // The arc's radius and side, for a fillet's mitre (mitreCornerRefusal() holds there)
+    double arcRadius = 0.0;
+    bool innerArc = false;
+    for (const auto& side : sides) {
+        if (!fillet || side.data->line) {
+            continue;
+        }
+        arcRadius = side.data->circle.Radius();
+        const TopoDS_Face& wall
+            = side.data->faces[0].IsSame(shared) ? side.data->faces[1] : side.data->faces[0];
+        gp_Vec radial(side.data->circle.Location(), side.plane.point);
+        const gp_Vec along(side.data->circle.Axis().Direction());
+        radial -= along * radial.Dot(along);
+        innerArc = gp_Vec(outwardNormal(wall, side.plane.point)).Dot(radial) < 0;
+    }
+    if (fillet && arcRadius <= 0) {
+        refuse("a fillet's mitre without an arc");
+    }
+    double behindFactor = 0.05;
     auto sweep = [&](const Side& side, double length) {
         const gp_Dir& beyond = side.plane.normal;
         TopoDS_Shape solid;
         if (side.data->line) {
             solid = BRepPrimAPI_MakePrism(side.end, gp_Vec(beyond) * length, Standard_True).Shape();
+            if (fillet && mitreLineReach(arcRadius, r, innerArc) > 0.9 * length) {
+                refuse(mitreFootRefusal);
+            }
         }
         else {
             // The tool itself turned on about its axis, beyond its end plane: its faces keep the
@@ -6715,10 +6857,65 @@ Tool miterTool(
             double angle = std::min(length / side.data->circle.Radius(), 0.45 * span);
             gp_Trsf turn;
             turn.SetRotation(axis, angle);
+            // A fillet's sweep starts a little behind the arc's end plane (behindFactor): that
+            // plane is the line's wall, and the line's sweep's face on it would coincide with the
+            // sweep's own end face, where OCCT's common part comes out empty at some radii (1 in 3
+            // on the lobe model) and the fuse with the base fails at others. The line's sweep stops
+            // at its wall, so the piece is the same. Where it still comes out empty, once more
+            // with the planes coinciding
+            TrimPlane start = side.plane;
+            double behind = 0.0;
+            if (fillet) {
+                behind = behindFactor * angle;
+                gp_Trsf back;
+                back.SetRotation(axis, -behind);
+                start = {side.plane.point.Transformed(back), side.plane.normal.Transformed(back)};
+            }
             solid = commonOf(
                 side.tool->solid.Moved(TopLoc_Location(turn)),
-                halfSpaceBeyond(side.plane, 4 * length)
+                halfSpaceBeyond(start, 4 * length)
             );
+            if (fillet) {
+                const double R = side.data->circle.Radius();
+                // The foot inside the sweep: the twice-as-far check below is vacuous where both
+                // sweeps reach the 0.45 span cap (section 3, "The sweep check")
+                if (mitreFootAngle(R, r, innerArc) > 0.9 * angle) {
+                    refuse(mitreFootRefusal);
+                }
+                if (innerArc) {
+                    // The ring behind the arc's wall, R to R + r and r high, over the same turn
+                    gp_Vec out(side.data->circle.Location(), side.plane.point);
+                    const gp_Vec along(side.data->circle.Axis().Direction());
+                    out -= along * out.Dot(along);
+                    out.Normalize();
+                    const gp_Vec up(outwardNormal(shared, side.plane.point));
+                    const gp_Pnt p0 = side.plane.point;
+                    const gp_Pnt p1 = p0.Translated(out * r);
+                    const gp_Pnt p2 = p1.Translated(up * r);
+                    const gp_Pnt p3 = p0.Translated(up * r);
+                    BRepBuilderAPI_MakePolygon square(p0, p1, p2, p3, Standard_True);
+                    gp_Trsf back;
+                    back.SetRotation(axis, -behind);
+                    TopoDS_Face face = TopoDS::Face(
+                        BRepBuilderAPI_MakeFace(square.Wire(), Standard_True).Face().Moved(TopLoc_Location(back))
+                    );
+                    TopoDS_Shape ring
+                        = BRepPrimAPI_MakeRevol(face, axis, angle + behind, Standard_True).Shape();
+                    if (volumeOf(ring) < 0) {
+                        ring.Reverse();
+                    }
+                    BRepAlgoAPI_Fuse fuse(solid, ring);
+                    if (!fuse.IsDone() || fuse.HasErrors()) {
+                        refuse("fusing the ring behind an arc's wall to its mitre's sweep failed");
+                    }
+                    ShapeUpgrade_UnifySameDomain unify(fuse.Shape(), false, true, false);
+                    unify.Build();
+                    solid = unify.Shape();
+                    if (countSolids(solid) != 1) {
+                        refuse("the ring behind an arc's wall and its mitre's sweep are not one solid");
+                    }
+                }
+            }
         }
         if (volumeOf(solid) < 0) {
             solid.Reverse();
@@ -6734,12 +6931,35 @@ Tool miterTool(
     tool.source = vertex;
     tool.miter = true;
     tool.volume = volumeOf(tool.solid);
+    if (fillet && tool.volume <= linearTolerance * reach * reach) {
+        behindFactor = 0.0;
+        tool.solid = pieceOf(reach);
+        tool.volume = volumeOf(tool.solid);
+    }
     if (tool.volume <= linearTolerance * reach * reach) {
         refuse("no miter at a concave corner with a circle");
     }
-    double further = volumeOf(pieceOf(2 * reach));
-    if (std::abs(further - tool.volume) > volumeTolerance * tool.volume) {
-        refuse("the miter at a concave corner with a circle runs past its sweeps");
+    if (!fillet) {
+        double further = volumeOf(pieceOf(2 * reach));
+        if (std::abs(further - tool.volume) > volumeTolerance * tool.volume) {
+            refuse("the miter at a concave corner with a circle runs past its sweeps");
+        }
+        return tool;
+    }
+    // The footprint (section 3): the piece's bottom lies wholly within the plane face the two edges
+    // share. No strips are checked for it, so a hole or an edge of that face under the piece would
+    // be bridged, and its volume is measured
+    tool.mitreFace = shared;
+    const TrimPlane sharedPlane {BRep_Tool::Pnt(vertex), outwardNormal(shared, BRep_Tool::Pnt(vertex))};
+    for (TopExp_Explorer it(tool.solid, TopAbs_FACE); it.More(); it.Next()) {
+        if (!inPlane(it.Current(), sharedPlane)) {
+            continue;
+        }
+        const double area = areaOf(it.Current());
+        const double within = areaOf(commonOf(it.Current(), shared));
+        if (std::abs(area - within) > volumeTolerance * std::max(area, 1.0)) {
+            refuse("the mitre at a concave corner with a circle runs off its face");
+        }
     }
     return tool;
 }
@@ -9288,6 +9508,22 @@ TopoDS_Shape constructShape(
     for (int i = 1; i <= ctx.selected.Extent(); ++i) {
         data.push_back(analyse(ctx, TopoDS::Edge(ctx.selected(i))));
     }
+    // The mitre corners' scope (Request::mitreOnly): before any Boolean, every selected edge ends
+    // at two mitre corners (closed loops of them), else OCCT's result stands
+    if (request.mitreOnly) {
+        for (const auto& edgeData : data) {
+            if (edgeData.closed || edgeData.convex) {
+                refuse(mitreLoopRefusal);
+            }
+            TopoDS_Vertex vertices[2];
+            TopExp::Vertices(edgeData.edge, vertices[0], vertices[1]);
+            for (const auto& vertex : vertices) {
+                if (classify(ctx, data, edgeData, vertex).kind != VertexClass::Corner2Union) {
+                    refuse(mitreLoopRefusal);
+                }
+            }
+        }
+    }
 
     std::vector<Tool> tools;
     ReflexCorners reflex;
@@ -9558,7 +9794,7 @@ TopoDS_Shape constructShape(
         admit(cornerTool(ctx, *corner, convex));
     }
     for (const auto& vertex : miterCorners) {
-        admit(miterTool(tools, data, vertex));
+        admit(miterTool(ctx, tools, data, vertex));
     }
     // A tight wall arc's wedge is its own tool's: the others are trimmed by it (Tool::wedge)
     for (const auto& tight : tools) {
@@ -9649,7 +9885,7 @@ TopoDS_Shape constructShape(
     std::vector<FusedRun> fusedRuns;
     // Rounds between two cylinders are built wherever they fit, not only at the limit: OCCT's own
     // are B-spline faces there (preferConstruction())
-    const bool limitOnly = request.limitOnly
+    const bool limitOnly = request.limitOnly && !request.mitreOnly
         && !(!data.empty() && std::all_of(data.begin(), data.end(), betweenCylinders));
     std::vector<SurfaceWall> surfaceWalls;
     std::vector<std::pair<TopoDS_Shape, TopoDS_Shape>> overlapPairs;
@@ -10873,6 +11109,51 @@ TopoDS_Shape constructShape(
                 stages.emplace_back(unify.History(), shape);
             }
         }
+        // A fillet's mitre (ops#941): the rounds' contact edges on the plane face, split at the
+        // tools' end planes, become one edge each, as OCCT's good result has them (collinear
+        // lines, arcs of one circle). Only new edges on that face; the base's vertices are kept
+        std::vector<TrimPlane> mitrePlanes;
+        for (const auto& tool : tools) {
+            if (tool.miter && !tool.mitreFace.IsNull()) {
+                const gp_Pnt at = BRep_Tool::Pnt(TopoDS::Vertex(tool.source));
+                mitrePlanes.push_back({at, outwardNormal(tool.mitreFace, at)});
+            }
+        }
+        if (!mitrePlanes.empty()) {
+            collectBaseImages();
+            TopTools_IndexedMapOfShape onPlane;
+            for (TopExp_Explorer it(shape, TopAbs_FACE); it.More(); it.Next()) {
+                for (const auto& plane : mitrePlanes) {
+                    if (inPlane(it.Current(), plane)) {
+                        for (TopExp_Explorer edge(it.Current(), TopAbs_EDGE); edge.More(); edge.Next()) {
+                            if (!baseImages.Contains(edge.Current())) {
+                                onPlane.Add(edge.Current());
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+            if (!onPlane.IsEmpty()) {
+                NCollection_Map<TopoDS_Shape, TopTools_ShapeMapHasher> keep;
+                for (auto type : {TopAbs_EDGE, TopAbs_VERTEX}) {
+                    TopTools_IndexedMapOfShape all;
+                    TopExp::MapShapes(shape, type, all);
+                    for (int i = 1; i <= all.Extent(); ++i) {
+                        if (type == TopAbs_EDGE ? !onPlane.Contains(all(i)) : baseImages.Contains(all(i))) {
+                            keep.Add(all(i));
+                        }
+                    }
+                }
+                ShapeUpgrade_UnifySameDomain unify(shape, true, false, false);
+                unify.KeepShapes(keep);
+                unify.Build();
+                if (BRepCheck_Analyzer(unify.Shape()).IsValid()) {
+                    shape = unify.Shape();
+                    stages.emplace_back(unify.History(), shape);
+                }
+            }
+        }
     }
 
     // Two of the dress-up's own faces on one cylinder or one torus, met along the crest, are one
@@ -11104,6 +11385,22 @@ TopoDS_Shape constructShape(
                 }
             }
         }
+        // A fillet's mitre piece (ops#941): its faces merge into the rounds' faces, which OCCT's
+        // good result names from their edges alone; where a piece's face became an edge tool's
+        // face, the vertex is not named a generator of it, so that the names equal OCCT's
+        TopTools_IndexedMapOfShape edgeToolFaces;
+        for (size_t i = 0; i < tools.size(); ++i) {
+            if (tools[i].miter || toolStage[i] > through.size()) {
+                continue;
+            }
+            for (TopExp_Explorer it(tools[i].solid, TopAbs_FACE); it.More(); it.Next()) {
+                for (const auto& image : imagesThrough(through, toolStage[i], it.Current())) {
+                    if (image.ShapeType() == TopAbs_FACE) {
+                        edgeToolFaces.Add(image);
+                    }
+                }
+            }
+        }
         for (size_t i = 0; i < tools.size(); ++i) {
             if (toolStage[i] > through.size()) {
                 continue;
@@ -11111,6 +11408,10 @@ TopoDS_Shape constructShape(
             for (TopExp_Explorer it(tools[i].solid, TopAbs_FACE); it.More(); it.Next()) {
                 for (const auto& image : imagesThrough(through, toolStage[i], it.Current())) {
                     if (image.ShapeType() == TopAbs_FACE && !images.Contains(image)) {
+                        if (tools[i].miter && !tools[i].mitreFace.IsNull()
+                            && edgeToolFaces.Contains(image)) {
+                            continue;
+                        }
                         into.insert(MappingStatus::Generated, tools[i].source, image);
                         for (const auto& also : tools[i].alsoFrom) {
                             into.insert(MappingStatus::Generated, also, image);
@@ -11788,6 +12089,154 @@ bool reflexCircleCorner(
     catch (const Standard_Failure&) {
     }
     return false;
+}
+
+bool mitreCircleCorner(
+    const TopoDS_Shape& baseShape,
+    const std::vector<TopoDS_Shape>& edges,
+    const Request& request,
+    std::vector<gp_Pnt>* corners
+)
+{
+    if (request.kind != Kind::Fillet || request.size1 <= 0
+        || std::abs(request.size1 - request.size2) > linearTolerance * std::max(1.0, request.size1)) {
+        return false;
+    }
+    bool found = false;
+    try {
+        const TopoShape base(baseShape);
+        Context ctx(base, request);
+        TopTools_IndexedMapOfShape selected;
+        for (const auto& edge : edges) {
+            if (!edge.IsNull() && edge.ShapeType() == TopAbs_EDGE) {
+                selected.Add(edge);
+            }
+        }
+        for (int i = 1; i <= ctx.vertexEdges.Extent(); ++i) {
+            const TopoDS_Vertex& vertex = TopoDS::Vertex(ctx.vertexEdges.FindKey(i));
+            const auto& around = ctx.vertexEdges(i);
+            if (around.Extent() != 3) {
+                continue;
+            }
+            std::vector<TopoDS_Edge> picked;
+            for (const auto& edge : around) {
+                if (selected.Contains(edge)) {
+                    picked.push_back(TopoDS::Edge(edge));
+                }
+            }
+            if (picked.size() != 2) {
+                continue;
+            }
+            try {
+                const EdgeData a = analyse(ctx, picked[0]);
+                const EdgeData b = analyse(ctx, picked[1]);
+                TopoDS_Face shared;
+                for (const auto& mine : a.faces) {
+                    for (const auto& theirs : b.faces) {
+                        if (mine.IsSame(theirs)) {
+                            shared = mine;
+                        }
+                    }
+                }
+                if (shared.IsNull()
+                    || BRepAdaptor_Surface(shared, Standard_False).GetType() != GeomAbs_Plane) {
+                    continue;
+                }
+                if (mitreCornerRefusal(ctx, a, b, vertex, shared).empty()) {
+                    found = true;
+                    if (corners) {
+                        corners->push_back(BRep_Tool::Pnt(vertex));
+                    }
+                }
+            }
+            catch (const Refusal&) {
+            }
+        }
+    }
+    catch (const Refusal&) {
+    }
+    catch (const Standard_Failure&) {
+    }
+    return found;
+}
+
+double mitreThreshold(double radius)
+{
+    // Five times the construction's own worst, 7.5e-7 r, over the lobe model at 1x, 10x, 100x and
+    // spans 20, 60, 120 deg; never under 1e-5 (ops#941 section 4, as measured: OCCT's error is a
+    // continuum there, 2e-5 R even at its best at 10x and 100x, so the threshold follows what the
+    // construction delivers, not a population of good OCCT mitres)
+    return std::max(1e-5, 4e-6 * radius);
+}
+
+double mitreOff(
+    const TopoDS_Shape& result,
+    const TopoDS_Shape& base,
+    const std::vector<gp_Pnt>& corners,
+    double radius
+)
+{
+    TopTools_IndexedMapOfShape baseEdges;
+    TopExp::MapShapes(base, TopAbs_EDGE, baseEdges);
+    TopTools_IndexedDataMapOfShapeListOfShape edgeFaces;
+    TopExp::MapShapesAndUniqueAncestors(result, TopAbs_EDGE, TopAbs_FACE, edgeFaces);
+    // The distance of a point from a face's cylinder or torus, in closed form
+    auto offSurface = [](const BRepAdaptor_Surface& surface, const gp_Pnt& p) {
+        if (surface.GetType() == GeomAbs_Cylinder) {
+            const gp_Cylinder c = surface.Cylinder();
+            return std::abs(gp_Lin(c.Axis()).Distance(p) - c.Radius());
+        }
+        const gp_Torus t = surface.Torus();
+        const gp_Ax1 axis = t.Axis();
+        gp_Vec v(axis.Location(), p);
+        const double h = v.Dot(gp_Vec(axis.Direction()));
+        const double rho = gp_Lin(axis).Distance(p);
+        return std::abs(std::hypot(rho - t.MajorRadius(), h) - t.MinorRadius());
+    };
+    double worst = 0.0;
+    for (const auto& corner : corners) {
+        bool seen = false;
+        for (int i = 1; i <= edgeFaces.Extent(); ++i) {
+            const TopoDS_Edge& edge = TopoDS::Edge(edgeFaces.FindKey(i));
+            if (baseEdges.Contains(edge) || BRep_Tool::Degenerated(edge) || edgeFaces(i).Extent() != 2) {
+                continue;
+            }
+            BRepAdaptor_Surface s0(TopoDS::Face(edgeFaces(i).First()), Standard_False);
+            BRepAdaptor_Surface s1(TopoDS::Face(edgeFaces(i).Last()), Standard_False);
+            const bool pair = (s0.GetType() == GeomAbs_Cylinder && s1.GetType() == GeomAbs_Torus)
+                || (s0.GetType() == GeomAbs_Torus && s1.GetType() == GeomAbs_Cylinder);
+            if (!pair) {
+                continue;
+            }
+            TopoDS_Vertex v0;
+            TopoDS_Vertex v1;
+            TopExp::Vertices(edge, v0, v1);
+            if (v0.IsNull() || v1.IsNull()
+                || std::min(BRep_Tool::Pnt(v0).Distance(corner), BRep_Tool::Pnt(v1).Distance(corner))
+                    > 2 * radius) {
+                continue;
+            }
+            seen = true;
+            BRepAdaptor_Curve curve(edge);
+            const double f = curve.FirstParameter();
+            const double l = curve.LastParameter();
+            for (int k = 0; k < 8; ++k) {
+                const gp_Pnt p = curve.Value(f + (l - f) * (k + 0.5) / 8.0);
+                worst = std::max({worst, offSurface(s0, p), offSurface(s1, p)});
+            }
+            for (double u : {f, l}) {
+                const gp_Pnt p = curve.Value(u);
+                worst = std::max(
+                    worst,
+                    std::min(p.Distance(BRep_Tool::Pnt(v0)), p.Distance(BRep_Tool::Pnt(v1)))
+                );
+            }
+        }
+        if (!seen) {
+            return -1.0;
+        }
+    }
+    return worst;
 }
 
 TopTools_DataMapOfShapeReal faceTolerances(const TopoDS_Shape& shape)
@@ -15887,7 +16336,47 @@ bool constructSolid(
     out.newRule = false;
     out.merged = MergedNames();
     // Whole rim loops on plane faces are built directly, without a Boolean; whatever that
-    // refuses, or fails a check of its result, goes to the construction by Booleans below
+    // refuses, or fails a check of its result, goes to the construction by Booleans below. The
+    // mitre corners' scope (Request::mitreOnly) asks the construction by Booleans alone
+    if (request.mitreOnly) {
+        try {
+            auto mapper = std::make_shared<ShapeMapper>();
+            int corners = 0;
+            bool rolledOn = false;
+            TopoDS_Shape shape = constructShape(base, edges, request, *mapper, corners, rolledOn);
+            TopTools_IndexedMapOfShape selected;
+            for (const auto& edge : edges) {
+                selected.Add(edge);
+            }
+            out.shape = shape;
+            out.mapper = mapper;
+            out.edges = selected.Extent();
+            out.corners = corners;
+            out.rolledOn = rolledOn;
+            return true;
+        }
+        catch (const Refusal& refusal) {
+            if (reason) {
+                *reason = refusal.reason;
+            }
+        }
+        catch (const Standard_Failure& e) {
+            if (reason) {
+                *reason = std::string("OCCT: ") + e.GetMessageString();
+            }
+        }
+        catch (const Base::Exception& e) {
+            if (reason) {
+                *reason = e.what();
+            }
+        }
+        catch (const std::exception& e) {
+            if (reason) {
+                *reason = e.what();
+            }
+        }
+        return false;
+    }
     try {
         auto mapper = std::make_shared<ShapeMapper>();
         int corners = 0;

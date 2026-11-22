@@ -4440,3 +4440,152 @@ TEST_F(FilletFallbackTest, aChamferPastBothFacesKeepsItsFarSideOnThePlate)
 }
 
 // NOLINTEND(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)
+
+// ops#941: a fillet's mitre corner, a line's and an arc's concave rounds meeting past a corner
+// (notes/fillet-corner-mitre-941.md). The model: a plate under z 0 with one ring-sector lobe on it,
+// between radii r1 and r2, from angle a0 to a1 (degrees), 2 high; the line at a0 may lean by lean
+// radians (its outer end turned about the axis)
+namespace
+{
+
+TopoDS_Shape lobeOnPlate(double r1, double r2, double a0, double a1, double lean = 0.0, double hole = 0.0)
+{
+    auto polar = [](double r, double a) {
+        return gp_Pnt(r * std::cos(a), r * std::sin(a), 0);
+    };
+    const double b0 = a0 * pi / 180;
+    const double b1 = a1 * pi / 180;
+    const double bm = (b0 + b1) / 2;
+    BRepBuilderAPI_MakeWire wire;
+    wire.Add(BRepBuilderAPI_MakeEdge(GC_MakeArcOfCircle(polar(r1, b0), polar(r1, bm), polar(r1, b1)).Value()).Edge());
+    wire.Add(BRepBuilderAPI_MakeEdge(polar(r1, b1), polar(r2, b1)).Edge());
+    wire.Add(BRepBuilderAPI_MakeEdge(GC_MakeArcOfCircle(polar(r2, b1), polar(r2, bm), polar(r2, b0 + lean)).Value())
+                 .Edge());
+    wire.Add(BRepBuilderAPI_MakeEdge(polar(r2, b0 + lean), polar(r1, b0)).Edge());
+    TopoDS_Shape lobe
+        = BRepPrimAPI_MakePrism(BRepBuilderAPI_MakeFace(wire.Wire()).Face(), gp_Vec(0, 0, 2)).Shape();
+    TopoDS_Shape plate = box(20, 20, 2, gp_Pnt(-10, -10, -2));
+    if (hole > 0) {
+        // A small hole through the plate past the outer arc's end at a0, under the mitre's piece
+        const gp_Pnt at = polar(r2 + 0.5 * hole, b0 - 0.6 * hole / r2);
+        plate = BRepAlgoAPI_Cut(
+                    plate,
+                    BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(at.X(), at.Y(), -3), gp::DZ()), 0.05, 4).Shape()
+        )
+                    .Shape();
+    }
+    ShapeUpgrade_UnifySameDomain unify(BRepAlgoAPI_Fuse(plate, lobe).Shape());
+    unify.Build();
+    return unify.Shape();
+}
+
+/// The lobe's foot edges: on the plate (z 0), between the radii
+std::vector<TopoDS_Shape> lobeFeet(const TopoDS_Shape& shape, double r1, double r2)
+{
+    std::vector<TopoDS_Shape> feet;
+    TopTools_IndexedMapOfShape edges;
+    TopExp::MapShapes(shape, TopAbs_EDGE, edges);
+    for (int i = 1; i <= edges.Extent(); ++i) {
+        Bnd_Box box;
+        BRepBndLib::Add(edges(i), box);
+        double x0, y0, z0, x1, y1, z1;
+        box.Get(x0, y0, z0, x1, y1, z1);
+        TopoDS_Vertex v0, v1;
+        TopExp::Vertices(TopoDS::Edge(edges(i)), v0, v1);
+        auto rho = [](const TopoDS_Vertex& v) {
+            gp_Pnt p = BRep_Tool::Pnt(v);
+            return std::hypot(p.X(), p.Y());
+        };
+        if (std::abs(z0) < 1e-6 && std::abs(z1) < 1e-6 && rho(v0) > r1 - 1e-6 && rho(v0) < r2 + 1e-6
+            && rho(v1) > r1 - 1e-6 && rho(v1) < r2 + 1e-6) {
+            feet.push_back(edges(i));
+        }
+    }
+    return feet;
+}
+
+FF::Request mitreFillet(double r)
+{
+    FF::Request request;
+    request.kind = FF::Kind::Fillet;
+    request.size1 = r;
+    request.size2 = r;
+    return request;
+}
+
+std::size_t mitreCorners(const TopoDS_Shape& shape, double r1, double r2, double r)
+{
+    std::vector<gp_Pnt> corners;
+    FF::mitreCircleCorner(shape, lobeFeet(shape, r1, r2), mitreFillet(r), &corners);
+    return corners.size();
+}
+
+}  // namespace
+
+TEST_F(FilletFallbackTest, mitreCornersOfALobe)
+{
+    // A 60 degree lobe between radii 4 and 5: four mitre corners
+    EXPECT_EQ(mitreCorners(lobeOnPlate(4, 5, 15, 75), 4, 5, 0.588), 4u);
+    // A chamfer, or a variable radius, has none
+    FF::Request chamfer = mitreFillet(0.5);
+    chamfer.kind = FF::Kind::Chamfer;
+    TopoDS_Shape lobe = lobeOnPlate(4, 5, 15, 75);
+    EXPECT_FALSE(FF::mitreCircleCorner(lobe, lobeFeet(lobe, 4, 5), chamfer));
+}
+
+TEST_F(FilletFallbackTest, mitreCornersRefused)
+{
+    // The line at 15 degrees leaning by 1e-3 rad (not normal to the arcs): only the other line's two
+    EXPECT_EQ(mitreCorners(lobeOnPlate(4, 5, 15, 75, 1e-3), 4, 5, 0.588), 2u);
+    // ... and by 1e-8 rad: within the squareness, all four
+    EXPECT_EQ(mitreCorners(lobeOnPlate(4, 5, 15, 75, 1e-8), 4, 5, 0.588), 4u);
+    // A 10 degree lobe, r 0.3: the inner mitre's foot (4.65 deg) lies past the sweep's 0.9 x 0.45
+    // x 10 deg; the outer one's (3.24 deg) does not
+    EXPECT_EQ(mitreCorners(lobeOnPlate(4, 5, 15, 25), 4, 5, 0.3), 2u);
+    // An inner arc of radius 1 at r 0.55 (R <= 2 r): only the outer arc's corners
+    EXPECT_EQ(mitreCorners(lobeOnPlate(1, 3, 15, 75), 1, 3, 0.55), 2u);
+}
+
+TEST_F(FilletFallbackTest, mitreRefusesAPieceOffItsFace)
+{
+    // A hole through the plate under the outer corner's piece at 15 degrees: the mitre corners'
+    // scope refuses the piece's footprint; without the hole it builds
+    for (double hole : {0.0, 0.3}) {
+        TopoDS_Shape shape = lobeOnPlate(4, 5, 15, 75, 0.0, hole);
+        FF::Request request = mitreFillet(0.588);
+        request.mitreOnly = true;
+        FF::Construction out;
+        std::string reason;
+        const bool built = FF::construct(shape, lobeFeet(shape, 4, 5), request, out, &reason);
+        if (hole == 0.0) {
+            EXPECT_TRUE(built) << reason;
+        }
+        else {
+            EXPECT_FALSE(built);
+            EXPECT_NE(reason.find("runs off its face"), std::string::npos) << reason;
+        }
+    }
+}
+
+TEST_F(FilletFallbackTest, mitreScopeTakesOnlyWholeLoops)
+{
+    // The lobe's four feet and one plate edge: refused before any Boolean
+    TopoDS_Shape shape = lobeOnPlate(4, 5, 15, 75);
+    std::vector<TopoDS_Shape> edges = lobeFeet(shape, 4, 5);
+    TopTools_IndexedMapOfShape all;
+    TopExp::MapShapes(shape, TopAbs_EDGE, all);
+    for (int i = 1; i <= all.Extent(); ++i) {
+        Bnd_Box box;
+        BRepBndLib::Add(all(i), box);
+        if (box.CornerMax().Z() < -1.9) {
+            edges.push_back(all(i));
+            break;
+        }
+    }
+    FF::Request request = mitreFillet(0.5);
+    request.mitreOnly = true;
+    FF::Construction out;
+    std::string reason;
+    EXPECT_FALSE(FF::construct(shape, edges, request, out, &reason));
+    EXPECT_NE(reason.find("closed loops"), std::string::npos) << reason;
+}

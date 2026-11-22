@@ -89,6 +89,11 @@ struct Request
     /// caller only where OCCT failed or left a face of zero width, so that nothing OCCT builds
     /// changes
     bool pastBothFaces = false;
+    /// The fillet's mitre corners only (ops#941, notes/fillet-corner-mitre-941.md section 4): no
+    /// rim route and no route under an overhang, the strips checked below the limit too, and a
+    /// refusal before any Boolean unless every selected edge ends at two corners of
+    /// mitreCircleCorner() (closed loops of that corner kind)
+    bool mitreOnly = false;
 };
 
 /// Each face's largest tolerance, with its edges and vertices: Request::faceTolerances
@@ -199,6 +204,40 @@ struct PartExport MergedNames
     std::vector<std::pair<TopoDS_Shape, std::vector<TopoDS_Shape>>> sources;
     std::vector<std::pair<TopoDS_Shape, std::vector<TopoDS_Shape>>> origins;
 };
+
+/** Whether the selection has a fillet's mitre corner (ops#941): a vertex of 3 edges, two of them
+ * selected, concave, a line and a circle on a plane face both walls are square to, convex in the
+ * material, the line normal to the arc within 1e-6 rad, R > 2 r on an inner arc, and the mitre's
+ * foot inside both sweeps of the construction's piece. OCCT builds the mitre there, but in narrow
+ * bands of radius inexactly or invalidly. corners, if not null, receives every such vertex's point.
+ * Reads only plain shapes, as construct().
+ */
+PartExport bool mitreCircleCorner(
+    const TopoDS_Shape& base,
+    const std::vector<TopoDS_Shape>& edges,
+    const Request& request,
+    std::vector<gp_Pnt>* corners = nullptr
+);
+
+/** How far OCCT's (or the construction's) mitres at the corners are off (ops#941 section 4): per
+ * corner, the result's edges not of the base that lie between a cylinder face and a torus face and
+ * end within 2 r of the corner; at 8 points of each, the distance to both surfaces in closed form,
+ * and at its ends the distance to its vertices. The largest of these; a negative value where a
+ * corner has no such edge (a patch, or the mitre missing).
+ */
+PartExport double mitreOff(
+    const TopoDS_Shape& result,
+    const TopoDS_Shape& base,
+    const std::vector<gp_Pnt>& corners,
+    double radius
+);
+
+/// The most mitre corners a valid fillet asks the construction for (ops#941 section 4): more are
+/// left to OCCT, so that the ask stays well within the feature's time
+constexpr std::size_t mitreCap = 64;
+
+/// How far OCCT's mitre may be off (mitreOff()) before the construction is asked, for a radius
+PartExport double mitreThreshold(double radius);
 
 /// What construct() makes: a shape and its history from the base, without names (kernel safety S1)
 struct PartExport Construction

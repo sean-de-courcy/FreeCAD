@@ -46,6 +46,7 @@ from parttests.FilletFallbackTest import (
     BridgedRecessTest,
     CornerBandRetryTest,  # ops#925
     ConeFootTest,
+    MitreCornerTest,  # ops#941
     CornerWithACircleTest,
     BlendEndTrimTest,
     CurvedEndTrimTest,

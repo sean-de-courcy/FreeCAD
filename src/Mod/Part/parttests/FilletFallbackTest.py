@@ -7090,3 +7090,138 @@ class ConeFootTest(unittest.TestCase):
         self.assertEqual(len(feet), 2)
         with self.assertRaises(Exception):
             body.makeFillet(self.r, feet)
+
+
+def mitre_fill_volume(r, R1=4.0, R2=5.0, span=60.0, lobes=4, steps=1200):
+    """The fill the 16 foot rounds add to lobed_plate(), by geometry (ops#941,
+    notes/fillet-corner-mitre-941.md sections 2 and 8): the lines' and arcs' fills in closed form, and
+    each corner's piece by the plan integral of its height. Behind an inner arc's wall the piece is
+    the line's round alone."""
+
+    def f(e):  # the round's height at the distance e from its wall
+        return r - math.sqrt(max(0.0, r * r - (r - e) ** 2))
+
+    section = r * r * (1 - math.pi / 4)
+    centroid = r * (10 - 3 * math.pi) / (12 - 3 * math.pi)
+    a = math.radians(span)
+    line = section * (R2 - R1)
+    outer = section * (R2 + centroid) * a
+    inner = section * (R1 - centroid) * a
+
+    def corner(R, inside):
+        total = 0.0
+        hy = r / steps
+        for i in range(steps):
+            y = (i + 0.5) * hy
+            x0, x1 = (math.sqrt(max(0.0, (R - r) ** 2 - y * y)), R) if inside else (R, math.sqrt((R + r) ** 2 - y * y))
+            hx = (x1 - x0) / steps
+            for j in range(steps):
+                rho = math.hypot(x0 + (j + 0.5) * hx, y)
+                if inside:
+                    h = f(y) if rho > R else (min(f(y), f(R - rho)) if rho >= R - r else 0.0)
+                else:
+                    h = min(f(y), f(rho - R)) if rho >= R else 0.0
+                total += h * hx * hy
+        return total
+
+    return lobes * (2 * line + outer + inner + 2 * corner(R2, False) + 2 * corner(R1, True))
+
+
+class MitreCornerTest(unittest.TestCase):
+    """A line's and an arc's concave rounds meeting in a mitre at the lobes' corners (ops#941): the
+    exact construction builds the mitre where OCCT's result is invalid or its mitre is off, in its
+    narrow bands of radius. Onshape's corner is that mitre, the fill behind an inner arc's wall
+    included (oracle941: +16 faces, +32 edges, +16 vertices; dV +3.703358 at r 0.588). Expected by
+    geometry: 16 new faces (8 cylinders, 8 tori), 16 mitre edges on both rounds, each foot on the
+    plate at radius 5 + r (4 - r) and asin(r / (5 + r)) (asin(r / (4 - r))) past its arc's end."""
+
+    setUp = InvalidDressUpTest.setUp
+    tearDown = InvalidDressUpTest.tearDown
+
+    def checkMitre(self, fillet, base, radius, onRounds):
+        shape = fillet.Shape
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+        self.assertTrue(shape.isValid())
+        self.assertEqual(
+            (len(shape.Faces) - len(base.Faces), len(shape.Edges) - len(base.Edges),
+             len(shape.Vertexes) - len(base.Vertexes)),
+            (16, 32, 16),
+        )
+        mitres = [e for e in shape.Edges if type(e.Curve).__name__ not in ("Line", "Circle")]
+        self.assertEqual(len(mitres), 16)
+        off = 0.0
+        feet = []
+        for e in mitres:
+            faces = shape.ancestorsOfType(e, Part.Face)
+            self.assertEqual(sorted(type(f.Surface).__name__ for f in faces), ["Cylinder", "Toroid"])
+            step = (e.LastParameter - e.FirstParameter) / 20
+            for k in range(21):
+                point = Part.Vertex(e.valueAt(e.FirstParameter + k * step))
+                off = max(off, max(point.distToShape(f)[0] for f in faces))
+            feet.append(min(e.Vertexes, key=lambda v: v.Z))
+        self.assertLess(off, onRounds, radius)
+        # each foot on the plate, at its arc's radius plus or minus r, past the arc's end by the angle
+        for foot in feet:
+            self.assertAlmostEqual(foot.Z, 0.0, delta=1e-6)
+            rho = math.hypot(foot.X, foot.Y)
+            outer = rho > 4.5
+            self.assertAlmostEqual(rho, 5 + radius if outer else 4 - radius, delta=1e-5)
+            angle = math.degrees(math.atan2(foot.Y, foot.X)) % 90.0
+            past = min(abs(angle - 15.0), abs(angle - 75.0))
+            expected = math.degrees(math.asin(radius / (5 + radius) if outer else radius / (4 - radius)))
+            self.assertAlmostEqual(past, expected, delta=1e-4)
+        self.assertAlmostEqual(shape.Volume - base.Volume, mitre_fill_volume(radius), delta=1e-4)
+
+    def testBandRadiiBuildTheExactMitre(self):
+        # 0.588, 0.586, 0.589, 0.419: inside OCCT's bands (invalid, cut short, or off its rounds);
+        # 0.55: a control, OCCT's result
+        for noise in (True, False):
+            base = lobed_plate(noise)
+            for radius in (0.588, 0.586, 0.589, 0.419, 0.55):
+                with self.subTest(radius=radius, noise=noise):
+                    fillet = filleted_in_a_body(self.doc, base, lobe_feet, radius)
+                    self.checkMitre(fillet, base, radius, MITRE_ON_ROUNDS)
+
+    def testRadiusEditKeepsTheNamesAndPicks(self):
+        # names and counts equal OCCT's good result (r 0.55) at a band's radius (the construction),
+        # and a later feature's picks of a round face and a mitre edge follow the edits
+        base = lobed_plate()
+        fillet = filleted_in_a_body(self.doc, base, lobe_feet, 0.55)
+        shape = fillet.Shape
+        face = next(i for i, f in enumerate(shape.Faces, 1) if type(f.Surface).__name__ == "Toroid")
+        edge = next(i for i, e in enumerate(shape.Edges, 1) if type(e.Curve).__name__ not in ("Line", "Circle"))
+        body = fillet.getParentGeoFeatureGroup()
+        binder = body.newObject("PartDesign::SubShapeBinder", "Picks")
+        binder.Support = [(fillet, ("Face%d" % face, "Edge%d" % edge))]
+        self.doc.recompute()
+        names = set(shape.ElementMap)
+        for radius in (0.588, 0.55):
+            with self.subTest(radius=radius):
+                fillet.Radius = radius
+                self.doc.recompute()
+                self.assertTrue(fillet.isValid(), fillet.getStatusString())
+                self.assertEqual(set(fillet.Shape.ElementMap), names)
+                self.assertTrue(binder.isValid(), binder.getStatusString())
+                picked = binder.Shape
+                self.assertEqual([type(f.Surface).__name__ for f in picked.Faces], ["Toroid"])
+                self.assertEqual(len(picked.Edges) - len(picked.Faces[0].Edges), 1)
+                self.assertAlmostEqual(picked.Faces[0].Surface.MinorRadius, radius, delta=1e-9)
+
+    def testMixedSelectionKeepsOcctsResult(self):
+        # the 16 edges and the plate's outer rim: not whole loops of mitre corners, so OCCT's result
+        # (or fix 1's retry) stands, with no error
+        def feetAndRim(shape):
+            rim = [e for e in shape.Edges if abs(e.BoundBox.ZMax) < 1e-9 and e.BoundBox.XMax > 8.9]
+            return lobe_feet(shape) + rim
+
+        base = lobed_plate()
+        for radius in (0.588, 0.55):
+            with self.subTest(radius=radius):
+                fillet = filleted_in_a_body(self.doc, base, feetAndRim, radius)
+                self.assertTrue(fillet.isValid(), fillet.getStatusString())
+                self.assertTrue(fillet.Shape.isValid())
+
+
+# How far the construction's mitre edges may lie off their rounds (ops#941): the Boolean's
+# intersection curve of the cylinder and the torus is an approximation (measured: work notes)
+MITRE_ON_ROUNDS = 1e-4
