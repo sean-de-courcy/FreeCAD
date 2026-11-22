@@ -285,6 +285,23 @@ class TestLoftOnshapeConditions(LoftCase):
         kinds = sorted(type(f.Surface).__name__ for f in loft.Shape.Faces)
         self.assertEqual(kinds, ["BSplineSurface"] * 4 + ["Plane"] * 2)
 
+    def testFlatSidesOfAnLDontCrossACap(self):
+        """Review pr963b-r1: the L x 0..20, y 0..20 (its notch x 10..20, y 10..20) lofted 10 up to
+        the narrower L x 5..20 (notch x 15..20, y 10..20). Its flat sides are planes now, and the
+        cap check samples only points on them (a plane's UV box is wider than the face): the loft
+        builds, as before, with the end condition 2686.7623 and with both 2750."""
+        bottom = models.polygon([(0, 0), (20, 0), (20, 10), (10, 10), (10, 20), (0, 20)])
+        top = models.polygon([(5, 0), (20, 0), (20, 10), (15, 10), (15, 20), (5, 20)])
+        loft = self.loft(bottom, top, height=10, EndCondition="Normal to profile")
+        for start, volume in (("None", 2686.7623), ("Normal to profile", 2750.0)):
+            with self.subTest(start=start):
+                loft.StartCondition = start
+                self.doc.recompute()
+                self.assertTrue(loft.isValid(), loft.getStatusString())
+                self.assertAlmostEqual(loft.Shape.Volume, volume, places=3)
+                kinds = sorted(type(f.Surface).__name__ for f in loft.Shape.Faces)
+                self.assertEqual(kinds, ["BSplineSurface"] * 2 + ["Plane"] * 6)
+
 
 
 def sides(shape):
