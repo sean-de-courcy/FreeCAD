@@ -12321,6 +12321,14 @@ MitreOff mitreOff(
                     std::min(p.Distance(BRep_Tool::Pnt(v0)), p.Distance(BRep_Tool::Pnt(v1)))
                 );
             }
+            // Its foot on the plate, the plane through the corner square to its top (review
+            // pr941-r1, T4: a mitre cut short at the plate's end)
+            const gp_Vec up(corner.at, corner.top);
+            const gp_Pnt foot = BRep_Tool::Pnt(v0).Distance(corner.top)
+                    < BRep_Tool::Pnt(v1).Distance(corner.top)
+                ? BRep_Tool::Pnt(v1)
+                : BRep_Tool::Pnt(v0);
+            off.ends = std::max(off.ends, std::abs(gp_Vec(corner.at, foot).Dot(up)) / up.Magnitude());
         }
         if (!seen) {
             return {};
@@ -16437,6 +16445,21 @@ bool constructSolid(
             TopTools_IndexedMapOfShape selected;
             for (const auto& edge : edges) {
                 selected.Add(edge);
+            }
+            // The rounds' faces merged as OCCT's good result and Onshape's have them (oracle941):
+            // per selected edge of the loops, one face, two edges (its mitre and its foot's other
+            // part) and one vertex more. A piece left as a face of its own would be silent to a
+            // pick of a round (review pr941-r1, T1: 7 of 16 at 600 mm)
+            auto count = [](const TopoDS_Shape& of, TopAbs_ShapeEnum type) {
+                TopTools_IndexedMapOfShape all;
+                TopExp::MapShapes(of, type, all);
+                return all.Extent();
+            };
+            const int n = selected.Extent();
+            if (count(shape, TopAbs_FACE) - count(base, TopAbs_FACE) != n
+                || count(shape, TopAbs_EDGE) - count(base, TopAbs_EDGE) != 2 * n
+                || count(shape, TopAbs_VERTEX) - count(base, TopAbs_VERTEX) != n) {
+                refuse("the mitre corners' rounds did not merge into one face per edge");
             }
             out.shape = shape;
             out.mapper = mapper;

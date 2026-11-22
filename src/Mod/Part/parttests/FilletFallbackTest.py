@@ -7207,6 +7207,38 @@ class MitreCornerTest(unittest.TestCase):
                 self.assertEqual(len(picked.Edges) - len(picked.Faces[0].Edges), 1)
                 self.assertAlmostEqual(picked.Faces[0].Surface.MinorRadius, radius, delta=1e-9)
 
+    def testBandRadiiAtOtherScales(self):
+        # review pr941-r1, T1: at 600 mm and 4 m the construction left corner pieces as faces of
+        # their own; whatever builds (OCCT's result or the construction's) has OCCT's and
+        # Onshape's counts: one face, two edges and one vertex more per foot edge
+        for scale in (33.3, 222.0):
+            base = lobed_plate(False)
+            base.scale(scale)
+
+            def feet(shape, s=scale):
+                return [
+                    e
+                    for e in shape.Edges
+                    if abs(e.BoundBox.ZMin) < 1e-9 * s
+                    and abs(e.BoundBox.ZMax) < 1e-9 * s
+                    and all(
+                        (4 - 1e-6) * s <= math.hypot(v.X, v.Y) <= (5 + 1e-6) * s for v in e.Vertexes
+                    )
+                ]
+
+            self.assertEqual(len(feet(base)), 16)
+            for radius in (0.586, 0.66):
+                with self.subTest(scale=scale, radius=radius):
+                    fillet = filleted_in_a_body(self.doc, base, feet, radius * scale)
+                    self.assertTrue(fillet.isValid(), fillet.getStatusString())
+                    shape = fillet.Shape
+                    self.assertTrue(shape.isValid())
+                    self.assertEqual(
+                        (len(shape.Faces) - len(base.Faces), len(shape.Edges) - len(base.Edges),
+                         len(shape.Vertexes) - len(base.Vertexes)),
+                        (16, 32, 16),
+                    )
+
     def testMixedSelectionKeepsOcctsResult(self):
         # the 16 edges and the plate's outer rim: not whole loops of mitre corners, so OCCT's result
         # (or fix 1's retry) stands, with no error

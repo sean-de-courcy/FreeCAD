@@ -9877,11 +9877,17 @@ TopoShape& TopoShape::makeElementFillet(
     // naming it failed) leaves OCCT's result: with a warning where its time ran out
     if (!outcome->failed && !outcome->thin && !outcome->invalid && !outcome->constructed
         && !retried && radius1 == radius2) {
+        // The input's own edges: after the reverse-order retry, input is that build's copy (review
+        // pr941-r1, T2)
+        std::vector<TopoDS_Shape> askEdges;
+        for (const auto& edge : inputEdges) {
+            askEdges.push_back(edge.getShape());
+        }
         std::vector<FilletFallback::MitreCorner> mitres;
         FilletFallback::MitreOff occtOff;
         bool asks = false;
         try {
-            asks = FilletFallback::mitreCircleCorner(input.getShape(), edgeShapes, request, &mitres)
+            asks = FilletFallback::mitreCircleCorner(input.getShape(), askEdges, request, &mitres)
                 && mitres.size() <= FilletFallback::mitreCap;
             if (asks) {
                 // Closed forms on at most one edge per corner: on this thread
@@ -9903,7 +9909,7 @@ TopoShape& TopoShape::makeElementFillet(
             TopExp::MapShapes(input.getShape(), TopAbs_EDGE, inputEdgeMap);
             TopExp::MapShapes(baseCopy, TopAbs_EDGE, copyEdgeMap);
             std::vector<TopoDS_Shape> edgeCopies;
-            for (const auto& edge : edgeShapes) {
+            for (const auto& edge : askEdges) {
                 const int index = inputEdgeMap.FindIndex(edge);
                 if (index > 0 && index <= copyEdgeMap.Extent()) {
                     edgeCopies.push_back(copyEdgeMap(index));
@@ -9918,7 +9924,7 @@ TopoShape& TopoShape::makeElementFillet(
             FilletFallback::Request mitreRequest = request;
             mitreRequest.mitreOnly = true;
             const double seconds = KernelBudget::optionalLimit();
-            const bool ran = edgeCopies.size() == edgeShapes.size()
+            const bool ran = edgeCopies.size() == askEdges.size()
                 && KernelBudget::runOptional(
                     "The fillet's exact mitre",
                     [ask, baseCopy, edgeCopies, mitreRequest, mitres, radius1](
