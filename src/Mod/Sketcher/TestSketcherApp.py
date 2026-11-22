@@ -67,6 +67,7 @@ from SketcherTests.TestSketchExtend import (  # FreeCAD-CH, Onshape's Extend, Tr
 )
 from SketcherTests.TestSketchConflicts import TestSketchConflicts  # FreeCAD-CH, ops#640
 from SketcherTests.TestSketchLadder import TestSketchLadder  # FreeCAD-CH, ops#656 D4 row 1
+from SketcherTests.TestSketchSolveRepeatable import TestSketchSolveRepeatable  # FreeCAD-CH, ops#940
 from SketcherTests.TestSketchPattern import (  # FreeCAD-CH, Onshape's sketch patterns
     TestSketchCircularPattern,
     TestSketchLinearPattern,

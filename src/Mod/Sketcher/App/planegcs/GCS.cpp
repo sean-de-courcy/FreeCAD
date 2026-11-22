@@ -4600,18 +4600,23 @@ int System::solve(SubSystem* subsysA, SubSystem* subsysB, bool /*isFine*/, bool 
     int xsizeB = subsysB->pSize();
     int csizeA = subsysA->cSize();
 
-    VEC_pD plistAB(xsizeA + xsizeB);
+    // FreeCAD-CH (ops#940): A's parameters in A's order, then those of B that A lacks, in B's
+    // order. Not sorted by address: that order changed from process to process (SubSystem.cpp).
+    VEC_pD plistAB;
+    plistAB.reserve(xsizeA + xsizeB);
     {
         VEC_pD plistA, plistB;
         subsysA->getParamList(plistA);
         subsysB->getParamList(plistB);
 
-        std::sort(plistA.begin(), plistA.end());
-        std::sort(plistB.begin(), plistB.end());
-
-        VEC_pD::const_iterator it;
-        it = std::set_union(plistA.begin(), plistA.end(), plistB.begin(), plistB.end(), plistAB.begin());
-        plistAB.resize(it - plistAB.begin());
+        SET_pD taken;
+        for (VEC_pD* list : {&plistA, &plistB}) {
+            for (double* param : *list) {
+                if (taken.insert(param).second) {
+                    plistAB.push_back(param);
+                }
+            }
+        }
     }
     int xsize = plistAB.size();
 
@@ -4649,6 +4654,9 @@ int System::solve(SubSystem* subsysA, SubSystem* subsysB, bool /*isFine*/, bool 
 
     double mu = 0;
     lambda.setZero();
+    // FreeCAD-CH (ops#940): whether h holds a step. When qp_eq fails at the first iteration, h was
+    // read below uninitialized, and the result was Converged or Failed by whatever the heap held.
+    bool stepped = false;
     for (int iter = 1; iter < maxIterNumber; iter++) {
         int status = qp_eq(B, grad, JA, resA, xdir, Y, Z);
         if (status) {
@@ -4717,6 +4725,7 @@ int System::solve(SubSystem* subsysA, SubSystem* subsysB, bool /*isFine*/, bool 
             lambda = lambda0 + alpha * lambdadir;
         }
         h = x - x0;
+        stepped = true;
 
         y = grad - JA.transpose() * lambda;
         {
@@ -4749,7 +4758,7 @@ int System::solve(SubSystem* subsysA, SubSystem* subsysB, bool /*isFine*/, bool 
     if (subsysA->error() <= smallF) {
         ret = Success;
     }
-    else if (h.norm() <= (isRedundantsolving ? convergenceRedundant : convergence)) {
+    else if (stepped && h.norm() <= (isRedundantsolving ? convergenceRedundant : convergence)) {
         ret = Converged;
     }
     else {

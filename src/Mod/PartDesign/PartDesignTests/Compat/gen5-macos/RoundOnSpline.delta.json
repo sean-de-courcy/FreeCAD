@@ -1,0 +1,56 @@
+{
+ "approved": "c791, 11-22 (ops#940: the fix goes in fork-1.0.6 as compat-change with its delta.json)",
+ "changes": {
+  "RoundOnSpline": {
+   "Body.shape.box[0]": {
+    "new": -30.000000100125632,
+    "old": -30.000000100117965,
+    "passes": [
+     "recompute",
+     "roundtrip"
+    ],
+    "rel": 1e-09
+   },
+   "Body.shape.box[4]": {
+    "new": 10.00000010000608,
+    "old": 10.000000100023632,
+    "passes": [
+     "recompute",
+     "roundtrip"
+    ],
+    "rel": 1e-09
+   },
+   "RimRound.shape.area": {
+    "new": 5030.945687928653,
+    "old": 5030.945687928638,
+    "passes": [
+     "recompute",
+     "roundtrip"
+    ],
+    "rel": 1e-09
+   },
+   "RimRound.shape.box[0]": {
+    "new": -30.000000100125632,
+    "old": -30.000000100117965,
+    "passes": [
+     "recompute",
+     "roundtrip"
+    ],
+    "rel": 1e-09
+   },
+   "RimRound.shape.box[4]": {
+    "new": 10.00000010000608,
+    "old": 10.000000100023632,
+    "passes": [
+     "recompute",
+     "roundtrip"
+    ],
+    "rel": 1e-09
+   }
+  }
+ },
+ "format": 1,
+ "issue": "ops#940",
+ "label": "compat-change",
+ "why": "the sketch solver solves the same sketch to the same bits in every process (unknowns in the caller's order, the start of a reduced equality from its kept parameter): RoundOnSpline's spline sketch re-solves in its last bits, and the round's readouts move by at most 2e-10 mm; the macOS half's entries (the area, and two bounding-box coordinates, box[0] and box[4], which move past the macOS half's own bounds) take their old values from its record and the new ones from this Windows build (macOS not measured locally; the entry holds within rel 1e-9)"
+}

@@ -508,7 +508,8 @@ names it.
 | `fix/i936-chamfer-curved-end` | fix | ops#936 | - | `integration` `a737a8565d` | `78fbf437c4` (fork PR 505), 2026-11-22 | never (fork fix): a chamfer whose edge ends on curved faces, the plain wedge run on through the part; a wall's round on a floor split at its foot |
 | `fix/i919-uptoface-split` | fix | ops#919 | - | `integration` `d01198675b` | `e810f519d9` (fork PR 506), 2026-11-22 | never (fork feature) |
 | `fix/i951-fullround-name-order` | fix | ops#951 | - | integration | `bcf7ad1195` (fork PR 503), 2026-11-22 | never (fork fix): a merged full round is named by the feature list's order, then the segment drawn first (ops#951, on ops#900) |
-| `fix/i958-worker-net-953-guard` | fix | ops#958, ops#953 | - | `integration` `bcf7ad1195` | (fork PR 510) | never (fork feature) |
+| `fix/i958-worker-net-953-guard` | fix | ops#958, ops#953 | - | `integration` `bcf7ad1195` | `bacc01cf8b` (fork PR 510), 2026-11-22 | never (fork feature) |
+| `fix/i940-solver-order` | fix | ops#940 | - | integration | (fork PR 514) | when upstream's planegcs orders its unknowns by the caller's list (then drop changes 1-3; 4 too if `h` is initialized there): the sketch solver solves the same sketch to the same bits in every process (ops#940) |
 
 ## Fork-only commits in carried topics
 
