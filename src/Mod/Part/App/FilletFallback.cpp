@@ -140,6 +140,8 @@
 #include <gp_XY.hxx>
 
 #include <App/ElementMap.h>
+#include <App/ElementSolver.h>
+#include <App/NameTable.h>
 #include <Base/Console.h>
 #include <Base/Exception.h>
 
@@ -13201,6 +13203,42 @@ std::string wrongWay(
     }
 }
 
+namespace
+{
+thread_local FeatureOrder* innermostOrder = nullptr;
+thread_local std::string namingOrderNote;
+}  // namespace
+
+FeatureOrder::FeatureOrder()
+    : outer(innermostOrder)
+{
+    innermostOrder = this;
+}
+
+FeatureOrder::~FeatureOrder()
+{
+    innermostOrder = outer;
+}
+
+const FeatureOrder* FeatureOrder::current()
+{
+    return innermostOrder;
+}
+
+void noteNamingOrder(const std::string& warning)
+{
+    if (namingOrderNote.empty()) {
+        namingOrderNote = warning;
+    }
+}
+
+std::string takeNamingOrder()
+{
+    std::string note;
+    note.swap(namingOrderNote);
+    return note;
+}
+
 Recorder::Recorder()
     : outer(innermostRecorder)
 {
@@ -17333,6 +17371,179 @@ bool kinkedContour(
     return found;
 }
 
+namespace
+{
+// ops#951 (notes/fullround-name-order-900.md 3): what a base edge's own name says of where it
+// comes from. The name is the same whatever the base is: getElementHistory()'s answer is not
+struct EdgeOrigin
+{
+    int index = 0;  // the base's Edge<index>, 0 if it has none
+    std::string maker;  // the tag of the feature or sketch that made it, or of its last copy
+    std::string copy;  // the copy it is (a pattern instance, a boundary, a second side), or empty
+    int place = -1;  // the maker's place in the feature list (FeatureOrder), -1 unknown
+    std::string sketch;  // the sketch its segment key is from, empty for none
+    std::array<long long, 3> segment {0, 0, 0};  // (n, m, side): g<n>, g<n>v<m>, sketch plane 0
+};
+
+bool isCopySection(const Data::DecodedMappedSection& section)
+{
+    return section.opCode == "TRF" || section.opCode == "EXT" || section.opCode == "CPY";
+}
+
+// A run of at most 18 digits at \a at, or -1 (std::stoll would throw on a longer one)
+long long digitsAt(std::string_view text, size_t& at)
+{
+    const size_t from = at;
+    while (at < text.size() && std::isdigit(static_cast<unsigned char>(text[at]))) {
+        ++at;
+    }
+    return at > from && at - from <= 18 ? std::stoll(std::string(text.substr(from, at - from))) : -1LL;
+}
+
+// A sketch geometry ID's segment: g<n> as (n, 0), a vertex g<n>v<m> as (n, m), m 1 the start,
+// 2 the end, 3 a midpoint or centre; nothing for another form (e<n>, external geometry)
+std::optional<std::array<long long, 2>> segmentOf(std::string_view id)
+{
+    if (id.empty() || id[0] != 'g') {
+        return std::nullopt;
+    }
+    size_t at = 1;
+    const long long n = digitsAt(id, at);
+    if (n < 0) {
+        return std::nullopt;
+    }
+    if (at == id.size()) {
+        return std::array<long long, 2> {n, 0};
+    }
+    if (id[at] != 'v') {
+        return std::nullopt;
+    }
+    ++at;
+    const long long m = digitsAt(id, at);
+    if (m < 0 || at != id.size()) {
+        return std::nullopt;
+    }
+    return std::array<long long, 2> {n, m};
+}
+
+EdgeOrigin originOf(const TopoShape& base, const TopoDS_Shape& edge, const FeatureOrder* order)
+{
+    EdgeOrigin origin;
+    origin.index = base.findShape(edge);
+    if (origin.index <= 0) {
+        origin.index = 0;
+        return origin;
+    }
+    const Data::MappedName name = base.getMappedName(Data::IndexedName::fromConst("Edge", origin.index));
+    if (!name) {
+        return origin;
+    }
+    const std::string plain = Data::NameTable::instance().toPlain(name.toString());
+    const auto sections = Data::NameAncestry::splitSections(plain);
+    if (sections.empty()) {
+        return origin;
+    }
+    auto decode = [](std::string_view section) -> const Data::DecodedMappedSection* {
+        const auto& decoded = Data::MappedName::getDecodedMappedName(std::string(section));
+        return decoded.empty() ? nullptr : &decoded.front();
+    };
+    // A copy is made by the pattern, the link or the second side, not by the feature it copies
+    for (auto section : sections) {
+        if (const auto* decoded = decode(section); decoded && isCopySection(*decoded)) {
+            origin.maker = decoded->iterationTag;
+            origin.copy = decoded->opCode + ";" + decoded->index;
+        }
+    }
+    bool own = false;  // a sketch's own edge: the first section is the sketch's
+    if (origin.copy.empty()) {
+        const auto* first = decode(sections.front());
+        if (!first) {
+            return origin;
+        }
+        origin.maker = first->iterationTag;
+        own = first->opCode == "SKT";
+    }
+    size_t end = 0;
+    const long long tag = digitsAt(origin.maker, end);
+    if (tag <= 0 || end != origin.maker.size()) {
+        origin.maker.clear();
+        return origin;
+    }
+    if (order) {
+        origin.place = own ? order->sketchMaker(static_cast<long>(tag), std::string(sections.front()))
+                           : order->place(static_cast<long>(tag));
+    }
+    // The segment: the innermost sources from a sketch the maker reads (with no feature list, all
+    // of one tag), the smallest of their geometry IDs (3e)
+    std::vector<std::string> sketches;
+    if (order && origin.place >= 0) {
+        for (long sketch : order->sketchesAt(origin.place)) {
+            sketches.push_back(std::to_string(sketch));
+        }
+    }
+    else if (own) {
+        sketches.push_back(origin.maker);
+    }
+    std::optional<std::array<long long, 2>> best;
+    std::string from;
+    for (const auto& source : Data::NameAncestry::sourceSections(plain)) {
+        // <tag>;<E or V>;<id>,<id>,
+        const size_t a = source.find(';');
+        const size_t b = a == std::string::npos ? a : source.find(';', a + 1);
+        if (b == std::string::npos) {
+            continue;
+        }
+        const std::string sketch = source.substr(0, a);
+        if (!sketches.empty() && std::find(sketches.begin(), sketches.end(), sketch) == sketches.end()) {
+            continue;
+        }
+        if (!from.empty() && from != sketch) {
+            return origin;  // sources of two sketches: no segment key
+        }
+        from = sketch;
+        std::string_view ids(source);
+        ids.remove_prefix(b + 1);
+        while (!ids.empty()) {
+            const size_t comma = ids.find(',');
+            const auto id = ids.substr(0, comma);
+            if (auto segment = segmentOf(id); segment && (!best || *segment < *best)) {
+                best = segment;
+            }
+            if (comma == std::string_view::npos) {
+                break;
+            }
+            ids.remove_prefix(comma + 1);
+        }
+    }
+    if (best) {
+        origin.sketch = from;
+        origin.segment = {(*best)[0], (*best)[1], own ? 0LL : 1LL};
+    }
+    return origin;
+}
+
+// Which of two base edges was made first (section 4): -1 a, 1 b, nothing where the names don't say
+std::optional<int> firstMade(const EdgeOrigin& a, const EdgeOrigin& b)
+{
+    if (a.maker.empty() || b.maker.empty()) {
+        return std::nullopt;
+    }
+    if (a.place >= 0 && b.place >= 0) {
+        if (a.place != b.place) {
+            return a.place < b.place ? -1 : 1;
+        }
+    }
+    else if (a.place >= 0 || b.place >= 0 || a.maker != b.maker) {
+        return std::nullopt;
+    }
+    if (a.copy != b.copy || a.sketch.empty() || a.sketch != b.sketch || a.segment == b.segment) {
+        return std::nullopt;
+    }
+    return a.segment < b.segment ? -1 : 1;
+}
+
+}  // namespace
+
 void finish(TopoShape& result, const Construction& construction, const TopoShape& base, const char* op)
 {
     // A copy keeps the result's tag, hasher and history algorithm, which name the elements
@@ -17348,97 +17559,97 @@ void finish(TopoShape& result, const Construction& construction, const TopoShape
         map = map->copy();
         // Every name is taken away before any is given, so that none is still another's
         using Names = std::vector<std::pair<Data::MappedName, Data::ElementIDRefs>>;
-        // The first source is the round of the edge first in the body's history (oracle900r8,
-        // ops#900 R8 by order): the feature the edge's name comes from, then the sketch geometry
-        // it was drawn as, g<n> (Onshape's ids follow the segment drawn first, also on a plate,
-        // for segments not drawn as one chain and for a hole drawn before its outline: review
-        // pr501-r2, T1). Where the names say neither, the order constructShape() gives stays
-        using Key = std::array<long long, 2>;
-        constexpr long long unknown = std::numeric_limits<long long>::max();
-        auto edgeKey = [&](const TopoDS_Shape& edge) {
-            Key key {unknown, unknown};
-            const int index = base.findShape(edge);
-            if (index <= 0) {
-                return key;
-            }
-            const Data::MappedName name = base.getMappedName(Data::IndexedName::fromConst("Edge", index));
-            if (!name) {
-                return key;
-            }
-            Data::MappedName original;
-            const long tag = base.getElementHistory(name, &original);
-            if (tag == 0 || !original) {
-                return key;
-            }
-            // The history stops at the first section another object made: the sketch's where the
-            // base is the pad that made the edge, that pad's where a later feature lies between
-            // (review pr501-r3, T1'). The sketch geometry is the innermost g<n> section either
-            // way; the feature is the one that made the edge from it, the base itself in the first
-            // case (T2': never the sketch's own tag beside a pad's)
-            const std::string text = original.toString();
-            auto number = [&](size_t from, size_t& end) {
-                end = from;
-                while (end < text.size() && std::isdigit(static_cast<unsigned char>(text[end]))) {
-                    ++end;
-                }
-                // At most 18 digits: a longer run is no id (std::stoll would throw)
-                return end > from && end - from <= 18 ? std::stoll(text.substr(from, end - from)) : -1LL;
-            };
-            long long sketch = -1;
-            for (size_t at = 0; at + 1 < text.size(); ++at) {
-                if (text[at] != 'g' || (at > 0 && text[at - 1] != ';')) {
-                    continue;
-                }
-                size_t end = 0;
-                const long long geometry = number(at + 1, end);
-                if (geometry < 0 || end >= text.size() || (text[end] != '^' && text[end] != ';')) {
-                    continue;
-                }
-                key[1] = geometry;
-                // g<n>;_;<sketch>;SKT, with one ^ per level of nesting after each section
-                size_t next = text.find(";_", end);
-                if (next != std::string::npos) {
-                    next = text.find(';', next + 2);
-                }
-                if (next != std::string::npos) {
-                    size_t tagEnd = 0;
-                    sketch = number(next + 1, tagEnd);
-                }
-                break;
-            }
-            key[0] = (sketch >= 0 && std::abs(tag) == sketch && base.Tag != 0) ? std::abs(base.Tag)
-                                                                               : std::abs(tag);
-            return key;
-        };
-        auto sourceKey = [&](const TopoDS_Shape& source) {
-            Key best {unknown, unknown};
-            for (const auto& [shape, edges] : merged.origins) {
-                if (shape.IsSame(source)) {
-                    for (const auto& edge : edges) {
-                        best = std::min(best, edgeKey(edge));
-                    }
-                }
-            }
-            return best;
+        // The first source is the round of the edge made first (ops#951, oracle951; R8 by order,
+        // oracle900r8): the feature that made it by its place in the feature list, then the sketch
+        // segment drawn first, a vertex's first segment, a sketch-plane edge before its far copy
+        // (notes/fullround-name-order-900.md 3, 4). The selection order never decides
+        const FeatureOrder* order = FeatureOrder::current();
+        struct Ranked
+        {
+            TopoDS_Shape source;
+            std::vector<EdgeOrigin> edges;
+            int first = -1;  // the edge of entry.edges made first
+            bool undecided = false;
+            int lowest = 0;  // the smallest base edge index, 0 for none
         };
         std::vector<std::pair<Data::IndexedName, Names>> renamed;
         for (const auto& [element, given] : merged.sources) {
             std::vector<TopoDS_Shape> sources = given;
             if (sources.size() > 1) {
-                std::vector<Key> keys;
+                std::vector<Ranked> ranked;
                 for (const auto& source : sources) {
-                    keys.push_back(sourceKey(source));
+                    Ranked entry;
+                    entry.source = source;
+                    for (const auto& [shape, edges] : merged.origins) {
+                        if (shape.IsSame(source)) {
+                            for (const auto& edge : edges) {
+                                entry.edges.push_back(originOf(base, edge, order));
+                            }
+                        }
+                    }
+                    for (size_t k = 0; k < entry.edges.size(); ++k) {
+                        const EdgeOrigin& edge = entry.edges[k];
+                        if (edge.index > 0 && (entry.lowest == 0 || edge.index < entry.lowest)) {
+                            entry.lowest = edge.index;
+                        }
+                        if (entry.first < 0) {
+                            entry.first = static_cast<int>(k);
+                            continue;
+                        }
+                        const auto which = firstMade(edge, entry.edges[entry.first]);
+                        if (!which) {
+                            entry.undecided = true;
+                        }
+                        else if (*which < 0) {
+                            entry.first = static_cast<int>(k);
+                        }
+                    }
+                    ranked.push_back(std::move(entry));
                 }
-                std::vector<size_t> order(sources.size());
-                std::iota(order.begin(), order.end(), size_t {0});
-                std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) {
-                    return keys[a] < keys[b];
+                // A source with no base edge (a corner's tool) goes after the others, silently
+                std::stable_partition(ranked.begin(), ranked.end(), [](const Ranked& r) {
+                    return r.first >= 0;
                 });
-                std::vector<TopoDS_Shape> ranked;
-                for (size_t k : order) {
-                    ranked.push_back(sources[k]);
+                const auto withEdges = static_cast<size_t>(std::count_if(
+                    ranked.begin(), ranked.end(), [](const Ranked& r) { return r.first >= 0; }
+                ));
+                auto firstOf = [](const Ranked& r) -> const EdgeOrigin& {
+                    return r.edges[static_cast<size_t>(r.first)];
+                };
+                // One source with base edges: nothing to decide between the sources
+                bool decided = true;
+                for (size_t i = 0; i < withEdges && decided; ++i) {
+                    decided = withEdges < 2 || !ranked[i].undecided;
+                    for (size_t j = i + 1; j < withEdges && decided; ++j) {
+                        decided = firstMade(firstOf(ranked[i]), firstOf(ranked[j])).has_value();
+                    }
                 }
-                sources = std::move(ranked);
+                const auto end = ranked.begin() + static_cast<std::ptrdiff_t>(withEdges);
+                if (decided) {
+                    std::stable_sort(ranked.begin(), end, [&](const Ranked& a, const Ranked& b) {
+                        return firstMade(firstOf(a), firstOf(b)) == -1;
+                    });
+                }
+                else {
+                    // Neither key (section 5): by the solid's edge order, the same for either
+                    // selection order, and said aloud
+                    std::stable_sort(ranked.begin(), end, [](const Ranked& a, const Ranked& b) {
+                        return a.lowest < b.lowest;
+                    });
+                    const std::string first = "Edge" + std::to_string(ranked[0].lowest);
+                    const std::string other = "Edge" + std::to_string(ranked[1].lowest);
+                    const std::string warning = "The round face over " + first + " and " + other
+                        + " is named after " + first
+                        + "'s round by the solid's edge order: the edges' history does not say "
+                          "which was made first. A reference made on that face follows that round "
+                          "when the radius is reduced; Onshape may follow the other.";
+                    FC_LOG(warning);
+                    noteNamingOrder(warning);
+                }
+                sources.clear();
+                for (const auto& entry : ranked) {
+                    sources.push_back(entry.source);
+                }
             }
             Names names;
             for (const auto& source : sources) {

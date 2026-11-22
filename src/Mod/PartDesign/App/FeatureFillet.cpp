@@ -22,8 +22,11 @@
  *                                                                         *
  ***************************************************************************/
 
+#include <algorithm>
 #include <array>
 #include <limits>
+#include <set>
+#include <string_view>
 
 #include <BRepFilletAPI_MakeFillet.hxx>
 #include <BRep_Tool.hxx>
@@ -34,7 +37,10 @@
 #include <ShapeFix_Shape.hxx>
 
 #include <Base/Exception.h>
+#include <App/Document.h>
+#include <App/NameTable.h>
 #include <Base/Reader.h>
+#include <Mod/Part/App/Part2DObject.h>
 #include <Mod/Part/App/FilletFallback.h>
 #include <Mod/Part/App/TopoShape.h>
 #include <Mod/Part/App/TopoShapeRepair.h>
@@ -139,6 +145,85 @@ App::DocumentObjectExecReturn* Fillet::execute()
     return partialFailure(build(), "fillet", "Radius");
 }
 
+namespace
+{
+// ops#951 (notes/fullround-name-order-900.md 3c): the dress-up's BaseFeature chain, its first
+// feature first, for the names of a merged full round. Ids and places only; the objects are
+// read during this execute
+class ChainOrder: public Part::FilletFallback::FeatureOrder
+{
+public:
+    explicit ChainOrder(const App::DocumentObject* base)
+    {
+        std::set<const App::DocumentObject*> seen;
+        for (const App::DocumentObject* object = base; object && seen.insert(object).second;) {
+            Entry entry;
+            entry.object = object;
+            entry.id = object->getID();
+            const auto* feature = dynamic_cast<const PartDesign::Feature*>(object);
+            entry.naming = feature ? feature->namingTag() : 0;
+            for (const App::DocumentObject* read : object->getOutList()) {
+                if (read && read->isDerivedFrom<Part::Part2DObject>()) {
+                    entry.sketches.push_back(read->getID());
+                }
+            }
+            chain.push_back(std::move(entry));
+            object = feature ? feature->BaseFeature.getValue() : nullptr;
+        }
+        std::reverse(chain.begin(), chain.end());
+    }
+
+    int place(long tag) const override
+    {
+        for (size_t at = 0; at < chain.size(); ++at) {
+            if (tag != 0 && (chain[at].id == tag || chain[at].naming == tag)) {
+                return static_cast<int>(at);
+            }
+        }
+        return -1;
+    }
+
+    int sketchMaker(long sketch, const std::string& section) const override
+    {
+        for (size_t at = 0; at < chain.size(); ++at) {
+            const auto& sketches = chain[at].sketches;
+            if (std::find(sketches.begin(), sketches.end(), sketch) == sketches.end()) {
+                continue;
+            }
+            const auto* feature = dynamic_cast<const Part::Feature*>(chain[at].object);
+            if (!feature) {
+                continue;
+            }
+            for (const auto& element : feature->Shape.getShape().getElementMap()) {
+                const std::string name = Data::NameTable::instance().toPlain(element.name.toString());
+                if (name.compare(0, section.size(), section) == 0
+                    && (name.size() == section.size() || name[section.size()] == '|')) {
+                    return static_cast<int>(at);
+                }
+            }
+        }
+        return -1;
+    }
+
+    std::vector<long> sketchesAt(int place) const override
+    {
+        return place >= 0 && static_cast<size_t>(place) < chain.size()
+            ? chain[static_cast<size_t>(place)].sketches
+            : std::vector<long>();
+    }
+
+private:
+    struct Entry
+    {
+        const App::DocumentObject* object = nullptr;
+        long id = 0;
+        long naming = 0;
+        std::vector<long> sketches;
+    };
+    std::vector<Entry> chain;
+};
+}  // namespace
+
 App::DocumentObjectExecReturn* Fillet::build()
 {
     // FreeCAD-CH ops#654 T3: re-run at a pattern's instance, on its base and edges
@@ -197,6 +282,9 @@ App::DocumentObjectExecReturn* Fillet::build()
 #endif
 
         Part::FilletFallback::Recorder recorder;
+        // ops#951: which round names a merged full round's face, from the feature list
+        const ChainOrder order(getBaseObject(/*silent=*/true));
+        Part::FilletFallback::takeNamingOrder();
         // ops#796: a studio step's owner built it already, on this base and these edges, with
         // these parameters, and checked it: the step goes on from the shape before the refine
         if (Part::TopoShape raw;
@@ -328,6 +416,13 @@ App::DocumentObjectExecReturn* Fillet::build()
         // the feature has its result
         recorder.report(Label.getValue());
         this->Shape.setValue(shape);
+        // ops#951: a merged face whose edges' history does not say which round names it
+        if (const std::string note = Part::FilletFallback::takeNamingOrder(); !note.empty()) {
+            if (auto doc = getDocument()) {
+                const char* previous = doc->getWarningDescription(this);
+                doc->setWarning(this, previous && *previous ? std::string(previous) + "\n" + note : note);
+            }
+        }
         return App::DocumentObject::StdReturn;
     }
     // ops#640 F2: Onshape's "Failed to fillet selections" with the exact construction's reason,

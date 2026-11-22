@@ -806,6 +806,7 @@ class TestFillet(unittest.TestCase):
         """Fillets the pad's edges at the limit, then just below it: what the merged face's first
         name is there, as where(face) of the round it names"""
         fillet = self._add_fillet(body, pad, edges, radius)
+        self._last_fillet = fillet
         self.assertTrue(fillet.isValid(), fillet.getStatusString())
         merged = [
             "Face%d" % i
@@ -1045,6 +1046,7 @@ class TestFillet(unittest.TestCase):
                     edges = [self._edge_between(pad.Shape, *ends[side]) for side in picked]
                     named = self._first_round_at_the_limit(body, pad, edges, 2.0, 1.9, self._front_or_back)
                     self.assertEqual(named, "back")
+                    self._assertNoNamingWarning()
 
     _HALVES = {
         "front": [(0, 0), (30, 0), (30, 2), (0, 2)],
@@ -1085,6 +1087,7 @@ class TestFillet(unittest.TestCase):
                     self.assertEqual(
                         self._first_round_at_the_limit(body, tip, edges, 2.0, 1.9, self._front_or_back), named
                     )
+                    self._assertNoNamingWarning()
 
     def testFullRoundOfVertexBornEdgesIsNamedByTheFirstVertex(self):
         # T2, one pad: both vertical edges at x = 0 are born of the sketch's vertices. The edge
@@ -1104,6 +1107,7 @@ class TestFillet(unittest.TestCase):
                     self.assertEqual(
                         self._first_round_at_the_limit(body, pad, edges, 2.0, 1.9, self._front_or_back), named
                     )
+                    self._assertNoNamingWarning()
 
     def testFullRoundOfAPadInsertedBeforeIsNamedByIt(self):
         # T3: PadB (the back half) made first, then PadF (the front half) inserted before it in the
@@ -1138,6 +1142,86 @@ class TestFillet(unittest.TestCase):
                     self.assertEqual(
                         self._first_round_at_the_limit(body, tip, edges, 2.0, 1.9, self._front_or_back), named
                     )
+                    self._assertNoNamingWarning()
+
+    def _assertNoNamingWarning(self):
+        self.assertNotIn("named after", self._last_fillet.getStatusString())
+
+    def testFullRoundOfAMirroredHalfRibIsNamedByTheOriginal(self):
+        # Rule, not measured (fullround-name-order-900.md 6.4): the half rib y 0..2 mirrored
+        # about the sketch's H axis; the mirror's copy is made by the mirror, after the pad, so
+        # the original's round (y 2) names the face, whichever edge was picked first
+        for picked in ((2, -2), (-2, 2)):
+            with self.subTest(picked=picked):
+                body = self.Doc.addObject("PartDesign::Body", "Body")
+                pad = self._pad_of_lines(body, "Pad", self._chain(self._HALVES["front"]), 20)
+                mirror = self.Doc.addObject("PartDesign::Mirrored", "Mirror")
+                mirror.Originals = [pad]
+                mirror.MirrorPlane = (pad.Profile[0], ["H_Axis"])
+                mirror.Refine = True
+                body.addObject(mirror)
+                self.Doc.recompute()
+                self.assertEqual(len(mirror.Shape.Faces), 6)
+                edges = [self._edge_between(mirror.Shape, (0, y, 20), (30, y, 20)) for y in picked]
+                named = self._first_round_at_the_limit(
+                    body, mirror, edges, 2.0, 1.9, lambda f: "original" if f.CenterOfMass.y > 0 else "copy"
+                )
+                self.assertEqual(named, "original")
+                self._assertNoNamingWarning()
+
+    def testFullRoundOfAPlateBullnoseIsNamedByTheSketchPlaneEdge(self):
+        # Rule, not measured (fullround-name-order-900.md 3f, 6.1): a plate 4 thick, its front
+        # side's bottom and top edges rounded at r 2 (a bullnose): the bottom edge, the sketch's
+        # own, names the face, with no warning
+        for picked in ((0, 4), (4, 0)):
+            with self.subTest(picked=picked):
+                body = self.Doc.addObject("PartDesign::Body", "Body")
+                plate = self._pad_of_lines(body, "Plate", self._chain([(0, 0), (30, 0), (30, 20), (0, 20)]), 4)
+                edges = [self._edge_between(plate.Shape, (0, 0, z), (30, 0, z)) for z in picked]
+                named = self._first_round_at_the_limit(
+                    body, plate, edges, 2.0, 1.9, lambda f: "bottom" if f.CenterOfMass.z < 2 else "top"
+                )
+                self.assertEqual(named, "bottom")
+                self._assertNoNamingWarning()
+
+    def testFullRoundWithoutHistoryIsNamedByTheEdgeOrderAndWarns(self):
+        # fullround-name-order-900.md 5: a Part::Box's edges carry no sketch, so neither edge is
+        # known to be made first: the round of the lower base edge names the face, for either
+        # selection order, and the feature says so
+        answers = set()
+        for back_first in (False, True):
+            with self.subTest(back_first=back_first):
+                box = self.Doc.addObject("Part::Box", "Box")
+                box.Length, box.Width, box.Height = 30, 4, 20
+                self.Doc.recompute()
+                ends = [((0, 0, 20), (30, 0, 20)), ((0, 4, 20), (30, 4, 20))]
+                if back_first:
+                    ends.reverse()
+                indices = [int(self._edge_between(box.Shape, *e)[4:]) for e in ends]
+                fillet = self.Doc.addObject("Part::Fillet", "Fillet")
+                fillet.Base = box
+                fillet.Edges = [(i, 2.0, 2.0) for i in indices]
+                self.Doc.recompute()
+                self.assertTrue(fillet.isValid(), fillet.getStatusString())
+                self.assertIn("named after Edge%d" % min(indices), fillet.getStatusString())
+                merged = [
+                    "Face%d" % i
+                    for i, f in enumerate(fillet.Shape.Faces, 1)
+                    if f.Surface.__class__.__name__ == "Cylinder"
+                ]
+                self.assertEqual(len(merged), 1)
+                first = fillet.Shape.getElementMappedName(merged[0])
+                first = first[0] if isinstance(first, tuple) else first
+                fillet.Edges = [(i, 1.9, 1.9) for i in indices]
+                self.Doc.recompute()
+                self.assertTrue(fillet.isValid(), fillet.getStatusString())
+                face = fillet.Shape.getElement(fillet.Shape.ElementMap[first])
+                lower = self._edge_between(box.Shape, *ends[indices.index(min(indices))])
+                self.assertEqual(
+                    face.CenterOfMass.y < 2, box.Shape.getElement(lower).CenterOfMass.y < 2
+                )
+                answers.add(face.CenterOfMass.y < 2)
+        self.assertEqual(len(answers), 1)
 
     def tearDown(self):
         # closing doc
