@@ -58,9 +58,12 @@ void SubSystem::initialize(VEC_pD& params, MAP_pD_pD& reductionmap)
 
     // tmpplist will contain the subset of parameters from params that are
     // relevant for the constraints listed in clist
+    // FreeCAD-CH (ops#940): in the order of params, not of their addresses. The parameters are
+    // separate heap allocations, so address order changed from process to process, and with it
+    // the Jacobian's column order and the last bits of every solution (sometimes whether the
+    // sketch solved at all). The sets below are only looked up, never iterated.
     VEC_pD tmpplist;
     {
-        SET_pD s1(params.begin(), params.end());
         SET_pD s2;
         for (std::vector<Constraint*>::iterator constr = clist.begin(); constr != clist.end();
              ++constr) {
@@ -68,7 +71,12 @@ void SubSystem::initialize(VEC_pD& params, MAP_pD_pD& reductionmap)
             VEC_pD constr_params = (*constr)->params();
             s2.insert(constr_params.begin(), constr_params.end());
         }
-        std::set_intersection(s1.begin(), s1.end(), s2.begin(), s2.end(), std::back_inserter(tmpplist));
+        SET_pD taken;
+        for (double* param : params) {
+            if (s2.count(param) != 0 && taken.insert(param).second) {
+                tmpplist.push_back(param);
+            }
+        }
     }
 
     plist.clear();
@@ -137,8 +145,12 @@ void SubSystem::initialize(VEC_pD& params, MAP_pD_pD& reductionmap)
 void SubSystem::redirectParams()
 {
     // copying values to pvals
-    for (MAP_pD_pD::const_iterator p = pmap.begin(); p != pmap.end(); ++p) {
-        *(p->second) = *(p->first);
+    // FreeCAD-CH (ops#940): each from the parameter it was made for (plist[j], the kept one of an
+    // equality), as initialize() does. Copying through pmap wrote a shared pval once per original
+    // parameter in address order, so the last address won: the start of the solve, and so its
+    // result, changed from process to process whenever the reduced parameters held different values.
+    for (int j = 0; j < psize; j++) {
+        pvals[j] = *plist[j];
     }
 
     // redirect constraints to point to pvals
