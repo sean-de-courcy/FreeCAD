@@ -37,6 +37,7 @@
 #include <TopTools_IndexedMapOfShape.hxx>
 
 
+#include <App/Document.h>
 #include <Base/Exception.h>
 
 #include "FeatureFillet.h"
@@ -122,6 +123,7 @@ App::DocumentObjectExecReturn* Fillet::execute()
         // anew, without their records (ops#258).
 
         Part::FilletFallback::Recorder recorder;
+        Part::FilletFallback::takeNamingOrder();
         TopoShape res = makeTopoShape(false);
         if (sameRadii && !edgeShapes.empty()) {
             // The same maker as below, and the exact construction where OCCT fails or builds an
@@ -212,6 +214,13 @@ App::DocumentObjectExecReturn* Fillet::execute()
         // Where OCCT failed, the exact construction built it (ops#300, decision 54)
         recorder.report(Label.getValue());
         this->Shape.setValue(res);
+        // ops#951: a merged face whose edges' history does not say which round names it
+        if (const std::string note = Part::FilletFallback::takeNamingOrder(); !note.empty()) {
+            if (auto doc = getDocument()) {
+                const char* previous = doc->getWarningDescription(this);
+                doc->setWarning(this, previous && *previous ? std::string(previous) + "\n" + note : note);
+            }
+        }
         return Part::FilletBase::execute();
     }
     catch (Base::Exception& e) {

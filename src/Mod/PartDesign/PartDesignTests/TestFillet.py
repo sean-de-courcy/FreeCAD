@@ -806,6 +806,7 @@ class TestFillet(unittest.TestCase):
         """Fillets the pad's edges at the limit, then just below it: what the merged face's first
         name is there, as where(face) of the round it names"""
         fillet = self._add_fillet(body, pad, edges, radius)
+        self._last_fillet = fillet
         self.assertTrue(fillet.isValid(), fillet.getStatusString())
         merged = [
             "Face%d" % i
@@ -995,6 +996,332 @@ class TestFillet(unittest.TestCase):
             if os.path.exists(path):
                 os.remove(path)
             os.rmdir(os.path.dirname(path))
+
+    # ops#951 (oracle951, rows T1-T3): Onshape names the merged face after the edge whose making
+    # feature comes first in the body's feature list (its place, not the order it was made in),
+    # then by the sketch segment drawn first; an edge born of sketch vertices goes by its first
+    # vertex in segment order. The selection order never changes it
+    @staticmethod
+    def _chain(points):
+        return [(points[k], points[(k + 1) % len(points)]) for k in range(len(points))]
+
+    def _pad_of_lines(self, body, name, segments, length):
+        pad = body.newObject("PartDesign::Pad", name)
+        pad.Profile = self._sketch_of_lines(body, segments)
+        pad.Length = length
+        pad.Refine = True
+        self.Doc.recompute()
+        return pad
+
+    def _front_or_back(self, face):
+        return "front" if face.CenterOfMass.y < 2 else "back"
+
+    def testFullRoundAfterAPocketIsNamedByThePocketsEdge(self):
+        # T1: a block y 2..10, a through pocket from its top cutting away everything behind
+        # y = 4 (its segment along y = 4 makes the back top edge), then PadF adds y 0..2. The
+        # back top edge is the pocket's, which comes before PadF: the back round names the face,
+        # whatever the segment numbers
+        cut_orders = {
+            4: [(31, 4), (31, 11), (-1, 11), (-1, 4)],
+            1: [(-1, 4), (31, 4), (31, 11), (-1, 11)],
+        }
+        front_orders = {
+            1: [(0, 0), (30, 0), (30, 2), (0, 2)],
+            3: [(30, 2), (0, 2), (0, 0), (30, 0)],
+        }
+        for cut_at, front_at in ((4, 1), (1, 3)):
+            for picked in (("front", "back"), ("back", "front")):
+                with self.subTest(cut_at=cut_at, front_at=front_at, picked=picked):
+                    body = self.Doc.addObject("PartDesign::Body", "Body")
+                    self._pad_of_lines(body, "Block", self._chain([(0, 2), (30, 2), (30, 10), (0, 10)]), 20)
+                    cut = body.newObject("PartDesign::Pocket", "Cut")
+                    cut.Profile = self._sketch_of_lines(body, self._chain(cut_orders[cut_at]), 20.0)
+                    cut.Type = "ThroughAll"
+                    cut.Refine = True
+                    self.Doc.recompute()
+                    self.assertTrue(cut.isValid(), cut.getStatusString())
+                    pad = self._pad_of_lines(body, "PadF", self._chain(front_orders[front_at]), 20)
+                    self.assertEqual(len(pad.Shape.Faces), 6)
+                    ends = {"front": ((0, 0, 20), (30, 0, 20)), "back": ((0, 4, 20), (30, 4, 20))}
+                    edges = [self._edge_between(pad.Shape, *ends[side]) for side in picked]
+                    named = self._first_round_at_the_limit(body, pad, edges, 2.0, 1.9, self._front_or_back)
+                    self.assertEqual(named, "back")
+                    self._assertNoNamingWarning()
+
+    _HALVES = {
+        "front": [(0, 0), (30, 0), (30, 2), (0, 2)],
+        "back": [(0, 2), (30, 2), (30, 4), (0, 4)],
+    }
+
+    def testFullRoundOfTwoPadsVerticalEdgesIsNamedByTheEarlierPad(self):
+        # T2: the rib 30 x 4 x 20 as two pads, each of its own sketch; the two vertical edges at
+        # x = 0, each born of sketch vertices, filleted at the limit. The round of the earlier
+        # pad's edge names the face, whichever sketch came first (S: sketch, P: pad)
+        rows = (
+            (("SB", "SF", "PF", "PB"), "front"),
+            (("SF", "SB", "PF", "PB"), "front"),
+            (("SF", "PF", "SB", "PB"), "front"),
+            (("SF", "SB", "PB", "PF"), "back"),
+            (("SB", "PB", "SF", "PF"), "back"),
+        )
+        sides = {"F": "front", "B": "back"}
+        for order, named in rows:
+            for picked in (("front", "back"), ("back", "front")):
+                with self.subTest(order=order, picked=picked):
+                    body = self.Doc.addObject("PartDesign::Body", "Body")
+                    sketches = {}
+                    tip = None
+                    for step in order:
+                        side = sides[step[1]]
+                        if step[0] == "S":
+                            sketches[side] = self._sketch_of_lines(body, self._chain(self._HALVES[side]))
+                        else:
+                            tip = body.newObject("PartDesign::Pad", "Pad")
+                            tip.Profile = sketches[side]
+                            tip.Length = 20
+                            tip.Refine = True
+                            self.Doc.recompute()
+                    self.assertEqual(len(tip.Shape.Faces), 6)
+                    ends = {"front": ((0, 0, 0), (0, 0, 20)), "back": ((0, 4, 0), (0, 4, 20))}
+                    edges = [self._edge_between(tip.Shape, *ends[side]) for side in picked]
+                    self.assertEqual(
+                        self._first_round_at_the_limit(body, tip, edges, 2.0, 1.9, self._front_or_back), named
+                    )
+                    self._assertNoNamingWarning()
+
+    def testFullRoundOfVertexBornEdgesIsNamedByTheFirstVertex(self):
+        # T2, one pad: both vertical edges at x = 0 are born of the sketch's vertices. The edge
+        # of the vertex first in segment order names the face, a segment's start before its end
+        rows = (
+            ([(0, 0), (30, 0), (30, 4), (0, 4)], "front"),  # front, right, back, left
+            ([(30, 4), (0, 4), (0, 0), (30, 0)], "back"),  # back, left, front, right
+            ([(0, 0), (0, 4), (30, 4), (30, 0)], "front"),  # left (from (0, 0)), back, right, front
+        )
+        for points, named in rows:
+            for picked in (("front", "back"), ("back", "front")):
+                with self.subTest(points=points, picked=picked):
+                    body = self.Doc.addObject("PartDesign::Body", "Body")
+                    pad = self._pad_of_lines(body, "Pad", self._chain(points), 20)
+                    ends = {"front": ((0, 0, 0), (0, 0, 20)), "back": ((0, 4, 0), (0, 4, 20))}
+                    edges = [self._edge_between(pad.Shape, *ends[side]) for side in picked]
+                    self.assertEqual(
+                        self._first_round_at_the_limit(body, pad, edges, 2.0, 1.9, self._front_or_back), named
+                    )
+                    self._assertNoNamingWarning()
+
+    def testFullRoundOfAPadInsertedBeforeIsNamedByIt(self):
+        # T3: PadB (the back half) made first, then PadF (the front half) inserted before it in the
+        # body: PadF comes first in the feature list and its round names the face. The control
+        # made in the same order without the insertion is named by PadB's
+        for inserted, named in ((True, "front"), (False, "back")):
+            for picked in (("front", "back"), ("back", "front")):
+                with self.subTest(inserted=inserted, picked=picked):
+                    body = self.Doc.addObject("PartDesign::Body", "Body")
+                    pad_b = self._pad_of_lines(body, "PadB", self._chain(self._HALVES["back"]), 20)
+                    profile = self._sketch_of_lines(body, self._chain(self._HALVES["front"]))
+                    if inserted:
+                        pad_f = self.Doc.addObject("PartDesign::Pad", "PadF")
+                        pad_f.Profile = profile
+                        pad_f.Length = 20
+                        pad_f.Refine = True
+                        body.insertObject(pad_f, pad_b, False)
+                        body.Tip = pad_b
+                        self.Doc.recompute()
+                        self.assertEqual(pad_b.BaseFeature, pad_f)
+                        self.assertIsNone(pad_f.BaseFeature)
+                        tip = pad_b
+                    else:
+                        tip = body.newObject("PartDesign::Pad", "PadF")
+                        tip.Profile = profile
+                        tip.Length = 20
+                        tip.Refine = True
+                        self.Doc.recompute()
+                    self.assertEqual(len(tip.Shape.Faces), 6)
+                    ends = {"front": ((0, 0, 20), (30, 0, 20)), "back": ((0, 4, 20), (30, 4, 20))}
+                    edges = [self._edge_between(tip.Shape, *ends[side]) for side in picked]
+                    self.assertEqual(
+                        self._first_round_at_the_limit(body, tip, edges, 2.0, 1.9, self._front_or_back), named
+                    )
+                    self._assertNoNamingWarning()
+
+    def _assertNoNamingWarning(self):
+        self.assertNotIn("named after", self._last_fillet.getStatusString())
+
+    def testFullRoundOfAMirroredHalfRibIsNamedByTheOriginal(self):
+        # oracle900b row d (fullround-name-order-900.md 6.4): the half rib y 0..2 mirrored
+        # about the sketch's H axis; the mirror's copy is made by the mirror, after the pad, so
+        # the original's round (y 2) names the face, whichever edge was picked first
+        for picked in ((2, -2), (-2, 2)):
+            with self.subTest(picked=picked):
+                body = self.Doc.addObject("PartDesign::Body", "Body")
+                pad = self._pad_of_lines(body, "Pad", self._chain(self._HALVES["front"]), 20)
+                mirror = self.Doc.addObject("PartDesign::Mirrored", "Mirror")
+                mirror.Originals = [pad]
+                mirror.MirrorPlane = (pad.Profile[0], ["H_Axis"])
+                mirror.Refine = True
+                body.addObject(mirror)
+                self.Doc.recompute()
+                self.assertEqual(len(mirror.Shape.Faces), 6)
+                edges = [self._edge_between(mirror.Shape, (0, y, 20), (30, y, 20)) for y in picked]
+                named = self._first_round_at_the_limit(
+                    body, mirror, edges, 2.0, 1.9, lambda f: "original" if f.CenterOfMass.y > 0 else "copy"
+                )
+                self.assertEqual(named, "original")
+                self._assertNoNamingWarning()
+
+    def testFullRoundOfAPlateBullnoseIsNamedByTheSketchPlaneEdge(self):
+        # oracle900b row a (fullround-name-order-900.md 3f, 6.1): a plate 4 thick, its front
+        # side's bottom and top edges rounded at r 2 (a bullnose): the bottom edge, the sketch's
+        # own, names the face, with no warning
+        for picked in ((0, 4), (4, 0)):
+            with self.subTest(picked=picked):
+                body = self.Doc.addObject("PartDesign::Body", "Body")
+                plate = self._pad_of_lines(body, "Plate", self._chain([(0, 0), (30, 0), (30, 20), (0, 20)]), 4)
+                edges = [self._edge_between(plate.Shape, (0, 0, z), (30, 0, z)) for z in picked]
+                named = self._first_round_at_the_limit(
+                    body, plate, edges, 2.0, 1.9, lambda f: "bottom" if f.CenterOfMass.z < 2 else "top"
+                )
+                self.assertEqual(named, "bottom")
+                self._assertNoNamingWarning()
+
+    def testFullRoundOfARibLeftByOneCutIsNamedByTheCutsSegment(self):
+        # oracle900b row b (fullround-name-order-900.md 6.2): a block
+        # 30 x 20 x 20, one through pocket from a sketch above it with two windows, leaving the rib
+        # y 8..12. Both long top edges are the pocket's; the window segment drawn first (y 8, g3,
+        # against y 12, g5) names the face
+        for picked in ((8, 12), (12, 8)):
+            with self.subTest(picked=picked):
+                body = self.Doc.addObject("PartDesign::Body", "Body")
+                self._pad_of_lines(body, "Block", self._chain([(0, 0), (30, 0), (30, 20), (0, 20)]), 20)
+                windows = self._chain([(-1, -1), (31, -1), (31, 8), (-1, 8)]) + self._chain(
+                    [(-1, 12), (31, 12), (31, 21), (-1, 21)]
+                )
+                cut = body.newObject("PartDesign::Pocket", "Cut")
+                cut.Profile = self._sketch_of_lines(body, windows, 30.0)
+                cut.Type = "ThroughAll"
+                cut.Refine = True
+                self.Doc.recompute()
+                self.assertTrue(cut.isValid(), cut.getStatusString())
+                self.assertEqual(len(cut.Shape.Faces), 6)
+                edges = [self._edge_between(cut.Shape, (0, y, 20), (30, y, 20)) for y in picked]
+                named = self._first_round_at_the_limit(
+                    body, cut, edges, 2.0, 1.9, lambda f: "front" if f.CenterOfMass.y < 10 else "back"
+                )
+                self.assertEqual(named, "front")
+                self._assertNoNamingWarning()
+
+    def testFullRoundOfAShortenedEdgeRanksAtTheCutsPlace(self):
+        # oracle900b row c: PadF (the front half, x 0..30), PadB (the back half, x 0..25) and a
+        # cut that shortens PadF's front edge to x 0..25, leaving PadB's back edge as it is. An
+        # edge ranks at the place of the last feature that made or changed it: PadF, Cut, PadB
+        # gives front; PadF, PadB, Cut gives back (PadB's round)
+        for cut_first, named in ((True, "front"), (False, "back")):
+            for picked in (("front", "back"), ("back", "front")):
+                with self.subTest(cut_first=cut_first, picked=picked):
+                    body = self.Doc.addObject("PartDesign::Body", "Body")
+                    self._pad_of_lines(body, "PadF", self._chain(self._HALVES["front"]), 20)
+
+                    def cut():
+                        box = body.newObject("PartDesign::SubtractiveBox", "Cut")
+                        box.Length, box.Width, box.Height = 10, 10, 30
+                        box.Placement.Base = FreeCAD.Vector(25, -3, -5)
+                        box.Refine = True
+                        self.Doc.recompute()
+                        return box
+
+                    def back():
+                        return self._pad_of_lines(
+                            body, "PadB", self._chain([(0, 2), (25, 2), (25, 4), (0, 4)]), 20
+                        )
+
+                    tip = (cut(), back())[1] if cut_first else (back(), cut())[1]
+                    self.assertTrue(tip.isValid(), tip.getStatusString())
+                    self.assertEqual(len(tip.Shape.Faces), 6)
+                    ends = {"front": ((0, 0, 20), (25, 0, 20)), "back": ((0, 4, 20), (25, 4, 20))}
+                    edges = [self._edge_between(tip.Shape, *ends[side]) for side in picked]
+                    got = self._first_round_at_the_limit(body, tip, edges, 2.0, 1.9, self._front_or_back)
+                    self.assertEqual(got, named)
+                    self._assertNoNamingWarning()
+
+    def testFullRoundOfAnEdgeSplitByALaterCutRanksAtTheCutsPlace(self):
+        # Review pr503-r1 T1 (row c's rule on a split edge, not measured): PadF (x 0..30), PadB
+        # (x 0..25), then a slot x 25..28 through the top half leaving a remnant of PadF's front
+        # edge beyond it. The near piece is renamed by the cut, which is last: back
+        for picked in (("front", "back"), ("back", "front")):
+            with self.subTest(picked=picked):
+                body = self.Doc.addObject("PartDesign::Body", "Body")
+                self._pad_of_lines(body, "PadF", self._chain(self._HALVES["front"]), 20)
+                self._pad_of_lines(body, "PadB", self._chain([(0, 2), (25, 2), (25, 4), (0, 4)]), 20)
+                slot = body.newObject("PartDesign::SubtractiveBox", "Slot")
+                slot.Length, slot.Width, slot.Height = 3, 10, 20
+                slot.Placement.Base = FreeCAD.Vector(25, -3, 10)
+                slot.Refine = True
+                self.Doc.recompute()
+                self.assertTrue(slot.isValid(), slot.getStatusString())
+                ends = {"front": ((0, 0, 20), (25, 0, 20)), "back": ((0, 4, 20), (25, 4, 20))}
+                edges = [self._edge_between(slot.Shape, *ends[side]) for side in picked]
+                got = self._first_round_at_the_limit(body, slot, edges, 2.0, 1.9, self._front_or_back)
+                self.assertEqual(got, "back")
+                self._assertNoNamingWarning()
+
+    def testFullRoundEndingInAWallHasNoNamingWarning(self):
+        # review pr503-r2 L1: PadF, PadB, then a taller wall across the rib's end (x 30..35). The
+        # round runs into the wall, so two of the merged face's sources come from one base edge: a
+        # tie, not an undecided order. PadF's edge is made first: the front round, no warning
+        for picked in (("front", "back"), ("back", "front")):
+            with self.subTest(picked=picked):
+                body = self.Doc.addObject("PartDesign::Body", "Body")
+                self._pad_of_lines(body, "PadF", self._chain(self._HALVES["front"]), 20)
+                self._pad_of_lines(body, "PadB", self._chain(self._HALVES["back"]), 20)
+                wall = self._pad_of_lines(
+                    body, "Wall", self._chain([(30, -5), (35, -5), (35, 9), (30, 9)]), 30
+                )
+                self.Doc.recompute()
+                self.assertTrue(wall.isValid(), wall.getStatusString())
+                ends = {"front": ((0, 0, 20), (30, 0, 20)), "back": ((0, 4, 20), (30, 4, 20))}
+                edges = [self._edge_between(wall.Shape, *ends[side]) for side in picked]
+                got = self._first_round_at_the_limit(body, wall, edges, 2.0, 1.9, self._front_or_back)
+                self.assertEqual(got, "front")
+                self._assertNoNamingWarning()
+
+    def testFullRoundWithoutHistoryIsNamedByTheEdgeOrderAndWarns(self):
+        # fullround-name-order-900.md 5: a Part::Box's edges carry no sketch, so neither edge is
+        # known to be made first: the round of the lower base edge names the face, for either
+        # selection order, and the feature says so
+        answers = set()
+        for back_first in (False, True):
+            with self.subTest(back_first=back_first):
+                box = self.Doc.addObject("Part::Box", "Box")
+                box.Length, box.Width, box.Height = 30, 4, 20
+                self.Doc.recompute()
+                ends = [((0, 0, 20), (30, 0, 20)), ((0, 4, 20), (30, 4, 20))]
+                if back_first:
+                    ends.reverse()
+                indices = [int(self._edge_between(box.Shape, *e)[4:]) for e in ends]
+                fillet = self.Doc.addObject("Part::Fillet", "Fillet")
+                fillet.Base = box
+                fillet.Edges = [(i, 2.0, 2.0) for i in indices]
+                self.Doc.recompute()
+                self.assertTrue(fillet.isValid(), fillet.getStatusString())
+                self.assertIn("named after Edge%d" % min(indices), fillet.getStatusString())
+                merged = [
+                    "Face%d" % i
+                    for i, f in enumerate(fillet.Shape.Faces, 1)
+                    if f.Surface.__class__.__name__ == "Cylinder"
+                ]
+                self.assertEqual(len(merged), 1)
+                first = fillet.Shape.getElementMappedName(merged[0])
+                first = first[0] if isinstance(first, tuple) else first
+                fillet.Edges = [(i, 1.9, 1.9) for i in indices]
+                self.Doc.recompute()
+                self.assertTrue(fillet.isValid(), fillet.getStatusString())
+                face = fillet.Shape.getElement(fillet.Shape.ElementMap[first])
+                lower = self._edge_between(box.Shape, *ends[indices.index(min(indices))])
+                self.assertEqual(
+                    face.CenterOfMass.y < 2, box.Shape.getElement(lower).CenterOfMass.y < 2
+                )
+                answers.add(face.CenterOfMass.y < 2)
+        self.assertEqual(len(answers), 1)
 
     def tearDown(self):
         # closing doc

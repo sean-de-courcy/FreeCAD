@@ -590,6 +590,49 @@ private:
     bool ran = false;
 };
 
+/** What the feature that calls the fillet knows of its feature list, for the names of a merged
+ * full round (ops#951, notes/fullround-name-order-900.md 3c): Onshape names the merged face after
+ * the round of the edge whose making feature comes first in the list. A PartDesign dress-up sets
+ * one around makeElementFillet(); finish() asks the innermost one on its thread. Places count from
+ * 0, the first feature of the dress-up's BaseFeature chain; -1 is unknown.
+ */
+class PartExport FeatureOrder
+{
+public:
+    FeatureOrder();
+    virtual ~FeatureOrder();
+    FeatureOrder(const FeatureOrder&) = delete;
+    FeatureOrder& operator=(const FeatureOrder&) = delete;
+
+    /// The place of the feature whose id or naming tag is \a tag
+    virtual int place(long tag) const = 0;
+    /// The place of the first feature that reads the sketch \a sketch and whose result holds an
+    /// element whose name starts with the top-level section \a section (the sketch's own edge)
+    virtual int sketchMaker(long sketch, const std::string& section) const = 0;
+    /// The tags of the sketches the feature at \a place reads
+    virtual std::vector<long> sketchesAt(int place) const = 0;
+    /// The place of the last feature, from \a place on, that changed the edge named \a name in
+    /// the base (oracle900b row c: Onshape ranks an edge a later cut shortened at the cut's
+    /// place). The fork's names don't say it: a shortened edge keeps its name, so the edge of
+    /// that name is compared feature by feature
+    virtual int lastChange(const Data::MappedName& name, int place) const = 0;
+
+    /// The innermost on this thread, or null
+    static const FeatureOrder* current();
+
+private:
+    FeatureOrder* outer;
+};
+
+/** Notes, once per feature, that a merged full round's first name was taken by the solid's edge
+ * order because the edges' history does not say which was made first (fullround-name-order-900.md
+ * section 5). The feature takes it after makeElementFillet() and shows it as its warning.
+ */
+PartExport void noteNamingOrder(const std::string& warning);
+
+/// The note made on this thread since the last call (empty if none), which it clears
+PartExport std::string takeNamingOrder();
+
 }  // namespace Part::FilletFallback
 
 #endif  // PART_FILLETFALLBACK_H

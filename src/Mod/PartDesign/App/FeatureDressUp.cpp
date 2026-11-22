@@ -619,6 +619,9 @@ struct DressUpRun
     bool keep = false;
     bool kept = false;
     Part::TopoShape raw;
+    // ops#951: the run's note that a merged full round's face is named by the edge order (the
+    // step's own compute takes the kept shape and runs no finish(): the owner says it)
+    std::string namingNote;
 };
 thread_local DressUpRun* dressUpRun = nullptr;
 
@@ -682,6 +685,15 @@ PartDesignExport const DressUp* dressUpTriedFor(const DressUp* step)
 {
     return dressUpRun && dressUpRun->keep ? freecad_cast<DressUp*>(step->StudioOwner.getValue())
                                           : nullptr;
+}
+
+/// ops#951 (review pr503-r1 T2): the try's note that a merged full round's face is named by the
+/// edge order, said by the owner (the step that takes the kept shape runs no finish())
+PartDesignExport void dressUpReappliedNote(const std::string& note)
+{
+    if (dressUpRun && dressUpRun->namingNote.empty()) {
+        dressUpRun->namingNote = note;
+    }
 }
 
 /// As dressUpReapplied(), with the shape before the refine. \a plain: the run built it the way
@@ -749,7 +761,8 @@ Part::TopoShape reapplyDressUpRun(
     const Part::TopoShape& base,
     const std::vector<Part::TopoShape>& edges,
     std::string& why,
-    Part::TopoShape* raw
+    Part::TopoShape* raw,
+    std::string* namingNote = nullptr
 );
 }  // namespace
 
@@ -765,16 +778,18 @@ PartDesignExport Part::TopoShape reapplyDressUp(
 
 namespace
 {
-/// \a raw: asked for, it takes the shape before the refine when the run kept one (null otherwise)
+/// \a raw: asked for, it takes the shape before the refine when the run kept one (null otherwise).
+/// \a namingNote: asked for, the run's note of a merged face named by the edge order (ops#951)
 Part::TopoShape reapplyDressUpRun(
     DressUp* feature,
     const Part::TopoShape& base,
     const std::vector<Part::TopoShape>& edges,
     std::string& why,
-    Part::TopoShape* raw
+    Part::TopoShape* raw,
+    std::string* namingNote
 )
 {
-    DressUpRun run {base, edges, Part::TopoShape(), false, false, Part::TopoShape()};
+    DressUpRun run {base, edges, Part::TopoShape(), false, false, Part::TopoShape(), {}};
     run.keep = raw != nullptr;
     DressUpRun* outer = dressUpRun;
     dressUpRun = &run;
@@ -797,6 +812,9 @@ Part::TopoShape reapplyDressUpRun(
         why = e.GetMessageString();
     }
     dressUpRun = outer;
+    if (namingNote) {
+        *namingNote = run.namingNote;
+    }
     if (ret) {
         why = ret->Why;
         delete ret;
@@ -1165,7 +1183,9 @@ PartDesignExport App::DocumentObjectExecReturn* studioDressUpOwnerRun(DressUp* o
         // with the same names, so the step's compute takes this one instead of building again
         takeOwnerParameters(step, owner);
         Part::TopoShape raw;
-        const Part::TopoShape tryResult = reapplyDressUpRun(step, shape, edges, why, &raw);
+        std::string namingNote;
+        const Part::TopoShape tryResult
+            = reapplyDressUpRun(step, shape, edges, why, &raw, &namingNote);
         if (!tryResult.isNull() && !raw.isNull()) {
             KeptDressUp kept;
             kept.step = step->getID();
@@ -1189,6 +1209,10 @@ PartDesignExport App::DocumentObjectExecReturn* studioDressUpOwnerRun(DressUp* o
         }
         else {
             ++done;
+            // ops#951 (review pr503-r1 T2): the step takes this shape and runs no finish()
+            if (!namingNote.empty()) {
+                notes.push_back(std::string("'") + part->Label.getValue() + "': " + namingNote);
+            }
         }
     }
     auto prop = stringList(owner, "StudioFailedParts", "The parts whose step passes its base through (ops#654 P8a)");

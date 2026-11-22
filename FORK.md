@@ -506,7 +506,8 @@ names it.
 | `fix/i930-sweep-spine-import` | fix | ops#930 | - | `integration` `a737a8565d` | `0f8c201e7f` (fork PR 507), 2026-11-22 | never (fork fix): an imported sketch on a face keeps the references into it (ops#930) |
 | `fix/i956-brep-notation` | fix | ops#956 | - | integration | `189bbf271e` (fork PR 511), 2026-11-22 | never (fork fix): text BRep in a document save is written in the default notation, so unbounded parameter ranges read back (ops#956) |
 | `fix/i936-chamfer-curved-end` | fix | ops#936 | - | `integration` `a737a8565d` | `78fbf437c4` (fork PR 505), 2026-11-22 | never (fork fix): a chamfer whose edge ends on curved faces, the plain wedge run on through the part; a wall's round on a floor split at its foot |
-| `fix/i919-uptoface-split` | fix | ops#919 | - | `integration` `d01198675b` | (fork PR 506) | never (fork feature) |
+| `fix/i919-uptoface-split` | fix | ops#919 | - | `integration` `d01198675b` | `e810f519d9` (fork PR 506), 2026-11-22 | never (fork feature) |
+| `fix/i951-fullround-name-order` | fix | ops#951 | - | integration | (fork PR 503) | never (fork fix): a merged full round is named by the feature list's order, then the segment drawn first (ops#951, on ops#900) |
 
 ## Fork-only commits in carried topics
 

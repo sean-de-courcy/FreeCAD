@@ -1484,7 +1484,11 @@ class TestThickenSheetCaps(unittest.TestCase):
         fl.Base = (self.feat, rim)
         fl.Radius = r
         self.doc.recompute()
-        self.assertEqual(fl.State, ["Up-to-date"], fl.getStatusString())
+        # A Part sheet's edges carry no sketch, so the merged rim round is named by the solid's edge
+        # order and the fillet says so as its warning (ops#951, fullround-name-order-900.md section 5)
+        status = fl.getStatusString()
+        named = fl.State == ["Warning", "Up-to-date"] and "by the solid's edge order" in status
+        self.assertTrue(fl.State == ["Up-to-date"] or named, status)
         self.assertTrue(fl.Shape.isValid())
         self.assertLess(fl.Shape.Volume, s.Volume)
         return fl
