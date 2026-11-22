@@ -365,6 +365,29 @@ class TestStudioDressUp(unittest.TestCase):
         self.assertFalse(f.isValid())
         self.assertVolume("A", 1180)
 
+    def testAFullRoundNamedByTheEdgeOrderWarnsOnTheOwner(self):
+        """ops#951 (review pr503-r1 T2): B with a rib y 10..12 padded on, both cut back to x 28 by
+        one box: the two top long edges were last changed by the same cut, from two sketches, so
+        the merged full round (r 6) is named by the solid's edge order. The step takes its owner's
+        kept shape and runs no naming of its own: the owner says it."""
+        b = self.body("B")
+        pad(b, "BRib", sketch(b, "BRibSk", xyPlane(b), (20, 10, 30, 12)), 10)
+        cut = b.newObject("PartDesign::SubtractiveBox", "BCut")
+        cut.Length, cut.Width, cut.Height = 3, 14, 12
+        cut.Placement.Base = V(28, -1, -1)
+        PartDesign.studioReconcile(self.list)
+        self.doc.recompute()
+        self.assertTrue(cut.isValid(), cut.getStatusString())
+        f = makeDressUp(self.doc, self.S, "F", [pickAt(b, V(24, 0, 10)), pickAt(b, V(24, 12, 10))], 6)
+        step = self.step(f, "B")
+        self.assertIsNotNone(step)
+        self.assertTrue(step.isValid(), step.getStatusString())
+        self.assertTrue(f.isValid(), f.getStatusString())
+        self.assertIn("Warning", f.State, f.getStatusString())
+        self.assertIn("by the solid's edge order", f.getStatusString())
+        full = 8 * 12 * 10
+        self.assertAlmostEqual(b.Shape.Volume, full - 8 * (12 * 6 - math.pi * 36 / 2), places=2)
+
     def testSuppressedOwnerRoundsNothing(self):
         f = self.filletAB()
         PartDesign.studioSuppress(f, True)

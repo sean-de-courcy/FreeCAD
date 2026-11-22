@@ -9703,6 +9703,18 @@ TopoShape& TopoShape::makeElementFillet(
         if (split->built) {
             TopoShape stage(Tag, Hasher, getHistoryAlgorithm());
             bool named = false;
+            // ops#951 (review pr503-r1 T3): a merged face's naming note of a stage that is thrown
+            // away goes with it (the whole selection's build below notes its own)
+            const bool notedBefore = [] {
+                std::string note = FilletFallback::takeNamingOrder();
+                FilletFallback::noteNamingOrder(note);
+                return !note.empty();
+            }();
+            auto dropStageNote = [notedBefore] {
+                if (!notedBefore) {
+                    FilletFallback::takeNamingOrder();
+                }
+            };
             try {
                 FilletFallback::finish(stage, split->construction, input, op);
                 named = true;
@@ -9750,6 +9762,7 @@ TopoShape& TopoShape::makeElementFillet(
             else {
                 FC_LOG("fillet split: " << rest.size() << " of the rest's edges found on the stage");
             }
+            dropStageNote();
         }
     }
     auto outcome = buildDressUp(mkFillet, input, inputEdges, request, "The fillet", prefer, reflex);

@@ -71,6 +71,7 @@ PartDesignExport bool studioDressUpTake(const DressUp* step,
                                         const std::vector<Part::TopoShape>& edges,
                                         Part::TopoShape& raw);
 PartDesignExport const DressUp* dressUpTriedFor(const DressUp* step);
+PartDesignExport void dressUpReappliedNote(const std::string& note);
 // FeatureDressUp.cpp (FreeCAD-CH ops#654 P8a; declared where used)
 PartDesignExport App::DocumentObjectExecReturn* studioDressUpOwnerRun(DressUp* owner);
 PartDesignExport bool studioDressUpStepPassesThrough(DressUp* step);
@@ -455,15 +456,19 @@ App::DocumentObjectExecReturn* Fillet::build()
         }
         // store shape before refinement
         if (reapplying) {
-            // ops#951: the pattern instance's undecided merged face is said on the pattern's fillet
-            // (review pr503-r1 T2)
+            // ops#951: the pattern instance's undecided merged face is said on the pattern's fillet;
+            // a studio owner's try's, by the owner: the step's own compute clears its warning and
+            // takes the kept shape without a finish() (review pr503-r1 T2)
+            auto owner = freecad_cast<Fillet*>(const_cast<DressUp*>(dressUpTriedFor(this)));
             if (const std::string note = Part::FilletFallback::takeNamingOrder(); !note.empty()) {
-                if (auto doc = getDocument()) {
+                if (owner) {
+                    dressUpReappliedNote(note);
+                }
+                else if (auto doc = getDocument()) {
                     const char* previous = doc->getWarningDescription(this);
                     doc->setWarning(this, previous && *previous ? std::string(previous) + "\n" + note : note);
                 }
             }
-            auto owner = freecad_cast<Fillet*>(const_cast<DressUp*>(dressUpTriedFor(this)));
             dressUpReappliedFrom(
                 shape,
                 owner ? owner->refineShapeIfActive(shape) : refineShapeIfActive(shape),
