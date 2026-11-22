@@ -704,3 +704,194 @@ class TestDocumentTabs(unittest.TestCase):
         top = [f for f in studio.Origin.OriginFeatures if f.Role == "XY_Plane"][0]
         body.Placement.Base = App.Vector(0, 0, 5)
         self.assertIsNone(PartDesign.studioOriginFeature(sketch, top))
+
+    # -- drawing holders (ops#927) -----------------------------------------------------------------
+
+    def drawingModel(self, studio=True):
+        """A studio with a padded Body, a hidden top-level Part::Feature "Lines" (two segments) and
+        a page whose view shows only Lines: a frozen drawing view's holder."""
+        import Part
+
+        doc = self.doc
+        objects = {}
+        if studio:
+            part = doc.addObject("App::Part", "Studio")
+            body = doc.addObject("PartDesign::Body", "Body")
+            part.addObject(body)
+            box(doc, body)
+            objects["studio"] = part
+        lines = doc.addObject("Part::Feature", "Lines")
+        lines.Shape = Part.Compound(
+            [
+                Part.LineSegment(App.Vector(0, 0, 0), App.Vector(10, 0, 0)).toShape(),
+                Part.LineSegment(App.Vector(0, 0, 0), App.Vector(0, 10, 0)).toShape(),
+            ]
+        )
+        lines.addProperty("App::PropertyString", "OnshapeEntities")
+        lines.Visibility = False
+        objects["lines"] = lines
+        objects["page"], objects["view"] = self.pageShowing(lines, "Page")
+        doc.recompute()
+        return objects
+
+    def pageShowing(self, source, name):
+        page = self.doc.addObject("TechDraw::DrawPage", name)
+        page.Template = self.doc.addObject("TechDraw::DrawSVGTemplate", name + "Template")
+        view = self.doc.addObject("TechDraw::DrawViewPart", name + "View")
+        page.addView(view)
+        view.Source = [source]
+        return page, view
+
+    def testDrawingHolderIsNoImplicitContent(self):
+        """A top-level 3D object that only drawing views show is the page's, not "Part Studio 1":
+        the tabs are the studio and the page, and the page's members hold it."""
+        objects = self.drawingModel()
+        self.assertEqual(self.kinds(), [("Studio", "PartStudio"), ("Page", "Drawing")])
+        self.assertIn(objects["lines"], Tabs.members(self.doc, "Page"))
+        self.assertNotIn(objects["lines"], Tabs.members(self.doc, "Studio"))
+        self.assertEqual(Tabs.tabOf(objects["lines"]), "*")  # tabOf() names groups only
+
+        path = os.path.join(self.folder, "drawing.FCStd")
+        self.doc.saveAs(path)
+        App.closeDocument(self.doc.Name)
+        self.doc = App.openDocument(path)
+        self.assertEqual(self.kinds(), [("Studio", "PartStudio"), ("Page", "Drawing")])
+        self.assertIn(self.doc.Lines, Tabs.members(self.doc, "Page"))
+
+    def testHolderUsedByAModelObjectIsImplicitContent(self):
+        """Edge 1: once a 3D object uses the holder, it is model geometry again: the implicit
+        studio comes back, holding it, and the page's members don't."""
+        objects = self.drawingModel()
+        uses = self.doc.addObject("Part::Compound", "Uses")
+        uses.Links = [objects["lines"]]
+        self.doc.recompute()
+        kinds = self.kinds()
+        self.assertEqual(kinds[0], ("*", "PartStudio"))
+        self.assertIn(objects["lines"], Tabs.members(self.doc, "*"))
+        self.assertNotIn(objects["lines"], Tabs.members(self.doc, "Page"))
+
+    def testHolderWithoutItsViewIsImplicitContent(self):
+        """Edge 2: deleting the view leaves the holder in "Part Studio 1", where it shows; the
+        delete never takes the holder with it."""
+        objects = self.drawingModel()
+        self.doc.removeObject(objects["view"].Name)
+        self.doc.recompute()
+        self.assertIsNotNone(self.doc.getObject("Lines"))
+        self.assertEqual(self.kinds()[0], ("*", "PartStudio"))
+        self.assertIn(objects["lines"], Tabs.members(self.doc, "*"))
+
+    def testHolderOnTwoPagesHasOneOwner(self):
+        """Edge 3: views on two pages show one holder: no implicit studio, and the holder is a
+        member of the first page only."""
+        objects = self.drawingModel()
+        self.pageShowing(objects["lines"], "Page2")
+        self.doc.recompute()
+        self.assertEqual(
+            self.kinds(),
+            [("Studio", "PartStudio"), ("Page", "Drawing"), ("Page2", "Drawing")],
+        )
+        self.assertIn(objects["lines"], Tabs.members(self.doc, "Page"))
+        self.assertNotIn(objects["lines"], Tabs.members(self.doc, "Page2"))
+
+    def testDrawingOnlyDocumentKeepsTheImplicitStudio(self):
+        """Edge 4, unchanged: a document holding only a page and its holder still shows the
+        empty implicit studio, which doesn't hold the holder."""
+        objects = self.drawingModel(studio=False)
+        self.assertEqual(self.kinds(), [("*", "PartStudio"), ("Page", "Drawing")])
+        self.assertNotIn(objects["lines"], Tabs.members(self.doc, "*"))
+        self.assertIn(objects["lines"], Tabs.members(self.doc, "Page"))
+
+    def testDrawingHolderInsideAStudioIsTheStudios(self):
+        """Edge 5: a holder inside an App::Part studio stays that studio's member."""
+        objects = self.drawingModel()
+        objects["studio"].addObject(objects["lines"])
+        self.doc.recompute()
+        self.assertEqual(self.kinds(), [("Studio", "PartStudio"), ("Page", "Drawing")])
+        self.assertIn(objects["lines"], Tabs.members(self.doc, "Studio"))
+        self.assertNotIn(objects["lines"], Tabs.members(self.doc, "Page"))
+
+    def testHolderOfAViewOffItsPageIsImplicitContent(self):
+        """Review r1 R1: a view taken off its page still shows the holder, but no page owns it:
+        the holder is implicit content, never in no tab."""
+        objects = self.drawingModel()
+        objects["page"].removeView(objects["view"])
+        self.doc.recompute()
+        self.assertIsNotNone(self.doc.getObject(objects["view"].Name))
+        self.assertEqual(self.kinds()[0], ("*", "PartStudio"))
+        self.assertIn(objects["lines"], Tabs.members(self.doc, "*"))
+
+    def testSolidShownFromAnotherDocumentStaysImplicitContent(self):
+        """Review r1 R2: a holder shown only by a view of another document's page stays implicit
+        content of its own document."""
+        objects = self.drawingModel()
+        self.doc.removeObject(objects["view"].Name)
+        other = App.newDocument("TestDocumentTabsOther")
+        page = other.addObject("TechDraw::DrawPage", "Page")
+        page.Template = other.addObject("TechDraw::DrawSVGTemplate", "Template")
+        view = other.addObject("TechDraw::DrawViewPart", "View")
+        page.addView(view)
+        self.doc.saveAs(os.path.join(self.folder, "holder.FCStd"))
+        other.saveAs(os.path.join(self.folder, "drawing.FCStd"))
+        view.XSource = [objects["lines"]]
+        other.recompute()
+        self.assertEqual(self.kinds()[0], ("*", "PartStudio"))
+        self.assertIn(objects["lines"], Tabs.members(self.doc, "*"))
+
+    def testUsersSolidShownInADrawingStaysInTheStudio(self):
+        """Review r1 R3: a user's own top-level solid that only a drawing shows (no transfer mark)
+        stays implicit studio content, shown and exported there."""
+        objects = self.drawingModel()
+        solid = self.doc.addObject("Part::Box", "Solo")
+        objects["view"].Source = [objects["lines"], solid]
+        self.doc.recompute()
+        self.assertEqual(self.kinds()[0], ("*", "PartStudio"))
+        self.assertIn(solid, Tabs.members(self.doc, "*"))
+        self.assertNotIn(solid, Tabs.members(self.doc, "Page"))
+        self.assertIn(objects["lines"], Tabs.members(self.doc, "Page"))
+
+    def testRemovingADrawingTabTakesItsHolders(self):
+        """Review r1 F4: deleting a Drawing tab removes its members, its holders too, in one undo
+        step; the undo brings them back as the page's."""
+        self.drawingModel()
+        self.doc.openTransaction("Delete Page")
+        Tabs.removeTab(self.doc, "Page")
+        self.doc.commitTransaction()
+        self.assertIsNone(self.doc.getObject("Page"))
+        self.assertIsNone(self.doc.getObject("Lines"))
+        self.assertEqual(self.kinds(), [("Studio", "PartStudio")])
+        self.doc.undo()
+        self.doc.recompute()
+        self.assertIsNotNone(self.doc.getObject("Lines"))
+        self.assertEqual(self.kinds(), [("Studio", "PartStudio"), ("Page", "Drawing")])
+
+    def testRemovingADrawingTabKeepsAHolderAnotherPageShows(self):
+        """Review r2 F5: deleting the page that owns a holder another page's view still shows keeps
+        the holder, which becomes the other page's; that view is no dependent."""
+        objects = self.drawingModel()
+        page2, view2 = self.pageShowing(objects["lines"], "Page2")
+        self.doc.recompute()
+        self.assertNotIn(view2, Tabs.dependents(self.doc, "Page"))
+        Tabs.removeTab(self.doc, "Page")
+        self.assertIsNotNone(self.doc.getObject("Lines"))
+        self.assertEqual(view2.Source, [objects["lines"]])
+        self.assertEqual(self.kinds(), [("Studio", "PartStudio"), ("Page2", "Drawing")])
+        self.assertIn(objects["lines"], Tabs.members(self.doc, "Page2"))
+
+    def testRemovingADrawingTabKeepsAHolderAnotherDocumentShows(self):
+        """Review r2 F5: a holder also shown by a view of another document stays when its page
+        goes, and is implicit content then."""
+        objects = self.drawingModel()
+        other = App.newDocument("TestDocumentTabsOther")
+        page = other.addObject("TechDraw::DrawPage", "Page")
+        page.Template = other.addObject("TechDraw::DrawSVGTemplate", "Template")
+        view = other.addObject("TechDraw::DrawViewPart", "View")
+        page.addView(view)
+        self.doc.saveAs(os.path.join(self.folder, "holder.FCStd"))
+        other.saveAs(os.path.join(self.folder, "drawing.FCStd"))
+        view.XSource = [objects["lines"]]
+        other.recompute()
+        self.assertIn(objects["lines"], Tabs.members(self.doc, "Page"))
+        Tabs.removeTab(self.doc, "Page")
+        self.assertIsNotNone(self.doc.getObject("Lines"))
+        self.assertEqual(view.XSource, [objects["lines"]])
+        self.assertIn(objects["lines"], Tabs.members(self.doc, "*"))
