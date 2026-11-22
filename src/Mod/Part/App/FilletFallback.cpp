@@ -1993,6 +1993,123 @@ void foldFarFaces(const Context& ctx,
     }
 }
 
+/// ops#938, Heat Wire Clip #10 (Wall Fillet 1): a wall's edge standing on a floor that is two or
+/// more faces of one plane meeting at its foot, with faces behind that plane (a step's concave
+/// corner right under the wall's corner, so that the floor's pieces on either side touch only at
+/// the vertex: 6 edges, 6 faces). The tool, bounded by the floor's plane, never reaches what lies
+/// behind it, as on a floor of one face: the faces wholly behind the plane are left out, with the
+/// edges in the plane or behind it among them, and the floor counts as one face. The edge's faces
+/// must each meet the floor in one edge at the vertex, which are kept; anything else stays
+/// refused. Called only for a vertex that would be refused
+void foldFloorPieces(const Context& ctx,
+                     const EdgeData& data,
+                     const TopoDS_Vertex& vertex,
+                     std::vector<TopoDS_Shape>& edges,
+                     std::vector<TopoDS_Shape>& faces)
+{
+    gp_Pnt point = BRep_Tool::Pnt(vertex);
+    gp_Dir away = awayFrom(data.edge, vertex);
+    auto ownIndex = [&](const TopoDS_Shape& face) {
+        return face.IsSame(data.faces[0]) ? 0 : face.IsSame(data.faces[1]) ? 1 : -1;
+    };
+    auto among = [](const TopoDS_Shape& face, const std::vector<TopoDS_Shape>& list) {
+        return std::any_of(list.begin(), list.end(), [&](const TopoDS_Shape& f) {
+            return f.IsSame(face);
+        });
+    };
+    // The floor: the plane faces through the vertex that are not the edge's, not along it, on one
+    // plane with one outward side
+    std::vector<TopoDS_Shape> floor;
+    gp_Pln plane;
+    gp_Dir toward;
+    for (const auto& face : faces) {
+        if (ownIndex(face) >= 0) {
+            continue;
+        }
+        BRepAdaptor_Surface surface(TopoDS::Face(face), Standard_False);
+        if (surface.GetType() != GeomAbs_Plane) {
+            continue;
+        }
+        gp_Pln candidate = surface.Plane();
+        double side = candidate.Axis().Direction().Dot(away);
+        if (std::abs(side) < 1e-6 || candidate.Distance(point) > linearTolerance) {
+            continue;
+        }
+        if (floor.empty()) {
+            plane = candidate;
+            toward = side > 0 ? candidate.Axis().Direction() : candidate.Axis().Direction().Reversed();
+            floor.push_back(face);
+        }
+        else if (oneSurface(TopoDS::Face(floor.front()), TopoDS::Face(face), point)) {
+            floor.push_back(face);
+        }
+    }
+    if (floor.size() < 2) {
+        return;
+    }
+    std::vector<TopoDS_Shape> behind;
+    for (const auto& face : faces) {
+        if (ownIndex(face) >= 0 || among(face, floor)) {
+            continue;
+        }
+        if (!whollyBeyond(TopoDS::Face(face), point, toward)) {
+            return;
+        }
+        behind.push_back(face);
+    }
+    std::vector<TopoDS_Shape> keptEdges {data.edge};
+    TopoDS_Shape keptFloor;
+    int bottoms[2] = {0, 0};
+    for (const auto& edge : edges) {
+        if (edge.IsSame(data.edge)) {
+            continue;
+        }
+        if (ctx.selected.Contains(edge)) {
+            return;
+        }
+        auto ofEdge = ctx.list(ctx.edgeFaces, edge);
+        if (ofEdge.size() != 2) {
+            return;
+        }
+        int floorHits = 0;
+        int own = -1;
+        TopoDS_Shape floorFace;
+        for (const auto& face : ofEdge) {
+            if (among(face, floor)) {
+                ++floorHits;
+                floorFace = face;
+            }
+            else if (ownIndex(face) >= 0) {
+                own = ownIndex(face);
+            }
+            else if (!among(face, behind)) {
+                return;
+            }
+        }
+        if (own >= 0) {
+            // The wall's foot along one of its faces
+            if (floorHits != 1) {
+                return;
+            }
+            ++bottoms[own];
+            keptEdges.push_back(edge);
+            if (keptFloor.IsNull()) {
+                keptFloor = floorFace;
+            }
+            continue;
+        }
+        // Between the floor and the faces behind it, in the plane; or behind it, between those
+        if (floorHits > 0 && !edgeInPlane(TopoDS::Edge(edge), plane)) {
+            return;
+        }
+    }
+    if (bottoms[0] != 1 || bottoms[1] != 1) {
+        return;
+    }
+    edges = std::move(keptEdges);
+    faces = {data.faces[0], data.faces[1], keptFloor};
+}
+
 struct VertexEnd
 {
     VertexClass kind = VertexClass::Refuse;
@@ -2604,6 +2721,10 @@ VertexEnd classify(
     foldSplits(ctx, data, vertex, edges, faces);
     if (!(edges.size() == 2 && faces.size() == 2) && (edges.size() != 3 || faces.size() != 3)) {
         foldFarFaces(ctx, data, vertex, edges, faces);
+        if (!(edges.size() == 2 && faces.size() == 2) && (edges.size() != 3 || faces.size() != 3)
+            && (edges.size() != 4 || faces.size() != 4)) {
+            foldFloorPieces(ctx, data, vertex, edges, faces);
+        }
     }
     // A vertex inside a curve, between two edges on the same two faces (a circle split at its
     // cylinder's seam, as a fused stadium's half circle): only a tangent continuation

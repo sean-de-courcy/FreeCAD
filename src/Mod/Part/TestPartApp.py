@@ -78,6 +78,7 @@ from parttests.FilletFallbackTest import (
     RoundAlongASplineEdgeTest,
     SeveralSolidsTest,
     WallOnAChamferedRimTest,
+    WallOnASplitFloorTest,  # ops#938
     TangentLineStepTest,
     TightWallArcTest,
     VolumeSignTest,

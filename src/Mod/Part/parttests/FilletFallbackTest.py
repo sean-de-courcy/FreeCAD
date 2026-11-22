@@ -7499,3 +7499,55 @@ class ChamferRunThroughTest(unittest.TestCase):
         ends = Part.makeBox(7, 20, 10).fuse(Part.makeBox(7, 20, 10, V(33, 0, 0)))
         self.assertAlmostEqual(result.common(ends).Volume, block.common(ends).Volume, delta=1e-6)
 
+
+class WallOnASplitFloorTest(unittest.TestCase):
+    """ops#938 (Heat Wire Clip #10, Wall Fillet 1): a wall's two end edges rounded just past half
+    its width, so the two rounds overlap and its end face vanishes, where one edge's foot is a
+    vertex of 6 edges: the floor is a step's top in three quadrants about it, whose pieces on
+    either side of the wall touch only there, and the step's concave corner runs on below it. The
+    tool is bounded by the floor's plane as on a floor of one face: the result above it is the
+    wall less the union of the two corner tools. Designed: the wall 3.9375 wide and 5 high on a
+    step 3 high, r 2"""
+
+    w, r, h, top = 3.9375, 2.0, 5.0, 3.0
+
+    def body(self):
+        step = Part.makeBox(20, 20, self.top, V(0, 0, 0)).fuse(
+            [Part.makeBox(20, 20, self.top, V(-20, -20, 0)), Part.makeBox(20, 20, self.top, V(0, -20, 0))]
+        )
+        return step.fuse(Part.makeBox(self.w, 20, self.h, V(0, -20, self.top))).removeSplitter()
+
+    def ends(self, body):
+        return [
+            e
+            for e in body.Edges
+            if e.Curve.TypeId == "Part::GeomLine"
+            and abs(e.BoundBox.YMax) < 1e-9
+            and abs(e.BoundBox.YMin) < 1e-9
+            and e.BoundBox.ZMin > self.top - 1e-9
+            and e.BoundBox.ZLength > 1
+        ]
+
+    def removed(self):
+        """The two corner tools' union, times the height: each r^2 (1 - pi / 4), less their overlap
+        where both reach, x in [w - r, r] between the arcs and the end face"""
+        r, w = self.r, self.w
+        arc = lambda c: lambda x: -r + math.sqrt(r * r - (x - c) ** 2)
+        a, b = arc(r), arc(w - r)
+        overlap = gauss_legendre(lambda x: -max(a(x), b(x)), w - r, r)
+        return self.h * (2 * r * r * (1 - math.pi / 4) - overlap)
+
+    def testSixEdgeFoot(self):
+        body = self.body()
+        ends = self.ends(body)
+        self.assertEqual(len(ends), 2)
+        foot = [v for v in ends[0].Vertexes + ends[1].Vertexes if v.Point.Length < 1e-9]
+        self.assertEqual(len(foot), 1)
+        self.assertEqual(sum(1 for e in body.Edges if any(q.isSame(foot[0]) for q in e.Vertexes)), 6)
+        result = body.makeFillet(self.r, ends)
+        self.assertTrue(result.isValid())
+        self.assertEqual(len(result.Solids), 1)
+        self.assertAlmostEqual(body.Volume - result.Volume, self.removed(), delta=1e-6 * body.Volume)
+        # Nothing below the floor changes
+        below = Part.makeBox(60, 60, self.top, V(-30, -30, 0))
+        self.assertAlmostEqual(result.common(below).Volume, body.common(below).Volume, delta=1e-7)
