@@ -6117,6 +6117,30 @@ double referenceAngle(const Context& ctx, const EdgeData& data)
     return ballSideAngle(data, foot);
 }
 
+double areaToleranceOf(const TopoDS_Shape& face);
+
+/** A cut tool (a convex edge) of a closed edge whose angle varies, whose contact runs off one of
+ * its two faces: refused (ops#942 review pr942-r1 A1, notes/chamfer-varying-angle-942.md 3 b: a
+ * cut tool's run-off is not measured against Onshape for these edges; OCCT's result or refusal
+ * then stands, as it does today)
+ */
+void refuseCutRunOff(const EdgeData& data, const Tool& tool)
+{
+    for (int k = 0; k < 2; ++k) {
+        for (TopExp_Explorer it(tool.solid, TopAbs_FACE); it.More(); it.Next()) {
+            const TopoDS_Face& contact = TopoDS::Face(it.Current());
+            if (!sameDomain(contact, data.faces[k])) {
+                continue;
+            }
+            if (areaOf(contact) - areaOf(commonOf(contact, data.faces[k]))
+                > areaToleranceOf(contact)) {
+                refuse("a chamfer's cut along a closed edge whose angle varies runs off its face "
+                       "there (not measured against Onshape)");
+            }
+        }
+    }
+}
+
 /** A fused ellipse tool whose contact on the plane runs off the plane face over its far edge
  * (ops#942, notes/chamfer-varying-angle-942.md 3 b; the gaskets' ledge narrower than the chamfer):
  * Onshape's fill adds nothing past the surface of the face beyond that edge (FR1), so the tool is
@@ -6126,8 +6150,6 @@ double referenceAngle(const Context& ctx, const EdgeData& data)
  * tool's volume is measured. Each piece cut off holds part of the contact that ran off and none of
  * the contact on the plane face or the wall
  */
-double areaToleranceOf(const TopoDS_Shape& face);
-
 void clipRunOff(const Context& ctx, const EdgeData& data, Tool& tool, double size)
 {
     const TopoDS_Face& planeFace = data.faces[data.planeFace];
@@ -6505,6 +6527,9 @@ Tool ellipseTool(const Context& ctx, const EdgeData& data)
     if (concave) {
         clipRunOff(ctx, data, result, size);
     }
+    else {
+        refuseCutRunOff(data, result);
+    }
     // The longest leg, at the narrow side, the same on both faces
     const double leg = d * (1 + sinTilt) / cosTilt;
     result.strips.resize(2);
@@ -6847,6 +6872,9 @@ Tool cylinderConeTool(const Context& ctx, const EdgeData& data)
     }
     result.source = data.edge;
     result.cut = data.convex;
+    if (data.convex) {
+        refuseCutRunOff(data, result);
+    }
     // No closed form: measured, as admit() then checks against itself; the rails are checked above
     result.volume = volumeOf(result.solid);
     result.relTolerance = 1e-6;

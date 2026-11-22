@@ -774,6 +774,60 @@ class TestChamfer(unittest.TestCase):
         self.assertIn("neither a plane nor a cylinder along the chamfered cylinder",
                       chamfer.getStatusString())
 
+    def testChamferVaryingAngleCutRunningOffIsRefused(self):
+        # Review pr942-r1 A1 (section 3 b): a cut tool (a hole's rim, a convex edge) whose contact
+        # runs off its face is not measured against Onshape, so the construction refuses it. T7's
+        # hole in a block whose side x = -11 stands 1 mm from the rim at the narrow side: the legs
+        # (2 there with Narrowest angle, 4.08 with Widest) run over the side. OCCT fails there too,
+        # so the chamfer fails with either value, as it does without this change. With the side at
+        # x = -13 the legs stay on the top face: the ball's cut, -72.640 as T7's
+        V = FreeCAD.Vector
+        R, t = self.R942, self.T942
+
+        def hole(xs):
+            block = self._tiltedPlate(t, depth=20).common(Part.makeBox(30 - xs, 60, 80, V(xs, -30, -40)))
+            shape = block.cut(Part.makeCylinder(R, 80, V(0, 0, -40))).removeSplitter()
+            rim = ["Edge%d" % (i + 1) for i, e in enumerate(shape.Edges)
+                   if e.Curve.TypeId == "Part::GeomEllipse" and abs(e.Curve.MinorRadius - R) < 1e-6
+                   and all(abs(p.z - p.x * math.tan(t)) < 1e-6 for p in e.discretize(12))]
+            self.assertEqual(len(rim), 1)
+            return shape, rim
+
+        shape, rim = hole(-11.0)
+        base, chamfer = self._varyingChamfer(shape, 0, rim)
+        self.assertFalse(chamfer.isValid())
+        chamfer.WidthAt = "Widest angle"
+        self.Doc.recompute()
+        self.assertFalse(chamfer.isValid())
+        self.assertIn("runs off its face", chamfer.getStatusString())
+        self.Doc.removeObject("Chamfer")
+        self.Doc.removeObject("Body")
+        self.Doc.removeObject("Base")
+        shape, rim = hole(-13.0)
+        base, chamfer = self._varyingChamfer(shape, 0, rim)
+        self.assertTrue(chamfer.isValid(), chamfer.getStatusString())
+        self._assertVolume(chamfer.Shape.Volume - shape.Volume, -self._ballVolume(
+            self.W942 * math.tan((pi / 2 - t) / 2), 1))
+
+    def testChamferVaryingAngleConeHoleCutRunningOffIsRefused(self):
+        # Review pr942-r1 A1 on the cylinder-cone kind: a hole of radius 2 along y through a
+        # frustum (radius 30 at z 0, 28 at z 20) at height 17.6, chamfered 1: the cut runs off the
+        # cone over the frustum's top rim. Refused, and OCCT fails there too
+        V = FreeCAD.Vector
+        cone = Part.makeCone(30, 28, 20)
+        shape = cone.cut(Part.makeCylinder(2, 40, V(0, 0, 17.6), V(0, 1, 0))).removeSplitter()
+        rim = ["Edge%d" % (i + 1) for i, e in enumerate(shape.Edges) if e.isClosed()
+               and e.Curve.TypeId not in ("Part::GeomCircle", "Part::GeomLine")
+               and all(abs(math.hypot(p.x, p.z - 17.6) - 2) < 1e-5 for p in e.discretize(12))
+               and min(p.y for p in e.discretize(12)) > 20]
+        self.assertEqual(len(rim), 1)
+        base, chamfer = self._varyingChamfer(shape, 1, rim, size=1.0)
+        self.assertFalse(chamfer.isValid())
+        self.assertIn("runs off its face", chamfer.getStatusString())
+        chamfer.WidthAt = "Narrowest angle"
+        self.Doc.recompute()
+        self.assertFalse(chamfer.isValid())
+
     def testChamferVaryingAngleKeepsOtherCases(self):
         # T4: square to the cylinder (t = 0), two distances, and a box edge: WidthAt changes nothing
         V = FreeCAD.Vector
