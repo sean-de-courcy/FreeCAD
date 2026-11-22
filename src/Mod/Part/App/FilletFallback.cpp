@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 
 #include <algorithm>
+#include <array>
+#include <cctype>
+#include <iterator>
 #include <map>
+#include <numeric>
 #include <cmath>
 #include <functional>
 #include <memory>
@@ -46,6 +50,7 @@
 #include <BRepPrimAPI_MakeTorus.hxx>
 #include <BRepTools.hxx>
 #include <BRepTools_History.hxx>
+#include <BRepTools_ReShape.hxx>
 #include <BRep_Builder.hxx>
 #include <ChFi3d.hxx>
 #include <BRep_Tool.hxx>
@@ -129,9 +134,12 @@
 #include <gp_Pnt.hxx>
 #include <gp_Pnt2d.hxx>
 #include <gp_Trsf.hxx>
+#include <gp_Ax2d.hxx>
+#include <gp_Trsf2d.hxx>
 #include <gp_Vec.hxx>
 #include <gp_XY.hxx>
 
+#include <App/ElementMap.h>
 #include <Base/Console.h>
 #include <Base/Exception.h>
 
@@ -455,6 +463,474 @@ bool sameDomain(const TopoDS_Face& face, const TopoDS_Face& other)
     }
     return false;
 }
+
+/// The torus a face lies on, where the face is; its frame is left-handed under a mirror
+bool torusOf(const TopoDS_Face& face, gp_Torus& torus)
+{
+    TopLoc_Location location;
+    auto toroidal = Handle(Geom_ToroidalSurface)::DownCast(BRep_Tool::Surface(face, location));
+    if (toroidal.IsNull()) {
+        return false;
+    }
+    const gp_Trsf trsf = location.Transformation();
+    if (std::abs(std::abs(trsf.ScaleFactor()) - 1.0) > 1e-12) {
+        return false;
+    }
+    torus = toroidal->Torus().Transformed(trsf);
+    return true;
+}
+
+/// One torus in space, whichever way the axes point and wherever the seams are
+bool sameTorus(const gp_Torus& a, const gp_Torus& b)
+{
+    return std::abs(a.MajorRadius() - b.MajorRadius()) < linearTolerance
+        && std::abs(a.MinorRadius() - b.MinorRadius()) < linearTolerance
+        && a.Location().Distance(b.Location()) < linearTolerance
+        && gp_Vec(a.Axis().Direction()).Crossed(gp_Vec(b.Axis().Direction())).Magnitude()
+            < linearTolerance;
+}
+
+/// The dress-up's own faces that are one face in Onshape: two of them on one cylinder or one
+/// torus, met along an edge (a full round, radius half the wall: the two rounds meet on the
+/// crest, ops#900).
+///
+/// OCCT 8.0.1's ShapeUpgrade_UnifySameDomain merges two faces of one torus only where the two
+/// surfaces have the same right-handed frame (measured: equal frames merge, also as two surface
+/// objects; a reversed axis or a left-handed frame does not). The two rounds of an arc are swept
+/// about opposite axes, and one of the two tools is a mirror image, so its torus is left-handed.
+/// Such a face is replaced by one on a torus with the group's frame: the same points under
+/// (u, v) -> (phi +/- u, +/- v). Where that map mirrors the parameter plane (a left-handed
+/// torus), the surface's normal turns over, so the new face holds the wires reversed and stands
+/// reversed in the shell: the same side and the same edge directions in space. Each pcurve is
+/// checked against its edge before a face is replaced.
+///
+/// The caller works on a copy of the result: edges get pcurves here, and OCCT's unify changes
+/// shared sub-shapes even where its result is thrown away.
+///
+/// Only the crest counts: a line on a cylinder, a circle about the axis on a torus. Two tools'
+/// faces end to end (a seam across the round) stay as they are, and so do faces that close a
+/// loop (a column's four quarter cylinders).
+struct OwnSeams
+{
+    TopTools_IndexedMapOfShape edges;     // between two own faces of one cylinder or one torus
+    TopTools_IndexedMapOfShape vertices;  // their ends
+    TopTools_IndexedMapOfShape closing;   // the seam lines of the rings among those faces
+    TopTools_DataMapOfShapeShape replaced;  // a torus face -> its face on the group's torus,
+                                            // oriented as it replaces the forward face
+
+    /// 1: a crest between two faces of one cylinder; 2: of one torus; 0: neither
+    static int kind(const TopoDS_Edge& edge, const TopoDS_Face& a, const TopoDS_Face& b)
+    {
+        if (a.IsSame(b) || BRep_Tool::Degenerated(edge)) {
+            return 0;
+        }
+        const GeomAbs_SurfaceType type = BRepAdaptor_Surface(a, Standard_False).GetType();
+        if (type != BRepAdaptor_Surface(b, Standard_False).GetType()) {
+            return 0;
+        }
+        const BRepAdaptor_Curve seam(edge);
+        if (type == GeomAbs_Cylinder) {
+            return seam.GetType() == GeomAbs_Line && sameDomain(a, b) ? 1 : 0;
+        }
+        if (type == GeomAbs_Torus) {
+            gp_Torus ta;
+            gp_Torus tb;
+            return seam.GetType() == GeomAbs_Circle && torusOf(a, ta) && torusOf(b, tb)
+                    && sameTorus(ta, tb)
+                    && gp_Vec(seam.Circle().Axis().Direction())
+                               .Crossed(gp_Vec(ta.Axis().Direction()))
+                               .Magnitude()
+                        < linearTolerance
+                ? 2
+                : 0;
+        }
+        return 0;
+    }
+
+    /// Whether a result has such an edge at all (before the copy is made)
+    static bool any(const TopoDS_Shape& shape, const TopTools_IndexedMapOfShape& baseImages)
+    {
+        TopTools_IndexedDataMapOfShapeListOfShape facesOf;
+        TopExp::MapShapesAndAncestors(shape, TopAbs_EDGE, TopAbs_FACE, facesOf);
+        for (int i = 1; i <= facesOf.Extent(); ++i) {
+            const TopTools_ListOfShape& faces = facesOf(i);
+            if (faces.Extent() != 2 || baseImages.Contains(faces.First())
+                || baseImages.Contains(faces.Last())) {
+                continue;
+            }
+            if (kind(
+                    TopoDS::Edge(facesOf.FindKey(i)),
+                    TopoDS::Face(faces.First()),
+                    TopoDS::Face(faces.Last())
+                )
+                != 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// The face as it is now: its replacement, or itself
+    TopoDS_Face now(const TopoDS_Face& face) const
+    {
+        return replaced.IsBound(face) ? TopoDS::Face(replaced.Find(face)) : face;
+    }
+
+    /// Makes the face's replacement on a torus with the given right-handed frame, its pcurves
+    /// beside the neighbour's across the shared edge (no neighbour: the first of a group).
+    /// False, with no replacement, where that is not exact
+    bool reseat(
+        const TopoDS_Face& face,
+        const gp_Torus& frame,
+        const TopoDS_Face* neighbour,
+        const TopoDS_Edge* shared
+    )
+    {
+        gp_Torus own;
+        if (replaced.IsBound(face) || !torusOf(face, own) || !sameTorus(own, frame)
+            || !frame.Position().Direct()) {
+            return false;
+        }
+        TopLoc_Location location;
+        const Handle(Geom_Surface) surface = BRep_Tool::Surface(face, location);
+        const gp_Ax3& to = frame.Position();
+        const gp_Ax3& from = own.Position();
+        // P(u, v) of the old frame is P(phi + su u, sv v) of the new one
+        const bool flipV = to.Direction().Dot(from.Direction()) < 0;
+        const gp_Vec normal = gp_Vec(from.XDirection()).Crossed(gp_Vec(from.YDirection()));
+        const bool flipU = normal.Dot(gp_Vec(to.Direction())) < 0;
+        const bool mirrored = flipU != flipV;
+        const double phi = std::atan2(
+            gp_Vec(from.XDirection()).Dot(gp_Vec(to.YDirection())),
+            gp_Vec(from.XDirection()).Dot(gp_Vec(to.XDirection()))
+        );
+        gp_Trsf2d map;
+        if (flipU && flipV) {
+            map.SetMirror(gp_Pnt2d(0, 0));
+        }
+        else if (flipU) {
+            map.SetMirror(gp_Ax2d(gp_Pnt2d(0, 0), gp_Dir2d(0, 1)));
+        }
+        else if (flipV) {
+            map.SetMirror(gp_Ax2d(gp_Pnt2d(0, 0), gp_Dir2d(1, 0)));
+        }
+        gp_Trsf2d turn;
+        turn.SetTranslation(gp_Vec2d(phi, 0));
+        map.PreMultiply(turn);
+        double first = 0;
+        double last = 0;
+        bool shifted = false;
+        if (neighbour && shared) {
+            // The period: the shared edge's pcurve falls on the neighbour's
+            if (BRep_Tool::IsClosed(*shared, face) || BRep_Tool::IsClosed(*shared, *neighbour)) {
+                return false;
+            }
+            const Handle(Geom2d_Curve) mine
+                = BRep_Tool::CurveOnSurface(*shared, face, first, last);
+            const Handle(Geom2d_Curve) theirs
+                = BRep_Tool::CurveOnSurface(*shared, *neighbour, first, last);
+            if (mine.IsNull() || theirs.IsNull()) {
+                return false;
+            }
+            const double middle = (first + last) / 2;
+            const gp_Pnt2d there = theirs->Value(middle);
+            const gp_Pnt2d here = mine->Value(middle).Transformed(map);
+            gp_Trsf2d period;
+            period.SetTranslation(gp_Vec2d(
+                2 * pi * std::round((there.X() - here.X()) / (2 * pi)),
+                2 * pi * std::round((there.Y() - here.Y()) / (2 * pi))
+            ));
+            shifted = gp_Vec2d(period.TranslationPart()).Magnitude() > angularTolerance;
+            map.PreMultiply(period);
+            for (double at : {first, middle, last}) {
+                if (mine->Value(at).Transformed(map).Distance(theirs->Value(at)) > 1e-4) {
+                    return false;
+                }
+            }
+        }
+        if (!flipU && !flipV && std::abs(phi) < angularTolerance && !shifted) {
+            return true;  // the same frame and period already: OCCT merges these as they are
+        }
+        // Every edge's pcurve, checked on the new torus against the edge itself. A seam stays a
+        // seam only on the new torus's own (a ring whose seam is elsewhere stays as it is)
+        struct Moved
+        {
+            TopoDS_Edge edge;
+            Handle(Geom2d_Curve) pcurve;
+            Handle(Geom2d_Curve) second;
+        };
+        std::vector<Moved> moved;
+        TopTools_IndexedMapOfShape seen;
+        for (TopExp_Explorer it(face, TopAbs_EDGE); it.More(); it.Next()) {
+            if (seen.Contains(it.Current())) {
+                continue;
+            }
+            seen.Add(it.Current());
+            const TopoDS_Edge edge = TopoDS::Edge(it.Current().Oriented(TopAbs_FORWARD));
+            if (BRep_Tool::Degenerated(edge)) {
+                return false;
+            }
+            Moved item;
+            item.edge = edge;
+            const Handle(Geom2d_Curve) old
+                = BRep_Tool::CurveOnSurface(edge, surface, location, first, last);
+            if (old.IsNull()) {
+                return false;
+            }
+            item.pcurve = Handle(Geom2d_Curve)::DownCast(old->Transformed(map));
+            if (BRep_Tool::IsClosed(edge, surface, location)) {
+                const Handle(Geom2d_Curve) other = BRep_Tool::CurveOnSurface(
+                    TopoDS::Edge(edge.Reversed()),
+                    surface,
+                    location,
+                    first,
+                    last
+                );
+                if (other.IsNull()) {
+                    return false;
+                }
+                item.second = Handle(Geom2d_Curve)::DownCast(other->Transformed(map));
+                const gp_Pnt2d one = item.pcurve->Value((first + last) / 2);
+                const gp_Pnt2d two = item.second->Value((first + last) / 2);
+                const double fixed = std::abs(one.X() - two.X()) > pi ? std::min(one.X(), two.X())
+                                                                       : std::min(one.Y(), two.Y());
+                if (std::abs(fixed / (2 * pi) - std::round(fixed / (2 * pi))) > 1e-9) {
+                    return false;
+                }
+                if (mirrored) {
+                    // The wires are reversed in the new face: the edge's two sides change places
+                    std::swap(item.pcurve, item.second);
+                }
+            }
+            const BRepAdaptor_Curve curve(edge);
+            const double allowed = BRep_Tool::Tolerance(edge) + 2 * linearTolerance;
+            for (const auto& pcurve : {item.pcurve, item.second}) {
+                if (pcurve.IsNull()) {
+                    continue;
+                }
+                for (int k = 0; k <= 16; ++k) {
+                    const double at = first + (last - first) * k / 16.0;
+                    const gp_Pnt2d uv = pcurve->Value(at);
+                    if (ElSLib::Value(uv.X(), uv.Y(), frame).Distance(curve.Value(at)) > allowed) {
+                        return false;
+                    }
+                }
+            }
+            moved.push_back(item);
+        }
+        const Handle(Geom_Surface) target
+            = new Geom_ToroidalSurface(to, frame.MajorRadius(), frame.MinorRadius());
+        BRep_Builder builder;
+        for (const auto& item : moved) {
+            const double tolerance = BRep_Tool::Tolerance(item.edge);
+            if (item.second.IsNull()) {
+                builder.UpdateEdge(item.edge, item.pcurve, target, TopLoc_Location(), tolerance);
+            }
+            else {
+                builder.UpdateEdge(
+                    item.edge,
+                    item.pcurve,
+                    item.second,
+                    target,
+                    TopLoc_Location(),
+                    tolerance
+                );
+            }
+        }
+        TopoDS_Face fresh;
+        builder.MakeFace(fresh, target, TopLoc_Location(), BRep_Tool::Tolerance(face));
+        for (TopoDS_Iterator it(face.Oriented(TopAbs_FORWARD)); it.More(); it.Next()) {
+            builder.Add(fresh, mirrored ? it.Value().Reversed() : it.Value());
+        }
+        builder.NaturalRestriction(fresh, BRep_Tool::NaturalRestriction(face));
+        replaced.Bind(face, mirrored ? fresh.Reversed() : fresh);
+        return true;
+    }
+
+    /// The pcurves of an edge on its two faces, of equal frames, are in one period
+    static bool inOnePeriod(const TopoDS_Edge& edge, const TopoDS_Face& a, const TopoDS_Face& b)
+    {
+        if (BRep_Tool::IsClosed(edge, a) || BRep_Tool::IsClosed(edge, b)) {
+            return false;
+        }
+        double first = 0;
+        double last = 0;
+        const Handle(Geom2d_Curve) onA = BRep_Tool::CurveOnSurface(edge, a, first, last);
+        const Handle(Geom2d_Curve) onB = BRep_Tool::CurveOnSurface(edge, b, first, last);
+        if (onA.IsNull() || onB.IsNull()) {
+            return false;
+        }
+        for (double at : {first, (first + last) / 2, last}) {
+            if (onA->Value(at).Distance(onB->Value(at)) > 1e-4) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /// Finds the seams in a result (a copy: see above); its faces that are not images of the
+    /// base's are its own
+    void find(const TopoDS_Shape& shape, const TopTools_IndexedMapOfShape& baseImages)
+    {
+        struct Pair
+        {
+            TopoDS_Edge edge;
+            TopoDS_Face faces[2];
+            bool done = false;
+        };
+        std::vector<Pair> pairs;
+        std::vector<Pair> found;  // the seams, before the loops are taken out
+        TopTools_IndexedDataMapOfShapeListOfShape facesOf;
+        TopExp::MapShapesAndAncestors(shape, TopAbs_EDGE, TopAbs_FACE, facesOf);
+        for (int i = 1; i <= facesOf.Extent(); ++i) {
+            const TopoDS_Edge edge = TopoDS::Edge(facesOf.FindKey(i));
+            const TopTools_ListOfShape& faces = facesOf(i);
+            if (faces.Extent() != 2) {
+                continue;
+            }
+            const TopoDS_Face a = TopoDS::Face(faces.First());
+            const TopoDS_Face b = TopoDS::Face(faces.Last());
+            if (baseImages.Contains(a) || baseImages.Contains(b)) {
+                continue;
+            }
+            const int which = kind(edge, a, b);
+            if (which == 1) {
+                found.push_back({edge, {a, b}});
+            }
+            else if (which == 2) {
+                pairs.push_back({edge, {a, b}});
+            }
+        }
+        // Tori: the first face of each group gives the frame (its own where that is
+        // right-handed), and its neighbours follow it
+        TopTools_IndexedMapOfShape seated;
+        TopTools_IndexedMapOfShape failed;
+        std::vector<std::pair<int, gp_Torus>> frames;  // by seated's index: the group, its frame
+        int groups = 0;
+        for (bool progress = true; progress;) {
+            progress = false;
+            for (auto& pair : pairs) {
+                if (pair.done) {
+                    continue;
+                }
+                const int ia = seated.FindIndex(pair.faces[0]);
+                const int ib = seated.FindIndex(pair.faces[1]);
+                if (ia == 0 && ib == 0) {
+                    continue;
+                }
+                pair.done = true;
+                progress = true;
+                if (ia != 0 && ib != 0) {
+                    if (frames[ia - 1].first == frames[ib - 1].first
+                        && inOnePeriod(pair.edge, now(pair.faces[0]), now(pair.faces[1]))) {
+                        found.push_back(pair);
+                    }
+                    continue;
+                }
+                const auto frame = frames[(ia != 0 ? ia : ib) - 1];
+                const TopoDS_Face fixed = now(pair.faces[ia != 0 ? 0 : 1]);
+                const TopoDS_Face& other = pair.faces[ia != 0 ? 1 : 0];
+                if (reseat(other, frame.second, &fixed, &pair.edge)) {
+                    seated.Add(other);
+                    frames.push_back(frame);
+                    found.push_back(pair);
+                }
+            }
+            if (progress) {
+                continue;
+            }
+            for (auto& pair : pairs) {
+                if (pair.done) {
+                    continue;
+                }
+                bool seeded = false;
+                for (const auto& face : pair.faces) {
+                    gp_Torus torus;
+                    if (failed.Contains(face) || !torusOf(face, torus)) {
+                        continue;
+                    }
+                    if (!torus.Position().Direct()) {
+                        const gp_Ax3& position = torus.Position();
+                        const gp_Dir axis(
+                            gp_Vec(position.XDirection()).Crossed(gp_Vec(position.YDirection()))
+                        );
+                        const gp_Torus direct(
+                            gp_Ax3(position.Location(), axis, position.XDirection()),
+                            torus.MajorRadius(),
+                            torus.MinorRadius()
+                        );
+                        if (!reseat(face, direct, nullptr, nullptr)) {
+                            failed.Add(face);
+                            continue;
+                        }
+                        torus = direct;
+                    }
+                    seated.Add(face);
+                    frames.emplace_back(groups++, torus);
+                    seeded = true;
+                    break;
+                }
+                if (!seeded) {
+                    pair.done = true;
+                }
+                progress = true;
+                break;
+            }
+        }
+        // Faces that close a loop over their seams stay apart: OCCT's unify makes no sound
+        // closed face of them (a column's four quarter cylinders: an invalid result)
+        TopTools_IndexedMapOfShape faces;
+        std::vector<int> root;
+        auto rootOf = [&root](int i) {
+            while (root[i] != i) {
+                i = root[i] = root[root[i]];
+            }
+            return i;
+        };
+        for (const auto& seam : found) {
+            for (const auto& face : seam.faces) {
+                if (faces.Add(face) > static_cast<int>(root.size())) {
+                    root.push_back(static_cast<int>(root.size()));
+                }
+            }
+            root[rootOf(faces.FindIndex(seam.faces[0]) - 1)]
+                = rootOf(faces.FindIndex(seam.faces[1]) - 1);
+        }
+        std::vector<int> seamsOf(root.size(), 0);
+        std::vector<int> facesIn(root.size(), 0);
+        for (int i = 0; i < static_cast<int>(root.size()); ++i) {
+            ++facesIn[rootOf(i)];
+        }
+        for (const auto& seam : found) {
+            ++seamsOf[rootOf(faces.FindIndex(seam.faces[0]) - 1)];
+        }
+        for (const auto& seam : found) {
+            const int group = rootOf(faces.FindIndex(seam.faces[0]) - 1);
+            if (seamsOf[group] >= facesIn[group]) {
+                continue;
+            }
+            edges.Add(seam.edge);
+            // A ring's own seam line is no edge of the merged ring: the two rings' seam lines
+            // become one (OCCT's unify leaves two rings apart while their seam lines are kept)
+            for (const auto& side : seam.faces) {
+                const TopoDS_Face face = now(side);
+                for (TopExp_Explorer it(face, TopAbs_EDGE); it.More(); it.Next()) {
+                    if (BRep_Tool::IsClosed(TopoDS::Edge(it.Current()), face)
+                        && !baseImages.Contains(it.Current())) {
+                        closing.Add(it.Current());
+                    }
+                }
+            }
+        }
+        for (int i = 1; i <= edges.Extent(); ++i) {
+            for (TopExp_Explorer it(edges(i), TopAbs_VERTEX); it.More(); it.Next()) {
+                if (!baseImages.Contains(it.Current())) {
+                    vertices.Add(it.Current());
+                }
+            }
+        }
+    }
+};
 
 /// The exact section of a fillet or chamfer in the plane normal to the edge at a point
 struct Section
@@ -8754,7 +9230,8 @@ TopoDS_Shape constructShape(
     ShapeMapper& mapper,
     int& cornerCount,
     bool& rolledOn,
-    bool* keptOverFace = nullptr
+    bool* keptOverFace = nullptr,
+    MergedNames* mergedNames = nullptr
 )
 {
     rolledOn = false;
@@ -10398,99 +10875,198 @@ TopoDS_Shape constructShape(
         }
     }
 
-    // The checks of the result
-    if (countSolids(shape) != 1) {
-        refuse("the result is not one solid");
-    }
-    if (!BRepCheck_Analyzer(shape).IsValid()) {
-        refuse("the result is not valid");
-    }
-    if (!thinFace(shape, base.getShape()).IsNull()) {
-        refuse("the result has a face of zero width");
-    }
-    TopTools_DataMapOfShapeReal faceTolerances;
-    auto bindImages = [&](size_t from, const TopoDS_Shape& face, double tolerance) {
-        for (const auto& image : imagesThrough(stages, from, face)) {
-            if (double* known = faceTolerances.ChangeSeek(image)) {
-                *known = std::max(*known, tolerance);
+    // Two of the dress-up's own faces on one cylinder or one torus, met along the crest, are one
+    // face, and the edges that end on the crest between them one edge, as Onshape's: a full round
+    // (radius half the wall) has one cylinder along a straight run and one torus around a corner
+    // (ops#900). Made on a copy (OwnSeams) and taken only if the result stays one valid solid of
+    // the same volume and area with fewer faces, and passes the checks below; else the result
+    // and its stages stay as they were
+    const TopoDS_Shape unmerged = shape;
+    const size_t unmergedStages = stages.size();
+    bool merged = false;
+    auto unmerge = [&]() {
+        merged = false;
+        shape = unmerged;
+        stages.erase(stages.begin() + static_cast<std::ptrdiff_t>(unmergedStages), stages.end());
+        collectBaseImages();
+    };
+    try {
+        collectBaseImages();
+        if (OwnSeams::any(shape, baseImages)) {
+            const double volumeBefore = volumeOf(shape);
+            const double areaBefore = areaOf(shape);
+            BRepBuilderAPI_Copy copy(shape, true, false);
+            Handle(BRepTools_History) copied = new BRepTools_History;
+            for (auto type : {TopAbs_FACE, TopAbs_EDGE, TopAbs_VERTEX}) {
+                TopTools_IndexedMapOfShape all;
+                TopExp::MapShapes(shape, type, all);
+                for (int i = 1; i <= all.Extent(); ++i) {
+                    copied->AddModified(all(i), copy.ModifiedShape(all(i)));
+                }
             }
-            else {
-                faceTolerances.Bind(image, tolerance);
+            TopoDS_Shape work = copy.Shape();
+            stages.emplace_back(copied, work);
+            collectBaseImages();
+            OwnSeams own;
+            own.find(work, baseImages);
+            if (!own.replaced.IsEmpty()) {
+                BRepTools_ReShape reshape;
+                Handle(BRepTools_History) reseated = new BRepTools_History;
+                TopTools_DataMapOfShapeShape::Iterator it(own.replaced);
+                for (; it.More(); it.Next()) {
+                    reshape.Replace(it.Key().Oriented(TopAbs_FORWARD), it.Value());
+                    reseated->AddModified(it.Key(), it.Value());
+                }
+                work = reshape.Apply(work);
+                stages.emplace_back(reseated, work);
+            }
+            if (!own.edges.IsEmpty()) {
+                NCollection_Map<TopoDS_Shape, TopTools_ShapeMapHasher> keep;
+                for (auto type : {TopAbs_EDGE, TopAbs_VERTEX}) {
+                    TopTools_IndexedMapOfShape all;
+                    TopExp::MapShapes(work, type, all);
+                    for (int i = 1; i <= all.Extent(); ++i) {
+                        if (!own.edges.Contains(all(i)) && !own.vertices.Contains(all(i))
+                            && !own.closing.Contains(all(i))) {
+                            keep.Add(all(i));
+                        }
+                    }
+                }
+                TopTools_IndexedMapOfShape facesBefore;
+                TopExp::MapShapes(work, TopAbs_FACE, facesBefore);
+                ShapeUpgrade_UnifySameDomain unify(work, true, true, false);
+                unify.KeepShapes(keep);
+                unify.Build();
+                const TopoDS_Shape unified = unify.Shape();
+                TopTools_IndexedMapOfShape facesAfter;
+                TopExp::MapShapes(unified, TopAbs_FACE, facesAfter);
+                if (facesAfter.Extent() < facesBefore.Extent() && countSolids(unified) == 1
+                    && BRepCheck_Analyzer(unified).IsValid()
+                    && std::abs(volumeOf(unified) - volumeBefore)
+                        <= volumeTolerance * std::abs(volumeBefore)
+                    && std::abs(areaOf(unified) - areaBefore) <= volumeTolerance * areaBefore) {
+                    shape = unified;
+                    stages.emplace_back(unify.History(), shape);
+                    merged = true;
+                }
+            }
+        }
+    }
+    catch (const Standard_Failure&) {
+        merged = false;
+    }
+    if (!merged) {
+        unmerge();
+    }
+
+    auto checkResult = [&]() {
+        // The checks of the result
+        if (countSolids(shape) != 1) {
+            refuse("the result is not one solid");
+        }
+        if (!BRepCheck_Analyzer(shape).IsValid()) {
+            refuse("the result is not valid");
+        }
+        if (!thinFace(shape, base.getShape()).IsNull()) {
+            refuse("the result has a face of zero width");
+        }
+        TopTools_DataMapOfShapeReal faceTolerances;
+        auto bindImages = [&](size_t from, const TopoDS_Shape& face, double tolerance) {
+            for (const auto& image : imagesThrough(stages, from, face)) {
+                if (double* known = faceTolerances.ChangeSeek(image)) {
+                    *known = std::max(*known, tolerance);
+                }
+                else {
+                    faceTolerances.Bind(image, tolerance);
+                }
+            }
+        };
+        // The base's as before OCCT's maker, which raises them in place
+        for (TopExp_Explorer it(base.getShape(), TopAbs_FACE); it.More(); it.Next()) {
+            const double* before = request.faceTolerances.Seek(it.Current());
+            bindImages(0, it.Current(), before ? *before : largestTolerance(it.Current()));
+        }
+        for (size_t i = 0; i < tools.size(); ++i) {
+            for (const auto& [face, tolerance] : toolFaceTolerances[i]) {
+                bindImages(toolStage[i], face, tolerance);
+            }
+        }
+        if (TopoDS_Edge grown = grownEdge(shape, base.getShape(), faceTolerances);
+            !grown.IsNull()) {
+            refuse("an edge's tolerance grew to " + describe(BRep_Tool::Tolerance(grown))
+                   + ": a face was merged away");
+        }
+        // One solid, as OCCT's fillet returns, not a compound holding it
+        if (shape.ShapeType() != TopAbs_SOLID) {
+            TopoDS_Shape solid = TopExp_Explorer(shape, TopAbs_SOLID).Current();
+            TopTools_IndexedMapOfShape inShape;
+            TopTools_IndexedMapOfShape inSolid;
+            for (auto type : {TopAbs_FACE, TopAbs_EDGE, TopAbs_VERTEX}) {
+                TopExp::MapShapes(shape, type, inShape);
+                TopExp::MapShapes(solid, type, inSolid);
+            }
+            if (inShape.Extent() != inSolid.Extent()) {
+                refuse("the result holds more than its solid");
+            }
+            shape = solid;
+        }
+        // The stages' checks don't cover the unification
+        double cutVolume = 0.0;
+        double fusedVolume = 0.0;
+        for (const auto& tool : tools) {
+            (tool.cut ? cutVolume : fusedVolume) += tool.volume;
+        }
+        double scale = cutVolume + fusedVolume;
+        for (const auto& tool : tools) {
+            fusedVolume -= tool.inBase;  // what the material absorbs (none for a cut tool)
+        }
+        fusedVolume -= fusedOverlap;  // what two fills at a concave corner reflex in it share
+        cutVolume = trimmed ? trimmedVolume : cutVolume - overlapVolume;
+        double expected = baseVolume - cutVolume + fusedVolume;
+        double measured = volumeOf(shape);
+        std::vector<TopoDS_Shape> inputs {base.getShape()};
+        double size = 0.0;
+        for (const auto& tool : tools) {
+            inputs.push_back(tool.solid);
+            size = std::max(size, squareSize(tool.solid));
+        }
+        double allowance =
+            raisedTolerance(shape, inputs) * size + (trimmed ? trimmedAllowance : 0.0);
+        if (std::abs(measured - expected) > volumeTolerance * scale + allowance) {
+            // As in applyTools: OCCT's default integration of free-form faces doesn't cancel
+            // between the base and the result; both again, adaptively
+            measured = MassProperties::volume(shape, true);
+            expected = MassProperties::volume(base.getShape(), true) - cutVolume + fusedVolume;
+        }
+        if (std::abs(measured - expected) > volumeTolerance * scale + allowance) {
+            // And over the faces that changed only, as in applyTools: the base's adaptive volume
+            // plus the change
+            measured = expected + cutVolume - fusedVolume + changedVolume(base.getShape(), shape);
+        }
+        if (std::abs(measured - expected) > volumeTolerance * scale + allowance) {
+            refuse("the result's volume " + describe(measured) + " differs from its closed form "
+                   + describe(expected));
+        }
+        // The allowance can be as large as a lens two tools share, and the measurement off by as
+        // much (ops#669: two rims' fillets 1.6 on holes 120 apart at 20x scale measure 0.099 off
+        // against a lens of 0.105, the shape right): that the cut removed each lens is checked by
+        // points instead
+        for (const auto& lens : lenses) {
+            if (materialIn(shape, lens)) {
+                refuse("the cut left material where two tools overlap");
             }
         }
     };
-    // The base's as before OCCT's maker, which raises them in place
-    for (TopExp_Explorer it(base.getShape(), TopAbs_FACE); it.More(); it.Next()) {
-        const double* before = request.faceTolerances.Seek(it.Current());
-        bindImages(0, it.Current(), before ? *before : largestTolerance(it.Current()));
+    try {
+        checkResult();
     }
-    for (size_t i = 0; i < tools.size(); ++i) {
-        for (const auto& [face, tolerance] : toolFaceTolerances[i]) {
-            bindImages(toolStage[i], face, tolerance);
+    catch (const Refusal&) {
+        // The merge must not refuse what built without it
+        if (!merged) {
+            throw;
         }
-    }
-    if (TopoDS_Edge grown = grownEdge(shape, base.getShape(), faceTolerances);
-        !grown.IsNull()) {
-        refuse("an edge's tolerance grew to " + describe(BRep_Tool::Tolerance(grown))
-               + ": a face was merged away");
-    }
-    // One solid, as OCCT's fillet returns, not a compound holding it
-    if (shape.ShapeType() != TopAbs_SOLID) {
-        TopoDS_Shape solid = TopExp_Explorer(shape, TopAbs_SOLID).Current();
-        TopTools_IndexedMapOfShape inShape;
-        TopTools_IndexedMapOfShape inSolid;
-        for (auto type : {TopAbs_FACE, TopAbs_EDGE, TopAbs_VERTEX}) {
-            TopExp::MapShapes(shape, type, inShape);
-            TopExp::MapShapes(solid, type, inSolid);
-        }
-        if (inShape.Extent() != inSolid.Extent()) {
-            refuse("the result holds more than its solid");
-        }
-        shape = solid;
-    }
-    // The stages' checks don't cover the unification
-    double cutVolume = 0.0;
-    double fusedVolume = 0.0;
-    for (const auto& tool : tools) {
-        (tool.cut ? cutVolume : fusedVolume) += tool.volume;
-    }
-    double scale = cutVolume + fusedVolume;
-    for (const auto& tool : tools) {
-        fusedVolume -= tool.inBase;  // what the material absorbs (none for a cut tool)
-    }
-    fusedVolume -= fusedOverlap;  // what two fills at a concave corner reflex in it share
-    cutVolume = trimmed ? trimmedVolume : cutVolume - overlapVolume;
-    double expected = baseVolume - cutVolume + fusedVolume;
-    double measured = volumeOf(shape);
-    std::vector<TopoDS_Shape> inputs {base.getShape()};
-    double size = 0.0;
-    for (const auto& tool : tools) {
-        inputs.push_back(tool.solid);
-        size = std::max(size, squareSize(tool.solid));
-    }
-    double allowance = raisedTolerance(shape, inputs) * size + (trimmed ? trimmedAllowance : 0.0);
-    if (std::abs(measured - expected) > volumeTolerance * scale + allowance) {
-        // As in applyTools: OCCT's default integration of free-form faces doesn't cancel between
-        // the base and the result; both again, adaptively
-        measured = MassProperties::volume(shape, true);
-        expected = MassProperties::volume(base.getShape(), true) - cutVolume + fusedVolume;
-    }
-    if (std::abs(measured - expected) > volumeTolerance * scale + allowance) {
-        // And over the faces that changed only, as in applyTools: the base's adaptive volume
-        // plus the change
-        measured = expected + cutVolume - fusedVolume + changedVolume(base.getShape(), shape);
-    }
-    if (std::abs(measured - expected) > volumeTolerance * scale + allowance) {
-        refuse("the result's volume " + describe(measured) + " differs from its closed form "
-               + describe(expected));
-    }
-    // The allowance can be as large as a lens two tools share, and the measurement off by as much
-    // (ops#669: two rims' fillets 1.6 on holes 120 apart at 20x scale measure 0.099 off against a
-    // lens of 0.105, the shape right): that the cut removed each lens is checked by points instead
-    for (const auto& lens : lenses) {
-        if (materialIn(shape, lens)) {
-            refuse("the cut left material where two tools overlap");
-        }
+        unmerge();
+        checkResult();
     }
 
     // The fillet's history, composed from the stages' (section 3): the base's elements are
@@ -10507,28 +11083,135 @@ TopoDS_Shape constructShape(
             }
         }
     }
-    for (auto type : {TopAbs_FACE, TopAbs_EDGE, TopAbs_VERTEX}) {
-        for (TopExp_Explorer it(base.getShape(), type); it.More(); it.Next()) {
-            const TopoDS_Shape& element = it.Current();
-            auto images = imagesThrough(stages, 0, element);
-            if (images.size() == 1 && images.front().IsSame(element)) {
-                continue;
-            }
-            for (const auto& image : images) {
-                mapper.insert(MappingStatus::Modified, element, image);
+    auto history = [&](ShapeMapper& into, const std::vector<Stage>& through) {
+        TopTools_IndexedMapOfShape images;
+        for (auto type : {TopAbs_FACE, TopAbs_EDGE, TopAbs_VERTEX}) {
+            for (TopExp_Explorer it(base.getShape(), type); it.More(); it.Next()) {
+                for (const auto& image : imagesThrough(through, 0, it.Current())) {
+                    images.Add(image);
+                }
             }
         }
-    }
-    for (size_t i = 0; i < tools.size(); ++i) {
-        for (TopExp_Explorer it(tools[i].solid, TopAbs_FACE); it.More(); it.Next()) {
-            for (const auto& image : imagesThrough(stages, toolStage[i], it.Current())) {
-                if (image.ShapeType() == TopAbs_FACE && !baseImages.Contains(image)) {
-                    mapper.insert(MappingStatus::Generated, tools[i].source, image);
-                    for (const auto& also : tools[i].alsoFrom) {
-                        mapper.insert(MappingStatus::Generated, also, image);
+        for (auto type : {TopAbs_FACE, TopAbs_EDGE, TopAbs_VERTEX}) {
+            for (TopExp_Explorer it(base.getShape(), type); it.More(); it.Next()) {
+                const TopoDS_Shape& element = it.Current();
+                auto modified = imagesThrough(through, 0, element);
+                if (modified.size() == 1 && modified.front().IsSame(element)) {
+                    continue;
+                }
+                for (const auto& image : modified) {
+                    into.insert(MappingStatus::Modified, element, image);
+                }
+            }
+        }
+        for (size_t i = 0; i < tools.size(); ++i) {
+            if (toolStage[i] > through.size()) {
+                continue;
+            }
+            for (TopExp_Explorer it(tools[i].solid, TopAbs_FACE); it.More(); it.Next()) {
+                for (const auto& image : imagesThrough(through, toolStage[i], it.Current())) {
+                    if (image.ShapeType() == TopAbs_FACE && !images.Contains(image)) {
+                        into.insert(MappingStatus::Generated, tools[i].source, image);
+                        for (const auto& also : tools[i].alsoFrom) {
+                            into.insert(MappingStatus::Generated, also, image);
+                        }
                     }
                 }
             }
+        }
+    };
+    history(mapper, stages);
+    // The merge's elements are named as the result before it names them (MergedNames): its
+    // history from the base, and where each element of the result comes from in it
+    if (merged && mergedNames) {
+        const std::vector<Stage> before(
+            stages.begin(),
+            stages.begin() + static_cast<std::ptrdiff_t>(unmergedStages)
+        );
+        mergedNames->unmerged = unmerged;
+        mergedNames->mapper = std::make_shared<ShapeMapper>();
+        history(*mergedNames->mapper, before);
+        mergedNames->sources.clear();
+        // Which of a merged element's sources names it first (oracle900r8, ops#900 R8 by order):
+        // the round of the edge first in the body's history, whatever the selection order. Here
+        // the sources are ranked by the base's edge index, and each one's base edges kept
+        // (`origins`): finish() ranks them by their names, which this base has not got
+        std::vector<std::pair<TopoDS_Shape, size_t>> rank;
+        auto rankOf = [&](const TopoDS_Shape& element) {
+            size_t best = std::numeric_limits<size_t>::max();
+            for (const auto& [shape, r] : rank) {
+                if (shape.IsSame(element)) {
+                    best = std::min(best, r);
+                }
+            }
+            return best;
+        };
+        mergedNames->origins.clear();
+        TopTools_IndexedMapOfShape baseEdges;
+        TopExp::MapShapes(base.getShape(), TopAbs_EDGE, baseEdges);
+        for (size_t i = 0; i < tools.size(); ++i) {
+            if (toolStage[i] > before.size()) {
+                continue;
+            }
+            // A tool from no base edge (a corner's) is still this feature's: after every edge's
+            size_t position = static_cast<size_t>(baseEdges.Extent()) + 1;
+            std::vector<TopoDS_Shape> from;
+            auto consider = [&](const TopoDS_Shape& edge) {
+                int index = edge.IsNull() ? 0 : baseEdges.FindIndex(edge);
+                if (index > 0) {
+                    position = std::min(position, static_cast<size_t>(index));
+                    from.push_back(edge);
+                }
+            };
+            consider(tools[i].source);
+            for (const auto& also : tools[i].alsoFrom) {
+                consider(also);
+            }
+            for (TopExp_Explorer it(tools[i].solid, TopAbs_FACE); it.More(); it.Next()) {
+                for (const auto& image : imagesThrough(before, toolStage[i], it.Current())) {
+                    if (image.ShapeType() != TopAbs_FACE) {
+                        continue;
+                    }
+                    for (auto type : {TopAbs_FACE, TopAbs_EDGE, TopAbs_VERTEX}) {
+                        for (TopExp_Explorer sub(image, type); sub.More(); sub.Next()) {
+                            rank.emplace_back(sub.Current(), position);
+                            mergedNames->origins.emplace_back(sub.Current(), from);
+                        }
+                    }
+                }
+            }
+        }
+        for (auto type : {TopAbs_FACE, TopAbs_EDGE, TopAbs_VERTEX}) {
+            TopTools_IndexedMapOfShape all;
+            TopExp::MapShapes(unmerged, type, all);
+            std::vector<std::pair<TopoDS_Shape, std::vector<TopoDS_Shape>>> ofType;
+            for (int i = 1; i <= all.Extent(); ++i) {
+                const auto images = imagesThrough(stages, unmergedStages, all(i));
+                // An element the merge splits would give its name to two: not named after it
+                if (images.size() != 1 || images.front().ShapeType() != type) {
+                    continue;
+                }
+                auto entry = std::find_if(ofType.begin(), ofType.end(), [&](const auto& e) {
+                    return e.first.IsSame(images.front());
+                });
+                if (entry == ofType.end()) {
+                    ofType.emplace_back(images.front(), std::vector<TopoDS_Shape> {});
+                    entry = std::prev(ofType.end());
+                }
+                entry->second.push_back(all(i));
+            }
+            for (auto& [element, sources] : ofType) {
+                if (sources.size() > 1) {
+                    std::stable_sort(
+                        sources.begin(),
+                        sources.end(),
+                        [&](const TopoDS_Shape& a, const TopoDS_Shape& b) {
+                            return rankOf(a) < rankOf(b);
+                        }
+                    );
+                }
+            }
+            mergedNames->sources.insert(mergedNames->sources.end(), ofType.begin(), ofType.end());
         }
     }
     cornerCount = cornerVertices.Extent();
@@ -15202,6 +15885,7 @@ bool constructSolid(
 )
 {
     out.newRule = false;
+    out.merged = MergedNames();
     // Whole rim loops on plane faces are built directly, without a Boolean; whatever that
     // refuses, or fails a check of its result, goes to the construction by Booleans below
     try {
@@ -15239,8 +15923,17 @@ bool constructSolid(
         int corners = 0;
         bool rolledOn = false;
         bool keptOverFace = false;
-        TopoDS_Shape shape
-            = constructShape(base, edges, request, *mapper, corners, rolledOn, &keptOverFace);
+        MergedNames mergedNames;
+        TopoDS_Shape shape = constructShape(
+            base,
+            edges,
+            request,
+            *mapper,
+            corners,
+            rolledOn,
+            &keptOverFace,
+            &mergedNames
+        );
         // A fill kept over its face (ops#898 cause A) is new: where the under-overhang
         // construction below builds the dress-up, it did so before this rule, and its result
         // stands (review of PR 484, S1: no result that builds today changes)
@@ -15275,6 +15968,7 @@ bool constructSolid(
         }
         out.shape = shape;
         out.mapper = mapper;
+        out.merged = std::move(mergedNames);
         out.edges = selected.Extent();
         out.corners = corners;
         out.rolledOn = rolledOn;
@@ -15641,6 +16335,137 @@ void finish(TopoShape& result, const Construction& construction, const TopoShape
     // A copy keeps the result's tag, hasher and history algorithm, which name the elements
     TopoShape built(result);
     built.makeShapeWithElementMap(construction.shape, *construction.mapper, {base}, op);
+    const MergedNames& merged = construction.merged;
+    if (merged.mapper && built.hasElementMap()) {
+        // The result before the merge, named through its own history: its elements' names are
+        // the merged result's (MergedNames)
+        TopoShape before(result);
+        before.makeShapeWithElementMap(merged.unmerged, *merged.mapper, {base}, op);
+        Data::ElementMapPtr map = built.resetElementMap();
+        map = map->copy();
+        // Every name is taken away before any is given, so that none is still another's
+        using Names = std::vector<std::pair<Data::MappedName, Data::ElementIDRefs>>;
+        // The first source is the round of the edge first in the body's history (oracle900r8,
+        // ops#900 R8 by order): the feature the edge's name comes from, then the sketch geometry
+        // it was drawn as, g<n> (Onshape's ids follow the segment drawn first, also on a plate,
+        // for segments not drawn as one chain and for a hole drawn before its outline: review
+        // pr501-r2, T1). Where the names say neither, the order constructShape() gives stays
+        using Key = std::array<long long, 2>;
+        constexpr long long unknown = std::numeric_limits<long long>::max();
+        auto edgeKey = [&](const TopoDS_Shape& edge) {
+            Key key {unknown, unknown};
+            const int index = base.findShape(edge);
+            if (index <= 0) {
+                return key;
+            }
+            const Data::MappedName name = base.getMappedName(Data::IndexedName::fromConst("Edge", index));
+            if (!name) {
+                return key;
+            }
+            Data::MappedName original;
+            const long tag = base.getElementHistory(name, &original);
+            if (tag == 0 || !original) {
+                return key;
+            }
+            // The history stops at the first section another object made: the sketch's where the
+            // base is the pad that made the edge, that pad's where a later feature lies between
+            // (review pr501-r3, T1'). The sketch geometry is the innermost g<n> section either
+            // way; the feature is the one that made the edge from it, the base itself in the first
+            // case (T2': never the sketch's own tag beside a pad's)
+            const std::string text = original.toString();
+            auto number = [&](size_t from, size_t& end) {
+                end = from;
+                while (end < text.size() && std::isdigit(static_cast<unsigned char>(text[end]))) {
+                    ++end;
+                }
+                // At most 18 digits: a longer run is no id (std::stoll would throw)
+                return end > from && end - from <= 18 ? std::stoll(text.substr(from, end - from)) : -1LL;
+            };
+            long long sketch = -1;
+            for (size_t at = 0; at + 1 < text.size(); ++at) {
+                if (text[at] != 'g' || (at > 0 && text[at - 1] != ';')) {
+                    continue;
+                }
+                size_t end = 0;
+                const long long geometry = number(at + 1, end);
+                if (geometry < 0 || end >= text.size() || (text[end] != '^' && text[end] != ';')) {
+                    continue;
+                }
+                key[1] = geometry;
+                // g<n>;_;<sketch>;SKT, with one ^ per level of nesting after each section
+                size_t next = text.find(";_", end);
+                if (next != std::string::npos) {
+                    next = text.find(';', next + 2);
+                }
+                if (next != std::string::npos) {
+                    size_t tagEnd = 0;
+                    sketch = number(next + 1, tagEnd);
+                }
+                break;
+            }
+            key[0] = (sketch >= 0 && std::abs(tag) == sketch && base.Tag != 0) ? std::abs(base.Tag)
+                                                                               : std::abs(tag);
+            return key;
+        };
+        auto sourceKey = [&](const TopoDS_Shape& source) {
+            Key best {unknown, unknown};
+            for (const auto& [shape, edges] : merged.origins) {
+                if (shape.IsSame(source)) {
+                    for (const auto& edge : edges) {
+                        best = std::min(best, edgeKey(edge));
+                    }
+                }
+            }
+            return best;
+        };
+        std::vector<std::pair<Data::IndexedName, Names>> renamed;
+        for (const auto& [element, given] : merged.sources) {
+            std::vector<TopoDS_Shape> sources = given;
+            if (sources.size() > 1) {
+                std::vector<Key> keys;
+                for (const auto& source : sources) {
+                    keys.push_back(sourceKey(source));
+                }
+                std::vector<size_t> order(sources.size());
+                std::iota(order.begin(), order.end(), size_t {0});
+                std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+                    return keys[a] < keys[b];
+                });
+                std::vector<TopoDS_Shape> ranked;
+                for (size_t k : order) {
+                    ranked.push_back(sources[k]);
+                }
+                sources = std::move(ranked);
+            }
+            Names names;
+            for (const auto& source : sources) {
+                const int index = before.findShape(source);
+                if (index <= 0) {
+                    continue;
+                }
+                const Data::IndexedName from(
+                    TopoShape::shapeName(source.ShapeType()).c_str(),
+                    index
+                );
+                for (auto& name : before.getElementMappedNames(from)) {
+                    names.push_back(std::move(name));
+                }
+            }
+            const int index = built.findShape(element);
+            if (names.empty() || index <= 0) {
+                continue;
+            }
+            const Data::IndexedName to(TopoShape::shapeName(element.ShapeType()).c_str(), index);
+            map->erase(to);
+            renamed.emplace_back(to, std::move(names));
+        }
+        for (const auto& [to, names] : renamed) {
+            for (const auto& [name, sids] : names) {
+                map->setElementName(to, name, built.Tag, &sids);
+            }
+        }
+        built.resetElementMap(map);
+    }
     result = built;
     if (!construction.rimRefusal.empty()) {
         FC_LOG("rim rounds not built directly: " << construction.rimRefusal);

@@ -676,8 +676,8 @@ TEST_F(FilletFallbackTest, fullRoundOfTheTopFace)
     ASSERT_TRUE(occtFilletFails(base, edges, 2, 2));
     TopoShape result = dressUp(base, edges, fillet(2));
     EXPECT_TRUE(exact(result, 2400 - 2 * filletSection(2) * 30));
-    // Without refine: one quarter cylinder per edge, as OCCT builds them below the limit
-    EXPECT_EQ(result.countSubElements("Face"), 7);
+    // At the limit the two quarter cylinders are one half cylinder, as Onshape's (ops#900)
+    EXPECT_EQ(result.countSubElements("Face"), 6);
 }
 
 TEST_F(FilletFallbackTest, filletAsWideAsItsFace)
@@ -750,12 +750,12 @@ TEST_F(FilletFallbackTest, tubeFullRound)
     double removed = 2 * pi * (10 - c) * filletSection(2) + 2 * pi * (6 + c) * filletSection(2);
     TopoShape result = dressUp(base, edges, fillet(2));
     EXPECT_TRUE(exact(result, pi * 64 * 10 - removed));
-    // The round faces are tori, as OCCT makes them
+    // The two rounds are one torus at the limit, as Onshape's (ops#900)
     int tori = 0;
     for (const auto& face : result.getSubTopoShapes(TopAbs_FACE)) {
         tori += surfaceType(face.getShape()) == GeomAbs_Torus ? 1 : 0;
     }
-    EXPECT_EQ(tori, 2);
+    EXPECT_EQ(tori, 1);
 }
 
 TEST_F(FilletFallbackTest, discRoundedOverItsWholeHeight)
@@ -1416,7 +1416,8 @@ TEST_F(FilletFallbackTest, namedAsAFillet)
                 << face;
         }
     }
-    EXPECT_EQ(rounds, 2);
+    // The two rounds are one half cylinder at the limit (ops#900)
+    EXPECT_EQ(rounds, 1);
     // A chamfer's faces carry the chamfer's op
     TopoShape chamfered = dressUp(base, {edges[0]}, chamfer(4));
     bool found = false;
@@ -3108,7 +3109,9 @@ TEST_F(FilletFallbackTest, wholeOutlineOfAStadium)
     // extruded one its result is invalid. makeElementFillet / makeElementChamfer build the full
     // round and the ridge exactly instead: the straight edges' tools meet the half circles' (a
     // sphere for the fillet, a cone for the chamfer) by tangent continuation, also across the
-    // fused stadium's seam vertex: 9 faces, 10 with the half circle in two
+    // fused stadium's seam vertex. The straight runs' two rounds are one half cylinder, as
+    // Onshape's (ops#900; its sphere patches stay apart, ops#947): 8 faces, 9 with the half
+    // circle in two; the ridge 9 and 10
     double plate = 20 * 4 * 3 + pi * 4 * 3;
     auto rounded = [&](double r) {
         double c = filletCentroid(r);
@@ -3116,13 +3119,14 @@ TEST_F(FilletFallbackTest, wholeOutlineOfAStadium)
     };
     for (const auto& [shape, faces] :
          std::vector<std::pair<TopoDS_Shape, int>> {{stadium(), 9}, {fusedStadium(), 10}}) {
+        const int rounds = faces - 1;  // the straight runs' rounds merged
         TopoShape base(shape, 1L);
         auto top = edgesWhere(base, atHeight(3));
         ASSERT_EQ(top.size(), faces - 5);
         TopoShape round = dressUp(base, top, fillet(2));
         EXPECT_TRUE(exact(round, rounded(2))) << faces;
         EXPECT_TRUE(FF::thinFace(round.getShape(), base.getShape()).IsNull()) << faces;
-        EXPECT_EQ(round.countSubElements("Face"), faces);
+        EXPECT_EQ(round.countSubElements("Face"), rounds);
         TopoShape ridge = dressUp(base, top, chamfer(2));
         EXPECT_TRUE(exact(ridge, plate - 2 * 2 * 20 - 2 * pi * (2 - 2.0 / 3) * 2)) << faces;
         EXPECT_TRUE(FF::thinFace(ridge.getShape(), base.getShape()).IsNull()) << faces;
@@ -3134,7 +3138,7 @@ TEST_F(FilletFallbackTest, wholeOutlineOfAStadium)
     auto top = edgesWhere(base, atHeight(3));
     TopoShape round = dressUp(base, top, fillet(2 - 1e-8));
     EXPECT_TRUE(exact(round, rounded(2 - 1e-8)));
-    EXPECT_EQ(round.countSubElements("Face"), 10);
+    EXPECT_EQ(round.countSubElements("Face"), 9);
     round = dressUp(base, top, fillet(2 - 1e-7));
     EXPECT_TRUE(exact(round, rounded(2 - 1e-7)));
     EXPECT_EQ(round.countSubElements("Face"), 11);
