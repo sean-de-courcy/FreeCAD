@@ -203,11 +203,13 @@ public:
         add_varargs_method(
             "split",
             &Module::split,
-            "split(body, tool, side='Front') -- Splits the part body by the plane tool: an origin "
-            "plane, a datum plane, or (feature, 'FaceN') for a planar face. A Split at its end "
-            "keeps side (Front: where the plane's normal points, or Back); a new part placed as "
-            "body gets the other side, from a Split that follows the first. Returns the new "
-            "Body; no recompute."
+            "split(body, tool, side='Front', keepTool=False) -- Splits the part body by the plane "
+            "tool: an origin plane, a datum plane, or (feature, 'FaceN') for a planar face; or by "
+            "a sheet, a shape feature in no Body with faces and no solid (one planar face cuts as "
+            "its whole plane, any other sheet as it is, into exactly two pieces). A Split at its "
+            "end keeps side (Front: where the plane's or sheet's normal points, or Back); a new "
+            "part placed as body gets the other side, from a Split that follows the first. A "
+            "sheet tool is hidden unless keepTool. Returns the new Body; no recompute."
         );
         add_varargs_method(
             "studioOriginFeature",
@@ -998,13 +1000,15 @@ private:
         PyObject* pObj;
         PyObject* pTool;
         const char* side = "Front";
+        int keepTool = 0;
         if (!PyArg_ParseTuple(
                 args.ptr(),
-                "O!O|s",
+                "O!O|sp",
                 &(App::DocumentObjectPy::Type),
                 &pObj,
                 &pTool,
-                &side
+                &side,
+                &keepTool
             )) {
             throw Py::Exception();
         }
@@ -1036,7 +1040,9 @@ private:
             throw Py::Exception();
         }
         try {
-            return Py::asObject(Split::makeSplit(body, tool, subs, side)->getPyObject());
+            return Py::asObject(
+                Split::makeSplit(body, tool, subs, side, keepTool != 0)->getPyObject()
+            );
         }
         catch (const Base::Exception& e) {
             e.setPyException();

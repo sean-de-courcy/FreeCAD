@@ -24,22 +24,41 @@
 
 #include <FCConfig.h>
 
+#include <algorithm>
+#include <cctype>
+#include <set>
+
+#include <BRep_Builder.hxx>
+#include <BRep_Tool.hxx>
+#include <BRepTools_WireExplorer.hxx>
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
+#include <BRepBndLib.hxx>
 #include <BRepBuilderAPI_Copy.hxx>
+#include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
+#include <BRepBuilderAPI_Transform.hxx>
 #include <BRepLib_FindSurface.hxx>
+#include <BRepPrimAPI_MakeHalfSpace.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
+#include <Bnd_Box.hxx>
+#include <gp_Ax3.hxx>
 #include <gp_Pln.hxx>
 #include <gp_Trsf.hxx>
 #include <Precision.hxx>
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopoDS.hxx>
+#include <TopoDS_Compound.hxx>
+#include <TopoDS_Iterator.hxx>
+#include <TopoDS_Vertex.hxx>
+#include <TopoDS_Wire.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
 
 
 #include <App/Document.h>
+#include <App/ElementNamingUtils.h>
+#include <App/GeoFeature.h>
 #include <Base/Exception.h>
 #include <Base/ProgramVersion.h>
 #include <Base/Tools.h>
@@ -47,6 +66,7 @@
 #include "FeatureExtrusion.h"
 #include "ExtrusionHelper.h"
 #include "Part2DObject.h"
+#include "TopoShapeOpCode.h"
 
 
 using namespace Part;
@@ -55,6 +75,7 @@ PROPERTY_SOURCE(Part::Extrusion, Part::Feature)
 
 const char* Extrusion::eDirModeStrings[] = {"Custom", "Edge", "Normal", nullptr};
 const char* Extrusion::eInnerWireTaperStrings[] = {"Inverted", "SameAsOuter", nullptr};
+const char* Extrusion::eEndTypeStrings[] = {"Length", "UpToFace", nullptr};
 
 namespace
 {
@@ -102,6 +123,192 @@ const char* classToEnum(const char* type)
     return MakerEnums.at(4).c_str();
 }
 
+/// Where @p obj's containers place it: its global placement without its own
+Base::Placement containerPlacement(const App::DocumentObject* obj)
+{
+    auto geo = freecad_cast<const App::GeoFeature*>(obj);
+    if (!geo) {
+        return {};
+    }
+    return App::GeoFeature::getGlobalPlacement(obj) * geo->Placement.getValue().inverse();
+}
+
+/// Whether point @p a comes before @p b, coordinate by coordinate
+bool before(const gp_Pnt& a, const gp_Pnt& b)
+{
+    constexpr double tol = Precision::Confusion();
+    for (int i = 1; i <= 3; ++i) {
+        if (a.Coord(i) < b.Coord(i) - tol) {
+            return true;
+        }
+        if (a.Coord(i) > b.Coord(i) + tol) {
+            return false;
+        }
+    }
+    return false;
+}
+
+/// Points along each edge of @p wire as the wire runs it
+std::vector<gp_Pnt> loopPoints(const TopoDS_Wire& wire)
+{
+    std::vector<gp_Pnt> points;
+    for (BRepTools_WireExplorer it(wire); it.More(); it.Next()) {
+        BRepAdaptor_Curve curve(it.Current());
+        const int steps = curve.GetType() == GeomAbs_Line ? 1 : 16;
+        const double u0 = curve.FirstParameter();
+        const double u1 = curve.LastParameter();
+        const bool reversed = it.Current().Orientation() == TopAbs_REVERSED;
+        for (int k = 0; k < steps; ++k) {
+            const double f = double(k) / steps;
+            points.push_back(curve.Value(reversed ? u1 + f * (u0 - u1) : u0 + f * (u1 - u0)));
+        }
+    }
+    return points;
+}
+
+/// A closed wire's vector area (half the sum of the cross products, here twice it), from
+/// points along each edge as the wire runs it; @p length is set to the points' perimeter
+gp_Vec vectorArea(const TopoDS_Wire& wire, double& length)
+{
+    const std::vector<gp_Pnt> points = loopPoints(wire);
+    length = 0.0;
+    for (std::size_t i = 0; i < points.size(); ++i) {
+        length += points[i].Distance(points[(i + 1) % points.size()]);
+    }
+    gp_Vec area(0, 0, 0);
+    for (std::size_t i = 1; i + 1 < points.size(); ++i) {
+        area += gp_Vec(points[0], points[i]).Crossed(gp_Vec(points[0], points[i + 1]));
+    }
+    return area;
+}
+
+/// Whether the closed polygon @p points, seen along @p dir, crosses or touches itself: two
+/// sides that aren't neighbours meet (review r6: a self-crossing loop's turn follows its larger
+/// lobe, which an edit can change)
+bool crossesItself(const std::vector<gp_Pnt>& points, const gp_Dir& dir, double tol)
+{
+    const std::size_t n = points.size();
+    if (n < 4) {
+        return false;
+    }
+    // Plane coordinates across dir
+    const gp_Ax3 frame(gp_Pnt(0, 0, 0), dir);
+    const gp_Dir xd = frame.XDirection();
+    const gp_Dir yd = frame.YDirection();
+    std::vector<std::pair<double, double>> p(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        const gp_Vec v(points[i].XYZ());
+        p[i] = {v.Dot(gp_Vec(xd)), v.Dot(gp_Vec(yd))};
+    }
+    auto cross = [](const std::pair<double, double>& o, const std::pair<double, double>& a,
+                    const std::pair<double, double>& b) {
+        return (a.first - o.first) * (b.second - o.second)
+            - (a.second - o.second) * (b.first - o.first);
+    };
+    auto distance = [](const std::pair<double, double>& q, const std::pair<double, double>& a,
+                       const std::pair<double, double>& b) {
+        const double dx = b.first - a.first;
+        const double dy = b.second - a.second;
+        const double len2 = dx * dx + dy * dy;
+        double t = len2 > 0.0 ? ((q.first - a.first) * dx + (q.second - a.second) * dy) / len2 : 0.0;
+        t = std::clamp(t, 0.0, 1.0);
+        return std::hypot(q.first - (a.first + t * dx), q.second - (a.second + t * dy));
+    };
+    for (std::size_t i = 0; i < n; ++i) {
+        const auto& a = p[i];
+        const auto& b = p[(i + 1) % n];
+        for (std::size_t j = i + 2; j < n; ++j) {
+            if (i == 0 && j == n - 1) {
+                continue;  // neighbours through the closing side
+            }
+            const auto& c = p[j];
+            const auto& d = p[(j + 1) % n];
+            const double d1 = cross(a, b, c);
+            const double d2 = cross(a, b, d);
+            const double d3 = cross(c, d, a);
+            const double d4 = cross(c, d, b);
+            if (((d1 > 0) != (d2 > 0)) && ((d3 > 0) != (d4 > 0))) {
+                return true;
+            }
+            if (distance(c, a, b) <= tol || distance(d, a, b) <= tol || distance(a, c, d) <= tol
+                || distance(b, c, d) <= tol) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+/// Whether @p wire is closed
+bool isClosedWire(const TopoDS_Wire& wire)
+{
+    TopoDS_Vertex first;
+    TopoDS_Vertex last;
+    TopExp::Vertices(wire, first, last);
+    if (first.IsNull() || last.IsNull()) {
+        return false;
+    }
+    return first.IsSame(last)
+        || BRep_Tool::Pnt(first).Distance(BRep_Tool::Pnt(last)) <= Precision::Confusion();
+}
+
+/// Whether @p wire runs the way the rule below wants: a closed wire counter-clockwise about
+/// @p dir, an open one from its end that comes first by coordinates
+bool runsTheRightWay(const TopoDS_Wire& wire, const gp_Dir& dir)
+{
+    TopoDS_Vertex first;
+    TopoDS_Vertex last;
+    TopExp::Vertices(wire, first, last);
+    if (first.IsNull() || last.IsNull()) {
+        return true;
+    }
+    if (!isClosedWire(wire)) {
+        return !before(BRep_Tool::Pnt(last), BRep_Tool::Pnt(first));
+    }
+    double length = 0.0;
+    return vectorArea(wire, length).Dot(gp_Vec(dir)) >= 0.0;
+}
+
+/// @p sheet, extruded from the wires of @p profile, turned by a rule of the profile's geometry
+/// alone (ops#919, review r1): each closed wire counter-clockwise about @p dir, so that a
+/// tube's normals point into it whichever way its edges were drawn. An open chain has no rule
+/// a move can't flip (review r2, r3): it runs from its end that comes first by coordinates,
+/// and a Split refuses such a sheet, which has no inside. The sheet's faces are turned, not the
+/// profile: the prism follows its edges, not a wire's own orientation. A profile with faces,
+/// or a result with a solid, is left as made
+void orientSheet(const TopoShape& profile, TopoShape& sheet, const gp_Dir& dir)
+{
+    const TopoDS_Shape& shape = profile.getShape();
+    if (shape.IsNull() || sheet.isNull() || profile.hasSubShape(TopAbs_FACE)
+        || sheet.hasSubShape(TopAbs_SOLID)) {
+        return;
+    }
+    std::vector<bool> turn;
+    for (TopExp_Explorer it(shape, TopAbs_WIRE); it.More(); it.Next()) {
+        turn.push_back(!runsTheRightWay(TopoDS::Wire(it.Current()), dir));
+    }
+    if (turn.empty() || std::none_of(turn.begin(), turn.end(), [](bool t) { return t; })) {
+        return;
+    }
+    const TopoDS_Shape made = sheet.getShape();
+    if (std::all_of(turn.begin(), turn.end(), [](bool t) { return t; })) {
+        sheet.setShape(made.Reversed(), false);
+        return;
+    }
+    // Some wires each way: the sheet's pieces one by one, when they match the wires
+    if (made.ShapeType() != TopAbs_COMPOUND || made.NbChildren() != static_cast<int>(turn.size())) {
+        return;
+    }
+    BRep_Builder builder;
+    TopoDS_Compound compound;
+    builder.MakeCompound(compound);
+    std::size_t i = 0;
+    for (TopoDS_Iterator it(made); it.More(); it.Next(), ++i) {
+        builder.Add(compound, turn[i] ? it.Value().Reversed() : it.Value());
+    }
+    sheet.setShape(compound, false);
+}
+
 void restoreFaceMakerMode(Extrusion* self)
 {
     const char* mode = enumToClass(self->FaceMakerMode.getValueAsString());
@@ -147,6 +354,18 @@ Extrusion::Extrusion()
     ADD_PROPERTY_TYPE(InnerWireTaper, (static_cast<long>(InnerWireTaper::Inverted)), "Compatibility", App::Prop_Hidden,
                       "Controls taper direction for inner wires (holes).");
     InnerWireTaper.setEnums(eInnerWireTaperStrings);
+    // FreeCAD-CH (ops#919, notes/surface-upto-split-919.md 4a, 4b): picked edges of Base, and a
+    // surface up to a face. The defaults are the extrusion as before
+    ADD_PROPERTY_TYPE(BaseEdges, (nullptr), "Extrude", App::Prop_None,
+                      "The edges of Base to extrude (EdgeN of Base's shape), joined into wires. Empty: all of Base.");
+    ADD_PROPERTY_TYPE(EndType, (0L), "Extrude", App::Prop_None,
+                      "Length: by LengthFwd. UpToFace: a surface (Solid off) up to the plane of UpToFace.");
+    EndType.setEnums(eEndTypeStrings);
+    ADD_PROPERTY_TYPE(UpToFace, (nullptr), "Extrude", App::Prop_None,
+                      "The planar face the surface runs up to, taken as its whole plane (EndType UpToFace).");
+    UpToFace.setScope(App::LinkScope::Global);
+    ADD_PROPERTY_TYPE(UpToFaceFrame, (Base::Placement()), "Extrude", (App::PropertyType)(App::Prop_Hidden | App::Prop_Output),
+                      "Where UpToFace's object was, in this object's frame, when this extrusion last computed");
     // clang-format on
 }
 
@@ -155,8 +374,17 @@ short Extrusion::mustExecute() const
     if (Base.isTouched() || Dir.isTouched() || DirMode.isTouched() || DirLink.isTouched()
         || LengthFwd.isTouched() || LengthRev.isTouched() || Solid.isTouched()
         || Reversed.isTouched() || Symmetric.isTouched() || TaperAngle.isTouched()
-        || TaperAngleRev.isTouched() || FaceMakerClass.isTouched() || InnerWireTaper.isTouched()) {
+        || TaperAngleRev.isTouched() || FaceMakerClass.isTouched() || InnerWireTaper.isTouched()
+        || BaseEdges.isTouched() || EndType.isTouched() || UpToFace.isTouched()) {
         return 1;
+    }
+    // The target's Body moved, and nothing this extrusion links changed (as Split's ToolFrame)
+    if (EndType.getValue() == 1 && UpToFace.getValue()) {
+        const Base::Placement frame =
+            containerPlacement(this).inverse() * containerPlacement(UpToFace.getValue());
+        if (!frame.isSame(UpToFaceFrame.getValue(), Precision::Confusion())) {
+            return 1;
+        }
     }
     return 0;
 }
@@ -258,7 +486,9 @@ ExtrusionParameters Extrusion::computeFinalParameters()
         result.lengthFwd = result.lengthFwd * 0.5;
     }
 
-    if (fabs(result.lengthFwd + result.lengthRev) < Precision::Confusion()) {
+    // Up to a face the lengths are unused (ops#919)
+    if (EndType.getValue() == 0
+        && fabs(result.lengthFwd + result.lengthRev) < Precision::Confusion()) {
         throw Base::ValueError("Total length of extrusion is zero.");
     }
 
@@ -395,6 +625,278 @@ void Extrusion::extrudeShape(TopoShape& result, const TopoShape& source, const E
     }
 }
 
+namespace
+{
+std::string objectLabel(const App::DocumentObject* obj)
+{
+    return obj ? obj->Label.getValue() : "None";
+}
+
+/// The name of an edge of a shape, "Edge<n>": the only names BaseEdges takes. A sketch's
+/// "edge<n>" (its geometry index) and "ExternalEdge<n>" are other numberings (ops#919 4a)
+bool isShapeEdgeName(const std::string& name)
+{
+    if (name.size() <= 4 || name.compare(0, 4, "Edge") != 0) {
+        return false;
+    }
+    return std::all_of(name.begin() + 4, name.end(), [](unsigned char c) {
+        return std::isdigit(c) != 0;
+    });
+}
+
+/// Whether some point of @p edges is the end of more than two of them: such edges branch and
+/// make no sheet that one wire would
+bool branches(const std::vector<TopoShape>& edges)
+{
+    std::vector<gp_Pnt> ends;
+    for (const auto& edge : edges) {
+        TopoDS_Vertex first;
+        TopoDS_Vertex last;
+        TopExp::Vertices(TopoDS::Edge(edge.getShape()), first, last);
+        if (first.IsNull() || last.IsNull()) {
+            continue;
+        }
+        ends.push_back(BRep_Tool::Pnt(first));
+        ends.push_back(BRep_Tool::Pnt(last));
+    }
+    for (const auto& point : ends) {
+        int count = 0;
+        for (const auto& other : ends) {
+            if (point.Distance(other) <= Precision::Confusion()) {
+                ++count;
+            }
+        }
+        if (count > 2) {
+            return true;
+        }
+    }
+    return false;
+}
+}  // namespace
+
+TopoShape Extrusion::baseShape() const
+{
+    App::DocumentObject* link = Base.getValue();
+    const std::vector<std::string>& subs = BaseEdges.getSubValues();
+    App::DocumentObject* edgesOf = BaseEdges.getValue();
+    if (!edgesOf && subs.empty()) {
+        return Feature::getTopoShape(link, ShapeOption::ResolveLink | ShapeOption::Transform);
+    }
+    // FreeCAD-CH (ops#919 4a): picked edges of Base, by their names in Base's shape. The link
+    // keeps each name's mapped name, so an edit that renumbers the edges is followed
+    if (edgesOf != link) {
+        throw Base::ValueError(
+            "BaseEdges names edges of " + objectLabel(edgesOf) + ", not of Base ("
+            + objectLabel(link) + ")"
+        );
+    }
+    if (subs.empty()) {
+        return Feature::getTopoShape(link, ShapeOption::ResolveLink | ShapeOption::Transform);
+    }
+    std::set<std::string> seen;
+    std::vector<TopoShape> edges;
+    for (const auto& sub : subs) {
+        const std::string name = Data::oldElementName(Data::findElementName(sub.c_str()));
+        if (Data::hasMissingElement(sub.c_str())) {
+            throw Base::ValueError(
+                "Missing element in BaseEdges: " + objectLabel(link) + "." + name
+            );
+        }
+        if (!isShapeEdgeName(name)) {
+            throw Base::ValueError(
+                "BaseEdges takes the edges of " + objectLabel(link) + "'s shape (EdgeN), not "
+                + name
+            );
+        }
+        if (!seen.insert(name).second) {
+            throw Base::ValueError("BaseEdges names " + name + " twice");
+        }
+        TopoShape edge = Feature::getTopoShape(
+            link,
+            ShapeOption::NeedSubElement | ShapeOption::ResolveLink | ShapeOption::Transform,
+            sub.c_str()
+        );
+        if (edge.isNull() || edge.getShape().ShapeType() != TopAbs_EDGE) {
+            throw Base::ValueError(
+                "Missing element in BaseEdges: " + objectLabel(link) + "." + name
+            );
+        }
+        edges.push_back(edge);
+    }
+    if (branches(edges)) {
+        throw Base::ValueError(
+            "BaseEdges of " + objectLabel(link) + " branch: more than two meet at a point"
+        );
+    }
+    TopoShape wires = makeTopoShape(0L);
+    wires.makeElementWires(edges);
+    if (wires.isNull()) {
+        throw Base::ValueError("BaseEdges of " + objectLabel(link) + " make no wire");
+    }
+    return wires;
+}
+
+bool Extrusion::isSidedTube() const
+{
+    if (Solid.getValue() || (EndType.getValue() != 1 && BaseEdges.getSubValues().empty())) {
+        return false;
+    }
+    // A taper makes the walls by a loft, whose faces don't follow the prism's turn (review r6)
+    if (std::fabs(TaperAngle.getValue()) >= Precision::Angular()
+        || std::fabs(TaperAngleRev.getValue()) >= Precision::Angular()) {
+        return false;
+    }
+    const Base::Vector3d dir = Dir.getValue();
+    if (dir.Length() < Precision::Confusion()) {
+        return false;
+    }
+    const gp_Dir along(dir.x, dir.y, dir.z);
+    TopoShape profile;
+    try {
+        profile = baseShape();
+    }
+    catch (const Base::Exception&) {
+        return false;
+    }
+    catch (Standard_Failure&) {
+        return false;
+    }
+    if (profile.isNull() || profile.hasSubShape(TopAbs_FACE)) {
+        return false;
+    }
+    bool loops = false;
+    for (TopExp_Explorer it(profile.getShape(), TopAbs_WIRE); it.More(); it.Next()) {
+        const TopoDS_Wire& wire = TopoDS::Wire(it.Current());
+        if (!isClosedWire(wire)) {
+            return false;
+        }
+        // An inside seen along the direction: a loop with an area across it that doesn't cross
+        // or touch itself (a bowtie's turn follows its larger lobe, reviews r5, r6)
+        double length = 0.0;
+        if (std::fabs(vectorArea(wire, length).Dot(gp_Vec(along))) <= 1e-6 * length * length
+            || crossesItself(loopPoints(wire), along, 1e-6 * length)) {
+            return false;
+        }
+        loops = true;
+    }
+    return loops;
+}
+
+void Extrusion::extrudeUpToFace(TopoShape& result, const TopoShape& profile, ExtrusionParameters params)
+{
+    // FreeCAD-CH (ops#919 4b): a surface, one way, from the profile
+    if (Solid.getValue()) {
+        throw Base::ValueError("EndType UpToFace makes a surface: set Solid to false");
+    }
+    if (Symmetric.getValue()) {
+        throw Base::ValueError("EndType UpToFace runs one way: set Symmetric to false");
+    }
+    if (std::fabs(params.taperAngleFwd) >= Precision::Angular()
+        || std::fabs(params.taperAngleRev) >= Precision::Angular()) {
+        throw Base::ValueError("EndType UpToFace takes no taper: set TaperAngle and TaperAngleRev to 0");
+    }
+    if (std::fabs(LengthRev.getValue()) > Precision::Confusion()) {
+        throw Base::ValueError("EndType UpToFace runs from the profile: set LengthRev to 0");
+    }
+    App::DocumentObject* target = UpToFace.getValue();
+    if (!target) {
+        throw Base::ValueError("EndType is UpToFace, but UpToFace links no face");
+    }
+    const std::vector<std::string>& subs = UpToFace.getSubValues();
+    if (subs.size() > 1) {
+        throw Base::ValueError("UpToFace takes one face");
+    }
+    const std::string sub = subs.empty() ? std::string() : subs.front();
+    const std::string element = Data::oldElementName(Data::findElementName(sub.c_str()));
+    const std::string name = objectLabel(target) + (sub.empty() ? "" : "." + element);
+    if (Data::hasMissingElement(sub.c_str())) {
+        throw Base::ValueError("Missing element in UpToFace: " + name);
+    }
+    TopoShape face = sub.empty()
+        ? Feature::getTopoShape(target, ShapeOption::ResolveLink | ShapeOption::Transform)
+        : Feature::getTopoShape(
+              target,
+              ShapeOption::NeedSubElement | ShapeOption::ResolveLink | ShapeOption::Transform,
+              sub.c_str()
+          );
+    if (sub.empty() && !face.isNull() && face.countSubShapes(TopAbs_FACE) == 1
+        && face.countSubShapes(TopAbs_SOLID) == 0) {
+        face = face.getSubTopoShape(TopAbs_FACE, 1);
+    }
+    if (face.isNull() || face.getShape().ShapeType() != TopAbs_FACE) {
+        throw Base::ValueError("UpToFace: " + name + " isn't a face");
+    }
+    // The target's place in the document, in this object's frame: the extrusion sits beside
+    // the part whose face it runs to, and a part's features are placed by their Body
+    const Base::Placement frame = containerPlacement(this).inverse() * containerPlacement(target);
+    UpToFaceFrame.setValue(frame);
+    if (!frame.isIdentity()) {
+        face.transformShape(frame.toMatrix(), false, true);
+    }
+    BRepAdaptor_Surface surface(TopoDS::Face(face.getShape()));
+    if (surface.GetType() != GeomAbs_Plane) {
+        throw Base::ValueError(
+            "UpToFace: " + name + " isn't planar: a surface runs up to a planar face"
+        );
+    }
+    const gp_Pln plane = surface.Plane();
+    const gp_Dir normal = plane.Axis().Direction();
+    const double along = gp_Vec(params.dir).Dot(gp_Vec(normal));
+    const std::string notAhead = "UpToFace: " + name
+        + " is not ahead of the profile in the extrude's direction";
+    if (std::fabs(along) < Precision::Angular()) {
+        throw Base::ValueError(notAhead);
+    }
+    // The profile's signed distances to the plane: a point at z runs -z / along to it
+    gp_Trsf toPlane;
+    toPlane.SetTransformation(gp_Ax3(plane.Position()));
+    BRepBuilderAPI_Transform moved(profile.getShape(), toPlane, /*copy=*/true);
+    Bnd_Box box;
+    BRepBndLib::AddOptimal(moved.Shape(), box, /*useTriangulation=*/false, /*useShapeTolerance=*/false);
+    if (box.IsVoid()) {
+        throw Standard_Failure("Cannot extrude empty shape");
+    }
+    double xMin, yMin, zMin, xMax, yMax, zMax;
+    box.Get(xMin, yMin, zMin, xMax, yMax, zMax);
+    const double tMin = std::min(-zMin / along, -zMax / along);
+    const double tMax = std::max(-zMin / along, -zMax / along);
+    // Every point of the profile meets the plane ahead of it (Onshape: EXTRUDE_FAILED, SU4)
+    if (tMin <= Precision::Confusion()) {
+        throw Base::ValueError(notAhead);
+    }
+    params.lengthRev = 0.0;
+    params.solid = false;
+    // A profile parallel to the plane: the blind sheet of that length, its names included
+    if (tMax - tMin <= Precision::Confusion()) {
+        params.lengthFwd = 0.5 * (tMin + tMax);
+        extrudeShape(result, profile, params);
+        return;
+    }
+    // A slanted plane: the sheet run past the plane everywhere, kept on the profile's side by a
+    // Common with a finite slab of that side (a half-space dropped a closed tube, review r1)
+    params.lengthFwd = tMax + std::max(1.0, tMax);
+    TopoShape prism = makeTopoShape(getID());
+    extrudeShape(prism, profile, params);
+    Bnd_Box reach;
+    BRepBndLib::Add(prism.getShape(), reach);
+    const double size = 2.0 * std::sqrt(reach.SquareExtent()) + 1.0;
+    double x0, y0, z0, x1, y1, z1;
+    reach.Get(x0, y0, z0, x1, y1, z1);
+    const gp_Pnt middle(0.5 * (x0 + x1), 0.5 * (y0 + y1), 0.5 * (z0 + z1));
+    const gp_Vec offset(plane.Location(), middle);
+    const gp_Pnt onPlane = middle.Translated(gp_Vec(normal) * -offset.Dot(gp_Vec(normal)));
+    const gp_Pln capPlane(gp_Ax3(onPlane, normal, plane.Position().XDirection()));
+    BRepBuilderAPI_MakeFace cap(capPlane, -size, size, -size, size);
+    BRepPrimAPI_MakePrism slab(cap.Face(), gp_Vec(normal) * (along > 0.0 ? -2.0 * size : 2.0 * size));
+    TopoShape slabShape = makeTopoShape(-getID());
+    slabShape.setShape(slab.Shape());
+    slabShape.Tag = -getID();
+    result.makeElementBoolean(Part::OpCodes::Common, {prism, slabShape});
+    if (result.isNull() || !result.hasSubShape(TopAbs_FACE)) {
+        throw Base::ValueError("Could not extrude up to " + name);
+    }
+}
+
 App::DocumentObjectExecReturn* Extrusion::execute()
 {
     App::DocumentObject* link = Base.getValue();
@@ -406,11 +908,25 @@ App::DocumentObjectExecReturn* Extrusion::execute()
         ExtrusionParameters params = computeFinalParameters();
         TopoShape result = makeTopoShape(getID());
 
-        extrudeShape(
-            result,
-            Feature::getTopoShape(link, ShapeOption::ResolveLink | ShapeOption::Transform),
-            params
-        );
+        const TopoShape source = baseShape();
+        if (EndType.getValue() == 1) {
+            extrudeUpToFace(result, source, params);
+        }
+        else {
+            extrudeShape(result, source, params);
+        }
+        // The new modes turn the sheet by the profile's geometry: a Split by it then keeps the
+        // same piece whichever way an edge was drawn (ops#919, review r1). The plain extrusion
+        // keeps its shape as before
+        if (!params.solid && (EndType.getValue() == 1 || !BaseEdges.getSubValues().empty())) {
+            // The way the prism actually runs: a negative total length runs it against Dir
+            // (review r5); up to a face it runs along Dir, the face being ahead
+            gp_Dir along = params.dir;
+            if (EndType.getValue() == 0 && params.lengthFwd + params.lengthRev < 0.0) {
+                along.Reverse();
+            }
+            orientSheet(source, result, along);
+        }
         this->Shape.setValue(result);
         return App::DocumentObject::StdReturn;
     }

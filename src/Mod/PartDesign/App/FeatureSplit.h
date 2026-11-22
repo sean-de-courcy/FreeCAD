@@ -49,12 +49,16 @@ public:
     /// Where the plane's object was, in this one's frame, at the last compute: a move of the
     /// Tool's own part is seen by no link (the partner's Tool, for the new half)
     App::PropertyPlacement ToolFrame;
+    /// FreeCAD-CH (ops#919): a sheet object as Tool stays shown; off, it is hidden by the Split
+    /// (Onshape's Keep tools) and shown again when the Split is deleted
+    App::PropertyBool KeepTool;
 
     App::DocumentObjectExecReturn* recompute() override;
     App::DocumentObjectExecReturn* execute() override;
     short mustExecute() const override;
     void onChanged(const App::Property* prop) override;
     void onDocumentRestored() override;
+    void unsetupObject() override;
     const char* getViewProviderName() const override
     {
         return "PartDesignGui::ViewProviderSplit";
@@ -68,12 +72,19 @@ public:
     /// Split keeping the other side. A Body as @p tool stands for its Tip. Refused, with the
     /// reason, before anything changes. Returns
     /// the new Body; no recompute.
+    /// A sheet object as @p tool (a shape feature in no Body with faces and no solid, ops#919)
+    /// is hidden unless @p keepTool.
     static Body* makeSplit(
         App::DocumentObject* body,
         App::DocumentObject* tool,
         const std::vector<std::string>& subs,
-        const char* side
+        const char* side,
+        bool keepTool = false
     );
+
+    /// FreeCAD-CH (ops#919): whether @p tool is a sheet object, a shape feature in no Body whose
+    /// shape has faces and no solid
+    static bool isSheetObject(const App::DocumentObject* tool);
 
     /// The plane of @p tool / @p sub in the coordinates of @p owner's Body (the document's when
     /// it is in none), its normal out of the face or along the plane's Z. Throws when it isn't

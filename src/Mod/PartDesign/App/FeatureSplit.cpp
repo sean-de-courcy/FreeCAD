@@ -2,18 +2,37 @@
 
 // Split (FreeCAD-CH ops#325, B+ Stage 1 session 4, notes/bplus-stage1-design.md 2.7)
 
+#include <algorithm>
+#include <cmath>
 #include <cstring>
 
 #include <BRepAdaptor_Surface.hxx>
+#include <BRepAlgoAPI_Splitter.hxx>
 #include <BRepBndLib.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
+#include <BRepClass_FaceClassifier.hxx>
+#include <BRepGProp.hxx>
 #include <BRepPrimAPI_MakeHalfSpace.hxx>
+#include <BRepTools.hxx>
+#include <BRep_Tool.hxx>
 #include <Bnd_Box.hxx>
+#include <GProp_GProps.hxx>
+#include <GeomAPI_ProjectPointOnSurf.hxx>
+#include <Geom_Surface.hxx>
 #include <Precision.hxx>
 #include <Standard_Failure.hxx>
+#include <TopExp.hxx>
+#include <TopExp_Explorer.hxx>
+#include <TopTools_DataMapOfShapeShape.hxx>
+#include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
+#include <TopTools_ListOfShape.hxx>
 #include <TopoDS.hxx>
+#include <TopoDS_Edge.hxx>
+#include <TopoDS_Vertex.hxx>
 #include <gp_Ax3.hxx>
+#include <gp_Pnt2d.hxx>
 #include <gp_Trsf.hxx>
 
 #include <App/Datums.h>
@@ -21,6 +40,7 @@
 #include <App/GeoFeature.h>
 #include <App/GeoFeatureGroupExtension.h>
 #include <App/GroupExtension.h>
+#include <Mod/Part/App/FeatureExtrusion.h>
 #include <Mod/Part/App/TopoShapeOpCode.h>
 
 #include "Body.h"
@@ -78,7 +98,310 @@ bool cuts(const TopoDS_Shape& base, const gp_Pln& plane)
     box.Get(xMin, yMin, zMin, xMax, yMax, zMax);
     return zMin < -Precision::Confusion() && zMax > Precision::Confusion();
 }
+
+// FreeCAD-CH (ops#919, notes/surface-upto-split-919.md 5): a Split by a sheet
+
+/// Whether @p shape cuts as a sheet, not as a plane: no solid, and several faces or one that
+/// isn't planar. One planar face is a plane, extended (toolPlane, Onshape's SU9)
+bool isSheetShape(const TopoShape& shape)
+{
+    if (shape.isNull() || shape.countSubShapes(TopAbs_SOLID) > 0) {
+        return false;
+    }
+    const auto faces = shape.countSubShapes(TopAbs_FACE);
+    if (faces > 1) {
+        return true;
+    }
+    if (faces == 1) {
+        BRepAdaptor_Surface surface(TopoDS::Face(shape.getSubShape(TopAbs_FACE, 1)));
+        return surface.GetType() != GeomAbs_Plane;
+    }
+    return false;
+}
+
+/// A sheet a Split takes: one shell (or one face), every edge between two of its faces met by
+/// them from opposite sides, so that its faces' normals agree on its Front
+void checkSheet(const TopoDS_Shape& sheet, const std::string& name)
+{
+    TopTools_IndexedMapOfShape shells;
+    TopExp::MapShapes(sheet, TopAbs_SHELL, shells);
+    TopTools_IndexedMapOfShape faces;
+    TopExp::MapShapes(sheet, TopAbs_FACE, faces);
+    if (shells.Extent() > 1) {
+        throw Base::ValueError(
+            name + " is " + std::to_string(shells.Extent()) + " sheets: a Split takes one"
+        );
+    }
+    if (shells.Extent() == 0) {
+        if (faces.Extent() > 1) {
+            throw Base::ValueError(name + " is separate faces: a Split takes one sheet");
+        }
+        return;
+    }
+    TopTools_IndexedMapOfShape shellFaces;
+    TopExp::MapShapes(shells(1), TopAbs_FACE, shellFaces);
+    if (shellFaces.Extent() != faces.Extent()) {
+        throw Base::ValueError(name + " is a sheet and separate faces: a Split takes one sheet");
+    }
+    TopTools_IndexedDataMapOfShapeListOfShape edgeFaces;
+    TopExp::MapShapesAndUniqueAncestors(shells(1), TopAbs_EDGE, TopAbs_FACE, edgeFaces);
+    for (int i = 1; i <= edgeFaces.Extent(); ++i) {
+        const TopTools_ListOfShape& owners = edgeFaces(i);
+        if (owners.Extent() > 2) {
+            throw Base::ValueError(name + " branches: more than two of its faces meet at an edge");
+        }
+        if (owners.Extent() != 2) {
+            continue;
+        }
+        // The edge as each face runs it: opposite in a consistently oriented sheet
+        auto orientationIn = [&](const TopoDS_Shape& face) {
+            for (TopExp_Explorer it(face, TopAbs_EDGE); it.More(); it.Next()) {
+                if (it.Current().IsSame(edgeFaces.FindKey(i))) {
+                    return it.Current().Orientation();
+                }
+            }
+            return TopAbs_EXTERNAL;
+        };
+        if (orientationIn(owners.First()) == orientationIn(owners.Last())) {
+            throw Base::ValueError(name + " isn't oriented: its faces don't agree on a side");
+        }
+    }
+}
+
+/// How many loops the free edges of @p sheet make: the edges of one face only, seams aside
+int freeLoops(const TopoDS_Shape& sheet)
+{
+    TopTools_IndexedDataMapOfShapeListOfShape edgeFaces;
+    TopExp::MapShapesAndUniqueAncestors(sheet, TopAbs_EDGE, TopAbs_FACE, edgeFaces);
+    std::vector<TopoDS_Edge> free;
+    for (int i = 1; i <= edgeFaces.Extent(); ++i) {
+        const TopoDS_Edge& edge = TopoDS::Edge(edgeFaces.FindKey(i));
+        const TopTools_ListOfShape& owners = edgeFaces(i);
+        if (owners.Extent() != 1 || BRep_Tool::Degenerated(edge)
+            || BRep_Tool::IsClosed(edge, TopoDS::Face(owners.First()))) {
+            continue;
+        }
+        free.push_back(edge);
+    }
+    // Loops by shared end points: each edge starts its own group, joined through its vertices
+    std::vector<int> group(free.size());
+    for (std::size_t i = 0; i < free.size(); ++i) {
+        group[i] = static_cast<int>(i);
+    }
+    auto root = [&group](int i) {
+        while (group[i] != i) {
+            i = group[i] = group[group[i]];
+        }
+        return i;
+    };
+    std::vector<std::pair<gp_Pnt, int>> ends;
+    for (std::size_t i = 0; i < free.size(); ++i) {
+        TopoDS_Vertex first;
+        TopoDS_Vertex last;
+        TopExp::Vertices(free[i], first, last);
+        for (const TopoDS_Vertex& vertex : {first, last}) {
+            if (vertex.IsNull()) {
+                continue;
+            }
+            const gp_Pnt point = BRep_Tool::Pnt(vertex);
+            for (const auto& [other, j] : ends) {
+                if (point.Distance(other) <= Precision::Confusion()) {
+                    group[root(static_cast<int>(i))] = root(j);
+                }
+            }
+            ends.emplace_back(point, static_cast<int>(i));
+        }
+    }
+    int loops = 0;
+    for (std::size_t i = 0; i < free.size(); ++i) {
+        loops += root(static_cast<int>(i)) == static_cast<int>(i) ? 1 : 0;
+    }
+    return loops;
+}
+
+/// A point inside @p face, as surface parameters; false when none is found
+bool pointInside(const TopoDS_Face& face, double& u, double& v)
+{
+    double u1, u2, v1, v2;
+    BRepTools::UVBounds(face, u1, u2, v1, v2);
+    const double tol = BRep_Tool::Tolerance(face);
+    constexpr int steps = 8;
+    // The middle first, then a grid
+    for (int k = -1; k < (steps - 1) * (steps - 1); ++k) {
+        const double fu = k < 0 ? 0.5 : (1 + k % (steps - 1)) / double(steps);
+        const double fv = k < 0 ? 0.5 : (1 + k / (steps - 1)) / double(steps);
+        u = u1 + fu * (u2 - u1);
+        v = v1 + fv * (v2 - v1);
+        BRepClass_FaceClassifier classifier(face, gp_Pnt2d(u, v), tol);
+        if (classifier.State() == TopAbs_IN) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// The normal of @p face at (@p u, @p v), out of the face as oriented; @p point is set there
+gp_Vec faceNormal(const TopoDS_Face& face, double u, double v, gp_Pnt& point)
+{
+    Handle(Geom_Surface) surface = BRep_Tool::Surface(face);
+    gp_Vec du;
+    gp_Vec dv;
+    surface->D1(u, v, point, du, dv);
+    gp_Vec normal = du.Crossed(dv);
+    if (face.Orientation() == TopAbs_REVERSED) {
+        normal.Reverse();
+    }
+    return normal;
+}
+
+/// Whether @p tool is a sheet whose sides hold through edits, copies and redraws: a surface
+/// `Part::Extrusion` of picked edges or up to a face whose profile is closed loops only, which
+/// the extrusion turns counter-clockwise about its direction, so that its normals point into
+/// the tube (ops#919, reviews r1 to r4). Any other sheet's Front follows the way its edges
+/// were drawn
+bool sidedSheet(const App::DocumentObject* tool)
+{
+    auto extrusion = freecad_cast<const Part::Extrusion*>(tool);
+    return extrusion && extrusion->isSidedTube();
+}
+
+std::string notSided(const App::DocumentObject* tool)
+{
+    return label(tool)
+        + " can't be a Split's tool: a Split by a sheet takes a surface Part Extrusion of closed "
+          "loops (BaseEdges, or up to a face); by any other sheet it isn't supported yet (which "
+          "part keeps which piece would follow the way its edges were drawn)";
+}
+
+/// @p base divided by @p sheet, the piece on the kept side, named through the cut. Throws, with
+/// the reason, unless the sheet divides the base into exactly two solids, one on each side of
+/// it, whose volumes add up to the base's. The sheet is not extended (Onshape: SU6 to SU8)
+TopoShape splitBySheet(
+    TopoShape named,
+    const TopoShape& base,
+    const TopoShape& sheet,
+    double fuzzy,
+    bool keepFront,
+    const std::string& sheetName,
+    const std::string& partName
+)
+{
+    checkSheet(sheet.getShape(), sheetName);
+    BRepAlgoAPI_Splitter splitter;
+    TopTools_ListOfShape arguments;
+    arguments.Append(base.getShape());
+    TopTools_ListOfShape tools;
+    tools.Append(sheet.getShape());
+    splitter.SetArguments(arguments);
+    splitter.SetTools(tools);
+    if (fuzzy > 0.0) {
+        splitter.SetFuzzyValue(fuzzy);
+    }
+    splitter.SetNonDestructive(Standard_True);
+    splitter.Build();
+    if (!splitter.IsDone()) {
+        throw Base::ValueError("Split: the cut by " + sheetName + " failed");
+    }
+    TopTools_IndexedMapOfShape solids;
+    TopExp::MapShapes(splitter.Shape(), TopAbs_SOLID, solids);
+    const std::string noCut = sheetName + " doesn't cut " + partName;
+    if (solids.Extent() < 2) {
+        throw Base::ValueError(noCut);
+    }
+    if (solids.Extent() > 2) {
+        throw Base::ValueError(
+            sheetName + " cuts " + partName + " into " + std::to_string(solids.Extent())
+            + " pieces; a split into more than two parts is not supported"
+        );
+    }
+    // A sheet whose free edges make one loop (a disc: an open chain's sheet, one face) has no
+    // inside: which part keeps which piece would follow the way its edges were drawn, which a
+    // move, a redraw or a copy can turn silently (ops#919, reviews r2 and r3). Refused until a
+    // Split chooses its piece by something that holds through those (the coordinator's ruling)
+    if (freeLoops(sheet.getShape()) == 1) {
+        throw Base::ValueError(
+            sheetName + " is an open sheet (its free edges make one loop): a Split by it is not "
+            "supported yet; a closed tube, or a sheet of one planar face, is"
+        );
+    }
+    // Each piece of a sheet face, to that face as the sheet runs it
+    TopTools_DataMapOfShapeShape sheetFaceOf;
+    for (TopExp_Explorer it(sheet.getShape(), TopAbs_FACE); it.More(); it.Next()) {
+        const TopTools_ListOfShape& images = splitter.Modified(it.Current());
+        if (images.IsEmpty()) {
+            sheetFaceOf.Bind(it.Current(), it.Current());
+        }
+        for (const auto& image : images) {
+            sheetFaceOf.Bind(image, it.Current());
+        }
+    }
+    // A piece is Front where the sheet's normals point into it: on every face it has on the
+    // sheet, its outward normal is against the sheet's
+    const std::string noDivide = sheetName + " doesn't divide " + partName;
+    int frontIndex = 0;
+    int backIndex = 0;
+    double volume = 0.0;
+    for (int i = 1; i <= solids.Extent(); ++i) {
+        int front = 0;
+        int back = 0;
+        for (TopExp_Explorer it(solids(i), TopAbs_FACE); it.More(); it.Next()) {
+            if (!sheetFaceOf.IsBound(it.Current())) {
+                continue;
+            }
+            const TopoDS_Face piece = TopoDS::Face(it.Current());
+            const TopoDS_Face of = TopoDS::Face(sheetFaceOf.Find(it.Current()));
+            double u, v;
+            if (!pointInside(piece, u, v)) {
+                continue;
+            }
+            gp_Pnt point;
+            const gp_Vec out = faceNormal(piece, u, v, point);
+            GeomAPI_ProjectPointOnSurf onSheet(point, BRep_Tool::Surface(of));
+            if (onSheet.NbPoints() == 0) {
+                continue;
+            }
+            double us, vs;
+            onSheet.LowerDistanceParameters(us, vs);
+            gp_Pnt sheetPoint;
+            const double dot = out.Dot(faceNormal(of, us, vs, sheetPoint));
+            if (dot < 0.0) {
+                ++front;
+            }
+            else if (dot > 0.0) {
+                ++back;
+            }
+        }
+        // On both sides of the sheet, or touching it nowhere: the sheet does not divide
+        if ((front > 0) == (back > 0)) {
+            throw Base::ValueError(noDivide);
+        }
+        (front > 0 ? frontIndex : backIndex) = i;
+        GProp_GProps props;
+        BRepGProp::VolumeProperties(solids(i), props);
+        volume += props.Mass();
+    }
+    if (frontIndex == 0 || backIndex == 0) {
+        throw Base::ValueError(noDivide);
+    }
+    GProp_GProps whole;
+    BRepGProp::VolumeProperties(base.getShape(), whole);
+    if (std::fabs(volume - whole.Mass()) > 1e-6 * std::max(1.0, std::fabs(whole.Mass()))) {
+        throw Base::ValueError(noDivide);
+    }
+    named.makeElementShape(splitter, {base, sheet}, Part::OpCodes::Split);
+    return named.getSubTopoShape(TopAbs_SOLID, keepFront ? frontIndex : backIndex);
+}
 }  // namespace
+
+bool Split::isSheetObject(const App::DocumentObject* tool)
+{
+    auto feature = freecad_cast<const Part::Feature*>(tool);
+    if (!feature || Body::findBodyOf(tool)) {
+        return false;
+    }
+    const TopoDS_Shape& shape = feature->Shape.getShape().getShape();
+    return !shape.IsNull() && countSolids(shape) == 0 && TopExp_Explorer(shape, TopAbs_FACE).More();
+}
 
 Split::Split()
 {
@@ -127,6 +450,14 @@ Split::Split()
         (App::PropertyType)(App::Prop_Hidden | App::Prop_Output),
         "Where the plane's object was, in this part's frame, when this Split last computed"
     );
+    ADD_PROPERTY_TYPE(
+        KeepTool,
+        (false),
+        "Split",
+        App::Prop_None,
+        "A sheet as the tool stays shown; off, the Split hides it (shown again when the Split is "
+        "deleted)"
+    );
     Partner.setStatus(App::Property::Hidden, true);
 }
 
@@ -172,6 +503,15 @@ void Split::onChanged(const App::Property* prop)
         Tool.setStatus(App::Property::Hidden, newHalf);
         Side.setStatus(App::Property::Hidden, newHalf);
         Partner.setStatus(App::Property::Hidden, !newHalf);
+        KeepTool.setStatus(App::Property::Hidden, newHalf);
+    }
+    // Keep tools turned on or off by hand shows or hides a sheet tool (ops#919)
+    if (prop == &KeepTool && !isRestoring() && !NewHalf.getValue() && getDocument()
+        && !getDocument()->isPerformingTransaction()) {
+        App::DocumentObject* tool = Tool.getValue();
+        if (tool && Tool.getSubValues().empty() && isSheetObject(tool)) {
+            tool->Visibility.setValue(KeepTool.getValue());
+        }
     }
     FeatureRefine::onChanged(prop);
 }
@@ -259,6 +599,52 @@ App::DocumentObjectExecReturn* Split::execute()
     const std::string sub = firstSub(source->Tool);
     if (!toolObject) {
         return new App::DocumentObjectExecReturn("The Split has no plane", this);
+    }
+    // FreeCAD-CH (ops#919): a sheet object in no Body cuts only when its sides hold (a tube of
+    // the surface extrusion), as makeSplit admits it: one edited since into something else, a
+    // single planar face included, fails here rather than cut by a plane (review r5)
+    if (sub.empty() && isSheetObject(toolObject) && !sidedSheet(toolObject)) {
+        return new App::DocumentObjectExecReturn(notSided(toolObject), this);
+    }
+    // FreeCAD-CH (ops#919): a sheet of several faces, or of one curved face, cuts as it is
+    if (sub.empty() && toolObject->isDerivedFrom<Part::Feature>()) {
+        const TopoShape sheet = getTopoShapeInLocalCoordinates(toolObject);
+        if (isSheetShape(sheet)) {
+            if (!sidedSheet(toolObject)) {
+                return new App::DocumentObjectExecReturn(notSided(toolObject), this);
+            }
+            TopoShape result;
+            try {
+                result = splitBySheet(
+                    makeResultShape(base),
+                    base,
+                    sheet,
+                    FuzzyTolerance.getValue(),
+                    keepFront,
+                    label(toolObject),
+                    label(part)
+                );
+            }
+            catch (const Base::Exception& e) {
+                return new App::DocumentObjectExecReturn(e.what(), this);
+            }
+            catch (Standard_Failure& e) {
+                FC_ERR("Split failed: " << e.GetMessageString());
+                return new App::DocumentObjectExecReturn(
+                    "Split: the cut by " + label(toolObject) + " failed",
+                    this
+                );
+            }
+            result = refineShapeIfActive(result);
+            if (result.isNull() || countSolids(result.getShape()) == 0) {
+                return new App::DocumentObjectExecReturn(
+                    label(toolObject) + " doesn't cut " + label(part),
+                    this
+                );
+            }
+            Shape.setValue(getSolid(result));
+            return StdReturn;
+        }
     }
     gp_Pln plane;
     try {
@@ -368,11 +754,23 @@ gp_Pln Split::toolPlane(
     return plane;
 }
 
+void Split::unsetupObject()
+{
+    // A sheet this Split hid comes back into view (ops#919)
+    App::DocumentObject* tool = Tool.getValue();
+    if (!NewHalf.getValue() && !KeepTool.getValue() && tool && !tool->isRemoving()
+        && Tool.getSubValues().empty() && isSheetObject(tool)) {
+        tool->Visibility.setValue(true);
+    }
+    FeatureRefine::unsetupObject();
+}
+
 Body* Split::makeSplit(
     App::DocumentObject* obj,
     App::DocumentObject* tool,
     const std::vector<std::string>& subs,
-    const char* side
+    const char* side,
+    bool keepTool
 )
 {
     Body* body = freecad_cast<Body*>(obj);
@@ -407,23 +805,67 @@ Body* Split::makeSplit(
             throw Base::ValueError("Split: " + label(toolBody) + " has no face to cut by");
         }
     }
-    if (!Part::BodyBase::isInOneStudio(last, tool)) {
+    // FreeCAD-CH (ops#919): a sheet in no Body (a surface made beside the parts) is admitted
+    // when its sides hold through edits: a closed tube of the surface extrusion. Any other sheet
+    // object, one of a single planar face included, is refused (reviews r1 to r4)
+    const bool sheetObject = subs.empty() && isSheetObject(tool);
+    if (sheetObject) {
+        if (!sidedSheet(tool)) {
+            throw Base::ValueError("Split: " + notSided(tool));
+        }
+        if (tool->getDocument() != body->getDocument()) {
+            throw Base::ValueError(
+                "Split: " + label(tool) + " isn't in " + label(body) + "'s document"
+            );
+        }
+        // The Split goes after the Tip: a sheet that depends on the Body itself is a cycle
+        const std::vector<App::DocumentObject*> needs = tool->getOutListRecursive();
+        if (std::find(needs.begin(), needs.end(), body) != needs.end()) {
+            throw Base::ValueError(
+                "Split: " + label(tool) + " depends on " + label(body)
+                + " itself; link it to a feature of " + label(body)
+            );
+        }
+    }
+    else if (!Part::BodyBase::isInOneStudio(last, tool)) {
         throw Base::ValueError(
             "Split: " + label(tool) + " isn't in " + label(body) + " or a part of its studio"
         );
     }
     const std::string sub = subs.empty() ? std::string() : subs.front();
-    gp_Pln plane;
-    try {
-        plane = toolPlane(last, tool, sub);
+    const TopoShape sheet = sheetObject ? last->getTopoShapeInLocalCoordinates(tool) : TopoShape();
+    if (sheetObject && isSheetShape(sheet)) {
+        try {
+            splitBySheet(
+                TopoShape(),
+                last->Shape.getShape(),
+                sheet,
+                0.0,
+                true,
+                label(tool),
+                label(body)
+            );
+        }
+        catch (const Base::Exception& e) {
+            throw Base::ValueError(std::string("Split: ") + e.what());
+        }
+        catch (Standard_Failure& e) {
+            throw Base::ValueError("Split: the cut by " + label(tool) + " failed");
+        }
     }
-    catch (const Base::Exception& e) {
-        throw Base::ValueError(std::string("Split: ") + e.what());
-    }
-    if (!cuts(last->Shape.getShape().getShape(), plane)) {
-        throw Base::ValueError(
-            "Split: " + planeLabel(tool, sub) + " doesn't cut " + label(body)
-        );
+    else {
+        gp_Pln plane;
+        try {
+            plane = toolPlane(last, tool, sub);
+        }
+        catch (const Base::Exception& e) {
+            throw Base::ValueError(std::string("Split: ") + e.what());
+        }
+        if (!cuts(last->Shape.getShape().getShape(), plane)) {
+            throw Base::ValueError(
+                "Split: " + planeLabel(tool, sub) + " doesn't cut " + label(body)
+            );
+        }
     }
     const char* kept = side && *side ? side : SideEnums[0];
     if (std::strcmp(kept, SideEnums[0]) != 0 && std::strcmp(kept, SideEnums[1]) != 0) {
@@ -436,6 +878,12 @@ Body* Split::makeSplit(
     body->addObject(split);
     split->Tool.setValue(tool, subs);
     split->Side.setValue(kept);
+    split->KeepTool.setValue(keepTool);
+    // Onshape consumes a sheet tool unless Keep tools: here it is hidden, and shown again when
+    // the Split is deleted (unsetupObject)
+    if (sheetObject && !keepTool) {
+        tool->Visibility.setValue(false);
+    }
 
     auto part = static_cast<Body*>(doc->addObject("PartDesign::Body", "Body"));
     // "Shroud" again, made unique by the document: "Shroud001"

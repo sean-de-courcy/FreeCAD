@@ -58,6 +58,15 @@ public:
     App::PropertyString FaceMakerClass;
     App::PropertyEnumeration FaceMakerMode;
     App::PropertyEnumeration InnerWireTaper;
+    /// FreeCAD-CH (ops#919): the edges of Base to extrude, made into wires; empty: all of Base
+    App::PropertyLinkSub BaseEdges;
+    /// FreeCAD-CH (ops#919): Length, or UpToFace (a surface up to the plane of a planar face)
+    App::PropertyEnumeration EndType;
+    /// FreeCAD-CH (ops#919): the face the surface runs up to, taken as its whole plane
+    App::PropertyLinkSub UpToFace;
+    /// FreeCAD-CH (ops#919): where UpToFace's object was, in this object's frame, at the last
+    /// compute: a move of its Body is seen by no link
+    App::PropertyPlacement UpToFaceFrame;
 
     /** @name methods override feature */
     //@{
@@ -119,6 +128,17 @@ public:  // mode enumerations
     };
     static const char* eDirModeStrings[];
     static const char* eInnerWireTaperStrings[];
+    static const char* eEndTypeStrings[];
+
+    /// FreeCAD-CH (ops#919): the shape to extrude, Base or its BaseEdges joined into wires
+    TopoShape baseShape() const;
+    /// FreeCAD-CH (ops#919): whether this is a surface (BaseEdges or UpToFace, Solid off) of
+    /// closed loops with an inside, which execute turns counter-clockwise about the direction
+    /// the prism runs: a tube whose normals point into it, whatever moved, copied or redrew it
+    bool isSidedTube() const;
+    /// FreeCAD-CH (ops#919): @p profile extruded along @p params' direction up to the plane of
+    /// UpToFace, taken in this object's frame; throws the feature's errors
+    void extrudeUpToFace(TopoShape& result, const TopoShape& profile, ExtrusionParameters params);
 
 protected:
     void setupObject() override;
