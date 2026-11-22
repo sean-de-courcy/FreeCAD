@@ -416,7 +416,7 @@ gp_Dir inwardInAny(const TopoDS_Face& face, const TopoDS_Edge& edge, double para
     return gp_Dir(left);
 }
 
-/// Faces of the same plane, or of the same cylinder
+/// Faces of the same plane, of the same cylinder, or of the same cone
 bool sameDomain(const TopoDS_Face& face, const TopoDS_Face& other)
 {
     // One surface (an overflowing end's trim, built on the face beyond's own cone)
@@ -443,6 +443,15 @@ bool sameDomain(const TopoDS_Face& face, const TopoDS_Face& other)
         return parallel(ca.Axis().Direction(), cb.Axis().Direction())
             && gp_Lin(ca.Axis()).Distance(cb.Location()) < linearTolerance
             && std::abs(ca.Radius() - cb.Radius()) < linearTolerance;
+    }
+    if (a.GetType() == GeomAbs_Cone) {
+        // One double cone: the apex, the axis's line and the half angle (a fill's face on the cone
+        // it stands against, ops#935)
+        gp_Cone ca = a.Cone();
+        gp_Cone cb = b.Cone();
+        return parallel(ca.Axis().Direction(), cb.Axis().Direction())
+            && ca.Apex().Distance(cb.Apex()) < linearTolerance
+            && std::abs(std::abs(ca.SemiAngle()) - std::abs(cb.SemiAngle())) < angularTolerance;
     }
     return false;
 }
@@ -997,6 +1006,8 @@ struct EdgeData
     gp_Pnt end;
     gp_Circ circle;
     int planeFace = 0;  // circle: which of faces is the plane
+    /// circle: the other face is a cone about the circle's axis, not a cylinder (ops#935)
+    bool cone = false;
     bool convex = true;
     /// A straight edge with a cylinder parallel to it among its faces (a curved wall's end,
     /// ops#640, #150): its round is a plane fillet of the faces' traces, swept along the edge
@@ -1156,18 +1167,36 @@ EdgeData analyse(const Context& ctx, const TopoDS_Edge& edge)
         };
         int planes = countOf(GeomAbs_Plane);
         int cylinders = countOf(GeomAbs_Cylinder);
-        if (planes != 1 || cylinders != 1) {
+        int cones = countOf(GeomAbs_Cone);
+        // A whole circle where a cone stands on a plane normal to its axis (ops#935: HNY DSH Nest
+        // Insert #30): the section lies in the meridian plane as between a plane and a cylinder,
+        // its side along the cone's line, and the tool is the section revolved a whole turn.
+        // Arcs on a cone (ends to classify), convex circles and chamfers (below) are not covered
+        if (planes != 1 || (cylinders != 1 && !(cones == 1 && data.closed))) {
             refuse("a circular edge not between a plane and a cylinder");
         }
         data.planeFace = s0.GetType() == GeomAbs_Plane ? 0 : 1;
+        data.cone = cones == 1;
         const gp_Dir& axis = data.circle.Axis().Direction();
         gp_Pln plane = (data.planeFace == 0 ? s0 : s1).Plane();
-        gp_Cylinder cylinder = (data.planeFace == 0 ? s1 : s0).Cylinder();
         if (!parallel(plane.Axis().Direction(), axis)
             || plane.Distance(data.circle.Location()) > linearTolerance) {
             refuse("a circular edge on a plane not normal to its axis");
         }
-        if (!parallel(cylinder.Axis().Direction(), axis)
+        if (data.cone) {
+            const gp_Cone cone = (data.planeFace == 0 ? s1 : s0).Cone();
+            // The cone's radius in the circle's plane
+            const double height
+                = gp_Vec(cone.Location(), data.circle.Location()).Dot(gp_Vec(cone.Axis().Direction()));
+            const double radius = cone.RefRadius() + height * std::tan(cone.SemiAngle());
+            if (!parallel(cone.Axis().Direction(), axis)
+                || gp_Lin(cone.Axis()).Distance(data.circle.Location()) > linearTolerance
+                || std::abs(radius - data.circle.Radius()) > linearTolerance) {
+                refuse("a circular edge on a cone that is not coaxial");
+            }
+        }
+        else if (gp_Cylinder cylinder = (data.planeFace == 0 ? s1 : s0).Cylinder();
+                 !parallel(cylinder.Axis().Direction(), axis)
             || gp_Lin(cylinder.Axis()).Distance(data.circle.Location()) > linearTolerance
             || std::abs(cylinder.Radius() - data.circle.Radius()) > linearTolerance) {
             refuse("a circular edge on a cylinder that is not coaxial");
@@ -1187,6 +1216,12 @@ EdgeData analyse(const Context& ctx, const TopoDS_Edge& edge)
     gp_Pnt point = curve.Value(middle);
     gp_Dir inward1 = inwardIn(data.faces[1], edge, middle);
     data.convex = inward1.Dot(outwardNormal(data.faces[0], point)) < 0;
+    // On a cone only what Onshape was measured on (ops#935): a concave round, the fill at the foot
+    // of a cone standing on the plane. A convex circle on a cone (a frustum's top), or a chamfer,
+    // is refused as before
+    if (data.cone && (data.convex || ctx.request.kind != Kind::Fillet)) {
+        refuse("a circular edge not between a plane and a cylinder");
+    }
     return data;
 }
 
@@ -4358,9 +4393,20 @@ Section arcSection(const Context& ctx, const EdgeData& data, double parameter, g
     const gp_Dir& z = circle.Axis().Direction();
     Section at = sectionAt(ctx, data, parameter);
     radial = gp_Dir(gp_Vec(circle.Location(), at.corner));
-    for (auto& d : at.inward) {
+    for (int k = 0; k < 2; ++k) {
+        gp_Dir& d = at.inward[k];
         double r = d.Dot(radial);
         double a = d.Dot(z);
+        if (data.cone && k != data.planeFace) {
+            // Along the cone's line, in the meridian plane (ops#935): kept, its part along the
+            // circle dropped
+            gp_Vec meridian = gp_Vec(radial) * r + gp_Vec(z) * a;
+            if (meridian.Magnitude() < 1 - 1e-6) {
+                refuse("the cone at a circular edge does not hold the meridian plane");
+            }
+            d = gp_Dir(meridian);
+            continue;
+        }
         if (std::abs(r) > 1 - 1e-6) {
             d = r > 0 ? radial : radial.Reversed();
         }
@@ -9133,6 +9179,55 @@ TopoDS_Shape constructShape(
     for (const auto& corner : overlapCorners) {
         overlapPairs.emplace_back(corner.edges[0], corner.edges[1]);
     }
+    // Fills about whole circles whose strips overlap on their common face (ops#935: HNY DSH Nest
+    // Insert #30, cones standing on a plane closer than their rounds' feet reach): Onshape's
+    // result is the union of the plain fills (measured on the capture to 1e-4 mm2). Each pair's
+    // common part outside the base is added once (fusedOverlap, below). Only what was measured:
+    // fills about cones, each one's strip on the plane ending before the other's foot (review
+    // of fix935 r1, T2: cylinders, and feet closer than a fill's reach, are not known from Onshape)
+    std::vector<std::pair<const Tool*, const Tool*>> ringPairs;
+    {
+        auto coneRing = [&](const Tool& tool) -> const EdgeData* {
+            if (tool.cut || tool.rolled || tool.miter) {
+                return nullptr;
+            }
+            for (const auto& d : data) {
+                if (d.edge.IsSame(tool.source) && !d.line && d.closed && d.cone) {
+                    return &d;
+                }
+            }
+            return nullptr;
+        };
+        // How far the tool's strip on the plane reaches from its circle's centre
+        auto reach = [&](const Tool& tool, const EdgeData& d) {
+            for (const auto& strip : tool.strips) {
+                if (strip.face.IsSame(d.faces[d.planeFace])) {
+                    return d.circle.Radius() + strip.width;
+                }
+            }
+            return std::numeric_limits<double>::infinity();
+        };
+        for (size_t i = 0; i < tools.size(); ++i) {
+            for (size_t j = i + 1; j < tools.size() && request.kind == Kind::Fillet; ++j) {
+                const EdgeData* a = coneRing(tools[i]);
+                const EdgeData* b = coneRing(tools[j]);
+                if (!a || !b) {
+                    continue;
+                }
+                const double apart = a->circle.Location().Distance(b->circle.Location());
+                if (reach(tools[i], *a) + b->circle.Radius() + linearTolerance > apart
+                    || reach(tools[j], *b) + a->circle.Radius() + linearTolerance > apart) {
+                    continue;
+                }
+                const TopoDS_Shape both = commonOf(tools[i].solid, tools[j].solid);
+                if (volumeOf(both) - volumeOf(commonOf(both, base.getShape()))
+                    > volumeTolerance * std::min(tools[i].volume, tools[j].volume)) {
+                    ringPairs.emplace_back(&tools[i], &tools[j]);
+                    overlapPairs.emplace_back(tools[i].source, tools[j].source);
+                }
+            }
+        }
+    }
     const bool trimmed = checkStrips(
                              tools,
                              overlaps,
@@ -9655,6 +9750,29 @@ TopoDS_Shape constructShape(
             if (volumeOf(both) - volumeOf(commonOf(both, base.getShape()))
                 > volumeTolerance * std::min(partners[i]->volume, tool.volume)) {
                 refuse("a fill at a concave corner reflex in the material overlaps a third");
+            }
+        }
+    }
+    // The overlapping fills about whole circles (ringPairs, above): their common part outside the
+    // base once. Three that share a part would need its volume back: not covered
+    for (size_t i = 0; i < ringPairs.size(); ++i) {
+        const auto [a, b] = ringPairs[i];
+        if (std::any_of(overlapCorners.begin(), overlapCorners.end(), [&](const auto& c) {
+                return c.edges[0].IsSame(a->source) || c.edges[1].IsSame(a->source)
+                    || c.edges[0].IsSame(b->source) || c.edges[1].IsSame(b->source);
+            })) {
+            refuse("a fill about a whole circle overlaps a fill at a concave corner");
+        }
+        const TopoDS_Shape both = commonOf(a->solid, b->solid);
+        fusedOverlap += volumeOf(both) - volumeOf(commonOf(both, base.getShape()));
+        for (const auto& tool : tools) {
+            if (tool.cut || &tool == a || &tool == b) {
+                continue;
+            }
+            const TopoDS_Shape three = commonOf(both, tool.solid);
+            if (volumeOf(three) - volumeOf(commonOf(three, base.getShape()))
+                > volumeTolerance * std::min(a->volume, tool.volume)) {
+                refuse("three fills about whole circles overlap");
             }
         }
     }
@@ -14964,9 +15082,118 @@ std::string narrowStrip(
         + ", which is not built";
 }
 
+/** The solids of a base that holds several (a Body of several parts, ops#937), in order, and which
+ * of them owns every picked edge. Empty, with the reason, where the base holds a shape that is not
+ * a solid, or where the picks are not all on one solid. */
+std::vector<TopoDS_Shape> partsOf(
+    const TopoDS_Shape& base,
+    const std::vector<TopoDS_Shape>& edges,
+    int& owner,
+    std::string& why
+)
+{
+    std::vector<TopoDS_Shape> parts;
+    std::vector<TopoDS_Shape> pending {base};
+    while (!pending.empty()) {
+        const TopoDS_Shape shape = pending.back();
+        pending.pop_back();
+        if (shape.ShapeType() == TopAbs_SOLID) {
+            parts.push_back(shape);
+            continue;
+        }
+        if (shape.ShapeType() != TopAbs_COMPOUND && shape.ShapeType() != TopAbs_COMPSOLID) {
+            why = "the base holds a shape that is not a solid";
+            return {};
+        }
+        std::vector<TopoDS_Shape> children;
+        for (TopoDS_Iterator it(shape); it.More(); it.Next()) {
+            children.push_back(it.Value());
+        }
+        // Depth first, in the base's own order
+        pending.insert(pending.end(), children.rbegin(), children.rend());
+    }
+    owner = -1;
+    for (size_t i = 0; i < parts.size(); ++i) {
+        TopTools_IndexedMapOfShape own;
+        TopExp::MapShapes(parts[i], TopAbs_EDGE, own);
+        int picked = 0;
+        int all = 0;
+        for (const auto& edge : edges) {
+            if (edge.IsNull()) {
+                continue;
+            }
+            ++all;
+            if (own.Contains(edge)) {
+                ++picked;
+            }
+        }
+        if (picked == 0) {
+            continue;
+        }
+        if (owner >= 0 || picked != all) {
+            why = "the picked edges lie on more than one of the base's solids";
+            return {};
+        }
+        owner = static_cast<int>(i);
+    }
+    if (owner < 0) {
+        why = "no picked edge lies on a solid of the base";
+        return {};
+    }
+    return parts;
+}
+
+bool constructSolid(
+    const TopoDS_Shape& base,
+    const std::vector<TopoDS_Shape>& edges,
+    const Request& request,
+    Construction& out,
+    std::string* reason
+);
+
 }  // namespace
 
 bool construct(
+    const TopoDS_Shape& base,
+    const std::vector<TopoDS_Shape>& edges,
+    const Request& request,
+    Construction& out,
+    std::string* reason
+)
+{
+    if (base.IsNull() || countSolids(base) <= 1) {
+        return constructSolid(base, edges, request, out, reason);
+    }
+    // A base of several solids (a Body whose shape holds several parts, ops#937): Onshape dresses
+    // up each part on its own, so the construction runs on the solid that owns the picked edges,
+    // and its result goes back among the other solids, which are left as they are (the same
+    // shapes: their elements keep their names through the mapper's unchanged shapes)
+    std::string why;
+    int owner = -1;
+    const std::vector<TopoDS_Shape> parts = partsOf(base, edges, owner, why);
+    if (parts.empty()) {
+        if (reason) {
+            *reason = why;
+        }
+        return false;
+    }
+    if (!constructSolid(parts[owner], edges, request, out, reason)) {
+        return false;
+    }
+    BRep_Builder builder;
+    TopoDS_Compound compound;
+    builder.MakeCompound(compound);
+    for (size_t i = 0; i < parts.size(); ++i) {
+        builder.Add(compound, static_cast<int>(i) == owner ? out.shape : parts[i]);
+    }
+    out.shape = compound;
+    return true;
+}
+
+namespace
+{
+
+bool constructSolid(
     const TopoDS_Shape& base,
     const std::vector<TopoDS_Shape>& edges,
     const Request& request,
@@ -15121,6 +15348,8 @@ bool construct(
     }
     return false;
 }
+
+}  // namespace
 
 bool preferConstruction(
     const TopoDS_Shape& baseShape,

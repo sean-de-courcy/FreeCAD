@@ -45,6 +45,7 @@ from parttests.FilletFallbackTest import (
     BaseToleranceTest,
     BridgedRecessTest,
     CornerBandRetryTest,  # ops#925
+    ConeFootTest,
     CornerWithACircleTest,
     BlendEndTrimTest,
     CurvedEndTrimTest,
@@ -72,6 +73,7 @@ from parttests.FilletFallbackTest import (
     RoundOnASplineLidEndingInAHoleTest,
     RoundOverASliverTest,
     RoundAlongASplineEdgeTest,
+    SeveralSolidsTest,
     WallOnAChamferedRimTest,
     TangentLineStepTest,
     TightWallArcTest,

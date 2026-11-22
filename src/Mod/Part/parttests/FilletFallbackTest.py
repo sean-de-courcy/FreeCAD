@@ -6807,3 +6807,162 @@ class CornerBandRetryTest(unittest.TestCase):
                         point = Part.Vertex(e.valueAt(e.FirstParameter + k * step))
                         off = max(off, max(point.distToShape(f)[0] for f in faces))
                 self.assertLess(off, 1e-3 if radius > 0.58 else 1e-6, radius)
+
+
+class SeveralSolidsTest(unittest.TestCase):
+    """ops#937: a base of several solids (a Body whose shape holds several parts, as FGC-NS88's
+    Labyrinth after an extrude of regions as new parts). Where OCCT fails, the construction runs on
+    the solid that owns the picked edges, and the other solids stay as they are: Onshape dresses
+    up each part on its own. Designed: testFullRound's wall (a full round, which OCCT refuses) and a
+    cube beside it, in one compound"""
+
+    def base(self):
+        wall = Part.makeBox(30, 4, 20)
+        cube = Part.makeBox(10, 10, 10, V(50, 0, 0))
+        base = Part.makeCompound([wall, cube])
+        base.Tag = 1
+        return base
+
+    def check(self, result, wall_volume, wall_faces):
+        self.assertTrue(result.isValid())
+        self.assertEqual(len(result.Solids), 2)
+        wall, cube = sorted(result.Solids, key=lambda s: s.BoundBox.XMin)
+        self.assertAlmostEqual(wall.Volume, wall_volume, delta=1e-6 * wall_volume)
+        self.assertEqual(len(wall.Faces), wall_faces)
+        self.assertFalse([face for face in wall.Faces if face.Area < 1e-7])
+        # The cube is left as it was
+        self.assertAlmostEqual(cube.Volume, 1000, delta=1e-9)
+        self.assertEqual(len(cube.Faces), 6)
+        self.assertTrue(cube.BoundBox.isInside(V(55, 5, 5)))
+        self.assertAlmostEqual(cube.BoundBox.XMin, 50, delta=1e-9)
+        self.assertAlmostEqual(cube.BoundBox.ZMax, 10, delta=1e-9)
+
+    def testFullRoundOnOneSolid(self):
+        base = self.base()
+        result = base.makeFillet(2, top_edges(base))
+        self.check(result, 2400 - 2 * fillet_section(2) * 30, 7)
+
+    def testPicksOnTwoSolidsAreRefused(self):
+        # One construction per solid is not built: OCCT's error stands
+        base = self.base()
+        edges = top_edges(base) + [edge_between(base, (50, 0, 10), (60, 0, 10))]
+        with self.assertRaises(Exception):
+            base.makeFillet(2, edges)
+
+    def testOneSolidUnchanged(self):
+        # The control: a single solid builds as before
+        wall = Part.makeBox(30, 4, 20)
+        result = wall.makeFillet(2, top_edges(wall))
+        self.assertEqual(len(result.Solids), 1)
+        self.assertAlmostEqual(result.Volume, 2400 - 2 * fillet_section(2) * 30, delta=1e-3)
+
+
+class ConeFootTest(unittest.TestCase):
+    """ops#935: a round on the whole circle where a cone stands on a plane normal to its axis (HNY
+    DSH Nest Insert #30's stalactites). The fill is the section between the plane, the cone's line
+    and the arc tangent to both, revolved about the axis; where two such fills overlap, Onshape's
+    result is their union (measured on the capture to 1e-4 mm2). Designed: cones of foot radius 4,
+    top radius 1 and height 6 on a 40 x 20 x 4 plate, rounded by 2, so each fill reaches
+    2 / tan(alpha / 2) beyond its foot; two cones whose feet are 1.8 apart, which their fills'
+    reaches overlap and neither fill reaches the other cone"""
+
+    R, TOP, H, T, r = 4.0, 1.0, 6.0, 4.0, 2.0
+
+    def base(self, centres):
+        plate = Part.makeBox(40, 20, self.T)
+        cones = [Part.makeCone(self.R, self.TOP, self.H, V(x, 10, self.T)) for x in centres]
+        body = plate.fuse(cones).removeSplitter()
+        body.Tag = 1
+        feet = [
+            e
+            for e in body.Edges
+            if e.Curve.TypeId == "Part::GeomCircle"
+            and abs(e.Curve.Radius - self.R) < 1e-9
+            and abs(e.BoundBox.ZMax - self.T) < 1e-9
+        ]
+        self.assertEqual(len(feet), len(centres))
+        return body, feet
+
+    def fill(self, x):
+        """The fill about the cone at x: its section in the meridian plane y = 10, revolved"""
+        up = V(self.TOP - self.R, 0, self.H).normalize()
+        out = V(1, 0, 0)
+        alpha = math.acos(out.dot(up))
+        t = self.r / math.tan(alpha / 2)
+        corner = V(x + self.R, 10, self.T)
+        a = corner + out * t
+        b = corner + up * t
+        bisector = (out + up).normalize()
+        centre = corner + bisector * (self.r / math.sin(alpha / 2))
+        middle = centre - bisector * self.r
+        wire = Part.Wire(
+            [Part.makeLine(corner, a), Part.Arc(a, middle, b).toShape(), Part.makeLine(b, corner)]
+        )
+        return Part.Face(wire).revolve(V(x, 10, 0), V(0, 0, 1), 360), alpha, t
+
+    def pappus(self):
+        """The fill's volume in closed form: the section, the kite corner-end-centre-end minus the
+        sector at the centre, revolved by Pappus about the axis"""
+        _, alpha, t = self.fill(0)
+        kite = self.r * t
+        theta = math.pi - alpha
+        sector = self.r * self.r * theta / 2
+        up = (self.TOP - self.R) / math.hypot(self.TOP - self.R, self.H)
+        dc = self.r / math.sin(alpha / 2)
+        bis_x = (1 + up) / math.hypot(1 + up, math.sqrt(1 - up * up))
+        # Radial centroids from the corner: the kite's (its four corners: 0, t, centre, t up)
+        kite_x = (t + t * up + 2 * dc * bis_x) / 6
+        sector_x = dc * bis_x - 4 * self.r * math.sin(theta / 2) / (3 * theta) * bis_x
+        area = kite - sector
+        centroid = (kite_x * kite - sector_x * sector) / area
+        return area * 2 * math.pi * (self.R + centroid)
+
+    def testOneConeIsPappus(self):
+        body, feet = self.base([20])
+        result = body.makeFillet(self.r, feet)
+        self.assertTrue(result.isValid())
+        self.assertEqual(len(result.Solids), 1)
+        self.assertAlmostEqual(result.Volume - body.Volume, self.pappus(), delta=1e-6 * body.Volume)
+
+    def testOverlappingFillsAreTheirUnion(self):
+        centres = [15.0, 15.0 + 2 * self.R + 1.8]
+        _, _, t = self.fill(0)
+        self.assertTrue(t < 1.8 < 2 * t)
+        body, feet = self.base(centres)
+        result = body.makeFillet(self.r, feet)
+        self.assertTrue(result.isValid())
+        self.assertEqual(len(result.Solids), 1)
+        fills = [self.fill(x)[0] for x in centres]
+        union = fills[0].fuse(fills[1])
+        self.assertLess(fills[0].common(fills[1]).Volume, union.Volume)
+        self.assertGreater(fills[0].common(fills[1]).Volume, 1e-3)
+        self.assertAlmostEqual(result.Volume - body.Volume, union.Volume, delta=1e-6 * body.Volume)
+        # The fills only: nothing of the body removed, nothing added beyond them
+        self.assertLess(body.cut(result).Volume, 1e-7)
+        self.assertLess(result.cut(body.fuse(union)).Volume, 1e-6)
+
+    def testFillsReachingTheOtherFootAreRefused(self):
+        # Feet 1.0 apart, nearer than a fill's reach (1.236): not known from Onshape (review of
+        # fix935 r1, T2b), refused as before
+        _, _, t = self.fill(0)
+        self.assertTrue(1.0 < t)
+        body, feet = self.base([15.0, 15.0 + 2 * self.R + 1.0])
+        with self.assertRaises(Exception):
+            body.makeFillet(self.r, feet)
+
+    def testOverlappingCylinderFillsAreRefused(self):
+        # Two bosses (cylinders) whose foot rounds overlap: not known from Onshape (T2a), refused
+        # as before
+        plate = Part.makeBox(40, 20, self.T)
+        bosses = [Part.makeCylinder(self.R, self.H, V(x, 10, self.T)) for x in (15.0, 26.0)]
+        body = plate.fuse(bosses).removeSplitter()
+        feet = [
+            e
+            for e in body.Edges
+            if e.Curve.TypeId == "Part::GeomCircle"
+            and abs(e.Curve.Radius - self.R) < 1e-9
+            and abs(e.BoundBox.ZMax - self.T) < 1e-9
+        ]
+        self.assertEqual(len(feet), 2)
+        with self.assertRaises(Exception):
+            body.makeFillet(self.r, feet)
