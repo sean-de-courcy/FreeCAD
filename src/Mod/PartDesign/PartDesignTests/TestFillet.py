@@ -862,6 +862,58 @@ class TestFillet(unittest.TestCase):
                 with self.subTest(order=order, plate=plate, picked=picked):
                     self.assertEqual(self._rib_first_round(order, picked, plate), named)
 
+    def testFullRoundIsNamedByTheSegmentDrawnFirstAfterALaterFeature(self):
+        # A pocket between the pad and the fillet (review pr501-r3, T1'): the edges' names go
+        # through it, and the segment drawn first still names the merged face
+        for order, named in ((("left", "back", "right", "front"), "back"), (("right", "front", "left", "back"), "front")):
+            for picked in (("front", "back"), ("back", "front")):
+                with self.subTest(order=order, picked=picked):
+                    body = self.Doc.addObject("PartDesign::Body", "Body")
+                    pad = body.newObject("PartDesign::Pad", "Pad")
+                    pad.Profile = self._sketch_of_lines(body, [self._RIB[side] for side in order])
+                    pad.Length = 20
+                    self.Doc.recompute()
+                    cut = body.newObject("PartDesign::SubtractiveBox", "Cut")
+                    cut.Length, cut.Width, cut.Height = 10, 10, 30
+                    cut.Placement.Base = FreeCAD.Vector(25, -3, -5)
+                    self.Doc.recompute()
+                    ends = {"front": ((0, 0, 20), (25, 0, 20)), "back": ((0, 4, 20), (25, 4, 20))}
+                    edges = [self._edge_between(cut.Shape, *ends[side]) for side in picked]
+                    named_here = self._first_round_at_the_limit(
+                        body, cut, edges, 2.0, 1.9, lambda f: "front" if f.CenterOfMass.y < 2 else "back"
+                    )
+                    self.assertEqual(named_here, named)
+
+    def testFullRoundOfTwoPadsIsNamedByTheEarlierPad(self):
+        # The rib as two pads, its front half and its back half (review pr501-r3, T2'): the round
+        # of the edge the earlier pad made names the merged face, whichever sketch came first
+        halves = {
+            "front": [((0, 0), (30, 0)), ((30, 0), (30, 2)), ((30, 2), (0, 2)), ((0, 2), (0, 0))],
+            "back": [((0, 2), (30, 2)), ((30, 2), (30, 4)), ((30, 4), (0, 4)), ((0, 4), (0, 2))],
+        }
+        for sketches, pads in (
+            (("back", "front"), ("front", "back")),
+            (("front", "back"), ("back", "front")),
+            (("front", "back"), ("front", "back")),
+        ):
+            with self.subTest(sketches=sketches, pads=pads):
+                body = self.Doc.addObject("PartDesign::Body", "Body")
+                profile = {side: self._sketch_of_lines(body, halves[side]) for side in sketches}
+                tip = None
+                for side in pads:
+                    tip = body.newObject("PartDesign::Pad", "Pad")
+                    tip.Profile = profile[side]
+                    tip.Length = 20
+                    self.Doc.recompute()
+                edges = [
+                    self._edge_between(tip.Shape, (0, 0, 20), (30, 0, 20)),
+                    self._edge_between(tip.Shape, (0, 4, 20), (30, 4, 20)),
+                ]
+                named = self._first_round_at_the_limit(
+                    body, tip, edges, 2.0, 1.9, lambda f: "front" if f.CenterOfMass.y < 2 else "back"
+                )
+                self.assertEqual(named, pads[0])
+
     def testFullRoundOfARingIsNamedByTheOutlineDrawnFirst(self):
         # A ring wall 2 thick (40 x 20 outside), both rims rounded at the limit: each run's
         # merged face is named after the rim of the outline drawn first, the hole's included

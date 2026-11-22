@@ -16367,16 +16367,44 @@ void finish(TopoShape& result, const Construction& construction, const TopoShape
             if (tag == 0 || !original) {
                 return key;
             }
-            key[0] = std::abs(tag);
+            // The history stops at the first section another object made: the sketch's where the
+            // base is the pad that made the edge, that pad's where a later feature lies between
+            // (review pr501-r3, T1'). The sketch geometry is the innermost g<n> section either
+            // way; the feature is the one that made the edge from it, the base itself in the first
+            // case (T2': never the sketch's own tag beside a pad's)
             const std::string text = original.toString();
-            size_t digits = 1;
-            while (digits < text.size() && std::isdigit(static_cast<unsigned char>(text[digits]))) {
-                ++digits;
+            auto number = [&](size_t from, size_t& end) {
+                end = from;
+                while (end < text.size() && std::isdigit(static_cast<unsigned char>(text[end]))) {
+                    ++end;
+                }
+                // At most 18 digits: a longer run is no id (std::stoll would throw)
+                return end > from && end - from <= 18 ? std::stoll(text.substr(from, end - from)) : -1LL;
+            };
+            long long sketch = -1;
+            for (size_t at = 0; at + 1 < text.size(); ++at) {
+                if (text[at] != 'g' || (at > 0 && text[at - 1] != ';')) {
+                    continue;
+                }
+                size_t end = 0;
+                const long long geometry = number(at + 1, end);
+                if (geometry < 0 || end >= text.size() || (text[end] != '^' && text[end] != ';')) {
+                    continue;
+                }
+                key[1] = geometry;
+                // g<n>;_;<sketch>;SKT, with one ^ per level of nesting after each section
+                size_t next = text.find(";_", end);
+                if (next != std::string::npos) {
+                    next = text.find(';', next + 2);
+                }
+                if (next != std::string::npos) {
+                    size_t tagEnd = 0;
+                    sketch = number(next + 1, tagEnd);
+                }
+                break;
             }
-            if (text.size() > 1 && text[0] == 'g' && digits > 1
-                && (digits == text.size() || text[digits] == ';')) {
-                key[1] = std::stoll(text.substr(1, digits - 1));
-            }
+            key[0] = (sketch >= 0 && std::abs(tag) == sketch && base.Tag != 0) ? std::abs(base.Tag)
+                                                                               : std::abs(tag);
             return key;
         };
         auto sourceKey = [&](const TopoDS_Shape& source) {
