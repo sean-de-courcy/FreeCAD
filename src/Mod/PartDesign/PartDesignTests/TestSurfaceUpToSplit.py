@@ -339,6 +339,25 @@ class TestSurfaceUpToSplit(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "isn't supported yet"):
             PartDesign.split(self.body, ext)
 
+    def testCrossingLoopAndTaperAreRefused(self):
+        """Review r6 (BowtieLobeGrows, TaperAddedToTube): a loop that crosses itself with unequal
+        lobes would turn by its larger lobe, which an edit can change; a taper makes the walls
+        by a loft, whose faces don't follow the turn. Both are refused."""
+        self.block()
+        bowtie = [V(4, 5, 0), V(36, 25, 0), V(36, 5, 0), V(10, 25, 0), V(4, 5, 0)]
+        sketch = self.sketch(bowtie)
+        ext = self.surface(sketch, self.edgesOf(sketch, bowtie), self.top(self.box, 20))
+        with self.assertRaisesRegex(ValueError, "isn't supported yet"):
+            PartDesign.split(self.body, ext)
+        self.profile = self.sketch(hexagon())
+        tube = self.surface(self.profile, self.edgesOf(self.profile, hexagon()), length=20,
+                            label="Tapered")
+        tube.TaperAngle = 2
+        self.doc.recompute()
+        self.assertValid(tube)
+        with self.assertRaisesRegex(ValueError, "isn't supported yet"):
+            PartDesign.split(self.body, tube)
+
     def testRetooledToOneLineFails(self):
         """Review r5 (TubeRetooledToOneLine): the tube's BaseEdges changed after the Split to one
         line, a sheet of one planar face: the Split fails, it doesn't cut by that face's plane."""

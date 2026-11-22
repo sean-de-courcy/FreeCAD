@@ -148,9 +148,8 @@ bool before(const gp_Pnt& a, const gp_Pnt& b)
     return false;
 }
 
-/// A closed wire's vector area (half the sum of the cross products, here twice it), from
-/// points along each edge as the wire runs it; @p length is set to the points' perimeter
-gp_Vec vectorArea(const TopoDS_Wire& wire, double& length)
+/// Points along each edge of @p wire as the wire runs it
+std::vector<gp_Pnt> loopPoints(const TopoDS_Wire& wire)
 {
     std::vector<gp_Pnt> points;
     for (BRepTools_WireExplorer it(wire); it.More(); it.Next()) {
@@ -164,6 +163,14 @@ gp_Vec vectorArea(const TopoDS_Wire& wire, double& length)
             points.push_back(curve.Value(reversed ? u1 + f * (u0 - u1) : u0 + f * (u1 - u0)));
         }
     }
+    return points;
+}
+
+/// A closed wire's vector area (half the sum of the cross products, here twice it), from
+/// points along each edge as the wire runs it; @p length is set to the points' perimeter
+gp_Vec vectorArea(const TopoDS_Wire& wire, double& length)
+{
+    const std::vector<gp_Pnt> points = loopPoints(wire);
     length = 0.0;
     for (std::size_t i = 0; i < points.size(); ++i) {
         length += points[i].Distance(points[(i + 1) % points.size()]);
@@ -173,6 +180,63 @@ gp_Vec vectorArea(const TopoDS_Wire& wire, double& length)
         area += gp_Vec(points[0], points[i]).Crossed(gp_Vec(points[0], points[i + 1]));
     }
     return area;
+}
+
+/// Whether the closed polygon @p points, seen along @p dir, crosses or touches itself: two
+/// sides that aren't neighbours meet (review r6: a self-crossing loop's turn follows its larger
+/// lobe, which an edit can change)
+bool crossesItself(const std::vector<gp_Pnt>& points, const gp_Dir& dir, double tol)
+{
+    const std::size_t n = points.size();
+    if (n < 4) {
+        return false;
+    }
+    // Plane coordinates across dir
+    const gp_Ax3 frame(gp_Pnt(0, 0, 0), dir);
+    const gp_Dir xd = frame.XDirection();
+    const gp_Dir yd = frame.YDirection();
+    std::vector<std::pair<double, double>> p(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        const gp_Vec v(points[i].XYZ());
+        p[i] = {v.Dot(gp_Vec(xd)), v.Dot(gp_Vec(yd))};
+    }
+    auto cross = [](const std::pair<double, double>& o, const std::pair<double, double>& a,
+                    const std::pair<double, double>& b) {
+        return (a.first - o.first) * (b.second - o.second)
+            - (a.second - o.second) * (b.first - o.first);
+    };
+    auto distance = [](const std::pair<double, double>& q, const std::pair<double, double>& a,
+                       const std::pair<double, double>& b) {
+        const double dx = b.first - a.first;
+        const double dy = b.second - a.second;
+        const double len2 = dx * dx + dy * dy;
+        double t = len2 > 0.0 ? ((q.first - a.first) * dx + (q.second - a.second) * dy) / len2 : 0.0;
+        t = std::clamp(t, 0.0, 1.0);
+        return std::hypot(q.first - (a.first + t * dx), q.second - (a.second + t * dy));
+    };
+    for (std::size_t i = 0; i < n; ++i) {
+        const auto& a = p[i];
+        const auto& b = p[(i + 1) % n];
+        for (std::size_t j = i + 2; j < n; ++j) {
+            if (i == 0 && j == n - 1) {
+                continue;  // neighbours through the closing side
+            }
+            const auto& c = p[j];
+            const auto& d = p[(j + 1) % n];
+            const double d1 = cross(a, b, c);
+            const double d2 = cross(a, b, d);
+            const double d3 = cross(c, d, a);
+            const double d4 = cross(c, d, b);
+            if (((d1 > 0) != (d2 > 0)) && ((d3 > 0) != (d4 > 0))) {
+                return true;
+            }
+            if (distance(c, a, b) <= tol || distance(d, a, b) <= tol || distance(a, c, d) <= tol
+                || distance(b, c, d) <= tol) {
+                return true;
+            }
+        }
+    }
+    return false;
 }
 
 /// Whether @p wire is closed
@@ -677,6 +741,16 @@ bool Extrusion::isSidedTube() const
     if (Solid.getValue() || (EndType.getValue() != 1 && BaseEdges.getSubValues().empty())) {
         return false;
     }
+    // A taper makes the walls by a loft, whose faces don't follow the prism's turn (review r6)
+    if (std::fabs(TaperAngle.getValue()) >= Precision::Angular()
+        || std::fabs(TaperAngleRev.getValue()) >= Precision::Angular()) {
+        return false;
+    }
+    const Base::Vector3d dir = Dir.getValue();
+    if (dir.Length() < Precision::Confusion()) {
+        return false;
+    }
+    const gp_Dir along(dir.x, dir.y, dir.z);
     TopoShape profile;
     try {
         profile = baseShape();
@@ -696,10 +770,11 @@ bool Extrusion::isSidedTube() const
         if (!isClosedWire(wire)) {
             return false;
         }
-        // A loop that crosses itself into lobes of equal area (a bowtie) has no inside to turn
-        // toward (review r5)
+        // An inside seen along the direction: a loop with an area across it that doesn't cross
+        // or touch itself (a bowtie's turn follows its larger lobe, reviews r5, r6)
         double length = 0.0;
-        if (vectorArea(wire, length).Magnitude() <= 1e-6 * length * length) {
+        if (std::fabs(vectorArea(wire, length).Dot(gp_Vec(along))) <= 1e-6 * length * length
+            || crossesItself(loopPoints(wire), along, 1e-6 * length)) {
             return false;
         }
         loops = true;
