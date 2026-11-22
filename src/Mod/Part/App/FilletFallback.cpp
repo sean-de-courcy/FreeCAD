@@ -2007,6 +2007,17 @@ void foldFloorPieces(const Context& ctx,
                      std::vector<TopoDS_Shape>& edges,
                      std::vector<TopoDS_Shape>& faces)
 {
+    // A convex edge between two planes only (review of fix935 2 r1, T2 and T3): a concave edge's
+    // fill reaches behind the floor's plane, and an edge between cylinders can take the preferred
+    // construction where OCCT builds, which must not move
+    if (!data.convex || !data.line) {
+        return;
+    }
+    for (const auto& face : data.faces) {
+        if (BRepAdaptor_Surface(face, Standard_False).GetType() != GeomAbs_Plane) {
+            return;
+        }
+    }
     gp_Pnt point = BRep_Tool::Pnt(vertex);
     gp_Dir away = awayFrom(data.edge, vertex);
     auto ownIndex = [&](const TopoDS_Shape& face) {

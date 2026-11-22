@@ -7552,3 +7552,25 @@ class WallOnASplitFloorTest(unittest.TestCase):
         # Nothing below the floor changes
         below = Part.makeBox(60, 60, self.top, V(-30, -30, 0))
         self.assertAlmostEqual(result.common(below).Volume, body.common(below).Volume, delta=1e-7)
+
+    def testConcaveFootStaysRefused(self):
+        # A wall's concave corner (an L) whose foot is a vertex of 6 edges on a floor notched in a
+        # V under it: the fill reaches behind the floor's plane, so the fold does not apply (review
+        # of fix935 2 r1, T2). Refused, or OCCT's own; never folded
+        floor = Part.makeBox(40, 40, self.top, V(-20, -20, 0))
+        notch = Part.Face(Part.makePolygon([V(0, 0, -1), V(-20, 8, -1), V(-20, -8, -1), V(0, 0, -1)]))
+        floor = floor.cut(notch.extrude(V(0, 0, self.top + 2)))
+        wall = Part.makeBox(10, 2, 5, V(0, 0, self.top)).fuse(Part.makeBox(2, 10, 5, V(0, 0, self.top)))
+        body = floor.fuse(wall).removeSplitter()
+        corner = [
+            e
+            for e in body.Edges
+            if e.Curve.TypeId == "Part::GeomLine"
+            and (e.BoundBox.Center - V(2, 2, self.top + 2.5)).Length < 1e-6
+        ]
+        self.assertEqual(len(corner), 1)
+        try:
+            result = body.makeFillet(1.0, corner)
+        except Exception:
+            return
+        self.assertTrue(result.isValid())
