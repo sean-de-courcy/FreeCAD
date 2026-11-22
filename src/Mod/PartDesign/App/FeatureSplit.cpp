@@ -667,7 +667,7 @@ void Split::unsetupObject()
     // A sheet this Split hid comes back into view (ops#919)
     App::DocumentObject* tool = Tool.getValue();
     if (!NewHalf.getValue() && !KeepTool.getValue() && tool && !tool->isRemoving()
-        && isSheetObject(tool)) {
+        && Tool.getSubValues().empty() && isSheetObject(tool)) {
         tool->Visibility.setValue(true);
     }
     FeatureRefine::unsetupObject();

@@ -224,22 +224,91 @@ class TestSurfaceUpToSplit(unittest.TestCase):
         self.assertFalse(self.original.KeepTool)
 
     def testSides(self):
-        """T8: Front of the tube of a hexagon drawn counter-clockwise is the plug; drawn
-        clockwise, the tube's faces turn the other way and Back is the plug. The drawing
-        direction decides, which a user can't see: the harness maps the parts to Onshape's by
-        volume and box, never by the side's name (design 5). Pinned so it can't flip unnoticed."""
+        """T8 (review r1): Front of a tube is its inside, the plug, however the hexagon was
+        drawn: a closed wire is turned counter-clockwise about the extrude's direction before
+        the sheet is made, so the side doesn't follow the drawing direction."""
+        for clockwise in (False, True):
+            self.block()
+            ext = self.hexTube(clockwise)
+            self.split(ext, "Front")
+            self.assertAlmostEqual(self.original.Shape.Volume, PLUG, places=4)
+            self.assertAlmostEqual(self.half.Shape.Volume, HOLED, places=4)
+            self.tearDown()
+            self.setUp()
+
+    def testFirstEdgeReversed(self):
+        """Review r1 (SideFollowsFirstEdge): the sketch's first segment reversed in place by
+        moving its end points: the sheet's geometry is the same, and so is the piece each part
+        keeps."""
         self.block()
         ext = self.hexTube()
         self.split(ext, "Front")
         self.assertAlmostEqual(self.original.Shape.Volume, PLUG, places=4)
-        self.assertAlmostEqual(self.half.Shape.Volume, HOLED, places=4)
-        self.tearDown()
-        self.setUp()
-        self.block()
-        ext = self.hexTube(clockwise=True)
-        self.split(ext, "Back")
+        sketch = self.profile
+        g = sketch.Geometry[0]
+        a, b = g.StartPoint, g.EndPoint
+        sketch.moveGeometry(0, 1, (a + b) * 0.5 + V(0.5, 0.5, 0), False)
+        self.doc.recompute()
+        sketch.moveGeometry(0, 2, a, False)
+        self.doc.recompute()
+        sketch.moveGeometry(0, 1, b, False)
+        self.doc.recompute()
+        self.assertTrue(sketch.Geometry[0].StartPoint.isEqual(b, 1e-9))
+        self.assertValid(self.original)
         self.assertAlmostEqual(self.original.Shape.Volume, PLUG, places=4)
         self.assertAlmostEqual(self.half.Shape.Volume, HOLED, places=4)
+
+    def testTargetBodyMoved(self):
+        """Review r1 (SheetUpToMovedBody, design 4b): the target's Body moved up 5 moves the face
+        the sheet runs to (a move no link sees): the sheet runs to z 25 (1200)."""
+        self.block()
+        ext = self.hexTube()
+        self.body.Placement = App.Placement(V(0, 0, 5), App.Rotation())
+        self.doc.recompute()
+        self.assertValid(ext)
+        self.assertAlmostEqual(box(ext.Shape).ZMax, 25, places=6)
+        self.assertAlmostEqual(ext.Shape.Area, 1200, places=6)
+
+    def testSplitByStaleSheetFails(self):
+        """Review r1 (SplitByStaleSheet): a block z 5..15 split by the tube up to a plate's top
+        (z 22) in another Body; the plate's Body down 10 brings the sheet's end to z 12, inside
+        the block: the Split fails (SU6-SU8), it doesn't keep the old cut."""
+        self.block(height=10)
+        self.box.Placement = App.Placement(V(0, 0, 5), App.Rotation())
+        plateBody = self.doc.addObject("PartDesign::Body", "Plate")
+        plate = plateBody.newObject("PartDesign::AdditiveBox", "PlateBox")
+        plate.Length, plate.Width, plate.Height = 40, 30, 2
+        plate.Placement = App.Placement(V(0, 0, 20), App.Rotation())
+        self.doc.recompute()
+        self.profile = self.sketch(hexagon())
+        ext = self.surface(self.profile, self.edgesOf(self.profile, hexagon()),
+                           self.top(plate, 22))
+        self.split(ext)
+        plateBody.Placement = App.Placement(V(0, 0, -10), App.Rotation())
+        self.doc.recompute()
+        self.assertValid(ext)
+        self.assertAlmostEqual(box(ext.Shape).ZMax, 12, places=6)
+        self.assertFails(self.original, "doesn't cut Block")
+
+    def testClosedTubeUpToSlantedFace(self):
+        """Review r1 (ClosedTubeUpToSlantedFace): the hexagon's closed tube up to the slanted top
+        z = 20 + 0.25 x: six faces whose far edges lie in the plane, area 8 x 6 x 25 = 1200 (the
+        edges' midpoints average x = 20); the plug of the slab split by it is the hexagon times
+        its mean height, 166.2769 x 25."""
+        base = self.slab()
+        sketch = self.sketch(hexagon())
+        ext = self.surface(sketch, self.edgesOf(sketch, hexagon()), self.faceSlanted(base))
+        self.assertValid(ext)
+        self.assertEqual(len(ext.Shape.Faces), 6)
+        self.assertAlmostEqual(ext.Shape.Area, 1200, places=4)
+        for vertex in ext.Shape.Vertexes:
+            p = vertex.Point
+            if p.z > 1e-6:
+                self.assertAlmostEqual(p.z, 20 + 0.25 * p.x, places=6)
+        self.split(ext)
+        got = sorted([self.original.Shape.Volume, self.half.Shape.Volume])
+        self.assertAlmostEqual(got[0], 25 * HEXAGON, places=4)
+        self.assertAlmostEqual(got[1], base.Shape.Volume - 25 * HEXAGON, places=4)
 
     def testEditFollows(self):
         """T6: a taller block (25) lengthens the tube (1200) and the plug (25 x 166.2769), and the

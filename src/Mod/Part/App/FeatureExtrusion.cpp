@@ -28,7 +28,9 @@
 #include <cctype>
 #include <set>
 
+#include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
+#include <BRepTools_WireExplorer.hxx>
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepBndLib.hxx>
@@ -47,7 +49,10 @@
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopoDS.hxx>
+#include <TopoDS_Compound.hxx>
+#include <TopoDS_Iterator.hxx>
 #include <TopoDS_Vertex.hxx>
+#include <TopoDS_Wire.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
 
 
@@ -118,6 +123,102 @@ const char* classToEnum(const char* type)
     return MakerEnums.at(4).c_str();
 }
 
+/// Where @p obj's containers place it: its global placement without its own
+Base::Placement containerPlacement(const App::DocumentObject* obj)
+{
+    auto geo = freecad_cast<const App::GeoFeature*>(obj);
+    if (!geo) {
+        return {};
+    }
+    return App::GeoFeature::getGlobalPlacement(obj) * geo->Placement.getValue().inverse();
+}
+
+/// Whether point @p a comes before @p b, coordinate by coordinate
+bool before(const gp_Pnt& a, const gp_Pnt& b)
+{
+    constexpr double tol = Precision::Confusion();
+    for (int i = 1; i <= 3; ++i) {
+        if (a.Coord(i) < b.Coord(i) - tol) {
+            return true;
+        }
+        if (a.Coord(i) > b.Coord(i) + tol) {
+            return false;
+        }
+    }
+    return false;
+}
+
+/// Whether @p wire runs the way the rule below wants: a closed wire counter-clockwise about
+/// @p dir, an open one from its end that comes first by coordinates
+bool runsTheRightWay(const TopoDS_Wire& wire, const gp_Dir& dir)
+{
+    TopoDS_Vertex first;
+    TopoDS_Vertex last;
+    TopExp::Vertices(wire, first, last);
+    if (first.IsNull() || last.IsNull()) {
+        return true;
+    }
+    const gp_Pnt start = BRep_Tool::Pnt(first);
+    const gp_Pnt end = BRep_Tool::Pnt(last);
+    if (!first.IsSame(last) && start.Distance(end) > Precision::Confusion()) {
+        return !before(end, start);
+    }
+    // The wire's vector area, from points along each edge as the wire runs it
+    std::vector<gp_Pnt> points;
+    for (BRepTools_WireExplorer it(wire); it.More(); it.Next()) {
+        BRepAdaptor_Curve curve(it.Current());
+        const int steps = curve.GetType() == GeomAbs_Line ? 1 : 16;
+        const double u0 = curve.FirstParameter();
+        const double u1 = curve.LastParameter();
+        const bool reversed = it.Current().Orientation() == TopAbs_REVERSED;
+        for (int k = 0; k < steps; ++k) {
+            const double f = double(k) / steps;
+            points.push_back(curve.Value(reversed ? u1 + f * (u0 - u1) : u0 + f * (u1 - u0)));
+        }
+    }
+    gp_Vec area(0, 0, 0);
+    for (std::size_t i = 1; i + 1 < points.size(); ++i) {
+        area += gp_Vec(points[0], points[i]).Crossed(gp_Vec(points[0], points[i + 1]));
+    }
+    return area.Dot(gp_Vec(dir)) >= 0.0;
+}
+/// @p sheet, extruded from @p profile, turned by a rule of the profile's geometry alone (ops#919,
+/// review r1): each closed wire counter-clockwise about @p dir, each open one from its end that
+/// comes first by coordinates. A Split's Front, where the sheet's normals point, then doesn't
+/// follow which way the sketch's first edge was drawn. The sheet's faces are turned, not the
+/// profile: the prism follows its edges, not a wire's own orientation
+void orientSheet(const TopoShape& profile, TopoShape& sheet, const gp_Dir& dir)
+{
+    const TopoDS_Shape& shape = profile.getShape();
+    const TopoDS_Shape& made = sheet.getShape();
+    if (shape.IsNull() || made.IsNull()) {
+        return;
+    }
+    std::vector<bool> turn;
+    for (TopExp_Explorer it(shape, TopAbs_WIRE); it.More(); it.Next()) {
+        turn.push_back(!runsTheRightWay(TopoDS::Wire(it.Current()), dir));
+    }
+    if (turn.empty() || std::none_of(turn.begin(), turn.end(), [](bool t) { return t; })) {
+        return;
+    }
+    if (std::all_of(turn.begin(), turn.end(), [](bool t) { return t; })) {
+        sheet.setShape(made.Reversed(), false);
+        return;
+    }
+    // Some wires each way: turn the sheet's pieces one by one, when they match the wires
+    if (made.ShapeType() != TopAbs_COMPOUND || made.NbChildren() != static_cast<int>(turn.size())) {
+        return;
+    }
+    BRep_Builder builder;
+    TopoDS_Compound compound;
+    builder.MakeCompound(compound);
+    std::size_t i = 0;
+    for (TopoDS_Iterator it(made); it.More(); it.Next(), ++i) {
+        builder.Add(compound, turn[i] ? it.Value().Reversed() : it.Value());
+    }
+    sheet.setShape(compound, false);
+}
+
 void restoreFaceMakerMode(Extrusion* self)
 {
     const char* mode = enumToClass(self->FaceMakerMode.getValueAsString());
@@ -173,6 +274,8 @@ Extrusion::Extrusion()
     ADD_PROPERTY_TYPE(UpToFace, (nullptr), "Extrude", App::Prop_None,
                       "The planar face the surface runs up to, taken as its whole plane (EndType UpToFace).");
     UpToFace.setScope(App::LinkScope::Global);
+    ADD_PROPERTY_TYPE(UpToFaceFrame, (Base::Placement()), "Extrude", (App::PropertyType)(App::Prop_Hidden | App::Prop_Output),
+                      "Where UpToFace's object was, in this object's frame, when this extrusion last computed");
     // clang-format on
 }
 
@@ -184,6 +287,14 @@ short Extrusion::mustExecute() const
         || TaperAngleRev.isTouched() || FaceMakerClass.isTouched() || InnerWireTaper.isTouched()
         || BaseEdges.isTouched() || EndType.isTouched() || UpToFace.isTouched()) {
         return 1;
+    }
+    // The target's Body moved, and nothing this extrusion links changed (as Split's ToolFrame)
+    if (EndType.getValue() == 1 && UpToFace.getValue()) {
+        const Base::Placement frame =
+            containerPlacement(this).inverse() * containerPlacement(UpToFace.getValue());
+        if (!frame.isSame(UpToFaceFrame.getValue(), Precision::Confusion())) {
+            return 1;
+        }
     }
     return 0;
 }
@@ -443,16 +554,6 @@ bool isShapeEdgeName(const std::string& name)
     });
 }
 
-/// Where @p obj's containers place it: its global placement without its own
-Base::Placement containerPlacement(const App::DocumentObject* obj)
-{
-    auto geo = freecad_cast<const App::GeoFeature*>(obj);
-    if (!geo) {
-        return {};
-    }
-    return App::GeoFeature::getGlobalPlacement(obj) * geo->Placement.getValue().inverse();
-}
-
 /// Whether some point of @p edges is the end of more than two of them: such edges branch and
 /// make no sheet that one wire would
 bool branches(const std::vector<TopoShape>& edges)
@@ -592,6 +693,7 @@ void Extrusion::extrudeUpToFace(TopoShape& result, const TopoShape& profile, Ext
     // The target's place in the document, in this object's frame: the extrusion sits beside
     // the part whose face it runs to, and a part's features are placed by their Body
     const Base::Placement frame = containerPlacement(this).inverse() * containerPlacement(target);
+    UpToFaceFrame.setValue(frame);
     if (!frame.isIdentity()) {
         face.transformShape(frame.toMatrix(), false, true);
     }
@@ -634,17 +736,26 @@ void Extrusion::extrudeUpToFace(TopoShape& result, const TopoShape& profile, Ext
         extrudeShape(result, profile, params);
         return;
     }
-    // A slanted plane: the sheet run past the plane everywhere, kept on the profile's side
+    // A slanted plane: the sheet run past the plane everywhere, kept on the profile's side by a
+    // Common with a finite slab of that side (a half-space dropped a closed tube, review r1)
     params.lengthFwd = tMax + std::max(1.0, tMax);
     TopoShape prism = makeTopoShape(getID());
     extrudeShape(prism, profile, params);
-    const gp_Pnt inside = plane.Location().Translated(gp_Vec(normal) * (along > 0.0 ? -1.0 : 1.0));
-    BRepBuilderAPI_MakeFace planeFace(plane);
-    BRepPrimAPI_MakeHalfSpace space(planeFace.Face(), inside);
-    TopoShape spaceShape = makeTopoShape(-getID());
-    spaceShape.setShape(space.Solid());
-    spaceShape.Tag = -getID();
-    result.makeElementBoolean(Part::OpCodes::Common, {prism, spaceShape});
+    Bnd_Box reach;
+    BRepBndLib::Add(prism.getShape(), reach);
+    const double size = 2.0 * std::sqrt(reach.SquareExtent()) + 1.0;
+    double x0, y0, z0, x1, y1, z1;
+    reach.Get(x0, y0, z0, x1, y1, z1);
+    const gp_Pnt middle(0.5 * (x0 + x1), 0.5 * (y0 + y1), 0.5 * (z0 + z1));
+    const gp_Vec offset(plane.Location(), middle);
+    const gp_Pnt onPlane = middle.Translated(gp_Vec(normal) * -offset.Dot(gp_Vec(normal)));
+    const gp_Pln capPlane(gp_Ax3(onPlane, normal, plane.Position().XDirection()));
+    BRepBuilderAPI_MakeFace cap(capPlane, -size, size, -size, size);
+    BRepPrimAPI_MakePrism slab(cap.Face(), gp_Vec(normal) * (along > 0.0 ? -2.0 * size : 2.0 * size));
+    TopoShape slabShape = makeTopoShape(-getID());
+    slabShape.setShape(slab.Shape());
+    slabShape.Tag = -getID();
+    result.makeElementBoolean(Part::OpCodes::Common, {prism, slabShape});
     if (result.isNull() || !result.hasSubShape(TopAbs_FACE)) {
         throw Base::ValueError("Could not extrude up to " + name);
     }
@@ -667,6 +778,12 @@ App::DocumentObjectExecReturn* Extrusion::execute()
         }
         else {
             extrudeShape(result, source, params);
+        }
+        // The new modes turn the sheet by the profile's geometry: a Split by it then keeps the
+        // same piece whichever way an edge was drawn (ops#919, review r1). The plain extrusion
+        // keeps its shape as before
+        if (!params.solid && (EndType.getValue() == 1 || BaseEdges.getValue())) {
+            orientSheet(source, result, params.dir);
         }
         this->Shape.setValue(result);
         return App::DocumentObject::StdReturn;

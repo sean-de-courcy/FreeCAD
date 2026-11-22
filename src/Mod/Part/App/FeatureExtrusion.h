@@ -64,6 +64,9 @@ public:
     App::PropertyEnumeration EndType;
     /// FreeCAD-CH (ops#919): the face the surface runs up to, taken as its whole plane
     App::PropertyLinkSub UpToFace;
+    /// FreeCAD-CH (ops#919): where UpToFace's object was, in this object's frame, at the last
+    /// compute: a move of its Body is seen by no link
+    App::PropertyPlacement UpToFaceFrame;
 
     /** @name methods override feature */
     //@{
