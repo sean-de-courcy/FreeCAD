@@ -4650,6 +4650,23 @@ TEST_F(FilletFallbackTest, mitreAsksPastTheVisibleFloor)
     EXPECT_TRUE(FF::mitreAsks(off(0.0, 1.1e-5), 0.02));
 }
 
+#ifdef _WIN32
+TEST_F(FilletFallbackTest, workerFaultFailsTheCall)
+{
+    // ops#958: an access violation in the work on KernelBudget's worker fails the call with
+    // Base::AccessViolation on the calling thread, and the process goes on (it ended there before)
+    auto fault = [](const Message_ProgressRange& /*range*/) {
+        int* volatile target = nullptr;
+        *target = 1;
+    };
+    EXPECT_THROW(Part::KernelBudget::run("A fault", fault), Base::AccessViolation);
+    // The next call on a worker runs as before
+    bool ran = false;
+    Part::KernelBudget::run("After it", [&ran](const Message_ProgressRange& /*range*/) { ran = true; });
+    EXPECT_TRUE(ran);
+}
+#endif
+
 TEST_F(FilletFallbackTest, optionalRunStopsAtItsOwnLimit)
 {
     // skeptic 941b, 1: runOptional()'s own limit stops the work and returns false; within it, true

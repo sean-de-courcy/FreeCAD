@@ -482,19 +482,73 @@ std::string seconds(double value)
     return text.str();
 }
 
+/// The work, its C++ errors kept for the caller
+void runWork(const std::shared_ptr<Call>* call)
+{
+    try {
+        Handle(CancelIndicator) indicator = new CancelIndicator(*call);
+        (*call)->work(indicator->Start());
+    }
+    catch (...) {
+        (*call)->error = std::current_exception();
+    }
+}
+
+#ifdef _WIN32
+/// The structured exceptions a worker turns into the feature's error (FreeCAD-CH, ops#958): faults
+/// of the kernel's code. Others (a C++ exception, a breakpoint, a stack overflow) are left as they
+/// are
+int workerFault(unsigned long code)
+{
+    switch (code) {
+        case EXCEPTION_ACCESS_VIOLATION:
+        case EXCEPTION_IN_PAGE_ERROR:
+        case EXCEPTION_ARRAY_BOUNDS_EXCEEDED:
+        case EXCEPTION_DATATYPE_MISALIGNMENT:
+        case EXCEPTION_ILLEGAL_INSTRUCTION:
+        case EXCEPTION_PRIV_INSTRUCTION:
+        case EXCEPTION_INT_DIVIDE_BY_ZERO:
+            return EXCEPTION_EXECUTE_HANDLER;
+        default:
+            return EXCEPTION_CONTINUE_SEARCH;
+    }
+}
+
+/// runWork() under a structured exception handler, in a function with no object to unwind (/EHsc):
+/// the fault's code, or 0
+unsigned long runGuarded(const std::shared_ptr<Call>* call)
+{
+    __try {
+        runWork(call);
+        return 0;
+    }
+    __except (workerFault(GetExceptionCode())) {
+        return GetExceptionCode();
+    }
+}
+#endif
+
 void runWorker(const std::shared_ptr<Call>& call)
 {
     onWorker = true;
     call->clock.open();
     call->sample.open();
     call->sampleReady.store(call->sample.valid(), std::memory_order_release);
-    try {
-        Handle(CancelIndicator) indicator = new CancelIndicator(call);
-        call->work(indicator->Start());
+#ifdef _WIN32
+    // FreeCAD-CH (ops#958): the C runtime's SIGSEGV action, which turns an access violation into
+    // Base::AccessViolation on the main thread (SystemHandler.cpp), is per thread and unset here,
+    // and /EHsc keeps catch (...) from seeing it: a fault in OCCT ended the process. Now it fails
+    // the call, which raises it on the calling thread. The work's frames are not unwound (their
+    // destructors don't run: a leak); OCC_CATCH_SIGNALS leaves no handler behind on Windows
+    if (const unsigned long fault = runGuarded(&call)) {
+        std::ostringstream text;
+        text << "Illegal storage access in the geometry kernel (structured exception 0x" << std::hex
+             << fault << "): the feature's shape was not built";
+        call->error = std::make_exception_ptr(Base::AccessViolation(text.str()));
     }
-    catch (...) {
-        call->error = std::current_exception();
-    }
+#else
+    runWork(&call);
+#endif
     // The work's captures (makers, shapes) are freed here, on this thread
     call->work = nullptr;
     call->cpuAtEnd = ownCpuSeconds();
