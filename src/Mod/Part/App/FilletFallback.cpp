@@ -107,6 +107,7 @@
 #include <TopExp_Explorer.hxx>
 #include <TopTools_DataMapOfShapeReal.hxx>
 #include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
+#include <TopTools_MapOfShape.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <TopTools_ListOfShape.hxx>
 #include <TopTools_ShapeMapHasher.hxx>
@@ -6155,10 +6156,17 @@ void refuseCutRunOff(const EdgeData& data, const Tool& tool, int only = -1)
  * not closed or not planar, or its plane holds the generators (notes/chamfer-varying-angle-942.md
  * section 14 rule 1)
  */
-TopoDS_Shape extrusionSide(const TopoDS_Face& face, const gp_Dir& along, const gp_Pnt& around,
-                           double size, Handle(Geom_Surface)& own)
+TopoDS_Shape extrusionSide(const TopoDS_Face& face, const gp_Dir& alongThere, const gp_Pnt& aroundThere,
+                           double size, Handle(Geom_Surface)& own, TopLoc_Location& ownLocation)
 {
-    Handle(Geom_Surface) surface = BRep_Tool::Surface(face);
+    // Built in the face's own frame on its own surface, then given the face's location (a
+    // pattern's instance carries one: Case Base's mirrored counterbores), so that the merge's
+    // surface and location match the face beyond's
+    TopLoc_Location location;
+    Handle(Geom_Surface) surface = BRep_Tool::Surface(face, location);
+    const gp_Trsf toOwn = location.Transformation().Inverted();
+    const gp_Dir along = alongThere.Transformed(toOwn);
+    const gp_Pnt around = aroundThere.Transformed(toOwn);
     if (auto trimmed = Handle(Geom_RectangularTrimmedSurface)::DownCast(surface)) {
         surface = trimmed->BasisSurface();
     }
@@ -6186,11 +6194,6 @@ TopoDS_Shape extrusionSide(const TopoDS_Face& face, const gp_Dir& along, const g
     BRepAdaptor_Surface sectionSurface(section.Face());
     if (sectionSurface.GetType() != GeomAbs_Plane
         || std::abs(sectionSurface.Plane().Axis().Direction().Dot(along)) < 1e-3) {
-        return {};
-    }
-    TopLoc_Location location;
-    BRep_Tool::Surface(face, location);
-    if (!location.IsIdentity()) {
         return {};
     }
     // Its side on the face's own surface, so that the face beyond's growth merges into it (as
@@ -6242,11 +6245,15 @@ TopoDS_Shape extrusionSide(const TopoDS_Face& face, const gp_Dir& along, const g
         return {};
     }
     TopoDS_Solid side = solid.Solid();
+    if (!location.IsIdentity()) {
+        side.Location(location);
+    }
     BRepLib::OrientClosedSolid(side);
     if (!BRepCheck_Analyzer(side).IsValid() || volumeOf(side) <= 0) {
         return {};
     }
-    own = extrusion;
+    own = surface;
+    ownLocation = location;
     return side;
 }
 
@@ -6424,11 +6431,12 @@ void clipRunOff(const Context& ctx, const EdgeData& data, Tool& tool, double siz
                  && measuredDirection(surface.Direction())) {
             // The prism of the closed planar basis curve's face along the generators
             Handle(Geom_Surface) own;
-            side = extrusionSide(face, surface.Direction(), edgeMiddle, size, own);
+            TopLoc_Location ownLocation;
+            side = extrusionSide(face, surface.Direction(), edgeMiddle, size, own, ownLocation);
             if (!side.IsNull()) {
                 // The tool's face on that surface (the side is built on it) merges into the face
                 // beyond, which grows
-                tool.mergeSurfaces.emplace_back(own, TopLoc_Location());
+                tool.mergeSurfaces.emplace_back(own, ownLocation);
                 // Just behind the face, in its material
                 BRepClass3d_SolidClassifier behind(
                     side,
@@ -6439,6 +6447,11 @@ void clipRunOff(const Context& ctx, const EdgeData& data, Tool& tool, double siz
             }
         }
         if (side.IsNull()) {
+            TopLoc_Location located;
+            BRep_Tool::Surface(face, located);
+            FC_LOG("run-off clip: face beyond of type " << static_cast<int>(surface.GetType())
+                   << (located.IsIdentity() ? ", unlocated" : ", located") << ", plane normal "
+                   << planeNormal.X() << " " << planeNormal.Y() << " " << planeNormal.Z());
             refuse(otherRefusal);
         }
         // The side holding the picked edge is kept (rule 2), clear of the surface
@@ -13244,6 +13257,68 @@ TopoDS_Shape constructShape(
             if (!reflex.any() || BRepCheck_Analyzer(unify.Shape()).IsValid()) {
                 shape = unify.Shape();
                 stages.emplace_back(unify.History(), shape);
+            }
+        }
+        // The face beyond a clipped tool's face merged into (mergeSurfaces) keeps its seam split
+        // where the growth crossed it (review pr509-r2 T1: two collinear pieces, and a later
+        // dress-up of that face's other edge then fails): the pieces become one edge again. Only
+        // those seams' edges, and only at a vertex no other edge of the shape uses
+        if (!mergeSurfaces.empty()) {
+            TopTools_IndexedMapOfShape seams;
+            for (TopExp_Explorer it(shape, TopAbs_FACE); it.More(); it.Next()) {
+                const TopoDS_Face& face = TopoDS::Face(it.Current());
+                TopLoc_Location location;
+                const Handle(Geom_Surface)& surface = BRep_Tool::Surface(face, location);
+                if (std::none_of(mergeSurfaces.begin(), mergeSurfaces.end(), [&](const auto& merge) {
+                        return merge.first == surface && merge.second.IsEqual(location);
+                    })) {
+                    continue;
+                }
+                TopTools_IndexedMapOfShape own;
+                for (TopExp_Explorer edge(face, TopAbs_EDGE); edge.More(); edge.Next()) {
+                    if (BRep_Tool::IsClosed(TopoDS::Edge(edge.Current()), face)) {
+                        own.Add(edge.Current());
+                    }
+                }
+                for (int i = 1; own.Extent() > 1 && i <= own.Extent(); ++i) {
+                    seams.Add(own(i));
+                }
+            }
+            if (!seams.IsEmpty()) {
+                TopTools_IndexedDataMapOfShapeListOfShape edgesOf;
+                TopExp::MapShapesAndAncestors(shape, TopAbs_VERTEX, TopAbs_EDGE, edgesOf);
+                NCollection_Map<TopoDS_Shape, TopTools_ShapeMapHasher> keep;
+                bool inner = false;
+                for (int i = 1; i <= edgesOf.Extent(); ++i) {
+                    TopTools_MapOfShape distinct;
+                    bool onSeamsOnly = true;
+                    for (const auto& edge : edgesOf(i)) {
+                        distinct.Add(edge);
+                        onSeamsOnly = onSeamsOnly && seams.Contains(edge);
+                    }
+                    if (onSeamsOnly && distinct.Extent() == 2) {
+                        inner = true;
+                    }
+                    else {
+                        keep.Add(edgesOf.FindKey(i));
+                    }
+                }
+                TopTools_IndexedMapOfShape allEdges;
+                TopExp::MapShapes(shape, TopAbs_EDGE, allEdges);
+                for (int i = 1; i <= allEdges.Extent(); ++i) {
+                    if (!seams.Contains(allEdges(i))) {
+                        keep.Add(allEdges(i));
+                    }
+                }
+                if (inner) {
+                    ShapeUpgrade_UnifySameDomain unify(shape, true, false, false);
+                    unify.KeepShapes(keep);
+                    unify.Build();
+                    if (BRepCheck_Analyzer(unify.Shape()).IsValid()) {
+                        shape = unify.Shape();
+                        stages.emplace_back(unify.History(), shape);
+                    }
+                }
             }
         }
         // A fillet's mitre (ops#941): the rounds' contact edges on the plane face, split at the

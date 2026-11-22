@@ -915,6 +915,80 @@ class TestChamfer(unittest.TestCase):
                             and all(abs(p.dot(n)) > 0.7 for p in e.discretize(12)) for e in new[0].Edges))
         self._assertOn(result, new[0], bore + floors + walls)
 
+    def testChamferVaryingAngleRunOffOverTheWallsSeam(self):
+        # T14e (review pr509-r2 T1): where the run-off is centred on the extruded wall's seam (T14a's
+        # collar moved toward -x, a counterbore's wall moved 0.1 toward -x), the wall grown to meet
+        # the chamfer keeps one seam edge, and a chamfer of the wall's other edge builds valid
+        V = FreeCAD.Vector
+
+        def wallKept(result, n, far):
+            walls = [f for f in result.Faces if "Extrusion" in f.Surface.TypeId]
+            self.assertEqual(len(walls), 1)
+            seams = [e for e in walls[0].Edges if "Line" in e.Curve.TypeId]
+            self.assertEqual(len(seams), 1, [e.Length for e in seams])
+            other = [e for e in walls[0].Edges if e.isClosed() and "Line" not in e.Curve.TypeId
+                     and all(abs(p.dot(n) - far) < 1e-6 for p in e.discretize(12))]
+            self.assertEqual(len(other), 1)
+            again = result.makeChamfer(0.3, other)
+            self.assertTrue(again.isValid())
+            self.assertEqual(len(again.Faces), len(result.Faces) + 1)
+
+        t = math.radians(3)
+        u, v, n = self._frame942(t)
+        wall = self._ellipseInPlane(t, 10.0, 1.0, -0.2).extrude(n * -5)
+        shape = wall.fuse(Part.makeCylinder(10.0, 40, V(0, 0, -20))).removeSplitter()
+        foot = ["Edge%d" % (i + 1) for i, e in enumerate(shape.Edges)
+                if e.isClosed() and e.Curve.TypeId == "Part::GeomEllipse" and abs(e.Curve.MinorRadius - 10.0) < 1e-6
+                and all(abs(p.z - p.x * math.tan(t)) < 1e-6 for p in e.discretize(12))]
+        base, chamfer = self._varyingChamfer(shape, 0, foot, size=1.0)
+        self.assertTrue(chamfer.isValid(), chamfer.getStatusString())
+        wallKept(chamfer.Shape, n, -5.0)
+        for name in ("Chamfer", "Body", "Base"):
+            self.Doc.removeObject(name)
+
+        t = math.radians(1)
+        u, v, n = self._frame942(t)
+        plate = self._tiltedPlate(t)
+        plate.translate(n * 2)
+        pocket = self._ellipseInPlane(t, 6.0, 0.70, -0.1).extrude(n * 3)
+        shape = plate.cut(pocket).cut(Part.makeCylinder(6.0, 80, V(0, 0, -40))).removeSplitter()
+        rim = ["Edge%d" % (i + 1) for i, e in enumerate(shape.Edges)
+               if e.isClosed() and e.Curve.TypeId == "Part::GeomEllipse" and abs(e.Curve.MinorRadius - 6.0) < 1e-6
+               and all(abs(p.dot(n)) < 1e-6 for p in e.discretize(12))]
+        base, chamfer = self._varyingChamfer(shape, 1, rim, size=0.75)
+        self.assertTrue(chamfer.isValid(), chamfer.getStatusString())
+        wallKept(chamfer.Shape, n, 2.0)
+
+    def testChamferVaryingAngleCutRunsOffOntoALocatedWall(self):
+        # T14f (Case Base's mirrored counterbores, where the pattern's instance carries a location):
+        # T14b's counterbore moved by a placement, its solid rebuilt from its faces, so that each
+        # face, the extruded wall included, keeps that location while the solid's own is identity.
+        # The cut is T14b's, the wall one face, one face more
+        V = FreeCAD.Vector
+        t = math.radians(1)
+        u, v, n = self._frame942(t)
+        plate = self._tiltedPlate(t)
+        plate.translate(n * 2)
+        pocket = self._ellipseInPlane(t, 6.0, 0.70, 0.1).extrude(n * 3)
+        moved = plate.cut(pocket).cut(Part.makeCylinder(6.0, 80, V(0, 0, -40))).removeSplitter()
+        moved.Placement = FreeCAD.Placement(V(5, 3, 1), FreeCAD.Rotation(V(0, 0, 1), 30))
+        shape = Part.Solid(Part.Shell(moved.Faces))
+        self.assertTrue(shape.Placement.isIdentity())
+        self.assertTrue(all(not f.Placement.isIdentity() for f in shape.Faces))
+        rim = ["Edge%d" % (i + 1) for i, e in enumerate(shape.Edges)
+               if e.isClosed() and e.Curve.TypeId == "Part::GeomEllipse" and abs(e.Curve.MinorRadius - 6.0) < 1e-6
+               and any(f.Surface.TypeId == "Part::GeomPlane" and f.Area < 100
+                       for f in shape.ancestorsOfType(e, Part.Face))]
+        self.assertEqual(len(rim), 1)
+        base, chamfer = self._varyingChamfer(shape, 1, rim, size=0.75)
+        self.assertTrue(chamfer.isValid(), chamfer.getStatusString())
+        result = chamfer.Shape
+        self.assertTrue(result.isValid())
+        self.assertEqual(len(result.Faces), len(shape.Faces) + 1)
+        self.assertLess(result.cut(shape).Volume, 1e-6)
+        self._assertVolume(shape.cut(result).Volume, self.RUNOFF14B)
+        self.assertEqual(len([f for f in result.Faces if "Extrusion" in f.Surface.TypeId]), 1)
+
     def testChamferVaryingAngleRunOffsNotMeasuredAreRefused(self):
         # T14c: what section 14 did not measure is refused, and OCCT fails on each too: (1) a strip
         # narrower than the shortest leg all round (T14a's collar 0.5 outside the tube); (2) a fill
