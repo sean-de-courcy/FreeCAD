@@ -258,6 +258,62 @@ class TestSurfaceUpToSplit(unittest.TestCase):
         self.assertAlmostEqual(self.original.Shape.Volume, PLUG, places=4)
         self.assertAlmostEqual(self.half.Shape.Volume, HOLED, places=4)
 
+    def testOpenSheetSideAfterAMove(self):
+        """Review r2 (OpenSheetSideAfterTilt): an open polyline (20, -5), (20.5, 15), (21, 35) up to
+        the top splits the block; moving its far end to (19, 35) tilts the sheet without turning
+        it: each part keeps its side of the line (an open chain keeps its last result's way)."""
+        self.block()
+        line = [V(20, -5, 0), V(20.5, 15, 0), V(21, 35, 0)]
+        sketch = self.sketch(line)
+        ext = self.surface(sketch, self.edgesOf(sketch, line), self.top(self.box, 20))
+        self.split(ext, "Front")
+        keptLeft = box(self.original.Shape).XMin < 1e-6
+        sketch.moveGeometry(1, 2, V(19, 35, 0), False)
+        self.doc.recompute()
+        self.assertValid(self.original)
+        self.assertValid(self.half)
+        self.assertEqual(box(self.original.Shape).XMin < 1e-6, keptLeft)
+        self.assertEqual(box(self.half.Shape).XMin < 1e-6, not keptLeft)
+        total = self.original.Shape.Volume + self.half.Shape.Volume
+        self.assertAlmostEqual(total, BLOCK, places=4)
+
+    def testFaceProfileIsNotTurned(self):
+        """Review r2 (FaceProfileTurnedOver): a face as the profile makes a solid even with Solid
+        off; it is never turned inside out (its volume stays positive), whichever way the face
+        faces."""
+        self.block()
+        for normal in (V(0, 0, -1), V(0, 0, 1)):
+            square = self.doc.addObject("Part::Feature", "Square")
+            face = Part.Face(Part.makePolygon(
+                [V(15, 10, 30), V(25, 10, 30), V(25, 20, 30), V(15, 20, 30), V(15, 10, 30)]))
+            if face.normalAt(0, 0).dot(normal) < 0:
+                face.reverse()
+            square.Shape = face
+            ext = self.doc.addObject("Part::Extrusion", "FaceUpTo")
+            ext.Base = square
+            ext.Dir = V(0, 0, -1)
+            ext.Solid = False
+            ext.EndType = "UpToFace"
+            ext.UpToFace = self.top(self.box, 20)
+            self.doc.recompute()
+            self.assertValid(ext)
+            self.assertAlmostEqual(ext.Shape.Volume, 1000, places=6)
+
+    def testEmptyPickIsTheWholeBase(self):
+        """Review r2: BaseEdges naming Base with no edges is the whole of Base, as made today: the
+        same faces, facing the same way, as with BaseEdges empty."""
+        sketch = self.sketch(hexagon(clockwise=True))
+        plain = self.doc.addObject("Part::Extrusion", "Plain")
+        plain.Base = sketch
+        plain.Dir = V(0, 0, 7)
+        picked = self.doc.addObject("Part::Extrusion", "Picked")
+        picked.Base = sketch
+        picked.BaseEdges = (sketch, [])
+        picked.Dir = V(0, 0, 7)
+        self.doc.recompute()
+        for a, b in zip(plain.Shape.Faces, picked.Shape.Faces):
+            self.assertTrue(a.normalAt(0, 0).isEqual(b.normalAt(0, 0), 1e-9))
+
     def testTargetBodyMoved(self):
         """Review r1 (SheetUpToMovedBody, design 4b): the target's Body moved up 5 moves the face
         the sheet runs to (a move no link sees): the sheet runs to z 25 (1200)."""

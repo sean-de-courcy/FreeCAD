@@ -26,10 +26,12 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstring>
 #include <set>
 
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
+#include <BRepTools.hxx>
 #include <BRepTools_WireExplorer.hxx>
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
@@ -42,6 +44,8 @@
 #include <BRepPrimAPI_MakeHalfSpace.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
 #include <Bnd_Box.hxx>
+#include <GeomAPI_ProjectPointOnSurf.hxx>
+#include <Geom_Surface.hxx>
 #include <gp_Ax3.hxx>
 #include <gp_Pln.hxx>
 #include <gp_Trsf.hxx>
@@ -182,41 +186,111 @@ bool runsTheRightWay(const TopoDS_Wire& wire, const gp_Dir& dir)
     }
     return area.Dot(gp_Vec(dir)) >= 0.0;
 }
-/// @p sheet, extruded from @p profile, turned by a rule of the profile's geometry alone (ops#919,
-/// review r1): each closed wire counter-clockwise about @p dir, each open one from its end that
-/// comes first by coordinates. A Split's Front, where the sheet's normals point, then doesn't
-/// follow which way the sketch's first edge was drawn. The sheet's faces are turned, not the
-/// profile: the prism follows its edges, not a wire's own orientation
-void orientSheet(const TopoShape& profile, TopoShape& sheet, const gp_Dir& dir)
+/// The normal of @p face (as oriented) at the middle of its parameters; @p point is set there
+gp_Vec middleNormal(const TopoDS_Face& face, gp_Pnt& point)
+{
+    double u0, u1, v0, v1;
+    BRepTools::UVBounds(face, u0, u1, v0, v1);
+    Handle(Geom_Surface) surface = BRep_Tool::Surface(face);
+    gp_Vec du;
+    gp_Vec dv;
+    surface->D1(0.5 * (u0 + u1), 0.5 * (v0 + v1), point, du, dv);
+    gp_Vec normal = du.Crossed(dv);
+    return face.Orientation() == TopAbs_REVERSED ? normal.Reversed() : normal;
+}
+
+/// Whether @p sheet faces the other way from @p previous, this feature's last result: its
+/// faces that @p previous has by the same mapped name, compared where they lie
+bool turnedFrom(const TopoShape& sheet, const TopoShape& previous)
+{
+    int same = 0;
+    int other = 0;
+    const int faces = static_cast<int>(sheet.countSubShapes(TopAbs_FACE));
+    for (int i = 1; i <= faces; ++i) {
+        const Data::MappedName name = sheet.getMappedName(Data::IndexedName::fromConst("Face", i));
+        if (!name) {
+            continue;
+        }
+        const Data::IndexedName before = previous.getIndexedName(name);
+        if (!before || std::strcmp(before.getType(), "Face") != 0) {
+            continue;
+        }
+        const TopoDS_Shape old = previous.getSubShape(TopAbs_FACE, before.getIndex(), true);
+        if (old.IsNull()) {
+            continue;
+        }
+        gp_Pnt point;
+        const gp_Vec now = middleNormal(TopoDS::Face(sheet.getSubShape(TopAbs_FACE, i)), point);
+        GeomAPI_ProjectPointOnSurf onOld(point, BRep_Tool::Surface(TopoDS::Face(old)));
+        if (onOld.NbPoints() == 0) {
+            continue;
+        }
+        double u, v;
+        onOld.LowerDistanceParameters(u, v);
+        gp_Pnt at;
+        gp_Vec du;
+        gp_Vec dv;
+        BRep_Tool::Surface(TopoDS::Face(old))->D1(u, v, at, du, dv);
+        gp_Vec then = du.Crossed(dv);
+        if (old.Orientation() == TopAbs_REVERSED) {
+            then.Reverse();
+        }
+        const double dot = now.Dot(then);
+        if (dot > 0.0) {
+            ++same;
+        }
+        else if (dot < 0.0) {
+            ++other;
+        }
+    }
+    return other > same;
+}
+
+/// @p sheet, extruded from the wires of @p profile, turned so that a Split's Front (where the
+/// sheet's normals point) doesn't follow which way the sketch's edges were drawn (ops#919,
+/// review r1): each closed wire counter-clockwise about @p dir. An open chain has no such
+/// rule that a move can't flip (review r2): it keeps the way of @p previous, this feature's
+/// last result, matched by the faces' mapped names, and only its first result runs from the
+/// end that comes first by coordinates. The sheet's faces are turned, not the profile: the
+/// prism follows its edges, not a wire's own orientation. A profile with faces, or a result
+/// with a solid, is left as made
+void orientSheet(const TopoShape& profile, TopoShape& sheet, const gp_Dir& dir, const TopoShape& previous)
 {
     const TopoDS_Shape& shape = profile.getShape();
-    const TopoDS_Shape& made = sheet.getShape();
-    if (shape.IsNull() || made.IsNull()) {
+    if (shape.IsNull() || sheet.isNull() || profile.hasSubShape(TopAbs_FACE)
+        || sheet.hasSubShape(TopAbs_SOLID)) {
         return;
     }
     std::vector<bool> turn;
+    bool open = false;
     for (TopExp_Explorer it(shape, TopAbs_WIRE); it.More(); it.Next()) {
-        turn.push_back(!runsTheRightWay(TopoDS::Wire(it.Current()), dir));
+        const TopoDS_Wire& wire = TopoDS::Wire(it.Current());
+        open = open || !BRep_Tool::IsClosed(wire);
+        turn.push_back(!runsTheRightWay(wire, dir));
     }
-    if (turn.empty() || std::none_of(turn.begin(), turn.end(), [](bool t) { return t; })) {
+    if (turn.empty()) {
         return;
     }
+    const TopoDS_Shape made = sheet.getShape();
     if (std::all_of(turn.begin(), turn.end(), [](bool t) { return t; })) {
         sheet.setShape(made.Reversed(), false);
-        return;
     }
-    // Some wires each way: turn the sheet's pieces one by one, when they match the wires
-    if (made.ShapeType() != TopAbs_COMPOUND || made.NbChildren() != static_cast<int>(turn.size())) {
-        return;
+    else if (std::any_of(turn.begin(), turn.end(), [](bool t) { return t; })) {
+        // Some wires each way: the sheet's pieces one by one, when they match the wires
+        if (made.ShapeType() == TopAbs_COMPOUND && made.NbChildren() == static_cast<int>(turn.size())) {
+            BRep_Builder builder;
+            TopoDS_Compound compound;
+            builder.MakeCompound(compound);
+            std::size_t i = 0;
+            for (TopoDS_Iterator it(made); it.More(); it.Next(), ++i) {
+                builder.Add(compound, turn[i] ? it.Value().Reversed() : it.Value());
+            }
+            sheet.setShape(compound, false);
+        }
     }
-    BRep_Builder builder;
-    TopoDS_Compound compound;
-    builder.MakeCompound(compound);
-    std::size_t i = 0;
-    for (TopoDS_Iterator it(made); it.More(); it.Next(), ++i) {
-        builder.Add(compound, turn[i] ? it.Value().Reversed() : it.Value());
+    if (open && !previous.isNull() && turnedFrom(sheet, previous)) {
+        sheet.setShape(sheet.getShape().Reversed(), false);
     }
-    sheet.setShape(compound, false);
 }
 
 void restoreFaceMakerMode(Extrusion* self)
@@ -782,8 +856,8 @@ App::DocumentObjectExecReturn* Extrusion::execute()
         // The new modes turn the sheet by the profile's geometry: a Split by it then keeps the
         // same piece whichever way an edge was drawn (ops#919, review r1). The plain extrusion
         // keeps its shape as before
-        if (!params.solid && (EndType.getValue() == 1 || BaseEdges.getValue())) {
-            orientSheet(source, result, params.dir);
+        if (!params.solid && (EndType.getValue() == 1 || !BaseEdges.getSubValues().empty())) {
+            orientSheet(source, result, params.dir, Shape.getShape());
         }
         this->Shape.setValue(result);
         return App::DocumentObject::StdReturn;
