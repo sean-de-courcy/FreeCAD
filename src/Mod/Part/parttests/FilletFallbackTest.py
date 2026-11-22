@@ -7156,8 +7156,8 @@ class MitreCornerTest(unittest.TestCase):
             self.assertEqual(sorted(type(f.Surface).__name__ for f in faces), ["Cylinder", "Toroid"])
             step = (e.LastParameter - e.FirstParameter) / 20
             for k in range(21):
-                point = Part.Vertex(e.valueAt(e.FirstParameter + k * step))
-                off = max(off, max(point.distToShape(f)[0] for f in faces))
+                point = e.valueAt(e.FirstParameter + k * step)
+                off = max(off, max(off_surface(f.Surface, point) for f in faces))
             feet.append(min(e.Vertexes, key=lambda v: v.Z))
         self.assertLess(off, onRounds, radius)
         # each foot on the plate, at its arc's radius plus or minus r, past the arc's end by the angle
