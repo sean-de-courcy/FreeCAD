@@ -209,7 +209,9 @@ PartExport double distanceAngleReach(
  * @param radius The fillet's radius, or 0 if the edges don't all have one radius along them; with
  * several radii, the largest (it bounds the round's reach)
  * @param leastRadius With several radii, the smallest: a chain arc below it has no torus and its
- * round is no bridge (ops#968); negative for  radius
+ * round is no bridge (ops#968); negative for one radius
+ * @param edgeRadii Each of \a edges' own radius when they differ (a Part::Fillet of several
+ * radii), else empty: the round over a small arc is bounded by its own radius (review pr516-r4)
  * @return what the result bridges, naming the base face with the hole (e.g. "'s band crosses a
  * hole or pocket on Face3; a round that rolls through it is not built yet"), or an empty string
  */
@@ -218,7 +220,8 @@ PartExport std::string bridgedRecess(
     const TopoShape& base,
     const std::vector<TopoShape>& edges,
     double radius,
-    double leastRadius = -1.0
+    double leastRadius = -1.0,
+    const std::vector<double>& edgeRadii = {}
 );
 
 /// What healSliverCorners() changed

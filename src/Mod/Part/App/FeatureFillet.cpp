@@ -211,13 +211,19 @@ App::DocumentObjectExecReturn* Fillet::execute()
         });
         // An arc is excused as too small for its round only below the smallest radius, so an arc
         // above its own edge's radius is never excused by a larger one elsewhere (review
-        // pr968pre-r1, MixedRadiusBridge)
+        // pr968pre-r1, MixedRadiusBridge), and the round over it is bounded by its own edge's
+        // radius (review pr516-r4, T1)
+        std::vector<double> edgeRadii;
+        for (const auto& r : radii) {
+            edgeRadii.push_back(r.first);
+        }
         const std::string bridged = Part::bridgedRecess(
             res,
             baseTopoShape,
             edgeShapes,
             constantRadius ? largest : 0.0,
-            constantRadius ? smallest : -1.0
+            constantRadius ? smallest : -1.0,
+            edgeRadii
         );
         if (!bridged.empty()) {
             return new App::DocumentObjectExecReturn("The fillet" + bridged);

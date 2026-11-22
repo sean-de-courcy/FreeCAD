@@ -2289,7 +2289,8 @@ std::string bridgedRecess(
     const TopoShape& base,
     const std::vector<TopoShape>& edges,
     double radius,
-    double leastRadius
+    double leastRadius,
+    const std::vector<double>& edgeRadii
 )
 {
     const TopoDS_Compound result = solidsIn(shape.getShape());
@@ -2323,24 +2324,110 @@ std::string bridgedRecess(
             BRepExtrema_DistShapeShape distance(face, chainEdges);
             return !distance.IsDone() || distance.Value() <= reach;
         };
-        // OCCT's round over an arc too small for it is a B-spline, and right (ops#968): a face whose
-        // vertices all lie within the round's reach of such arcs is that round, not a bridge
-        TopoDS_Compound arcEdges;
-        builder.MakeCompound(arcEdges);
-        for (int i = 1; i <= smallArcs.Extent(); ++i) {
-            builder.Add(arcEdges, smallArcs(i));
-        }
-        const auto overSmallArc = [&](const TopoDS_Shape& face) {
-            if (smallArcs.IsEmpty()) {
-                return false;
+        // OCCT's round over an arc too small for it is a B-spline, and right (ops#968). At a corner
+        // of angle theta between the chain's neighbouring edges, which meet the arc tangentially
+        // (roundsAnalytically()), theta is pi less the arc's turn. The round's far vertex lies where
+        // the faces' lines offset by R meet, sqrt(((R - r) / tan(theta / 2))^2 + R^2) from the arc,
+        // with r the arc's radius and R its own edge's radius. A face is that round only if all its
+        // vertices lie within one arc's own bound: never the whole fillet's reach, which a larger
+        // radius or a sharper edge elsewhere widens (review pr516-r4, T1 and T2). The pieces of one
+        // arc split by a vertex are one corner
+        std::vector<double> chainRadii(chain.Extent() + 1, -1.0);
+        for (int i = 1; i <= chain.Extent(); ++i) {
+            for (size_t k = 0; k < edges.size(); ++k) {
+                if (edges[k].isNull() || !edges[k].getShape().IsSame(chain(i))) {
+                    continue;
+                }
+                const double own = edgeRadii.size() == edges.size() ? edgeRadii[k] : radius;
+                chainRadii[i] = chainRadii[i] < 0.0 ? own : std::min(chainRadii[i], own);
             }
-            for (TopExp_Explorer it(face, TopAbs_VERTEX); it.More(); it.Next()) {
-                BRepExtrema_DistShapeShape distance(it.Current(), arcEdges);
-                if (!distance.IsDone() || distance.Value() > reach + Precision::Confusion()) {
-                    return false;
+        }
+        // An edge OCCT carries the round on along takes the radius of the picked edge it continues
+        // (the smallest, if several: a smaller bound only refuses)
+        for (bool changed = true; changed;) {
+            changed = false;
+            for (int i = 1; i <= chain.Extent(); ++i) {
+                for (int j = 1; j <= chain.Extent(); ++j) {
+                    if (chainRadii[j] < 0.0 || (chainRadii[i] >= 0.0 && chainRadii[i] <= chainRadii[j])) {
+                        continue;
+                    }
+                    bool meets = false;
+                    for (TopExp_Explorer a(chain(i), TopAbs_VERTEX); a.More() && !meets; a.Next()) {
+                        for (TopExp_Explorer b(chain(j), TopAbs_VERTEX); b.More() && !meets; b.Next()) {
+                            meets = a.Current().IsSame(b.Current());
+                        }
+                    }
+                    if (meets) {
+                        chainRadii[i] = chainRadii[j];
+                        changed = true;
+                    }
                 }
             }
-            return true;
+        }
+        struct Corner
+        {
+            gp_Circ circle;
+            double turn = 0.0;
+            double radius = -1.0;
+            double tolerance = 0.0;
+            TopoDS_Compound arcs;
+            double bound = -1.0;
+        };
+        std::vector<Corner> corners;
+        // Below this corner angle the offset lines meet too far out to bound anything
+        constexpr double leastCorner = 10.0 * std::numbers::pi / 180.0;
+        for (int i = 1; i <= smallArcs.Extent(); ++i) {
+            const TopoDS_Edge& arc = TopoDS::Edge(smallArcs(i));
+            const BRepAdaptor_Curve curve(arc);
+            const gp_Circ circle = curve.Circle();
+            const int at = chain.FindIndex(arc);
+            const double own = at != 0 && chainRadii[at] >= 0.0
+                ? chainRadii[at]
+                : (leastRadius < 0.0 ? radius : leastRadius);
+            const double tolerance = BRep_Tool::Tolerance(arc) + Precision::Confusion();
+            auto corner = std::find_if(corners.begin(), corners.end(), [&](const Corner& c) {
+                return c.circle.Location().Distance(circle.Location()) <= tolerance + c.tolerance
+                    && std::abs(c.circle.Radius() - circle.Radius()) <= tolerance + c.tolerance
+                    && c.circle.Axis().IsParallel(circle.Axis(), Precision::Angular());
+            });
+            if (corner == corners.end()) {
+                corners.emplace_back();
+                corner = std::prev(corners.end());
+                corner->circle = circle;
+                builder.MakeCompound(corner->arcs);
+            }
+            corner->turn += std::abs(curve.LastParameter() - curve.FirstParameter());
+            corner->radius = corner->radius < 0.0 ? own : std::min(corner->radius, own);
+            corner->tolerance = std::max(corner->tolerance, tolerance);
+            builder.Add(corner->arcs, arc);
+        }
+        for (auto& corner : corners) {
+            const double theta = std::numbers::pi - corner.turn;
+            const double r = corner.circle.Radius();
+            const double R = corner.radius;
+            if (theta >= leastCorner && R > r) {
+                const double along = (R - r) / std::tan(theta / 2.0);
+                corner.bound = std::sqrt(along * along + R * R);
+            }
+        }
+        const auto overSmallArc = [&](const TopoDS_Shape& face) {
+            for (const auto& corner : corners) {
+                if (corner.bound < 0.0) {
+                    continue;
+                }
+                bool within = true;
+                for (TopExp_Explorer it(face, TopAbs_VERTEX); it.More() && within; it.Next()) {
+                    const TopoDS_Vertex& vertex = TopoDS::Vertex(it.Current());
+                    BRepExtrema_DistShapeShape distance(vertex, corner.arcs);
+                    within = distance.IsDone()
+                        && distance.Value() <= corner.bound * (1.0 + 1e-6) + corner.tolerance
+                                + BRep_Tool::Tolerance(vertex);
+                }
+                if (within) {
+                    return true;
+                }
+            }
+            return false;
         };
         // A face of the base that isn't analytic there can't be told from the bridge once a repair
         // has copied the geometry (PR review r1, T1): the check doesn't run
