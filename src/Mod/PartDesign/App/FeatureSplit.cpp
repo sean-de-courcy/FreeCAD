@@ -40,6 +40,7 @@
 #include <App/GeoFeature.h>
 #include <App/GeoFeatureGroupExtension.h>
 #include <App/GroupExtension.h>
+#include <Mod/Part/App/FeatureExtrusion.h>
 #include <Mod/Part/App/TopoShapeOpCode.h>
 
 #include "Body.h"
@@ -251,6 +252,49 @@ gp_Vec faceNormal(const TopoDS_Face& face, double u, double v, gp_Pnt& point)
         normal.Reverse();
     }
     return normal;
+}
+
+/// Whether @p tool is a sheet whose sides hold through edits, copies and redraws: a surface
+/// `Part::Extrusion` of picked edges or up to a face whose profile is closed loops only, which
+/// the extrusion turns counter-clockwise about its direction, so that its normals point into
+/// the tube (ops#919, reviews r1 to r4). Any other sheet's Front follows the way its edges
+/// were drawn
+bool sidedSheet(const App::DocumentObject* tool)
+{
+    auto extrusion = freecad_cast<const Part::Extrusion*>(tool);
+    if (!extrusion || extrusion->Solid.getValue()
+        || (extrusion->EndType.getValue() != 1 && extrusion->BaseEdges.getSubValues().empty())) {
+        return false;
+    }
+    TopoShape profile;
+    try {
+        profile = extrusion->baseShape();
+    }
+    catch (const Base::Exception&) {
+        return false;
+    }
+    catch (Standard_Failure&) {
+        return false;
+    }
+    if (profile.isNull() || profile.hasSubShape(TopAbs_FACE)) {
+        return false;
+    }
+    bool loops = false;
+    for (TopExp_Explorer it(profile.getShape(), TopAbs_WIRE); it.More(); it.Next()) {
+        if (!BRep_Tool::IsClosed(it.Current())) {
+            return false;
+        }
+        loops = true;
+    }
+    return loops;
+}
+
+std::string notSided(const App::DocumentObject* tool)
+{
+    return label(tool)
+        + " can't be a Split's tool: a Split by a sheet takes a surface Part Extrusion of closed "
+          "loops (BaseEdges, or up to a face); by any other sheet it isn't supported yet (which "
+          "part keeps which piece would follow the way its edges were drawn)";
 }
 
 /// @p base divided by @p sheet, the piece on the kept side, named through the cut. Throws, with
@@ -584,6 +628,9 @@ App::DocumentObjectExecReturn* Split::execute()
     if (sub.empty() && toolObject->isDerivedFrom<Part::Feature>()) {
         const TopoShape sheet = getTopoShapeInLocalCoordinates(toolObject);
         if (isSheetShape(sheet)) {
+            if (!sidedSheet(toolObject)) {
+                return new App::DocumentObjectExecReturn(notSided(toolObject), this);
+            }
             TopoShape result;
             try {
                 result = splitBySheet(
@@ -776,10 +823,14 @@ Body* Split::makeSplit(
             throw Base::ValueError("Split: " + label(toolBody) + " has no face to cut by");
         }
     }
-    // FreeCAD-CH (ops#919): a sheet in no Body (a surface made beside the parts) is admitted;
-    // one planar face then cuts as its whole plane, any other sheet as it is
+    // FreeCAD-CH (ops#919): a sheet in no Body (a surface made beside the parts) is admitted
+    // when its sides hold through edits: a closed tube of the surface extrusion. Any other sheet
+    // object, one of a single planar face included, is refused (reviews r1 to r4)
     const bool sheetObject = subs.empty() && isSheetObject(tool);
     if (sheetObject) {
+        if (!sidedSheet(tool)) {
+            throw Base::ValueError("Split: " + notSided(tool));
+        }
         if (tool->getDocument() != body->getDocument()) {
             throw Base::ValueError(
                 "Split: " + label(tool) + " isn't in " + label(body) + "'s document"

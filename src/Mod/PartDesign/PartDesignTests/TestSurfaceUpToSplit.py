@@ -306,7 +306,7 @@ class TestSurfaceUpToSplit(unittest.TestCase):
         sketch = self.sketch(line)
         ext = self.surface(sketch, self.edgesOf(sketch, line), self.top(self.box, 20))
         self.assertValid(ext)
-        with self.assertRaisesRegex(ValueError, "is an open sheet"):
+        with self.assertRaisesRegex(ValueError, "isn.t supported yet"):
             PartDesign.split(self.body, ext)
         self.assertEqual(len(self.body.Group), 1)
         self.assertTrue(ext.Visibility)
@@ -465,7 +465,7 @@ class TestSurfaceUpToSplit(unittest.TestCase):
             if p.z > 1e-6:
                 self.assertAlmostEqual(p.z, 20 + 0.25 * p.x, places=6)
         # An open sheet: no inside, so the Split refuses it (reviews r2, r3)
-        with self.assertRaisesRegex(ValueError, "is an open sheet"):
+        with self.assertRaisesRegex(ValueError, "isn.t supported yet"):
             PartDesign.split(self.body, ext)
 
     def faceSlanted(self, feature):
@@ -522,56 +522,68 @@ class TestSurfaceUpToSplit(unittest.TestCase):
             self.assertFails(ext, text)
 
     def testSplitErrors(self):
-        """T4 (SU6, SU7, SU10): a sheet that ends inside the block doesn't cut it; one that
-        would make three pieces is refused with the count; two sheets as one tool are refused.
-        Nothing is changed."""
+        """T4 (SU6, SU8): a tube that ends inside the block (blind to 10), or starts inside it (from
+        z 5 up to the top), doesn't cut it: the sheet isn't extended. Two tubes as one tool (a
+        compound) and an open sheet are refused. Nothing is changed."""
         self.block()
-        sketch = self.sketch(POLYLINE[:3])
-        short = self.surface(sketch, self.edgesOf(sketch, POLYLINE), self.top(self.box, 20))
-        self.assertValid(short)
-        with self.assertRaisesRegex(ValueError, "doesn't cut Block"):
-            PartDesign.split(self.body, short)
-        full = self.sketch(POLYLINE)
-        low = self.surface(full, self.edgesOf(full, POLYLINE), length=10, label="Low")
+        hexagons = self.sketch(hexagon(), hexagon(cx=10, cy=8, r=3))
+        low = self.surface(hexagons, self.edgesOf(hexagons, hexagon()), length=10, label="Low")
         self.assertValid(low)
         with self.assertRaisesRegex(ValueError, "doesn't cut Block"):
             PartDesign.split(self.body, low)
-        hexagons = self.sketch(hexagon(), hexagon(cx=10, cy=8, r=3))
+        raised = self.sketch(hexagon())
+        raised.Placement = App.Placement(V(0, 0, 5), App.Rotation())
+        self.doc.recompute()
+        inside = self.surface(raised, self.edgesOf(raised, [p + V(0, 0, 5) for p in hexagon()]),
+                              self.top(self.box, 20), label="Inside")
+        self.assertValid(inside)
+        self.assertAlmostEqual(inside.Shape.Area, 6 * 8 * 15, places=6)
+        with self.assertRaisesRegex(ValueError, "doesn't cut Block"):
+            PartDesign.split(self.body, inside)
         one = self.surface(hexagons, self.edgesOf(hexagons, hexagon()), length=20, label="One")
         two = self.surface(hexagons, self.edgesOf(hexagons, hexagon(cx=10, cy=8, r=3)),
                            length=20, label="Two")
         both = self.doc.addObject("Part::Compound", "Both")
         both.Links = [one, two]
         self.doc.recompute()
-        with self.assertRaisesRegex(ValueError, "is 2 sheets"):
+        with self.assertRaisesRegex(ValueError, "isn't supported yet"):
             PartDesign.split(self.body, both)
+        line = self.sketch(POLYLINE[:3])
+        short = self.surface(line, self.edgesOf(line, POLYLINE), self.top(self.box, 20))
+        with self.assertRaisesRegex(ValueError, "isn't supported yet"):
+            PartDesign.split(self.body, short)
         self.assertEqual(len(self.body.Group), 1)
         self.assertTrue(short.Visibility)
+        self.assertTrue(low.Visibility)
 
     def testThreePieces(self):
-        """T4 (SU10): the polyline up to the top through a block with a through slot would
-        give three pieces: Onshape makes three parts, FreeCAD-CH refuses, saying so."""
-        self.block(slot=True)
-        sketch = self.sketch(POLYLINE)
-        ext = self.surface(sketch, self.edgesOf(sketch, POLYLINE), self.top(self.box, 20))
+        """T4 (SU10): a slot x 19..21, y 5..25 through the block cuts the hexagon's plug in two, so
+        the tube would give three pieces: Onshape makes three parts, FreeCAD-CH refuses, saying
+        so."""
+        self.block()
+        cut = self.body.newObject("PartDesign::SubtractiveBox", "Slot")
+        cut.Length, cut.Width, cut.Height = 2, 20, 22
+        cut.Placement = App.Placement(V(19, 5, -1), App.Rotation())
+        self.doc.recompute()
+        ext = self.hexTube()
         with self.assertRaisesRegex(ValueError, "into 3 pieces"):
             PartDesign.split(self.body, ext)
 
     # --- T5, T7 ------------------------------------------------------------------------------
 
-    def testOnePlaneSheetIsExtended(self):
-        """SU9: a sheet of one planar face that doesn't span the block cuts it by its whole
-        plane, and is hidden."""
+    def testOnePlaneSheetIsRefused(self):
+        """SU9 and review r4: Onshape extends a sheet of one planar face to its whole plane; here
+        its Front would follow the way its line was drawn, so a Split refuses it (as before this
+        change): a datum plane or a picked face cuts by a plane."""
         self.block()
         sketch = self.sketch([V(20, 5, 0), V(20, 25, 0)])
         sketch.Placement = App.Placement(V(0, 0, 5), App.Rotation())
         self.doc.recompute()
         ext = self.surface(sketch, ["Edge1"], length=10)
         self.assertValid(ext)
-        self.split(ext)
-        self.assertAlmostEqual(self.original.Shape.Volume, 12000, places=4)
-        self.assertAlmostEqual(self.half.Shape.Volume, 12000, places=4)
-        self.assertFalse(ext.Visibility)
+        with self.assertRaisesRegex(ValueError, "isn't supported yet"):
+            PartDesign.split(self.body, ext)
+        self.assertTrue(ext.Visibility)
 
     def testLengthUnchanged(self):
         """T5: BaseEdges empty and EndType Length: the whole sketch, as before."""
