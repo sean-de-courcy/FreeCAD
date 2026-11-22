@@ -530,3 +530,174 @@ class TestImportPieces(unittest.TestCase):
         self.assertAsAlone(host, copies)
         originals = [obj for obj in host.Objects if obj not in copies]
         self.assertEqual(self.pieces(originals), self.alone)
+
+
+class TestImportedSketchOnAFace(unittest.TestCase):
+    """FreeCAD-CH ops#930: a sketch on a face of a feature, copied into another document, keeps
+    the references into it.
+
+    A copy (Document.copyObject, as the document merge does) has no element names until each object
+    recomputes. The support's recompute moves the sketch before the sketch runs (its attachment
+    sets the identity, then the face's placement). That move named the sketch's name-less shape by
+    a match (MLN names); the references into the sketch took them, and the sketch read such a
+    name as one of its own geometry names: the index after the '.' (wire order) as a geometry
+    index. A sweep's spine `Edge<k>` became `edge<k>` ("Invalid shape name"), and another sketch's
+    external geometry silently followed geometry k instead of the edge.
+
+    Designed geometry: a pad 40 x 40 x 40; on its top face (z 40) a sketch with a construction line
+    first, then the lines B-C, C-D and A-B (out of chain order: A (10, 20), B (30, 20), C (30, 30),
+    D (20, 30)), and the pad's top edge at y 0 as external geometry; a sweep cut along A-B of a
+    circle of radius 1.5 centred on A, perpendicular to A-B (half of it in the pad: takes
+    pi * 1.5^2 / 2 * 20); a sketch at z 40 whose external geometry is the edge A-B."""
+
+    A, B, C, D = (10, 20), (30, 20), (30, 30), (20, 30)
+    Z = 40
+    VOLUME = 40**3 - math.pi * 1.5**2 / 2 * 20
+
+    @classmethod
+    def build(cls, name):
+        V = App.Vector
+        doc = App.newDocument(name)
+        body = doc.addObject("PartDesign::Body", "Body")
+        base = body.newObject("Sketcher::SketchObject", "BaseSketch")
+        corners = [V(0, 0, 0), V(40, 0, 0), V(40, 40, 0), V(0, 40, 0)]
+        for i in range(4):
+            base.addGeometry(Part.LineSegment(corners[i], corners[(i + 1) % 4]))
+        for i in range(4):
+            base.addConstraint(Sketcher.Constraint("Coincident", i, 2, (i + 1) % 4, 1))
+        pad = body.newObject("PartDesign::Pad", "Pad")
+        pad.Profile = base
+        pad.Length = 40
+        doc.recompute()
+
+        top = next(
+            f"Face{i}"
+            for i, face in enumerate(pad.Shape.Faces, 1)
+            if abs(face.CenterOfMass.z - cls.Z) < 1e-9 and face.normalAt(0, 0).z > 0.5
+        )
+        topEdge = next(
+            f"Edge{i}"
+            for i, edge in enumerate(pad.Shape.Edges, 1)
+            if all(abs(v.Point.z - cls.Z) < 1e-9 and abs(v.Point.y) < 1e-9 for v in edge.Vertexes)
+        )
+        onTop = body.newObject("Sketcher::SketchObject", "OnTop")
+        onTop.AttachmentSupport = [(pad, top)]
+        onTop.MapMode = "FlatFace"
+        doc.recompute()
+        local = onTop.getGlobalPlacement().inverse()
+
+        def at(xy):
+            return local.multVec(V(xy[0], xy[1], cls.Z))
+
+        onTop.addGeometry(Part.LineSegment(at((0, 35)), at((40, 35))), True)
+        for p, q in ((cls.B, cls.C), (cls.C, cls.D), (cls.A, cls.B)):
+            onTop.addGeometry(Part.LineSegment(at(p), at(q)))
+        onTop.addConstraint(Sketcher.Constraint("Coincident", 3, 2, 1, 1))
+        onTop.addConstraint(Sketcher.Constraint("Coincident", 1, 2, 2, 1))
+        onTop.addExternal(pad.Name, topEdge)
+        doc.recompute()
+
+        profile = body.newObject("Sketcher::SketchObject", "Profile")
+        profile.Placement = App.Placement(
+            V(cls.A[0], 0, 0), App.Rotation(V(0, 0, 1), V(1, 0, 0))
+        )
+        centre = profile.Placement.inverse().multVec(V(cls.A[0], cls.A[1], cls.Z))
+        profile.addGeometry(Part.Circle(centre, V(0, 0, 1), 1.5))
+        doc.recompute()
+
+        spine = cls.edgeOf(onTop, cls.A, cls.B)
+        sweep = body.newObject("PartDesign::SubtractivePipe", "Sweep")
+        sweep.Profile = profile
+        sweep.Spine = (onTop, [spine])
+        doc.recompute()
+
+        follower = body.newObject("Sketcher::SketchObject", "Follower")
+        follower.Placement = App.Placement(V(0, 0, cls.Z), App.Rotation())
+        follower.addExternal(onTop.Name, spine)
+        doc.recompute()
+        return doc
+
+    @classmethod
+    def edgeOf(cls, sketch, p, q):
+        """The edge of the sketch's public shape from p to q."""
+        want = {(float(p[0]), float(p[1])), (float(q[0]), float(q[1]))}
+        for i, edge in enumerate(sketch.Shape.Edges, 1):
+            ends = {(round(v.Point.x, 6) + 0.0, round(v.Point.y, 6) + 0.0) for v in edge.Vertexes}
+            if ends == want:
+                return f"Edge{i}"
+        return None
+
+    @staticmethod
+    def externalLine(sketch):
+        """The ends, global x and y, of the sketch's one external line (after the two axes)."""
+        line = sketch.ExternalGeo[2]
+        place = sketch.getGlobalPlacement()
+        return {
+            (round(place.multVec(pt).x, 6) + 0.0, round(place.multVec(pt).y, 6) + 0.0)
+            for pt in (line.StartPoint, line.EndPoint)
+        }
+
+    @staticmethod
+    def inError(doc):
+        return {obj.Name: obj.getStatusString() for obj in doc.Objects if not obj.isValid()}
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="TestImportedSketch")
+        doc = self.build("TestImportedSketchSource")
+        self.file = os.path.join(self.dir, "source.FCStd")
+        doc.saveAs(self.file)
+        App.closeDocument(doc.Name)
+
+    def tearDown(self):
+        for doc in list(App.listDocuments().values()):
+            if doc.Name.startswith("TestImportedSketch"):
+                App.closeDocument(doc.Name)
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def copied(self):
+        """The source file and a copy of all its objects in an empty document, every object of
+        the copy touched and recomputed (the merge's order)."""
+        source = App.openDocument(self.file, hidden=True)
+        host = App.newDocument("TestImportedSketchHost", hidden=True)
+        copies = host.copyObject(list(source.Objects), False, False)
+        for obj in host.Objects:
+            obj.touch()
+        host.recompute()
+        byLabel = {obj.Label: obj for obj in copies}
+        return source, host, byLabel
+
+    def testTheModelIsAsDesigned(self):
+        """The source computes as designed, and the spine's public index is not its geometry's
+        (the case needs the two to differ)."""
+        source = App.openDocument(self.file, hidden=True)
+        self.assertEqual(self.inError(source), {})
+        self.assertAlmostEqual(source.getObject("Body").Shape.Volume, self.VOLUME, places=4)
+        onTop = source.getObject("OnTop")
+        spine = source.getObject("Sweep").Spine[1][0]
+        self.assertEqual(spine, self.edgeOf(onTop, self.A, self.B))
+        # `edge<k>` reads geometry k - 1: a line of the sketch, not A-B
+        geometry = onTop.Geometry[int(spine[4:]) - 1]
+        ends = {(round(p.x, 6), round(p.y, 6)) for p in (geometry.StartPoint, geometry.EndPoint)}
+        local = onTop.getGlobalPlacement().inverse()
+        ab = {
+            (round(local.multVec(App.Vector(x, y, self.Z)).x, 6), round(local.multVec(App.Vector(x, y, self.Z)).y, 6))
+            for x, y in (self.A, self.B)
+        }
+        self.assertNotEqual(ends, ab)
+        self.assertEqual(self.externalLine(source.getObject("Follower")), {self.A, self.B})
+
+    def testCopiedSweepKeepsItsSpine(self):
+        source, host, copy = self.copied()
+        self.assertEqual(self.inError(host), {})
+        self.assertEqual(copy["Sweep"].Spine[1], source.getObject("Sweep").Spine[1])
+        self.assertAlmostEqual(
+            copy["Body"].Shape.Volume, source.getObject("Body").Shape.Volume, places=6
+        )
+
+    def testCopiedExternalGeometryFollowsTheSameEdge(self):
+        """The silent case: another sketch's external geometry names the edge by index."""
+        source, host, copy = self.copied()
+        self.assertEqual(
+            copy["Follower"].ExternalGeometry[0][1], source.getObject("Follower").ExternalGeometry[0][1]
+        )
+        self.assertEqual(self.externalLine(copy["Follower"]), {self.A, self.B})

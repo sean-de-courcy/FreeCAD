@@ -25,6 +25,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstring>
+#include <string_view>
 
 #include <BRep_Tool.hxx>
 #include <BRepAdaptor_Curve.hxx>
@@ -922,6 +923,56 @@ static const char *hasSketchMarker(const char *name) {
     if (!name)
         return nullptr;
     return strstr(name,marker.c_str());
+}
+
+// The part of a mapped name before its '.' (all of it without one)
+static std::string_view mappedNameHead(const char* mapped)
+{
+    const char* dot = strchr(mapped, '.');
+    return std::string_view(mapped, dot ? static_cast<std::size_t>(dot - mapped) : strlen(mapped));
+}
+
+static bool isSketchAxisName(std::string_view head)
+{
+    return head == "RootPoint" || head == "H_Axis" || head == "V_Axis";
+}
+
+// FreeCAD-CH ops#930: whether a mapped name without the sketch marker is one of the sketch's own
+// geometry names, the forms convertSubName() writes: g<id> or e<id> with an optional v<pos>, and
+// the axes and the root point. Any other (a name a match gave the public shape before the sketch
+// ran, MLN; a stale one) names an element of the public shape, whose index after the '.' counts
+// the shape's edges in wire order, not the geometry
+static bool isSketchGeometryName(const char* mapped)
+{
+    std::string_view head = mappedNameHead(mapped);
+    if (isSketchAxisName(head)) {
+        return true;
+    }
+    if (head.size() < 2 || (head[0] != 'g' && head[0] != 'e')) {
+        return false;
+    }
+    auto isDigit = [](char c) { return std::isdigit(static_cast<unsigned char>(c)) != 0; };
+    std::size_t i = 1;
+    if (head[i] == '-') {
+        ++i;
+    }
+    const std::size_t idStart = i;
+    while (i < head.size() && isDigit(head[i])) {
+        ++i;
+    }
+    if (i == idStart) {
+        return false;
+    }
+    if (i < head.size() && head[i] == 'v') {
+        const std::size_t posStart = ++i;
+        while (i < head.size() && isDigit(head[i])) {
+            ++i;
+        }
+        if (i == posStart) {
+            return false;
+        }
+    }
+    return i == head.size();
 }
 
 void SketchObject::updateGeoHistory() {
@@ -2568,6 +2619,13 @@ App::ElementNamePair SketchObject::getElementName(
     if(hasSketchMarker(name) && !isInternalElement)
         return Part2DObject::getElementName(name,type);
 
+    // FreeCAD-CH ops#930: a mapped name of the public shape that is not the sketch's (an MLN name a
+    // move gave an imported sketch before it ran) is looked up in the shape: one it no longer has
+    // reads as missing and the usual search takes over. Read as geometry, its index after the '.'
+    // named another line ("Invalid shape name edge4", or a silent wrong edge)
+    if (mapped && !isInternalElement && !isSketchGeometryName(mapped))
+        return Part2DObject::getElementName(name,type);
+
     Data::IndexedName index = isInternalElement ? Data::IndexedName(indexedSubname, {"InternalFace", "InternalEdge", "InternalVertex"}, false) : checkSubName(name);
     index.appendToStringBuffer(ret.oldName);
     if (auto realName = convertInternalName(ret.oldName.c_str())) {
@@ -2683,6 +2741,11 @@ Data::IndexedName SketchObject::checkSubName(const char *subname) const
 
         // for RootPoint, H_Axis, V_Axis
         default: {
+            // FreeCAD-CH ops#930: only those. Another mapped name is the public shape's, and its
+            // index after the '.' is not a geometry's
+            if (!isSketchAxisName(mappedNameHead(mappedSubname))) {
+                return Data::IndexedName();
+            }
             const char* dot = strchr(mappedSubname, '.');
             if (dot) {
                 mappedSubname = dot + 1;

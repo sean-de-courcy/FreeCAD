@@ -3141,16 +3141,19 @@ void Feature::onChanged(const App::Property* prop)
             App::Property::NoRecompute,
             &this->Shape
         );
-        if (oldTransform != newTransform && this->isRecomputing() && !shape.isNull()
-            && shape.getElementMapSize() == 0) {
-            // FreeCAD-CH ops#910: moved at its own recompute, before its new shape is set (a
-            // PartDesign feature takes its sketch's Placement, an attachment; a Placement a file
-            // doesn't give back bit for bit is enough), a shape without names stays without
-            // them. It is an import's, whose map the export left out: named now by a match
+        if (oldTransform != newTransform && !shape.isNull() && shape.getElementMapSize() == 0) {
+            // FreeCAD-CH ops#910, ops#930: a move never names a shape. A shape without names is
+            // an import's, whose map the export left out; named by a match here
             // (PropertyPartShape::namesByMatch(), provisional MLN names under the copy's ID), the
-            // references into it took those names, and the result set next has none of them
-            // ("Face10 moved and Face10 sits where it was"). Unnamed, they keep their index and
-            // fingerprint until the result names it, as a copy whose Placement stays does.
+            // references into it take those names, and the result its own recompute sets has
+            // none of them. Moved at its own recompute, before its new shape is set (a
+            // PartDesign feature takes its sketch's Placement, a Placement a file doesn't give
+            // back bit for bit): "Face10 moved and Face10 sits where it was" (ops#910). Moved by
+            // another object's recompute (a sketch on a face re-attached while its support
+            // recomputes): a sweep's spine took the MLN name and the sketch read it as a
+            // geometry index, "Invalid shape name edge1" (ops#930). Unnamed, the elements keep
+            // their index and fingerprint until the object's own recompute names them, as a
+            // copy whose Placement stays does.
             this->Shape.aboutToSetValue();
             this->Shape._Shape.setTransform(newTransform);
             this->Shape.hasSetValue();
