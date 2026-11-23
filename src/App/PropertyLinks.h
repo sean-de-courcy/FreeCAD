@@ -456,12 +456,6 @@ public:
                                               const std::string& sub,
                                               const ShadowSub& shadow);
 
-    /** Refreshes fingerprints[i] for every reference i that resolves (to an element of feature,
-     * if given), in solver documents only and not while restoring. The target is obj, or
-     * objs[i] for a list. When the sizes differ (the list was rebuilt), the old fingerprints
-     * can't be matched to the references and are dropped first. Returns true if any reference
-     * names an element.
-     */
     /// remapImportedTags() of a list of references: obj, or each of objs, with its subs and the
     /// lists parallel to them (shorter ones are taken as far as they go)
     bool _remapImportedTags(App::DocumentObject* obj,
@@ -472,6 +466,12 @@ public:
                             std::vector<std::string>& expandedFrom,
                             std::vector<ElementRecords>& records);
 
+    /** Refreshes fingerprints[i] for every reference i that resolves (to an element of feature,
+     * if given), in solver documents only and not while restoring. The target is obj, or
+     * objs[i] for a list. When the sizes differ (the list was rebuilt), the old fingerprints
+     * can't be matched to the references and are dropped first. Returns true if any reference
+     * names an element.
+     */
     bool _updateElementFingerprints(App::DocumentObject* feature,
                                     App::DocumentObject* obj,
                                     const std::vector<App::DocumentObject*>* objs,
