@@ -69,6 +69,7 @@ from PartDesignTests.TestPipeOnshape import (  # FreeCAD-CH, sweeps as Onshape's
     TestPipeProfileControl,
     TestPipeExtendToFullPath,
     TestPipeProfilePlacement,
+    TestPipeObliquePath,
     TestPipePathFromSeveralObjects,
     TestPipeEndAfterThePathGrows,
     TestThreadCapFollowsEdits,
