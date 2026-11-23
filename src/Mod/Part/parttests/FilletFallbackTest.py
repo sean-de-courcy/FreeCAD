@@ -8883,16 +8883,16 @@ class EndOnTangentWallTest(unittest.TestCase):
         # (ops#1001: one edge and one vertex more than Onshape's); the volume is the closed form
         self.assertRunsOn(V(-1, -1, 0), V(0, 0, 1), edges=3, vertices=2)
 
-    def wallBase(self, wall, s, theta):
+    def wallBase(self, wall, s, theta, n=24):
         # The same model at scale s with the pocket's curved wall made by `wall` (review pr999-r1):
-        # "bsp" a periodic B-spline through 24 points of the circle, its first point at theta; "rev"
-        # a surface of revolution turned by theta
+        # "bsp" a periodic B-spline through n points of the circle, its first point at theta (the
+        # arc's ends among them); "rev" a surface of revolution turned by theta
         R, L, TOP = self.R * s, self.L * s, self.TOP * s
         c = V(20 * s, L + R, 0)
         if wall == "bsp":
             points = [
-                V(c.x + R * math.cos(theta + 2 * math.pi * k / 24), c.y + R * math.sin(theta + 2 * math.pi * k / 24), TOP - 5 * s)
-                for k in range(24)
+                V(c.x + R * math.cos(theta + 2 * math.pi * k / n), c.y + R * math.sin(theta + 2 * math.pi * k / n), TOP - 5 * s)
+                for k in range(n)
             ]
             curve = Part.BSplineCurve()
             curve.interpolate(points, PeriodicFlag=True)
@@ -8939,9 +8939,12 @@ class EndOnTangentWallTest(unittest.TestCase):
         return body, found[0]
 
     def testSplineWallSeamInsideKeepsItsFaces(self):
-        # A periodic B-spline wall whose seam lies inside the arc keeps its natural sheet: centred,
-        # the sheet crossed the knot origin and left a face of zero area, removing 6e-3 too much
-        body, edge = self.wallBase("bsp", 1.0, 2 * math.pi * 10 / 16)
+        # A periodic B-spline wall whose seam lies inside the arc: OCCT refuses through 48 points with
+        # the seam at 240 degrees, and the construction builds it on its natural sheet (review
+        # pr528-r6, T3). Round 1's face of zero area came with the fused base's sliver face, which
+        # the drawn base no longer has; centring is guarded by testRevolvedWallAt4mBuilds and
+        # testSeamAtTheArcsFarEndRunsOnInTheSecondTry, which both fail with every sheet centred
+        body, edge = self.wallBase("bsp", 1.0, math.radians(240), 48)
         result = body.makeFillet(self.R, [edge])
         self.assertTrue(result.isValid())
         self.assertFalse([f for f in result.Faces if f.Area < 1e-9])
