@@ -2224,6 +2224,7 @@ App::DocumentObjectExecReturn* Transformed::execute()
                     reapply,
                     instances,
                     {},
+                    {},
                     {}
                 };
                 std::vector<ReapplyItem> items;
