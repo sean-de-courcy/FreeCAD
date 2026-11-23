@@ -154,6 +154,9 @@
 #include <ShapeUpgrade_UnifySameDomain.hxx>
 #include <TopTools_MapOfShape.hxx>
 #include <StdFail_NotDone.hxx>
+#include <Standard_OutOfMemory.hxx>
+#include <OSD_Exception.hxx>
+#include <OSD_Signal.hxx>
 #include <TopTools_HSequenceOfShape.hxx>
 #include <ShapeFix_Face.hxx>
 #include <ShapeFix_Shape.hxx>
@@ -8557,8 +8560,9 @@ TopoShape& TopoShape::removeElementShape(const TopoShape& shape, const std::vect
 
 namespace
 {
-/** Builds a fillet or chamfer maker: true when OCCT fails with StdFail_NotDone, the failure the
- * exact construction may build instead (ops#300). Other exceptions propagate as before.
+/** Builds a fillet or chamfer maker: true when OCCT fails with StdFail_NotDone (ops#300) or another
+ * of its errors (ops#999: Standard_ProgramError from TopOpeBRepDS where a round ends on a wall tangent
+ * to its end plane), the failures the exact construction may build instead. Out of memory propagates.
  * @param error Receives what OCCT threw, if it threw
  * @param contour Receives the edges of the maker's contours, read before the build
  */
@@ -8576,7 +8580,17 @@ bool buildDressUpFailed(
     try {
         maker.Build();
     }
-    catch (const StdFail_NotDone&) {
+    catch (const Standard_OutOfMemory&) {
+        throw;
+    }
+    catch (const OSD_Signal&) {
+        // A signal turned into an exception (Part::SignalException on Linux): no failure to retry
+        throw;
+    }
+    catch (const OSD_Exception&) {
+        throw;
+    }
+    catch (const Standard_Failure&) {
         error = std::current_exception();
         return true;
     }
@@ -8620,6 +8634,24 @@ bool builtInvalid(BRepFilletAPI_LocalOperation& maker, const TopoDS_Shape& base)
         if (e.GetMessageString() && *e.GetMessageString()) {
             message = e.GetMessageString();
         }
+    }
+    catch (const Standard_OutOfMemory&) {
+        throw;
+    }
+    catch (const OSD_Signal&) {
+        throw;
+    }
+    catch (const OSD_Exception&) {
+        throw;
+    }
+    catch (const Standard_Failure& e) {
+        // ops#999: another of OCCT's errors (Standard_ProgramError) keeps its class and text in
+        // the message, with the construction's reason as for StdFail_NotDone
+        if (reason.empty()) {
+            throw;
+        }
+        message = std::string(e.ExceptionType()) + " "
+            + (e.GetMessageString() ? e.GetMessageString() : "");
     }
     if (!reason.empty()) {
         message += " (exact construction refused: " + reason + ")";

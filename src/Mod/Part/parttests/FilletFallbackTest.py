@@ -8857,6 +8857,27 @@ class EndOnTangentWallTest(unittest.TestCase):
         self.assertRunsOn(V(0, -1, 0), V(0, 0, 1))
         self.assertRunsOn(V(0, -1, 0), V(0, 0, -1))
 
+    def testOcctsProgramErrorAsksTheConstruction(self):
+        # OCCT's maker throws Standard_ProgramError (TopOpeBRepDS_DataStructure::Point): the exact
+        # construction is asked, as where it throws StdFail_NotDone
+        self.assertRunsOn(V(1, 0, 0), V(0, 0, 1))
+        self.assertRunsOn(V(0, 1, 0), V(0, 0, 1))
+
+    def testSeamAtTheArcsFarEndRunsOnInTheSecondTry(self):
+        # The seam at the arc's far end, axis down: OCCT throws, and the splitter with the natural
+        # sheet loses the section where the tool's far side is tangent to the wall at its cusp edge.
+        # The construction's second try, with the sheet's seam opposite the face, builds it
+        self.assertRunsOn(V(-1, 0, 0), V(0, 0, -1))
+
+    def testRefusalAfterAProgramErrorGivesItsReason(self):
+        # The seam away (+x), axis down: OCCT throws and both tries refuse (ops#1000). The error
+        # keeps OCCT's class and text and gives the construction's reason
+        body, edge = self.base(V(1, 0, 0), V(0, 0, -1))
+        with self.assertRaises(Exception) as caught:
+            body.makeFillet(self.R, [edge])
+        self.assertIn("Standard_ProgramError", str(caught.exception))
+        self.assertIn("exact construction refused: ", str(caught.exception))
+
     def testSeamInsideTheArcRunsOn(self):
         # The seam inside the arc: the round's edge on the wall is split at the seam into two
         # (ops#1001: one edge and one vertex more than Onshape's); the volume is the closed form
@@ -8916,3 +8937,36 @@ class EndOnTangentWallTest(unittest.TestCase):
         result = body.makeFillet(self.R * s, [edge])
         self.assertTrue(result.isValid())
         self.assertAlmostEqual((body.Volume - result.Volume) / s**3, self.removed(), delta=1e-4)
+
+
+class ShallowRidgeTest(unittest.TestCase):
+    """ops#999 (review pr999-r1, T3): OCCT refuses an edge whose faces turn by less than 0.1 rad with
+    Standard_Failure "There are no suitable edges for chamfer or fillet". Any OCCT error now asks the
+    exact construction, which builds such a ridge at the limit (the round's or chamfer's far line on
+    the far edge of the shorter face) and refuses below it. Designed: a prism 30 long whose top is two
+    planes meeting at x = 0, z = 10, turning by phi, over x -20..12"""
+
+    def roof(self, phi_deg, left=20.0, right=12.0, length=30.0):
+        t = math.tan(math.radians(phi_deg) / 2)
+        points = [V(-left, 0, 0), V(right, 0, 0), V(right, 0, 10 - right * t), V(0, 0, 10), V(-left, 0, 10 - left * t), V(-left, 0, 0)]
+        body = Part.Face(Part.makePolygon(points)).extrude(V(0, length, 0))
+        ridge = [e for e in body.Edges if all(abs(v.X) < 1e-9 and abs(v.Z - 10) < 1e-9 for v in e.Vertexes)]
+        self.assertEqual(len(ridge), 1)
+        return body, ridge
+
+    def testAtTheLimitBuildsTheClosedForm(self):
+        phi = math.radians(4.0)
+        w = 12.0 / math.cos(phi / 2)  # the shorter face's width
+        body, ridge = self.roof(4.0)
+        radius = w / math.tan(phi / 2)
+        rounded = body.makeFillet(radius, ridge)
+        self.assertTrue(rounded.isValid())
+        self.assertAlmostEqual(body.Volume - rounded.Volume, radius**2 * (math.tan(phi / 2) - phi / 2) * 30, delta=1e-5)
+        chamfered = body.makeChamfer(w, ridge)
+        self.assertTrue(chamfered.isValid())
+        self.assertAlmostEqual(body.Volume - chamfered.Volume, 0.5 * w * w * math.sin(phi) * 30, delta=1e-5)
+
+    def testBelowTheLimitStaysRefused(self):
+        body, ridge = self.roof(4.0)
+        with self.assertRaises(Exception):
+            body.makeFillet(5.0, ridge)
