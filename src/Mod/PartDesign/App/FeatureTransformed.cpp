@@ -786,8 +786,8 @@ struct ReapplyCollector
     /** ops#963 A: whether reader's up-to element (obj, sub) is one this pattern's originals made:
      * 1 own (read unmoved at each instance), 0 outside (the same element at every instance, moved
      * back by toSeed: Onshape O6), 2 a face made by an original and an earlier feature together
-     * (ops#992: outside where the instance's own copy is the same face), with why when it can't be
-     * told (a refusal). The maker is the
+     * (ops#992: outside for an extrusion's up-to face; a shape list or a hole refuses it), with why
+     * when it can't be told (a refusal). The maker is the
      * earliest member of the Body, or original, that holds the element where it is now, walking
      * its history back to its end (faces to faces, the linked object first): a face of the plate
      * kept in a pocket's shape is the plate's, a wall the pocket made is the pocket's, wherever the
@@ -879,12 +879,12 @@ struct ReapplyCollector
         if (face) {
             // A face refine merged from the original's face and one already there (the pocket's
             // wall and the plate's side in one plane): the history follows one of them, so it is
-            // told by the maker's base, where the face is partly there already. ops#992: such a
-            // face (2) is read as outside, the same face at every instance (Onshape names the
-            // team's case wall, which a slot's side extends, after the wall's sketch), but only
-            // where the instance's own copy is the same face: the run checks it at each instance
-            // (FeatureExtrude.cpp requireMergedAgrees) and the pattern is refused where they
-            // differ. A shape list or a hole up to such a face stays refused (mergedWhy)
+            // told by the maker's base, where the face is partly there already. ops#992 (coordinator
+            // c797's ruling): such a face (2) is the earlier feature's, as Onshape names the team's
+            // case wall that a slot's side extends (the wall sketch's), so an extrusion up to it
+            // reads it outside, the same face at every instance, as 1.0.4 did; Onshape builds
+            // FM Case Vial Well's mirror #19 so. A shape list or a hole up to it stays refused
+            // (mergedWhy)
             if (auto feature = freecad_cast<PartDesign::Feature*>(maker)) {
                 if (const App::DocumentObject* baseObject = feature->getBaseObject(/*silent=*/true)) {
                     const TopoDS_Shape base = Part::Feature::getTopoShape(
@@ -936,7 +936,7 @@ struct ReapplyCollector
                 own |= bit;
             }
             else if (kind == 2) {
-                own |= bit << 4;  // ops#992: MergedUpToFace(2), FeatureExtrude.cpp
+                own |= bit << 4;  // ops#992: merged, read as outside (holes refuse it, below)
             }
         };
         auto list = [&](const App::PropertyLinkSubList* prop, unsigned bit) {
@@ -1350,10 +1350,6 @@ struct ReapplyCollector
 
 namespace PartDesign
 {
-// FeatureExtrude.cpp's mergedDiffers (ops#992), the same text: the start of a run's why when the
-// two readings of a merged up-to face differ at an instance
-constexpr const char* mergedDiffers = "Reapply can't tell which face to extrude up to here";
-
 // FeatureExtrude.cpp (FreeCAD-CH ops#654 T3; declared where used): feature's tool re-solved at a
 // pattern's instance, in the feature's frame
 PartDesignExport Part::TopoShape reapplyExtrusion(
@@ -2293,11 +2289,6 @@ App::DocumentObjectExecReturn* Transformed::execute()
                         catch (const Base::Exception& e) {
                             why = e.what();
                         }
-                        if (made.isNull() && why.rfind(mergedDiffers, 0) == 0) {
-                            return new App::DocumentObjectExecReturn(  // ops#992, as below
-                                quoted(it->named) + ": " + why, this
-                            );
-                        }
                         if (made.isNull()) {
                             // It contributes nothing (R2), and says so (ops#963 A: never silent)
                             notMade.push_back(
@@ -2408,13 +2399,6 @@ App::DocumentObjectExecReturn* Transformed::execute()
                                     Part::TopoShape made = item.rerun
                                         ? reapplyExtrusion(item.rerun, toSeed, base, partName, item.own, why)
                                         : reapplyHole(item.hole, toSeed, base, item.own != 0, why);
-                                    if (made.isNull() && why.rfind(mergedDiffers, 0) == 0) {
-                                        // ops#992: the two readings of a merged up-to face differ
-                                        // here: refused, never a guess
-                                        return new App::DocumentObjectExecReturn(
-                                            quoted(item.named) + ", " + instance + ": " + why, this
-                                        );
-                                    }
                                     if (made.isNull()) {
                                         // An instance that fails contributes nothing, with no
                                         // message (oracle 9, R2)

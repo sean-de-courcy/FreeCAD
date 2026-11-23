@@ -694,7 +694,9 @@ class TestPatternRules(unittest.TestCase):
         Wall's into one face. The Rib, x 22..28, z 12..14, from the plane y = 30 up to that face
         (y 30..40, 120). Mirrored across YZ with Reapply: the Step and the Rib at x -30..-20, the Rib
         up to the mirrored part's y = 40: 100000 + 10000 + 2 x (500 + 120) = 111240, no warning.
-        Before: refused ("made together")."""
+        Before: refused ("made together"). Where the pattern moves such a face off its plane it is
+        read as outside too, as 1.0.4 did (coordinator c797's ruling; what Onshape does there is
+        an open oracle question, ops#992's follow-up)."""
         self.block(-50, -50, 50, 50)
         wallSketch = models.sketch(
             self.doc, "WallSketch", models.rectangle(-50, 40, 50, 50), self.body, z=10
@@ -740,107 +742,6 @@ class TestPatternRules(unittest.TestCase):
         for x in (25, -25):
             self.assertTrue(self.inside(x, 35, 13), f"no rib at x = {x}")
             self.assertTrue(self.inside(x, 45, 22.5), f"no step at x = {x}")
-
-    def ribToMergedSide(self):
-        """Review pr992-r1: the plate x -50..50, y -50..50, z 0..10 and the Boss x 40..50, y -5..5,
-        z 10..15 (refined: its side x = 50 merges with the plate's). The Rib, y -2..2, z 11..13,
-        from the plane x = 60 up to that face: x 50..60 (+80): 100000 + 500 + 80."""
-        self.block(-50, -50, 50, 50)
-        boss = self.topPad("Boss", 40, -5, 50, 5)
-        boss.Refine = True
-        self.recompute()
-        side = self.faceOf(boss, V(50, 0, (1000 * 5 + 50 * 12.5) / 1050), 1050)
-        rib = self.barUpToFrom(60, (boss, [side]), 80)
-        return boss, rib
-
-    def barUpToFrom(self, x, link, added):
-        sketch = self.xSketch("RibSketch", x, models.rectangle(-2, 11, 2, 13))
-        rib = self.body.newObject("PartDesign::Pad", "Rib")
-        rib.Profile = sketch
-        rib.Type = "UpToFace"
-        rib.UpToFace = link
-        before = self.body.Shape.Volume
-        for reversed_ in (True, False):
-            rib.Reversed = reversed_
-            self.recompute()
-            if rib.isValid() and abs(self.body.Shape.Volume - before - added) < 1e-6:
-                break
-        self.assertValid(rib)
-        self.assertBody(before + added)
-        return rib
-
-    def testReapplyMirrorMovingAMergedFaceOffItselfIsRefused(self):
-        """Review pr992-r1 MadeTogetherMirrorAcross: mirrored across YZ, the merged face x = 50 goes
-        to x = -50. Read as outside, the mirrored Rib would run from x = -60 across the plate to
-        x = 50 (101800); read as its own, to the mirrored Boss's side (101160). Which one Onshape
-        takes isn't known: refused ("can't tell"), never either guess."""
-        boss, rib = self.ribToMergedSide()
-        mirrored = self.body.newObject("PartDesign::Mirrored", "Mirrored")
-        mirrored.Originals = [boss, rib]
-        mirrored.MirrorPlane = self.axis("YZ_Plane")
-        mirrored.Refine = True
-        mirrored.Reapply = True
-        self.body.Tip = mirrored
-        self.recompute()
-        self.assertFailed(mirrored, "can't tell")
-
-    def testReapplyTurnAboutALineInTheMergedFaceIsRefused(self):
-        """Review pr992-r2 MadeTogetherDiscOnAxis: two half discs r 50, z 0..10 (x >= 0, then
-        x <= 0 refined: their tops merge into one face, whose only vertices (0, +-50, 10) and centre
-        lie on the line along y through (0, 0, 10)). The Rib, x -25..-15, y 15..25, from z = 30 down
-        to that face (+2000). Turned 30 deg about that line with Reapply, the merged face tilts:
-        read as outside the turned Rib would end on z = 10, as its own on the tilted copy. Refused,
-        though every point a sample would test stays on the face's plane."""
-        self.body = models.body(self.doc)
-
-        def half(name, start):
-            arc = Part.ArcOfCircle(Part.Circle(V(0, 0, 0), V(0, 0, 1), 50), start, start + math.pi)
-            line = Part.LineSegment(arc.EndPoint, arc.StartPoint)
-            sketch = models.sketch(self.doc, name + "Sketch", [arc, line], self.body)
-            return models.pad(self.body, sketch, 10, name=name)
-
-        half("Half1", -math.pi / 2)
-        half2 = half("Half2", math.pi / 2)
-        half2.Refine = True
-        self.recompute()
-        disc = math.pi * 50 * 50 * 10
-        self.assertBody(disc)
-        top = self.faceOf(half2, V(0, 0, 10), math.pi * 50 * 50)
-        sketch = models.sketch(
-            self.doc, "RibSketch", models.rectangle(-25, 15, -15, 25), self.body, z=30
-        )
-        rib = self.body.newObject("PartDesign::Pad", "Rib")
-        rib.Profile = sketch
-        rib.Type = "UpToFace"
-        rib.UpToFace = (half2, [top])
-        for reversed_ in (True, False):
-            rib.Reversed = reversed_
-            self.recompute()
-            if rib.isValid() and abs(self.body.Shape.Volume - disc - 2000) < 1e-6:
-                break
-        self.assertValid(rib)
-        self.assertBody(disc + 2000)
-        hinge = self.body.newObject("PartDesign::Line", "Hinge")
-        hinge.MapMode = "Deactivated"
-        hinge.Placement = App.Placement(V(0, 0, 10), App.Rotation(V(1, 0, 0), -90))
-        pattern = self.body.newObject("PartDesign::PolarPattern", "PolarPattern")
-        pattern.Originals = [half2, rib]
-        pattern.Axis = (hinge, [""])
-        pattern.Mode = "Extent"
-        pattern.Angle = 30
-        pattern.Occurrences = 2
-        pattern.Refine = True
-        pattern.Reapply = True
-        self.body.Tip = pattern
-        self.recompute()
-        self.assertFailed(pattern, "can't tell")
-
-    def testReapplyQuarterTurnsMovingAMergedFaceOffItselfAreRefused(self):
-        """Review pr992-r1 MadeTogetherQuarterTurns: the same turned a quarter four times: at each
-        instance the merged face moves off itself, so refused, as the mirror."""
-        boss, rib = self.ribToMergedSide()
-        pattern = self.quarterTurns([boss, rib])
-        self.assertFailed(pattern, "can't tell")
 
     def testReapplyUpToAnOutsideFaceWithATurnedTwin(self):
         """Onshape O6q (oracle963b, 11-22): an outside face stays the same face at every instance
