@@ -43,6 +43,7 @@
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <gp_Pnt2d.hxx>
 #include <BRepBndLib.hxx>
+#include <BRepBuilderAPI_Transform.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
 #include <BRepGProp.hxx>
 #include <BRepIntCurveSurface_Inter.hxx>
@@ -51,6 +52,8 @@
 #include <BRepFeat_MakePrism.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
 #include <Bnd_Box.hxx>
+#include <GeomAPI_ProjectPointOnSurf.hxx>
+#include <Geom_Surface.hxx>
 #include <gp.hxx>
 #include <gp_Dir.hxx>
 #include <gp_Lin.hxx>
@@ -1191,7 +1194,69 @@ enum ReapplyOwn : unsigned
     OwnUpToFace2 = 2,
     OwnUpToShape = 4,
     OwnUpToShape2 = 8,
+    /// ops#992: the same properties' face that refine merged from an original's face and an
+    /// earlier feature's. It is read as outside (toSeed applied), and only where the instance's
+    /// own copy would be the same: carried back, it lies on itself (a mirror across a plane
+    /// holding its normal); elsewhere the two readings differ and the pattern is refused
+    MergedUpToFace = 16,
+    MergedUpToFace2 = 32,
 };
+
+/// ops#992: the start of the message of a run refused because the two readings of a merged
+/// up-to face differ there (FeatureTransformed.cpp refuses the whole pattern on it)
+constexpr const char* mergedDiffers = "Reapply can't tell which face to extrude up to here";
+
+/// Whether prop holds a merged up-to face (ops#992) in the run
+bool reapplyMerged(const FeatureExtrude& feature, const App::Property& prop)
+{
+    if (!reapplyRun || !reapplyRun->own) {
+        return false;
+    }
+    const unsigned bit = &prop == &feature.UpToFace ? MergedUpToFace
+        : &prop == &feature.UpToFace2               ? MergedUpToFace2
+                                                    : 0u;
+    return (reapplyRun->own & bit) != 0;
+}
+
+/// ops#992: a merged up-to face (in the feature's frame) carried back by toSeed must lie on its own
+/// surface, face by face: then the outside face and the instance's own copy are the same there.
+/// Otherwise the run stops with mergedDiffers
+void requireMergedAgrees(const TopoDS_Shape& unmoved)
+{
+    std::vector<TopoDS_Face> faces;
+    for (TopExp_Explorer x(unmoved, TopAbs_FACE); x.More(); x.Next()) {
+        faces.push_back(TopoDS::Face(x.Current()));
+    }
+    Bnd_Box box;
+    BRepBndLib::Add(unmoved, box);
+    if (!reapplyRun->base.isNull()) {
+        BRepBndLib::Add(reapplyRun->base.getShape(), box);
+    }
+    const double tol = std::max(1e-6, 1e-7 * std::sqrt(box.SquareExtent()));
+    for (const TopoDS_Face& face : faces) {
+        const Handle(Geom_Surface) surface = BRep_Tool::Surface(face);
+        const TopoDS_Shape carried = BRepBuilderAPI_Transform(face, reapplyRun->toSeed, true).Shape();
+        std::vector<gp_Pnt> points;
+        for (TopExp_Explorer v(carried, TopAbs_VERTEX); v.More(); v.Next()) {
+            points.push_back(BRep_Tool::Pnt(TopoDS::Vertex(v.Current())));
+        }
+        BRepAdaptor_Surface along(TopoDS::Face(carried));
+        points.push_back(along.Value(
+            (along.FirstUParameter() + along.LastUParameter()) / 2,
+            (along.FirstVParameter() + along.LastVParameter()) / 2
+        ));
+        for (const gp_Pnt& point : points) {
+            GeomAPI_ProjectPointOnSurf projection(point, surface);
+            if (projection.NbPoints() == 0 || projection.LowerDistance() > tol) {
+                throw Base::ValueError(
+                    std::string(mergedDiffers)
+                    + ": its up-to face was made by one of the pattern's originals and an earlier "
+                      "feature together, and at this instance the pattern moves it off itself"
+                );
+            }
+        }
+    }
+}
 
 /// Whether prop, one of feature's up-to properties, holds a reference that the pattern re-running
 /// feature made itself (ops#963 A)
@@ -1657,6 +1722,12 @@ App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions opt
                 gp_Dir faceNormal = plane->Direction();
                 faceNormal.Transform(invTrsf);
                 if (reapplyRun && !reapplyOwn(*this, UpToFace)) {
+                    if (reapplyMerged(*this, UpToFace)) {
+                        TopoShape face;
+                        getUpToFaceFromLinkSub(face, UpToFace);
+                        face.move(invObjLoc);
+                        requireMergedAgrees(face.getShape());  // ops#992
+                    }
                     faceNormal.Transform(reapplyRun->toSeed);
                 }
                 gp_Dir sketchNormal(SketchVector.x, SketchVector.y, SketchVector.z);
@@ -2337,6 +2408,9 @@ TopoShape FeatureExtrude::generateSingleExtrusionSide(
                 requireOwnOnRunBase(upToShape.getShape());  // ops#963 A: the instance's own, unmoved
             }
             else if (reapplyRun) {
+                if (reapplyMerged(*this, upToFacePropHandle)) {
+                    requireMergedAgrees(upToShape.getShape());  // ops#992
+                }
                 upToShape = upToShape.makeElementTransform(reapplyRun->toSeed);
             }
         }

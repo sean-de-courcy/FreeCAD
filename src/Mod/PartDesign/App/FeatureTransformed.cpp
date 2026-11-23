@@ -780,9 +780,14 @@ struct ReapplyCollector
         }
     }
 
+    /// ops#992: why a merged up-to face (ownElement's 2) is refused where the run can't check it
+    std::string mergedWhy;
+
     /** ops#963 A: whether reader's up-to element (obj, sub) is one this pattern's originals made:
      * 1 own (read unmoved at each instance), 0 outside (the same element at every instance, moved
-     * back by toSeed: Onshape O6), with why when it can't be told (a refusal). The maker is the
+     * back by toSeed: Onshape O6), 2 a face made by an original and an earlier feature together
+     * (ops#992: outside where the instance's own copy is the same face), with why when it can't be
+     * told (a refusal). The maker is the
      * earliest member of the Body, or original, that holds the element where it is now, walking
      * its history back to its end (faces to faces, the linked object first): a face of the plate
      * kept in a pocket's shape is the plate's, a wall the pocket made is the pocket's, wherever the
@@ -874,10 +879,12 @@ struct ReapplyCollector
         if (face) {
             // A face refine merged from the original's face and one already there (the pocket's
             // wall and the plate's side in one plane): the history follows one of them, so it is
-            // told by the maker's base, where the face is partly there already. Such a face is the
-            // earlier feature's, as Onshape names it (ops#992: the team's case wall that a slot's
-            // side extends is the wall sketch's face), so it is outside: the same face at every
-            // instance, as before ops#963 A
+            // told by the maker's base, where the face is partly there already. ops#992: such a
+            // face (2) is read as outside, the same face at every instance (Onshape names the
+            // team's case wall, which a slot's side extends, after the wall's sketch), but only
+            // where the instance's own copy is the same face: the run checks it at each instance
+            // (FeatureExtrude.cpp requireMergedAgrees) and the pattern is refused where they
+            // differ. A shape list or a hole up to such a face stays refused (mergedWhy)
             if (auto feature = freecad_cast<PartDesign::Feature*>(maker)) {
                 if (const App::DocumentObject* baseObject = feature->getBaseObject(/*silent=*/true)) {
                     const TopoDS_Shape base = Part::Feature::getTopoShape(
@@ -892,7 +899,10 @@ struct ReapplyCollector
                     }
                     for (const gp_Pnt& point : insidePoints(TopoDS::Face(element), 9)) {
                         if (pointsOn({point}, faces, tol)) {
-                            return 0;
+                            mergedWhy = "Reapply isn't available yet for an extrusion up to a face "
+                                        "that " + quoted(maker) + " and an earlier feature made "
+                                        "together: " + name + unavailable;
+                            return 2;
                         }
                     }
                 }
@@ -921,8 +931,12 @@ struct ReapplyCollector
             }
             const auto& subs = prop->getSubValues();
             const std::string sub = subs.empty() ? std::string() : subs.front();
-            if (ownElement(reader, prop->getValue(), sub, levels, why) == 1) {
+            const int kind = ownElement(reader, prop->getValue(), sub, levels, why);
+            if (kind == 1) {
                 own |= bit;
+            }
+            else if (kind == 2) {
+                own |= bit << 4;  // ops#992: MergedUpToFace(2), FeatureExtrude.cpp
             }
         };
         auto list = [&](const App::PropertyLinkSubList* prop, unsigned bit) {
@@ -935,6 +949,9 @@ struct ReapplyCollector
                 const std::vector<std::string> each = subs.empty() ? std::vector<std::string> {""} : subs;
                 for (const std::string& sub : each) {
                     const int kind = ownElement(reader, obj, sub, levels, why);
+                    if (kind == 2) {
+                        why = mergedWhy;  // ops#992: not checked per face in a list
+                    }
                     if (!why.empty()) {
                         return;
                     }
@@ -1229,6 +1246,9 @@ struct ReapplyCollector
                 !why.empty()) {
                 return why;
             }
+            if (it.own & 0x30u) {
+                return mergedWhy;  // ops#992: a hole's up-to face isn't checked per instance
+            }
         }
         out.push_back(it);
         return {};
@@ -1330,6 +1350,10 @@ struct ReapplyCollector
 
 namespace PartDesign
 {
+// FeatureExtrude.cpp's mergedDiffers (ops#992), the same text: the start of a run's why when the
+// two readings of a merged up-to face differ at an instance
+constexpr const char* mergedDiffers = "Reapply can't tell which face to extrude up to here";
+
 // FeatureExtrude.cpp (FreeCAD-CH ops#654 T3; declared where used): feature's tool re-solved at a
 // pattern's instance, in the feature's frame
 PartDesignExport Part::TopoShape reapplyExtrusion(
@@ -2268,6 +2292,11 @@ App::DocumentObjectExecReturn* Transformed::execute()
                         catch (const Base::Exception& e) {
                             why = e.what();
                         }
+                        if (made.isNull() && why.rfind(mergedDiffers, 0) == 0) {
+                            return new App::DocumentObjectExecReturn(  // ops#992, as below
+                                quoted(it->named) + ": " + why, this
+                            );
+                        }
                         if (made.isNull()) {
                             // It contributes nothing (R2), and says so (ops#963 A: never silent)
                             notMade.push_back(
@@ -2378,6 +2407,13 @@ App::DocumentObjectExecReturn* Transformed::execute()
                                     Part::TopoShape made = item.rerun
                                         ? reapplyExtrusion(item.rerun, toSeed, base, partName, item.own, why)
                                         : reapplyHole(item.hole, toSeed, base, item.own != 0, why);
+                                    if (made.isNull() && why.rfind(mergedDiffers, 0) == 0) {
+                                        // ops#992: the two readings of a merged up-to face differ
+                                        // here: refused, never a guess
+                                        return new App::DocumentObjectExecReturn(
+                                            quoted(item.named) + ", " + instance + ": " + why, this
+                                        );
+                                    }
                                     if (made.isNull()) {
                                         // An instance that fails contributes nothing, with no
                                         // message (oracle 9, R2)

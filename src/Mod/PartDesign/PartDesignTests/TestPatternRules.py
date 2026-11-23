@@ -741,6 +741,56 @@ class TestPatternRules(unittest.TestCase):
             self.assertTrue(self.inside(x, 35, 13), f"no rib at x = {x}")
             self.assertTrue(self.inside(x, 45, 22.5), f"no step at x = {x}")
 
+    def ribToMergedSide(self):
+        """Review pr992-r1: the plate x -50..50, y -50..50, z 0..10 and the Boss x 40..50, y -5..5,
+        z 10..15 (refined: its side x = 50 merges with the plate's). The Rib, y -2..2, z 11..13,
+        from the plane x = 60 up to that face: x 50..60 (+80): 100000 + 500 + 80."""
+        self.block(-50, -50, 50, 50)
+        boss = self.topPad("Boss", 40, -5, 50, 5)
+        boss.Refine = True
+        self.recompute()
+        side = self.faceOf(boss, V(50, 0, (1000 * 5 + 50 * 12.5) / 1050), 1050)
+        rib = self.barUpToFrom(60, (boss, [side]), 80)
+        return boss, rib
+
+    def barUpToFrom(self, x, link, added):
+        sketch = self.xSketch("RibSketch", x, models.rectangle(-2, 11, 2, 13))
+        rib = self.body.newObject("PartDesign::Pad", "Rib")
+        rib.Profile = sketch
+        rib.Type = "UpToFace"
+        rib.UpToFace = link
+        before = self.body.Shape.Volume
+        for reversed_ in (True, False):
+            rib.Reversed = reversed_
+            self.recompute()
+            if rib.isValid() and abs(self.body.Shape.Volume - before - added) < 1e-6:
+                break
+        self.assertValid(rib)
+        self.assertBody(before + added)
+        return rib
+
+    def testReapplyMirrorMovingAMergedFaceOffItselfIsRefused(self):
+        """Review pr992-r1 MadeTogetherMirrorAcross: mirrored across YZ, the merged face x = 50 goes
+        to x = -50. Read as outside, the mirrored Rib would run from x = -60 across the plate to
+        x = 50 (101800); read as its own, to the mirrored Boss's side (101160). Which one Onshape
+        takes isn't known: refused ("can't tell"), never either guess."""
+        boss, rib = self.ribToMergedSide()
+        mirrored = self.body.newObject("PartDesign::Mirrored", "Mirrored")
+        mirrored.Originals = [boss, rib]
+        mirrored.MirrorPlane = self.axis("YZ_Plane")
+        mirrored.Refine = True
+        mirrored.Reapply = True
+        self.body.Tip = mirrored
+        self.recompute()
+        self.assertFailed(mirrored, "can't tell")
+
+    def testReapplyQuarterTurnsMovingAMergedFaceOffItselfAreRefused(self):
+        """Review pr992-r1 MadeTogetherQuarterTurns: the same turned a quarter four times: at each
+        instance the merged face moves off itself, so refused, as the mirror."""
+        boss, rib = self.ribToMergedSide()
+        pattern = self.quarterTurns([boss, rib])
+        self.assertFailed(pattern, "can't tell")
+
     def testReapplyUpToAnOutsideFaceWithATurnedTwin(self):
         """Onshape O6q (oracle963b, 11-22): an outside face stays the same face at every instance
         of a quarter turn too, even on a part the turn maps onto itself. The plate is square, so a quarter turn maps
