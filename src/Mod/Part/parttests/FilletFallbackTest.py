@@ -8497,3 +8497,290 @@ class RuledChamferTest(unittest.TestCase):
     def testAtTheStripsWidthTheStripVanishes(self):
         result, shape = self.chamfer(self.w)
         self.assertEqual(len(result.Faces), len(shape.Faces))
+
+
+class MitreRunOnTest(unittest.TestCase):
+    """ops#918 (NS44 Test Tube Nest #48, FGF-FF1010 Case #25): a round of r along a line L whose
+    end runs into the mitre E of two earlier rounds of q < r (tangent propagation picks E with L).
+    No round of r exists along E and OCCT fails; Onshape's result is the two features in the other
+    order: L's round runs on to the earlier rounds' plane F, with a torus at its foot (minor radius
+    q, major r - q, a quarter turn). Designed: a pocket's floor rounds and its inside corner
+    (concave), a box's bottom rim rounds and its vertical edge (convex), q 2, r 5. Per corner the
+    volume changes by +-[A (|L| + q) + (pi/2 - 2) K], A = r^2 (1 - pi/4), K = (1 - pi/4) q^2 (r - q)
+    + q^3/6 (notes/fillet-mitre-runon-918.md, skeptic 5): +-51.972893 for |L| 8"""
+
+    q, r = 2.0, 5.0
+
+    @staticmethod
+    def change(r, q, length):
+        s = 1 - math.pi / 4
+        k = s * q * q * (r - q) + q**3 / 6
+        return r * r * s * (length + q) + (math.pi / 2 - 2) * k
+
+    @staticmethod
+    def section(rho0, z0, q, axis, toward):
+        """The earlier round's section at the new round's foot, in the meridian plane"""
+
+        def p(rho, z):
+            return V(axis.x + toward.x * rho, axis.y + toward.y * rho, z)
+
+        c = (rho0 - q, z0 + q)
+        m = (c[0] + q / math.sqrt(2), c[1] - q / math.sqrt(2))
+        wire = Part.Wire(
+            [
+                Part.makeLine(p(rho0, z0), p(rho0 - q, z0)),
+                Part.Arc(p(rho0 - q, z0), p(*m), p(rho0, z0 + q)).toShape(),
+                Part.makeLine(p(rho0, z0 + q), p(rho0, z0)),
+            ]
+        )
+        return Part.Face(wire)
+
+    @staticmethod
+    def column(corner, r, z0, z1):
+        square = Part.makeBox(r, r, z1 - z0, V(corner.x, corner.y, z0))
+        return square.cut(Part.makeCylinder(r, z1 - z0 + 2, V(corner.x + r, corner.y + r, z0 - 1)))
+
+    def pocket(self, q=None, width=20.0, boss=None):
+        """A block 40 x 40 x 20 with a pocket width x 20 x 10 deep at (10, 10), its floor edges
+        rounded by q"""
+        q = self.q if q is None else q
+        block = Part.makeBox(40, 40, 20).cut(Part.makeBox(width, 20, 10, V(10, 10, 10)))
+        if boss is not None:
+            block = block.fuse(boss).removeSplitter()
+        floor = [
+            e
+            for e in block.Edges
+            if e.Curve.TypeId == "Part::GeomLine"
+            and abs(e.BoundBox.ZMax - 10) < 1e-9
+            and abs(e.BoundBox.ZMin - 10) < 1e-9
+            and 10 - 1e-9 < e.BoundBox.XMin
+            and e.BoundBox.XMax < 10 + width + 1e-9
+            and 10 - 1e-9 < e.BoundBox.YMin
+            and e.BoundBox.YMax < 30 + 1e-9
+        ]
+        self.assertEqual(len(floor), 4)
+        return block.makeFillet(q, floor)
+
+    def rimmed(self, q=None, top=False):
+        """A box 20 x 20 x 10, its bottom edges (and its top ones) rounded by q"""
+        q = self.q if q is None else q
+        box = Part.makeBox(20, 20, 10)
+        rim = [
+            e
+            for e in box.Edges
+            if e.BoundBox.ZMax < 1e-9 or (top and e.BoundBox.ZMin > 10 - 1e-9)
+        ]
+        return box.makeFillet(q, rim)
+
+    def picks(self, shape, x, y):
+        """The vertical line at (x, y) and the mitre at its lower end"""
+        lines = [
+            e
+            for e in shape.Edges
+            if e.Curve.TypeId == "Part::GeomLine"
+            and abs(e.BoundBox.XMin - x) < 1e-7
+            and abs(e.BoundBox.XMax - x) < 1e-7
+            and abs(e.BoundBox.YMin - y) < 1e-7
+            and abs(e.BoundBox.YMax - y) < 1e-7
+        ]
+        self.assertEqual(len(lines), 1)
+        line = lines[0]
+        low = min(line.Vertexes, key=lambda v: v.Point.z)
+        mitres = [
+            e
+            for e in shape.Edges
+            if not e.isSame(line)
+            and e.Curve.TypeId != "Part::GeomLine"
+            and any(v.isSame(low) for v in e.Vertexes)
+        ]
+        self.assertEqual(len(mitres), 1)
+        return [line, mitres[0]]
+
+    def assertBuilt(self, base, result, expected, change, corner):
+        self.assertTrue(result.isValid())
+        self.assertEqual(len(result.Solids), 1)
+        self.assertEqual(len(result.Faces), len(base.Faces) + 2)
+        self.assertAlmostEqual(result.Volume - base.Volume, change, delta=1e-6)
+        self.assertLess(result.cut(expected).Volume + expected.cut(result).Volume, 1e-6)
+        # No mitre left at the rounded corner (the other corners keep theirs)
+        near = [
+            e
+            for e in result.Edges
+            if e.Curve.TypeId == "Part::GeomEllipse"
+            and abs(e.BoundBox.Center.x - corner[0]) < self.r
+            and abs(e.BoundBox.Center.y - corner[1]) < self.r
+        ]
+        self.assertEqual(near, [])
+
+    def testConcaveCornerRunsOnToTheFloor(self):
+        base = self.pocket()
+        axis = V(10 + self.r, 10 + self.r, 0)
+        torus = self.section(self.r, 10, self.q, axis, V(-1, 0, 0)).revolve(axis, V(0, 0, 1), 90)
+        expected = base.fuse([self.column(V(10, 10, 0), self.r, 10, 20), torus]).removeSplitter()
+        for picks in (self.picks(base, 10, 10), list(reversed(self.picks(base, 10, 10)))):
+            result = base.makeFillet(self.r, picks)
+            self.assertBuilt(base, result, expected, self.change(self.r, self.q, 8.0), (10, 10))
+            self.assertAlmostEqual(self.change(self.r, self.q, 8.0), 51.972893, delta=1e-6)
+
+    def testConvexEdgeRunsOnToTheBottom(self):
+        base = self.rimmed()
+        axis = V(self.r, self.r, 0)
+        torus = self.section(self.r, 0, self.q, axis, V(-1, 0, 0)).revolve(axis, V(0, 0, 1), 90)
+        expected = base.cut([self.column(V(0, 0, 0), self.r, 0, 10), torus]).removeSplitter()
+        result = base.makeFillet(self.r, self.picks(base, 0, 0))
+        self.assertBuilt(base, result, expected, -self.change(self.r, self.q, 8.0), (0, 0))
+
+    def testAtOtherSizes(self):
+        # Built at size, not scaled after: the tools' common with the base was 0.1-0.5 % off at
+        # some sizes and the exact cut lost the solid at others (review fix918-r1, L2); r = 2q,
+        # where OCCT's revolution may be a surface of revolution, not a torus (L1)
+        s = 1 - math.pi / 4
+        for q, r in ((self.q, self.r), (2.0, 4.0), (2.5, 5.0)):
+            for k in (1.5, 3.0, 10.0, 50.0, 200.0):
+                for convex in (True, False):
+                    with self.subTest(q=q, r=r, k=k, convex=convex):
+                        if convex:
+                            box = Part.makeBox(20 * k, 20 * k, 10 * k)
+                            rim = [e for e in box.Edges if e.BoundBox.ZMax < 1e-9 * k]
+                            base, x = box.makeFillet(q * k, rim), 0.0
+                        else:
+                            block = Part.makeBox(40 * k, 40 * k, 20 * k).cut(
+                                Part.makeBox(20 * k, 20 * k, 10 * k, V(10 * k, 10 * k, 10 * k))
+                            )
+                            tol = 1e-7 * k
+                            floor = [
+                                e
+                                for e in block.Edges
+                                if e.Curve.TypeId == "Part::GeomLine"
+                                and abs(e.BoundBox.ZMax - 10 * k) < tol
+                                and abs(e.BoundBox.ZMin - 10 * k) < tol
+                                and 10 * k - tol < e.BoundBox.XMin
+                                and e.BoundBox.XMax < 30 * k + tol
+                                and 10 * k - tol < e.BoundBox.YMin
+                                and e.BoundBox.YMax < 30 * k + tol
+                            ]
+                            self.assertEqual(len(floor), 4)
+                            base, x = block.makeFillet(q * k, floor), 10.0 * k
+                        tol = 1e-7 * k
+                        line = [
+                            e
+                            for e in base.Edges
+                            if e.Curve.TypeId == "Part::GeomLine"
+                            and abs(e.BoundBox.XMin - x) < tol
+                            and abs(e.BoundBox.XMax - x) < tol
+                            and abs(e.BoundBox.YMin - x) < tol
+                            and abs(e.BoundBox.YMax - x) < tol
+                        ]
+                        self.assertEqual(len(line), 1)
+                        result = base.makeFillet(r * k, line)
+                        self.assertTrue(result.isValid())
+                        self.assertEqual(len(result.Faces), len(base.Faces) + 2)
+                        K = s * q * q * (r - q) + q**3 / 6
+                        change = (r * r * s * 10 + (math.pi / 2 - 2) * K) * k**3
+                        self.assertAlmostEqual(
+                            result.Volume - base.Volume,
+                            -change if convex else change,
+                            delta=1e-6 * change,
+                        )
+
+    def testTheRestIsRoundedOnTheResult(self):
+        # One corner and a plain edge elsewhere: the block's top front edge, a straight round
+        # between its end faces
+        base = self.pocket()
+        plain = [
+            e
+            for e in base.Edges
+            if e.Curve.TypeId == "Part::GeomLine"
+            and e.BoundBox.YMax < 1e-9
+            and e.BoundBox.ZMin > 20 - 1e-9
+        ]
+        self.assertEqual(len(plain), 1)
+        result = base.makeFillet(self.r, self.picks(base, 10, 10) + plain)
+        self.assertTrue(result.isValid())
+        straight = -(1 - math.pi / 4) * self.r * self.r * 40
+        self.assertAlmostEqual(
+            result.Volume - base.Volume, self.change(self.r, self.q, 8.0) + straight, delta=1e-5
+        )
+
+    def assertRefused(self, base, picks, r=None):
+        """Not built by the run-on: an error, or (where OCCT builds it) no torus of the run-on's"""
+        r = self.r if r is None else r
+        try:
+            result = base.makeFillet(r, picks)
+        except Exception:
+            return
+        tori = [
+            f
+            for f in result.Faces
+            if f.Surface.TypeId == "Part::GeomToroid"
+            and abs(f.Surface.MinorRadius - self.q) < 1e-6
+            and abs(f.Surface.MajorRadius - (r - self.q)) < 1e-6
+        ]
+        self.assertEqual(tori, [])
+
+    def testEqualRadiiRefused(self):
+        base = self.pocket(q=self.r)
+        self.assertRefused(base, self.picks(base, 10, 10))
+
+    def testSpindleRangeRefused(self):
+        # r 3, q 2: r in (q, 2q) is not measured on Onshape
+        base = self.pocket()
+        self.assertRefused(base, self.picks(base, 10, 10), r=3.0)
+
+    def testBumpInTheKiteRefused(self):
+        # A bump on wall x = 10 within the new round's reach, above the floor rounds
+        bump = Part.makeBox(0.5, 0.5, 1, V(10, 11, 15))
+        base = self.pocket(boss=bump)
+        self.assertRefused(base, self.picks(base, 10, 10))
+
+    def testTwoCornersOnAShortWallRefused(self):
+        # A pocket 8 wide: two corners 8 apart on one floor round, less than 2r
+        base = self.pocket(width=8.0)
+        self.assertRefused(base, self.picks(base, 10, 10) + self.picks(base, 18, 10))
+
+    def testMitreAtBothEndsRefused(self):
+        base = self.rimmed(top=True)
+        line = self.picks(base, 0, 0)
+        high = max(line[0].Vertexes, key=lambda v: v.Point.z)
+        upper = [
+            e
+            for e in base.Edges
+            if not e.isSame(line[0])
+            and e.Curve.TypeId != "Part::GeomLine"
+            and any(v.isSame(high) for v in e.Vertexes)
+        ]
+        self.assertEqual(len(upper), 1)
+        self.assertRefused(base, line + upper)
+
+    def testConvexEdgeIntoConcaveRoundsRefused(self):
+        # A boss's vertical edge whose foot edges on the plate are rounded concave (skeptic 1)
+        body = Part.makeBox(40, 40, 10).fuse(Part.makeBox(20, 20, 10, V(10, 10, 10))).removeSplitter()
+        foot = [
+            e
+            for e in body.Edges
+            if e.Curve.TypeId == "Part::GeomLine"
+            and abs(e.BoundBox.ZMin - 10) < 1e-9
+            and abs(e.BoundBox.ZMax - 10) < 1e-9
+            and 10 - 1e-9 < e.BoundBox.XMin
+            and e.BoundBox.XMax < 30 + 1e-9
+            and 10 - 1e-9 < e.BoundBox.YMin
+            and e.BoundBox.YMax < 30 + 1e-9
+        ]
+        self.assertEqual(len(foot), 4)
+        base = body.makeFillet(self.q, foot)
+        self.assertRefused(base, self.picks(base, 10, 10))
+
+    def testTheLineAloneTakesTheMitreByTangency(self):
+        # Only L picked: the mitre comes in by tangent propagation, as in a rebuilt document
+        base = self.pocket()
+        axis = V(10 + self.r, 10 + self.r, 0)
+        torus = self.section(self.r, 10, self.q, axis, V(-1, 0, 0)).revolve(axis, V(0, 0, 1), 90)
+        expected = base.fuse([self.column(V(10, 10, 0), self.r, 10, 20), torus]).removeSplitter()
+        result = base.makeFillet(self.r, self.picks(base, 10, 10)[:1])
+        self.assertBuilt(base, result, expected, self.change(self.r, self.q, 8.0), (10, 10))
+        rimmed = self.rimmed()
+        axis = V(self.r, self.r, 0)
+        torus = self.section(self.r, 0, self.q, axis, V(-1, 0, 0)).revolve(axis, V(0, 0, 1), 90)
+        expected = rimmed.cut([self.column(V(0, 0, 0), self.r, 0, 10), torus]).removeSplitter()
+        result = rimmed.makeFillet(self.r, self.picks(rimmed, 0, 0)[:1])
+        self.assertBuilt(rimmed, result, expected, -self.change(self.r, self.q, 8.0), (0, 0))

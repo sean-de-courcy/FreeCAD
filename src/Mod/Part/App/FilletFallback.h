@@ -384,6 +384,21 @@ PartExport bool constructRims(
     std::vector<TopoDS_Shape>& rest
 );
 
+/** ops#918: every picked line whose end runs into the mitre of two earlier rounds of a smaller
+ * radius (the mitre picked, or in the line's tangent chain), its round run on to the earlier
+ * rounds' plane with a torus at its foot, as Onshape builds it (notes/fillet-mitre-runon-918.md).
+ * Built in one Boolean on the base; rest is the selection less the lines and mitres. False, with
+ * the reason, when no corner passes the rule
+ */
+PartExport bool constructMitreRunOns(
+    const TopoDS_Shape& base,
+    const std::vector<TopoDS_Shape>& edges,
+    const Request& request,
+    Construction& out,
+    std::vector<TopoDS_Shape>& rest,
+    std::string* reason
+);
+
 /** Whether the construction should run before OCCT, whose own checks never ask it where its
  * result is valid. Either some selected edge is a convex rim arc on a bulging wall tighter than
  * the round (ops#640, C4 shape A), where OCCT's result is wrong (notes/fillet-tight-arc.md); or

@@ -54,6 +54,7 @@ from parttests.FilletFallbackTest import (
     StraightBSplineWallTest,  # ops#950
     InvalidResultWiderScopeTest,  # ops#989
     RuledChamferTest,  # ops#987
+    MitreRunOnTest,  # ops#918
     CornerWithACircleTest,
     BlendEndTrimTest,
     CurvedEndTrimTest,

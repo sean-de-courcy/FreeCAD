@@ -9937,6 +9937,125 @@ bool roundCoveredFirst(
     FilletFallback::takeInvalidResult();
     return false;
 }
+
+/** ops#918 (NS44 Test Tube Nest #48, FGF-FF1010 Case #25): a round whose line runs into the mitre
+ * of two earlier rounds of a smaller radius, the mitre picked with it (tangent propagation). No
+ * round of the radius exists along the mitre, and OCCT fails; Onshape runs the line's round on to
+ * the earlier rounds' plane with a torus at its foot (notes/fillet-mitre-runon-918.md). Asked only
+ * once everything else has failed. The corners are built on a fresh copy of the shape, named, and
+ * the rest of the picks is rounded on that stage, as the rim split does. Any failure leaves the
+ * feature's error as it was: false
+ */
+bool roundMitreRunOns(
+    TopoShape& result,
+    const TopoShape& shape,
+    const std::vector<TopoShape>& edges,
+    double radius,
+    const char* op
+)
+{
+    if (inRimSplitRest || KernelBudget::pastDeadline()) {
+        return false;
+    }
+    // A fresh copy: OCCT's failed walk raised the tolerances of the maker's (skeptic 6)
+    std::vector<TopoShape> copyEdges = edges;
+    TopoShape copy = FilletFallback::makerInput(shape, copyEdges);
+    std::vector<TopoDS_Shape> plain;
+    for (const auto& edge : copyEdges) {
+        plain.push_back(edge.getShape());
+    }
+    FilletFallback::Request request;
+    request.faceTolerances = FilletFallback::faceTolerances(copy.getShape());
+    request.kind = FilletFallback::Kind::Fillet;
+    request.size1 = radius;
+    request.size2 = radius;
+    struct Split
+    {
+        FilletFallback::Construction construction;
+        std::vector<TopoDS_Shape> rest;
+        std::string reason;
+        bool built = false;
+    };
+    auto split = std::make_shared<Split>();
+    KernelBudget::run(
+        "The fillet",
+        [base = copy.getShape(), plain, request, split](const Message_ProgressRange& /*range*/) {
+            split->built = FilletFallback::constructMitreRunOns(
+                base,
+                plain,
+                request,
+                split->construction,
+                split->rest,
+                &split->reason
+            );
+        }
+    );
+    if (!split->built) {
+        FC_LOG("fillet by mitre run-ons: " << split->reason);
+        return false;
+    }
+    // A stage's merged-face note goes with it where the stage is thrown away (as the rim split's)
+    const bool notedBefore = [] {
+        std::string note = FilletFallback::takeNamingOrder();
+        FilletFallback::noteNamingOrder(note);
+        return !note.empty();
+    }();
+    auto dropStageNote = [notedBefore] {
+        if (!notedBefore) {
+            FilletFallback::takeNamingOrder();
+        }
+    };
+    TopoShape stage(result.Tag, result.Hasher, result.getHistoryAlgorithm());
+    try {
+        FilletFallback::finish(stage, split->construction, copy, op);
+    }
+    catch (const Standard_Failure& e) {
+        FC_LOG("fillet by mitre run-ons: naming failed (OCCT): " << e.GetMessageString());
+        dropStageNote();
+        return false;
+    }
+    catch (const Base::Exception& e) {
+        FC_LOG("fillet by mitre run-ons: naming failed: " << e.what());
+        dropStageNote();
+        return false;
+    }
+    if (split->rest.empty()) {
+        result = stage;
+        return true;
+    }
+    std::vector<TopoShape> rest;
+    for (const auto& edge : split->rest) {
+        const int index = stage.findShape(edge);
+        if (index <= 0) {
+            FC_LOG("fillet by mitre run-ons: a picked edge is not on the stage");
+            dropStageNote();
+            return false;
+        }
+        rest.push_back(stage.getSubTopoShape(TopAbs_EDGE, index));
+    }
+    try {
+        TopoShape built(result.Tag, result.Hasher, result.getHistoryAlgorithm());
+        built.makeElementFillet(stage, rest, radius, radius, op);
+        if (FilletFallback::takeInvalidResult().empty()) {
+            result = built;
+            return true;
+        }
+        FC_LOG("fillet by mitre run-ons: the rest's result on the stage is invalid");
+    }
+    catch (const Base::CADKernelError& e) {
+        FC_LOG("fillet by mitre run-ons: the rest failed on the stage: " << e.what());
+        if (KernelBudget::pastDeadline()) {
+            dropStageNote();
+            throw;
+        }
+    }
+    catch (const Standard_Failure& e) {
+        FC_LOG("fillet by mitre run-ons: the rest failed on the stage (OCCT): "
+               << e.GetMessageString());
+    }
+    dropStageNote();
+    return false;
+}
 }  // namespace
 
 TopoShape& TopoShape::makeElementFillet(
@@ -10264,6 +10383,10 @@ TopoShape& TopoShape::makeElementFillet(
         // (Where the construction refuses OCCT's refused result, OCCT's is returned: the feature's
         // check refuses it as before, ops#990)
         if (finishConstruction(*this, *outcome, input, op)) {
+            return *this;
+        }
+        if (outcome->failed && radius1 == radius2
+            && roundMitreRunOns(*this, shape, edges, radius1, op)) {
             return *this;
         }
         if (outcome->failed && edges.size() > 1 && radius1 == radius2
