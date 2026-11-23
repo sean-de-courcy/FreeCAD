@@ -780,9 +780,14 @@ struct ReapplyCollector
         }
     }
 
+    /// ops#992: why a merged up-to face (ownElement's 2) is refused where the run can't check it
+    std::string mergedWhy;
+
     /** ops#963 A: whether reader's up-to element (obj, sub) is one this pattern's originals made:
      * 1 own (read unmoved at each instance), 0 outside (the same element at every instance, moved
-     * back by toSeed: Onshape O6), with why when it can't be told (a refusal). The maker is the
+     * back by toSeed: Onshape O6), 2 a face made by an original and an earlier feature together
+     * (ops#992: outside for an extrusion's up-to face; a shape list or a hole refuses it), with why
+     * when it can't be told (a refusal). The maker is the
      * earliest member of the Body, or original, that holds the element where it is now, walking
      * its history back to its end (faces to faces, the linked object first): a face of the plate
      * kept in a pocket's shape is the plate's, a wall the pocket made is the pocket's, wherever the
@@ -874,7 +879,12 @@ struct ReapplyCollector
         if (face) {
             // A face refine merged from the original's face and one already there (the pocket's
             // wall and the plate's side in one plane): the history follows one of them, so it is
-            // told by the maker's base, where the face is partly there already
+            // told by the maker's base, where the face is partly there already. ops#992 (coordinator
+            // c797's ruling): such a face (2) is the earlier feature's, as Onshape names the team's
+            // case wall that a slot's side extends (the wall sketch's), so an extrusion up to it
+            // reads it outside, the same face at every instance, as 1.0.4 did; Onshape builds
+            // FM Case Vial Well's mirror #19 so. A shape list or a hole up to it stays refused
+            // (mergedWhy)
             if (auto feature = freecad_cast<PartDesign::Feature*>(maker)) {
                 if (const App::DocumentObject* baseObject = feature->getBaseObject(/*silent=*/true)) {
                     const TopoDS_Shape base = Part::Feature::getTopoShape(
@@ -889,10 +899,10 @@ struct ReapplyCollector
                     }
                     for (const gp_Pnt& point : insidePoints(TopoDS::Face(element), 9)) {
                         if (pointsOn({point}, faces, tol)) {
-                            why = "Reapply isn't available yet for an extrusion up to a face that "
-                                + quoted(maker) + " and an earlier feature made together: " + name
-                                + unavailable;
-                            return -1;
+                            mergedWhy = "Reapply isn't available yet for an extrusion up to a face "
+                                        "that " + quoted(maker) + " and an earlier feature made "
+                                        "together: " + name + unavailable;
+                            return 2;
                         }
                     }
                 }
@@ -921,8 +931,12 @@ struct ReapplyCollector
             }
             const auto& subs = prop->getSubValues();
             const std::string sub = subs.empty() ? std::string() : subs.front();
-            if (ownElement(reader, prop->getValue(), sub, levels, why) == 1) {
+            const int kind = ownElement(reader, prop->getValue(), sub, levels, why);
+            if (kind == 1) {
                 own |= bit;
+            }
+            else if (kind == 2) {
+                own |= bit << 4;  // ops#992: merged, read as outside (holes refuse it, below)
             }
         };
         auto list = [&](const App::PropertyLinkSubList* prop, unsigned bit) {
@@ -935,6 +949,9 @@ struct ReapplyCollector
                 const std::vector<std::string> each = subs.empty() ? std::vector<std::string> {""} : subs;
                 for (const std::string& sub : each) {
                     const int kind = ownElement(reader, obj, sub, levels, why);
+                    if (kind == 2) {
+                        why = mergedWhy;  // ops#992: not checked per face in a list
+                    }
                     if (!why.empty()) {
                         return;
                     }
@@ -1228,6 +1245,9 @@ struct ReapplyCollector
             if (std::string why = ownBits(hole, levels, &hole->UpToFace, nullptr, nullptr, nullptr, it.own);
                 !why.empty()) {
                 return why;
+            }
+            if (it.own & 0x30u) {
+                return mergedWhy;  // ops#992: a hole's up-to face isn't checked per instance
             }
         }
         out.push_back(it);
@@ -2199,6 +2219,7 @@ App::DocumentObjectExecReturn* Transformed::execute()
                     collector,
                     reapply,
                     instances,
+                    {},
                     {},
                     {}
                 };
