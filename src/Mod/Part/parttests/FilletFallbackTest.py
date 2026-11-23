@@ -8200,6 +8200,51 @@ class ChamferSurfaceEndTest(unittest.TestCase):
         shape = shape.removeSplitter()
         self.refused(shape, self.xline(shape, 3, 2))
 
+    def testMaterialInTheRunOnOfALargePartRefused(self):
+        # The block on the edge's line on a plate 600 x 400 x 100: the check is against the run-on
+        # wedge, not the part, whose 1e-6 would pass the block's 12 mm3 (review r1, R1-A). With
+        # nothing in the run-on the large part builds
+        big = Part.makeBox(600, 400, 100, V(-300, -200, -100))
+        clear = big.fuse(self.bar().common(self.end())).removeSplitter()
+        self.built(clear, self.xline(clear, 3, 2), self.L(2, 3, self.S409, -12))
+        shape = big.fuse(self.bar().common(self.end()))
+        shape = shape.fuse(Part.makeBox(6, 6, 2, V(44, 0, 0))).removeSplitter()
+        self.refused(shape, self.xline(shape, 3, 2))
+
+    def testMaterialBetweenARecedingEndSurfaceAndTheVertexRefused(self):
+        # The bar x -8 to 1 cut by a hole of radius 3.5 about (sqrt(3.25), 0), through (0, +-3):
+        # the end surface recedes behind the vertex's plane over the section, and the tool stops at
+        # it. Alone it builds (both readings the same); a post in the hole, inside the plain wedge
+        # between the surface and the vertex's plane, is refused (review r1, R1-B)
+        cx = math.sqrt(3.25)
+        bar = self.bar(-8, 1.0).cut(Part.makeCylinder(3.5, 2, V(cx, 0, 0)))
+        shape = self.plate().fuse(bar).removeSplitter()
+        edges = self.xline(shape, 3, 2)
+        self.assertEqual(len(edges), 1)
+        result = shape.makeChamfer(2.0, 2.0, edges)
+        self.assertTrue(result.isValid())
+        # Removed: the integral over y in [1, 3] of (y - 1) (cx - sqrt(12.25 - y^2) + 8), by the
+        # closed forms of L with the circle about x = cx
+        r = 3.5
+
+        def F(y):
+            return y / 2 * math.sqrt(r * r - y * y) + r * r / 2 * math.asin(y / r)
+
+        def G(y):
+            return -((r * r - y * y) ** 1.5) / 3
+
+        removed = -(G(3) - G(1) - (F(3) - F(1))) + (cx + 8) * 2
+        self.assertAlmostEqual(shape.Volume - result.Volume, removed, delta=1e-6 * shape.Volume)
+        post = Part.makeBox(0.9, 0.8, 2, V(cx - 2.8, 1.2, 0))
+        shape = self.plate().fuse(bar).fuse(post).removeSplitter()
+        self.refused(shape, self.xline(shape, 3, 2))
+
+    def testConcaveEdgeStaysRefused(self):
+        # The bar's foot edge on the plate, filled at the walls' height and ending on the cylinder:
+        # a fill ended on an end surface is not known from Onshape (review r1, trace 3)
+        shape = self.plate().fuse(self.bar().common(self.end())).removeSplitter()
+        self.refused(shape, self.xline(shape, 3, 0))
+
     def testArcsAndRuledEdgesStayRefused(self):
         # An arc ending on the cylinder, and a straight edge beside a cylinder: not opened
         shape = self.plate().fuse(Part.makeCylinder(3, 2).common(self.end())).removeSplitter()

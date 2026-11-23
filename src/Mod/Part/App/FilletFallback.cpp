@@ -1626,8 +1626,8 @@ struct Context
     /// with ops#898 cause B (Construction::newRule)
     mutable bool cuspLifted = false;
     /// A chamfer's ends on a face that is not a plane (Request::chamferSurfaceEnd, ops#1009): at
-    /// each, the chamfer's wedge run on from the vertex along the edge's line through the part,
-    /// which the result must leave empty
+    /// each, the chamfer's plain wedge from the edge's middle on past the end along the edge's line
+    /// through the part, which the result must leave empty
     mutable std::vector<TopoDS_Shape> runOns;
     /// The blends' continuations built so far, by wall and end (blendBeyond): one per end, so that
     /// every tool cut by it is cut by the same surface
@@ -3297,9 +3297,10 @@ VertexEnd classify(
         // off by an end blend's B-spline face, as Onshape's): the face's surface, extended past
         // the face, bounds the tool, as OCCT's own fillet ends there below the limit (lineTool)
         // A chamfer ends so only on the second pass (Request::chamferSurfaceEnd, ops#1009), and
-        // only on a straight edge between two planes, the end face not tangent to it (below)
+        // only on a straight convex edge between two planes, the end face not tangent to it
+        // (below). A concave edge's fill ended so is not known from Onshape (review r1, trace 3)
         const bool chamferEnd = ctx.request.kind == Kind::Chamfer && ctx.request.chamferSurfaceEnd
-            && data.line && !data.ruled
+            && data.line && !data.ruled && data.convex
             && BRepAdaptor_Surface(data.faces[0], Standard_False).GetType() == GeomAbs_Plane
             && BRepAdaptor_Surface(data.faces[1], Standard_False).GetType() == GeomAbs_Plane;
         if (ctx.request.kind != Kind::Fillet && !chamferEnd) {
@@ -5548,14 +5549,17 @@ std::optional<Tool> lineTool(const Context& ctx, const EdgeData& data, const Ver
                 ends[i].bound
             );
             if (ctx.request.kind == Kind::Chamfer) {
-                // The wedge run on past this end through the part (ops#1009): the section at the
-                // vertex, swept outward a base size and the margin
+                // The plain wedge from the edge's middle on past this end through the part
+                // (ops#1009): the section swept from there outward a base size and the margin. It
+                // starts inside the edge, not at the vertex, so that it also covers what lies
+                // between the vertex's plane and an end surface that recedes behind it, where the
+                // tool stops at the surface (review r1, R1-B)
                 const double reach = ctx.scale + margin;
                 gp_Trsf at;
-                at.SetTranslation(step * (i == 0 ? -reach : length));
-                TopoDS_Face from = TopoDS::Face(section.face().Moved(TopLoc_Location(at)));
+                at.SetTranslation(step * (i == 0 ? -reach : length / 2));
+                TopoDS_Face start = TopoDS::Face(section.face().Moved(TopLoc_Location(at)));
                 ctx.runOns.push_back(
-                    BRepPrimAPI_MakePrism(from, step * reach, Standard_True).Shape()
+                    BRepPrimAPI_MakePrism(start, step * (reach + length / 2), Standard_True).Shape()
                 );
             }
             continue;
@@ -20052,8 +20056,10 @@ bool constructSolid(
             if (runOns.empty()) {
                 refuse("no end on a face that is not a plane");
             }
-            const double bound = volumeTolerance * volumeOf(base);
             for (const auto& runOn : runOns) {
+                // Against the run-on wedge's own volume, not the part's: what can lie in it is at
+                // most its section times its length (review r1, R1-A)
+                const double bound = volumeTolerance * volumeOf(runOn);
                 const double left = volumeOf(commonOf(shape, runOn));
                 if (left > bound) {
                     refuse("the wedge run on past an end holds " + describe(left) + " of the part");
