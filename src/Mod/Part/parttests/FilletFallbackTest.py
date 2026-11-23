@@ -2249,16 +2249,22 @@ class BridgedRecessTest(unittest.TestCase):
         return block.makeFillet(2, front_top(block))
 
     def testThroughHoleAcrossTheBand(self):
-        # O1: the hole's rim 1 and 0.5 mm from the edge; OCCT's bridge is 0.75 and 1.34 mm3 off
-        for y in (4.0, 3.5):
-            with self.subTest(y=y):
-                self.assertBridgeFails(
-                    Part.makeBox(30, 20, 10).cut(Part.makeCylinder(3, 10, V(15, y, 0)))
-                )
+        # O1: the hole's rim 1 mm from the edge; OCCT's bridge is 0.75 mm3 off. The exact
+        # construction builds Onshape's shape (ops#993)
+        hole = Part.makeCylinder(3, 10, V(15, 4, 0))
+        self.assertRight(Part.makeBox(30, 20, 10).cut(hole), self.rounded().cut(hole))
+
+    def testThroughHoleNearTheEdgeStillFails(self):
+        # O1 with the rim 0.5 mm from the edge (OCCT's bridge 1.34 mm3 off): the construction
+        # refuses, and the bridge stays an error
+        self.assertBridgeFails(
+            Part.makeBox(30, 20, 10).cut(Part.makeCylinder(3, 10, V(15, 3.5, 0)))
+        )
 
     def testBlindHoleAcrossTheBand(self):
         # O2: 4 deep
-        self.assertBridgeFails(Part.makeBox(30, 20, 10).cut(Part.makeCylinder(3, 4, V(15, 4, 6))))
+        hole = Part.makeCylinder(3, 4, V(15, 4, 6))
+        self.assertRight(Part.makeBox(30, 20, 10).cut(hole), self.rounded().cut(hole))
 
     def testSlotAcrossTheBand(self):
         # O4: a stadium 3 deep, 1 mm from the edge
@@ -2267,12 +2273,16 @@ class BridgedRecessTest(unittest.TestCase):
             .fuse([Part.makeCylinder(2, 3, V(11, 3, 7)), Part.makeCylinder(2, 3, V(19, 3, 7))])
             .removeSplitter()
         )
-        self.assertBridgeFails(Part.makeBox(30, 20, 10).cut(slot))
+        self.assertRight(Part.makeBox(30, 20, 10).cut(slot), self.rounded().cut(slot))
 
     def testRoundBossAcrossTheBand(self):
         # O5: its wall 1 mm from the edge. The boss's foot is an inner wire of the top face
+        # Builds, unmeasured: the construction keeps the material under the boss's foot, which is
+        # this oracle's boss extended to the bottom (notes/fillet-parity.md 2.2 in the ops
+        # repository); Onshape's own result is not measured yet (ops#993 review, finding 1)
         boss = Part.makeBox(30, 20, 10).fuse(Part.makeCylinder(3, 4, V(15, 4, 10))).removeSplitter()
-        self.assertBridgeFails(boss)
+        extended = Part.makeCylinder(3, 14, V(15, 4, 0))
+        self.assertRight(boss, self.rounded().fuse(extended).removeSplitter())
 
     def testHoleBreakingTheEdgeStillBuilds(self):
         # O1 with the hole through the front face: the edge's two pieces end at the hole's wall
@@ -2325,8 +2335,13 @@ class BridgedRecessTest(unittest.TestCase):
                 self.assertTrue(fillet.Shape.isValid())
 
     def testPartFilletAcrossAHole(self):
-        # Part::Fillet with one radius fails the same; a variable radius isn't checked
-        shape = Part.makeBox(30, 20, 10).cut(Part.makeCylinder(3, 10, V(15, 4, 0)))
+        # Part::Fillet with one radius builds the same (ops#993); near the edge it fails the same
+        hole = Part.makeCylinder(3, 10, V(15, 4, 0))
+        shape = Part.makeBox(30, 20, 10).cut(hole)
+        feature = InvalidDressUpTest.dressUp(self, "Fillet", shape, front_top(shape), [(2, 2)])
+        self.assertTrue(feature.isValid(), feature.getStatusString())
+        self.assertLess(symmetric_difference(feature.Shape, self.rounded().cut(hole)), 1e-6)
+        shape = Part.makeBox(30, 20, 10).cut(Part.makeCylinder(3, 10, V(15, 3.5, 0)))
         feature = InvalidDressUpTest.dressUp(self, "Fillet", shape, front_top(shape), [(2, 2)])
         self.assertFalse(feature.isValid())
         self.assertTrue(
@@ -2366,15 +2381,17 @@ class BridgedRecessTest(unittest.TestCase):
     def testRimWithRoundedCornersAcrossACountersink(self):
         # The countersink's rim 1 mm from the long side: the rim round's band (2 wide) crosses it.
         # The picked loop runs round tangent corners, whose walls are tangent to the sides; the
-        # check used to stop there and OCCT's B-spline bridge was kept (DSH front lid #14)
-        shape, _ = self.rimBlock(5)
+        # check used to stop there and OCCT's B-spline bridge was kept (DSH front lid #14). The
+        # exact construction builds the plain round cut by the countersink (ops#993)
+        shape, sink = self.rimBlock(5)
         self.assertEqual(len(self.rim(shape)), 8)
         fillet = filleted_in_a_body(self.doc, shape, self.rim, 2)
-        self.assertFalse(fillet.isValid())
-        status = fillet.getStatusString()
-        self.assertTrue(
-            status.startswith("The fillet's band crosses a hole or pocket on Face"), status
-        )
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+        rounded, _ = self.rimBlock()
+        right = rounded.makeFillet(2, self.rim(rounded)).cut(sink)
+        kinds = {f.Surface.TypeId for f in fillet.Shape.Faces}
+        self.assertNotIn("Part::GeomBSplineSurface", kinds)
+        self.assertLess(symmetric_difference(fillet.Shape, right), 1e-6)
 
     def testRimWithRoundedCornersClearOfACountersinkBuilds(self):
         # The countersink's rim 6 mm from the side, clear of the band; and no countersink: the
@@ -2468,19 +2485,26 @@ class BridgedRecessTest(unittest.TestCase):
                     "Part::GeomBSplineSurface", {f.Surface.TypeId for f in fillet.Shape.Faces}
                 )
 
-    def testRimWithEveryArcAtOrAboveTheRadiusAcrossACountersinkFails(self):
+    def testRimWithEveryArcAtOrAboveTheRadiusAcrossACountersinkBuilds(self):
         # ops#968: the check still runs on a rim loop whose arcs are all at or above the radius,
         # the arc equal to it included: the round r 2's band crosses the countersink's rim, where
-        # OCCT bridges it with a B-spline, and the fillet is refused, as in rimBlock()'s case
+        # OCCT bridges it with a B-spline. As in rimBlock()'s case, the exact construction then
+        # builds the plain round cut by the countersink (ops#993)
+        sink = (
+            Part.makeCone(2, 4, 2, V(30, 5, 1))
+            .fuse(Part.makeCylinder(2, 3, V(30, 5, 0)))
+            .removeSplitter()
+        )
         for small in (5, 2):
             with self.subTest(small=small):
                 shape = self.cornerPlate(small, sink=True)
                 fillet = filleted_in_a_body(self.doc, shape, self.topRim, 2)
-                self.assertFalse(fillet.isValid())
-                status = fillet.getStatusString()
-                self.assertTrue(
-                    status.startswith("The fillet's band crosses a hole or pocket on Face"), status
-                )
+                self.assertTrue(fillet.isValid(), fillet.getStatusString())
+                kinds = {f.Surface.TypeId for f in fillet.Shape.Faces}
+                self.assertNotIn("Part::GeomBSplineSurface", kinds)
+                plain = self.cornerPlate(small)
+                right = plain.makeFillet(2, self.topRim(plain)).cut(sink)
+                self.assertLess(symmetric_difference(fillet.Shape, right), 1e-6)
 
     @staticmethod
     def pocketBlock(hole=False):
@@ -2748,6 +2772,144 @@ class BridgedRecessTest(unittest.TestCase):
                 fillet = filleted_in_a_body(self.doc, block, picked, 1.5)
                 self.assertTrue(fillet.isValid(), fillet.getStatusString())
                 self.assertEqual(len(fillet.Shape.Solids), 1)
+
+
+class RimAcrossCountersinkTest(unittest.TestCase):
+    """A rim round whose band crosses countersinks (ops#993; DSH lids, notes/rim-band-countersink-993.md
+    in the ops repository): a plate 10 thick whose vertical edges are rounded r 6, its top rim (lines
+    and arcs, tangent) rounded r 1.5875, and a countersink (a cone r 4 at the top face to r 2 at
+    depth 2, then a hole r 2 through) whose rim lies 1.25 from a side, so the band overlaps it by
+    0.3375. OCCT bridges the bite with B-spline patches; Onshape's result is the plain plate's
+    round with the countersink cut afterwards, which the exact construction builds. The bite lies
+    within one line's round (mid-side), or runs across the junction of a side's line and a corner's
+    arc (the lid's case, where 1.0.4 kept OCCT's bridge silently).
+    """
+
+    radius = 1.5875
+    rectangle = [V(0, 0, 0), V(60, 0, 0), V(60, 40, 0), V(0, 40, 0)]
+    # An L plate: one reflex corner, its arc concave
+    ell = [V(0, 0, 0), V(60, 0, 0), V(60, 20, 0), V(30, 20, 0), V(30, 40, 0), V(0, 40, 0)]
+
+    setUp = InvalidDressUpTest.setUp
+    tearDown = InvalidDressUpTest.tearDown
+
+    @staticmethod
+    def plate(points):
+        solid = Part.Face(Part.makePolygon(points + [points[0]])).extrude(V(0, 0, 10))
+        return solid.makeFillet(6, [e for e in solid.Edges if abs(e.BoundBox.ZLength - 10) < 1e-9])
+
+    @staticmethod
+    def sink(x):
+        # Its rim (r 4) 1.25 from the side y = 0
+        y = 5.25
+        return (
+            Part.makeCone(2, 4, 2, V(x, y, 8))
+            .fuse(Part.makeCylinder(2, 12, V(x, y, -1)))
+            .removeSplitter()
+        )
+
+    @staticmethod
+    def rim(shape):
+        """The top face's outer loop: its lines and the corners' arcs r 6 at z 10"""
+        return [
+            e
+            for e in shape.Edges
+            if all(abs(v.Point.z - 10) < 1e-9 for v in e.Vertexes)
+            and (e.Curve.TypeId == "Part::GeomLine" or abs(e.Curve.Radius - 6) < 1e-9)
+        ]
+
+    def cases(self):
+        # The corner arc at (60, 0) starts at x 54 on y 0: the sink at x 53 bites across it
+        for name, points in (("rectangle", self.rectangle), ("L plate", self.ell)):
+            for where, x in (("mid-side", 15.0), ("junction", 53.0)):
+                yield "%s, %s" % (name, where), points, x
+
+    def expected(self, points, x):
+        plain = self.plate(points)
+        return plain.makeFillet(self.radius, self.rim(plain)).cut(self.sink(x)).removeSplitter()
+
+    def assertOnshapes(self, result, right):
+        self.assertTrue(result.isValid())
+        self.assertEqual(len(result.Solids), 1)
+        self.assertNotIn("Part::GeomBSplineSurface", {f.Surface.TypeId for f in result.Faces})
+        self.assertLess(symmetric_difference(result, right), 1e-6)
+        refined = result.removeSplitter()
+        self.assertEqual(len(refined.Faces), len(right.Faces))
+        self.assertEqual(len(refined.Edges), len(right.Edges))
+
+    def testMakeFilletFromPython(self):
+        # Part's makeFillet from Python runs no bridge check. Mid-side, OCCT's stretch over the
+        # bite was recognised and could not be made exact with OCCT's topology, which raised (the
+        # lid's other edge order): the exact construction builds it now. Across a junction OCCT's
+        # bridge isn't recognised and is returned as it is (extra material, B-spline faces; debt,
+        # as before ops#993): the features check it
+        for name, points, x in self.cases():
+            with self.subTest(case=name):
+                shape = self.plate(points).cut(self.sink(x))
+                result = shape.makeFillet(self.radius, self.rim(shape))
+                if "junction" in name:
+                    self.assertIn(
+                        "Part::GeomBSplineSurface", {f.Surface.TypeId for f in result.Faces}
+                    )
+                    self.assertGreater(result.Volume - self.expected(points, x).Volume, 1e-3)
+                else:
+                    self.assertOnshapes(result, self.expected(points, x))
+
+    def testRimRoundAcrossACountersinkInABody(self):
+        for name, points, x in self.cases():
+            with self.subTest(case=name):
+                shape = self.plate(points).cut(self.sink(x))
+                self.assertEqual(len(self.rim(shape)), len(points) * 2)
+                fillet = filleted_in_a_body(self.doc, shape, self.rim, self.radius)
+                self.assertTrue(fillet.isValid(), fillet.getStatusString())
+                self.assertOnshapes(fillet.Shape, self.expected(points, x))
+
+    def testRimPickedByOneEdge(self):
+        # One line of the rim picked: tangent propagation carries the round round the loop, and
+        # the construction rounds the whole loop as OCCT's contour has it
+        shape = self.plate(self.rectangle).cut(self.sink(53.0))
+
+        def one(s):
+            return [
+                e
+                for e in self.rim(s)
+                if e.Curve.TypeId == "Part::GeomLine" and abs(e.BoundBox.YMax - 40) < 1e-9
+            ]
+
+        self.assertEqual(len(one(shape)), 1)
+        fillet = filleted_in_a_body(self.doc, shape, one, self.radius)
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+        self.assertOnshapes(fillet.Shape, self.expected(self.rectangle, 53.0))
+
+    def testPartFilletAcrossACountersink(self):
+        # Part::Fillet with one radius on every edge, the same
+        shape = self.plate(self.ell).cut(self.sink(53.0))
+        edges = self.rim(shape)
+        feature = InvalidDressUpTest.dressUp(
+            self, "Fillet", shape, edges, [(self.radius, self.radius)] * len(edges)
+        )
+        self.assertTrue(feature.isValid(), feature.getStatusString())
+        self.assertOnshapes(feature.Shape, self.expected(self.ell, 53.0))
+
+    def testPartFilletOfTwoRadiiStillFails(self):
+        # Two radii: the construction takes one, and the bridge stays an error
+        shape = self.plate(self.rectangle).cut(self.sink(15.0))
+        edges = self.rim(shape)
+        sizes = [(self.radius, self.radius)] * len(edges)
+        other = next(
+            i
+            for i, e in enumerate(edges)
+            if e.Curve.TypeId == "Part::GeomLine" and abs(e.BoundBox.YMax - 40) < 1e-9
+        )
+        sizes[other] = (1.0, 1.0)
+        feature = InvalidDressUpTest.dressUp(self, "Fillet", shape, edges, sizes)
+        self.assertFalse(feature.isValid())
+        self.assertTrue(
+            feature.getStatusString().startswith(
+                "The fillet's band crosses a hole or pocket on Face"
+            ),
+            feature.getStatusString(),
+        )
 
 
 def tolerances(shape):

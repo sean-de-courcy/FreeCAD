@@ -226,7 +226,28 @@ App::DocumentObjectExecReturn* Fillet::execute()
             edgeRadii
         );
         if (!bridged.empty()) {
-            return new App::DocumentObjectExecReturn("The fillet" + bridged);
+            // Onshape's round there is the plain round cut by the openings: the exact
+            // construction, below the limit, where it builds a result without a bridge (ops#993)
+            TopoShape exact = res;
+            std::string why;
+            if (!sameRadii || radii.front().first != radii.front().second
+                || !Part::FilletFallback::buildAcrossRecess(
+                    exact,
+                    baseTopoShape,
+                    edgeShapes,
+                    radii.front().first,
+                    Part::OpCodes::Fillet,
+                    &why
+                )
+                || !Part::checkDressUp(exact, baseTopoShape)
+                || !Part::filledPocket(exact, baseTopoShape, edgeShapes, largest).empty()
+                || (!recorder.rolledOn()
+                    && !Part::lostMaterial(exact, baseTopoShape, edgeShapes, largest).empty())
+                || !Part::bridgedRecess(exact, baseTopoShape, edgeShapes, largest, smallest, edgeRadii)
+                        .empty()) {
+                return new App::DocumentObjectExecReturn("The fillet" + bridged);
+            }
+            res = exact;
         }
         // Where OCCT failed, the exact construction built it (ops#300, decision 54)
         recorder.report(Label.getValue());
