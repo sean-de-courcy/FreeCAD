@@ -372,6 +372,12 @@ def _mergeModel(model, path, features):
     doc.InternNames = False  # into a plain document (new ones start interned: ops#6 Q6)
     doc.mergeProject(path)
     result = {"expanded": _expanded(model, doc, features)}
+    # The merge gives the objects new IDs, and their names get them (ops#1002): the names a
+    # recompute of the merged objects gives
+    for obj in doc.Objects:
+        obj.touch()
+    doc.recompute()
+    result["recomputed"] = _expanded(model, doc, features)
     App.closeDocument(doc.Name)
     return result
 
@@ -1038,7 +1044,13 @@ class TestNamingLoadCollision(unittest.TestCase):
         self.assertEqual(result["forced"], len(colliding))
         self.checkModel(checked(self, result["models"][model]), info, colliding)
         merged = checked(self, result["merged"][model])
-        self.assertEqual(merged["expanded"], info["expanded"], "expanded names after a merge")
+        # With the merged objects' new IDs (ops#1002): as a recompute of them names them
+        self.assertEqual(merged["expanded"], merged["recomputed"], "expanded names after a merge")
+        self.assertEqual(
+            len(merged["expanded"].splitlines()),
+            len(info["expanded"].splitlines()),
+            "the merge's names, counted",
+        )
 
     def checkCrossDoc(self, key):
         self.checkCrossDocResult(

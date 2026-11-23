@@ -76,6 +76,7 @@ namespace PartDesign
 {
 void registerPartMirrorResync();  // StudioList.cpp (ops#654 slice 9; declared where used)
 void registerPieceImport();       // Pieces.cpp (ops#920; declared where used)
+void registerPipeImport();        // FeaturePipe.cpp (ops#1002; declared where used)
 }  // namespace PartDesign
 
 
@@ -108,6 +109,8 @@ PyMOD_INIT_FUNC(_PartDesign)
     // A split's piece records follow their objects' new IDs through import, merge and paste
     // (ops#920)
     PartDesign::registerPieceImport();
+    // A sweep's records of its spine follow the import's names and IDs (ops#1002)
+    PartDesign::registerPipeImport();
     // Part Studio variables have a place in the history (ops#723). Before registerHistoryImport:
     // a deleted row's variables move up while the row (a studio owner and its steps) is still
     // listed, before the list drops it
