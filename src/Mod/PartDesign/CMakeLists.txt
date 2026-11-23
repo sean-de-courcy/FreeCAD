@@ -1207,6 +1207,7 @@ set(PartDesign_CompatGen5
     PartDesignTests/Compat/gen5/RevolveFreeFormProfile.FCStd
     PartDesignTests/Compat/gen5/RevolveFreeFormProfile.oracle.json
     PartDesignTests/Compat/gen5/RoundOnSpline.FCStd
+    PartDesignTests/Compat/gen5/RoundOnSpline.delta.json
     PartDesignTests/Compat/gen5/RoundOnSpline.oracle.json
     PartDesignTests/Compat/gen5/RoundUnderLeaningWall.FCStd
     PartDesignTests/Compat/gen5/RoundUnderLeaningWall.oracle.json
@@ -1312,6 +1313,7 @@ set(PartDesign_CompatGen5Macos
     PartDesignTests/Compat/gen5-macos/RevolveFreeFormProfile.FCStd
     PartDesignTests/Compat/gen5-macos/RevolveFreeFormProfile.oracle.json
     PartDesignTests/Compat/gen5-macos/RoundOnSpline.FCStd
+    PartDesignTests/Compat/gen5-macos/RoundOnSpline.delta.json
     PartDesignTests/Compat/gen5-macos/RoundOnSpline.oracle.json
     PartDesignTests/Compat/gen5-macos/RoundUnderLeaningWall.FCStd
     PartDesignTests/Compat/gen5-macos/RoundUnderLeaningWall.oracle.json
