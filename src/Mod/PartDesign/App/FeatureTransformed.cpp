@@ -780,6 +780,51 @@ struct ReapplyCollector
         }
     }
 
+    /** ops#963 A (4c8292): whether obj only kept element (its sub) from its base: the base's shape
+     * holds an element of the same type under the same mapped name, at points (within tol). No
+     * element map, or no base: false (today's reading stays) */
+    static bool keptFromBase(
+        App::DocumentObject* obj,
+        const std::string& sub,
+        const TopoDS_Shape& element,
+        const std::vector<gp_Pnt>& points,
+        double tol
+    )
+    {
+        auto feature = freecad_cast<PartDesign::Feature*>(obj);
+        if (!feature) {
+            return false;
+        }
+        App::DocumentObject* baseObject = feature->getBaseObject(/*silent=*/true);
+        if (!baseObject) {
+            return false;
+        }
+        try {
+            const auto options = Part::ShapeOption::ResolveLink | Part::ShapeOption::Transform;
+            const Part::TopoShape shape = Part::Feature::getTopoShape(obj, options);
+            const Data::MappedName mapped = shape.getElementName(sub.c_str()).name;
+            if (!mapped) {
+                return false;
+            }
+            const Part::TopoShape base = Part::Feature::getTopoShape(baseObject, options);
+            const Data::IndexedName there = base.getIndexedName(mapped);
+            // The literal name: getIndexedName also resolves a name the base doesn't hold
+            // (review pr4c82-r2 T-b)
+            if (!there || base.getMappedName(there) != mapped) {
+                return false;
+            }
+            const TopoDS_Shape held = base.getSubShape(there.toString().c_str(), true);
+            return !held.IsNull() && held.ShapeType() == element.ShapeType()
+                && pointsOn(points, held, tol);
+        }
+        catch (const Base::Exception&) {
+            return false;
+        }
+        catch (const Standard_Failure&) {
+            return false;
+        }
+    }
+
     /// ops#992: why a merged up-to face (ownElement's 2) is refused where the run can't check it
     std::string mergedWhy;
 
@@ -847,13 +892,19 @@ struct ReapplyCollector
         const double tol = std::max(1e-6, 1e-7 * std::sqrt(box.SquareExtent()));
         const std::vector<gp_Pnt> points = pointsOf(element);
         App::DocumentObject* maker = inBody(obj) ? obj : nullptr;
+        bool walkedInBody = false;  // the walk met a member of the Body other than obj
+        const App::DocumentObject* walkedLast = nullptr;  // the history's last object
         const bool face = element.ShapeType() == TopAbs_FACE;
         const bool sameType = face || element.ShapeType() == TopAbs_VERTEX;
         if (sameType) {
             for (const auto& item : Part::Feature::getElementHistory(obj, sub.c_str(), true, true)) {
+                if (item.obj) {
+                    walkedLast = item.obj;
+                }
                 if (!item.obj || item.obj == obj || !inBody(item.obj)) {
                     continue;
                 }
+                walkedInBody = true;
                 std::string there = item.index ? item.index.toString() : std::string();
                 if (there.empty() && item.element) {
                     there = Data::ELEMENT_MAP_PREFIX + item.element.toString();
@@ -872,6 +923,21 @@ struct ReapplyCollector
             return 0;
         }
         if (nested.count(maker) || !levels.empty()) {
+            // ops#963 A (a team document's mirror): a face made outside the Body (a wall of
+            // another Body that a Boolean or the first feature subtracts) and only kept by the
+            // linked object has no member of the Body in its history, so the maker is still the
+            // link's object. Where that object's base holds the element under the same name, in
+            // the same place, the link's object didn't make it: outside, as 1.0.4 read it and
+            // Onshape builds it. The history must end on an object outside the Body and meet no
+            // member of it: one that meets a member (an original's face a later feature merged
+            // into, review pr4c82-r1 R1/R2), or only the linked object (a name rebuilt from its
+            // edges, review pr4c82-r2 KN), keeps the refusal (coordinator c799's ruling)
+            const bool endsOutside = walkedLast && walkedLast != obj
+                && (!body || Body::findBodyOf(walkedLast) != body);
+            if (sameType && endsOutside && !walkedInBody && maker == obj
+                && keptFromBase(obj, sub, element, points, tol)) {
+                return 0;
+            }
             why = "Reapply isn't available yet for an extrusion up to an element made by an "
                   "original reached through another pattern: " + name + unavailable;
             return -1;

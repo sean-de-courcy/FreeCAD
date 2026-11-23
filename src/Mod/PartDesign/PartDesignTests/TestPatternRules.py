@@ -917,6 +917,211 @@ class TestPatternRules(unittest.TestCase):
                 self.assertBody(100000 + 2 * 2000 + 2 * 20 * area)
                 self.assertTrue(self.inside(0, 20, 15), "no pad at the second instance")
 
+    # -- Reapply: an up-to face kept from outside the Body, linked on an inner pattern ----------
+
+    def cavityMirrored(self, tool):
+        """The plate 100 x 100 x 10 (100000) with a cavity x 30..40, y -5..5, z 4..10 (-600): cut
+        by a Tool Body's pad (z 4..12) with a Boolean when tool, else a Pocket of this Body. P1, a
+        pocket x 5..15, y 20..30, 5 deep (-500); M1, P1 mirrored across XZ, Reapply on (-500 at y
+        -30..-20). Returns M1's face of the cavity's wall x = 40 (60)."""
+        self.block(-50, -50, 50, 50)
+        if tool:
+            toolBody = self.doc.addObject("PartDesign::Body", "Tool")
+            toolSketch = models.sketch(
+                self.doc, "ToolSketch", models.rectangle(30, -5, 40, 5), toolBody, z=4
+            )
+            models.pad(toolBody, toolSketch, 8, name="ToolPad")
+            self.recompute()
+            cut = self.body.newObject("PartDesign::Boolean", "Cut")
+            cut.setObjects([toolBody])
+            cut.Type = 1
+            self.body.Tip = cut
+        else:
+            cavitySketch = models.sketch(
+                self.doc, "CavitySketch", models.rectangle(30, -5, 40, 5), self.body, z=10
+            )
+            models.pocket(self.body, cavitySketch, 6, name="Cavity")
+        self.recompute()
+        self.assertBody(100000 - 600)
+        p1Sketch = models.sketch(
+            self.doc, "P1Sketch", models.rectangle(5, 20, 15, 30), self.body, z=10
+        )
+        self.p1 = models.pocket(self.body, p1Sketch, 5, name="P1")
+        self.recompute()
+        self.m1 = self.mirror(self.p1, "XZ_Plane", name="M1")
+        self.m1.Reapply = True
+        self.recompute()
+        self.assertValid(self.m1)
+        self.assertBody(100000 - 600 - 1000)
+        return self.faceOf(self.m1, V(40, 0, 7), 60)
+
+    def pocketUpTo(self, name, sketch, link, removed):
+        pocket = self.body.newObject("PartDesign::Pocket", name)
+        pocket.Profile = sketch
+        pocket.Type = "UpToFace"
+        pocket.UpToFace = link
+        before = self.body.Shape.Volume
+        for reversed_ in (False, True):
+            pocket.Reversed = reversed_
+            self.recompute()
+            if pocket.isValid() and abs(before - self.body.Shape.Volume - removed) < 1e-6:
+                break
+        self.assertValid(pocket)
+        self.assertBody(before - removed)
+        return pocket
+
+    def cavityTunnel(self, tool):
+        """P2: a 4 x 2 pocket (y -2..2, z 6..8) from the plate's side x = 50 towards -x up to the
+        cavity's wall x = 40, linked as M1's face (-80). M2: P1, M1 and P2 mirrored across YZ,
+        Reapply on."""
+        wall = self.cavityMirrored(tool)
+        sketch = self.xSketch("P2Sketch", 50, models.rectangle(-2, 6, 2, 8))
+        p2 = self.pocketUpTo("P2", sketch, (self.m1, [wall]), 80)
+        m2 = self.mirror(p2, "YZ_Plane", name="M2")
+        m2.Originals = [self.p1, self.m1, p2]
+        m2.Reapply = True
+        self.recompute()
+        return m2
+
+    def assertTunnelOutside(self, m2):
+        """The wall is outside (Onshape O6: the same face at every instance): M2's P2 runs from x
+        = -50 up to the wall x = 40 through the plate to the cavity, x -50..30 (-640): 100000 -
+        600 - 4 x 500 - 80 - 640 = 96680, 39 faces. (Read as own, it would end on the mirrored
+        cavity's wall x = -40, which isn't there: the Reapply-off copy gives 97240.)"""
+        self.assertValid(m2)
+        self.assertNoWarning(m2)
+        self.assertBody(96680)
+        self.assertEqual(len(self.body.Shape.Faces), 39)
+        self.assertFalse(self.inside(0, 0, 7))
+        self.assertTrue(self.inside(0, 0, 3))
+
+    def testReapplyUpToAWallMadeOutsideTheBodyNested(self):
+        """A team document's mirror (ops#963 A): the up-to face is a wall of another Body that
+        the Body's Boolean cuts, picked on an inner mirror's shape (M1, which only kept it). Its
+        history has no holder in the Body, so the face's maker was taken as M1, an inner pattern,
+        and M2 was refused ("reached through another pattern"). M1's base holds the face under
+        the same name, so M1 didn't make it: outside, as 1.0.4 read it."""
+        self.assertTunnelOutside(self.cavityTunnel(tool=True))
+
+    def testReapplyUpToAWallMadeInTheBodyNestedControl(self):
+        """The same cavity made by a Pocket of this Body: the history finds the Pocket, outside."""
+        self.assertTunnelOutside(self.cavityTunnel(tool=False))
+
+    def testReapplyUpToAWallAnInnerPatternMadeStaysRefused(self):
+        """A face M1 made, its copy of P1's wall y = -30: a 4 x 2 pocket (x 8..12, z 6..8) from
+        the plate's side y = -50 towards +y up to it, linked as M1's face (-160). M2 of P1, M1 and
+        it, Reapply on, stays refused (ops#963 A): M1's base doesn't hold that face."""
+        self.cavityMirrored(tool=True)
+        copyWall = self.faceOf(self.m1, V(10, -30, 7.5), 50)
+        sketch = models.sketch(
+            self.doc,
+            "P3Sketch",
+            models.rectangle(8, 6, 12, 8),
+            self.body,
+            placement=App.Placement(V(0, -50, 0), App.Rotation(V(1, 0, 0), 90)),
+        )
+        p3 = self.pocketUpTo("P3", sketch, (self.m1, [copyWall]), 160)
+        m2 = self.mirror(p3, "YZ_Plane", name="M2")
+        m2.Originals = [self.p1, self.m1, p3]
+        m2.Reapply = True
+        self.recompute()
+        self.assertFailed(m2, "reached through another pattern")
+        m2.Reapply = False
+        self.recompute()
+        self.assertValid(m2)
+        self.assertBody(100000 - 600 - 2000 - 320)
+
+    def testReapplyUpToAWallAnOriginalMadeAndALaterPocketExtendedStaysRefused(self):
+        """Review pr4c82-r1 R1, R2: P0, a pocket x 30..40, y -5..5, 6 deep (-600), and G, one at y
+        5..15 (-600): the wall x = 40 merged (120), named after P0. P1 and M1 as above; P2 from
+        x = 50 up to that wall, linked as M1's face (-80). The history meets P0, a member of the
+        Body, though P0's face is only half the wall: M2 of P0 (and G), P1, M1 and P2, Reapply on,
+        stays refused, never read outside."""
+        for withG in (True, False):
+            with self.subTest(withG=withG):
+                if hasattr(self, "body"):
+                    App.closeDocument(self.doc.Name)
+                    self.doc = App.newDocument("PartDesignTestPatternRules")
+                self.block(-50, -50, 50, 50)
+                pockets = []
+                for name, y0, y1 in (("P0", -5, 5), ("G", 5, 15)):
+                    sketch = models.sketch(
+                        self.doc, name + "Sketch", models.rectangle(30, y0, 40, y1), self.body, z=10
+                    )
+                    pockets.append(models.pocket(self.body, sketch, 6, name=name))
+                self.recompute()
+                p1Sketch = models.sketch(
+                    self.doc, "P1Sketch", models.rectangle(5, 20, 15, 30), self.body, z=10
+                )
+                self.p1 = models.pocket(self.body, p1Sketch, 5, name="P1")
+                self.recompute()
+                self.m1 = self.mirror(self.p1, "XZ_Plane", name="M1")
+                self.m1.Reapply = True
+                self.recompute()
+                self.assertBody(100000 - 1200 - 1000)
+                wall = self.faceOf(self.m1, V(40, 5, 7), 120)
+                sketch = self.xSketch("P2Sketch", 50, models.rectangle(-2, 6, 2, 8))
+                p2 = self.pocketUpTo("P2", sketch, (self.m1, [wall]), 80)
+                m2 = self.mirror(p2, "YZ_Plane", name="M2")
+                m2.Originals = pockets[: 2 if withG else 1] + [self.p1, self.m1, p2]
+                m2.Reapply = True
+                self.recompute()
+                self.assertFailed(m2, "reached through another pattern")
+
+    def testReapplyUpToAWallAnOriginalMadeAndAnInnerCopyPlugsStaysRefused(self):
+        """Review pr4c82-r2 KN: C0, a pocket x 30..40, y -20..20, 6 deep (-2400), is an original;
+        R, two 4 x 2 recesses behind its wall x = 40 (x 40..43, z 6..8, y -2..2 and 10..14, -48);
+        P1 pads the second shut (+24) and L1, P1 patterned -12 along Y, the first: the wall is
+        whole again in L1, its name rebuilt from its edges, its history L1 alone. P2: 4 x 2 (y
+        -12..-8, z 5..7) from x = 50 up to that wall, linked as L1's face (-80). M2 of C0, P1, L1
+        and P2, Reapply on, stays refused: the history meets no object outside the Body."""
+        self.block(-50, -50, 50, 50)
+        c0Sketch = models.sketch(
+            self.doc, "C0Sketch", models.rectangle(30, -20, 40, 20), self.body, z=10
+        )
+        c0 = models.pocket(self.body, c0Sketch, 6, name="C0")
+        self.recompute()
+        sketch = self.xSketch(
+            "RSketch", 40, models.rectangle(-2, 6, 2, 8) + models.rectangle(10, 6, 14, 8)
+        )
+        recess = self.body.newObject("PartDesign::Pocket", "R")
+        recess.Profile = sketch
+        recess.Length = 3
+        for reversed_ in (False, True):
+            recess.Reversed = reversed_
+            self.recompute()
+            if recess.isValid() and abs(self.body.Shape.Volume - (100000 - 2400 - 48)) < 1e-6:
+                break
+        self.assertBody(100000 - 2400 - 48)
+        p1 = self.body.newObject("PartDesign::Pad", "P1")
+        p1.Profile = self.xSketch("P1Sketch", 40, models.rectangle(10, 6, 14, 8))
+        p1.Length = 3
+        for reversed_ in (False, True):
+            p1.Reversed = reversed_
+            self.recompute()
+            if p1.isValid() and abs(self.body.Shape.Volume - (100000 - 2400 - 24)) < 1e-6:
+                break
+        self.assertBody(100000 - 2400 - 24)
+        l1 = self.body.newObject("PartDesign::LinearPattern", "L1")
+        l1.Originals = [p1]
+        l1.Direction = self.axis("Y_Axis")
+        l1.Mode = "Extent"
+        l1.Length = 12
+        l1.Reversed = True
+        l1.Occurrences = 2
+        l1.Reapply = True
+        self.body.Tip = l1
+        self.recompute()
+        self.assertBody(100000 - 2400)
+        wall = self.faceOf(l1, V(40, 0, 7), 240)
+        p2Sketch = self.xSketch("P2Sketch", 50, models.rectangle(-12, 5, -8, 7))
+        p2 = self.pocketUpTo("P2", p2Sketch, (l1, [wall]), 80)
+        m2 = self.mirror(p2, "YZ_Plane", name="M2")
+        m2.Originals = [c0, p1, l1, p2]
+        m2.Reapply = True
+        self.recompute()
+        self.assertFailed(m2, "reached through another pattern")
+
 
 if __name__ == "__main__":
     unittest.main()
