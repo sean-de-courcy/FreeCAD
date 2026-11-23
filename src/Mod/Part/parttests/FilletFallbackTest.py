@@ -8896,7 +8896,21 @@ class EndOnTangentWallTest(unittest.TestCase):
             ]
             curve = Part.BSplineCurve()
             curve.interpolate(points, PeriodicFlag=True)
-            tool = Part.Face(Part.Wire([curve.toShape()])).extrude(V(0, 0, 5 * s))
+            # The pocket's outline as base()'s, the wall the spline's quarter from b to a through
+            # its own points, so no Boolean meets the near-tangent wall (PR 528's macOS run: the
+            # boxes' fuse there left an edge of 4 faces at the round's end, by the last digits)
+            z = TOP - 5 * s
+            a, b = V(c.x, c.y - R, z), V(c.x - R, c.y, z)
+            ua, ub = curve.parameter(a), curve.parameter(b)
+            if ua < ub:
+                ua += curve.getKnots()[-1] - curve.getKnots()[0]
+            wire = Part.Wire(
+                [
+                    curve.toShape(ub, ua),
+                    Part.makePolygon([a, V(50 * s, L, z), V(50 * s, 30 * s, z), V(20 * s - R, 30 * s, z), b]),
+                ]
+            )
+            pocket = Part.Face(wire).extrude(V(0, 0, 5 * s))
         else:
             profile = Part.makePolygon(
                 [V(c.x, c.y, TOP - 5 * s), V(c.x + R, c.y, TOP - 5 * s), V(c.x + R, c.y, TOP), V(c.x, c.y, TOP), V(c.x, c.y, TOP - 5 * s)]
@@ -8904,13 +8918,16 @@ class EndOnTangentWallTest(unittest.TestCase):
             tool = Part.Face(profile).revolve(V(c.x, c.y, 0), V(0, 0, 1), 360)
             tool = Part.Solid(Part.Shell(tool.Faces)) if tool.ShapeType != "Solid" else tool
             tool.rotate(V(c.x, c.y, 0), V(0, 0, 1), math.degrees(theta))
-        z = TOP - 5 * s
-        boxes = Part.makeBox(30 * s + R, 30 * s - L - R, 5 * s, V(20 * s - R, L + R, z)).fuse(
-            Part.makeBox(30 * s, R + 1e-3 * s, 5 * s, V(20 * s, L, z))
-        )
+            z = TOP - 5 * s
+            boxes = Part.makeBox(30 * s + R, 30 * s - L - R, 5 * s, V(20 * s - R, L + R, z)).fuse(
+                Part.makeBox(30 * s, R + 1e-3 * s, 5 * s, V(20 * s, L, z))
+            )
+            pocket = tool.fuse(boxes)
         block = Part.makeBox(60 * s, 40 * s, TOP)
         notch = Part.makeBox(10 * s, L, 9 * s, V(20 * s, 0, TOP - 9 * s))
-        body = block.cut(tool.fuse(boxes)).cut(notch).removeSplitter()
+        body = block.cut(pocket).cut(notch).removeSplitter()
+        # The intended model: every edge between two faces (no pinch)
+        self.assertEqual({len(body.ancestorsOfType(e, Part.Face)) for e in body.Edges}, {2})
         found = [
             e
             for e in body.Edges
