@@ -52,6 +52,7 @@ from parttests.FilletFallbackTest import (
     PinchedVertexTest,  # ops#953
     MixedCoverageTest,  # ops#952
     StraightBSplineWallTest,  # ops#950
+    InvalidResultWiderScopeTest,  # ops#989
     CornerWithACircleTest,
     BlendEndTrimTest,
     CurvedEndTrimTest,
