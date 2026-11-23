@@ -4249,11 +4249,27 @@ class CurvedWallEndTest(unittest.TestCase):
                 self.assertEqual(len(shape.Solids), 1)
                 self.assertAlmostEqual(shape.Volume, sector.Volume - removed, delta=1e-6)
 
-    def testChamferOfACurvedWallsEndFails(self):
-        # Not built yet: a chamfer's distances along a cylinder
+    def testChamferOfACurvedWallsEndIsTheChordRule(self):
+        # ops#987: OCCT fails; the construction builds each edge's chamfer by Onshape's chord rule
+        # (on the end face at w from the edge, on the cylinder at the same straight-line distance
+        # w). Per edge, h times the triangle of the corner and the two points, plus the outer
+        # cylinder's segment over its chord, less the inner's. At w = half the wall's thickness the
+        # two chamfers meet on the end face's middle line and the end face goes (7 faces)
         sector, edges = self.wall(10, 11.5, 4)
-        with self.assertRaises(Part.OCCError):
-            sector.makeChamfer(0.75, edges)
+        for w, faces in ((0.5, 8), (0.75, 7)):
+            with self.subTest(w=w):
+                removed = 0.0
+                for R, inside in ((11.5, True), (10.0, False)):
+                    theta = 2 * math.asin(w / (2 * R))
+                    segment = R * R * (theta - math.sin(theta)) / 2
+                    along = R - w if inside else R + w
+                    triangle = abs((along - R) * R * math.sin(theta)) / 2
+                    removed += 4 * (triangle + segment if inside else triangle - segment)
+                shape = sector.makeChamfer(w, edges)
+                self.assertTrue(shape.isValid())
+                self.assertEqual(len(shape.Solids), 1)
+                self.assertEqual(len(shape.Faces), faces)
+                self.assertAlmostEqual(sector.Volume - shape.Volume, removed, delta=1e-6)
 
     def testFullRoundOfAWallOnABase(self):
         # ops#640 F1. The round ends square on the base's top: it removes the section over the
