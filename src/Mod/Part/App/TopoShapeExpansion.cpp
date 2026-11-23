@@ -8715,6 +8715,12 @@ struct DressUpOutcome
     /// The mitre corners' scope was asked on OCCT's invalid result (ops#941), and refused or
     /// built a mitre that was off: the reverse order's result is not asked again
     bool mitreAsked {false};
+    /// OCCT's result is invalid and the construction built it only with the wider scope
+    /// (ops#989): the reverse order's valid result, which stood before, still comes first
+    bool widerAfterInvalid {false};
+    /// OCCT's result is valid, and the feature's own check refused it on an earlier build of the
+    /// same selection (FilletFallback::RefusedResultScope, ops#990): the construction, else OCCT's
+    bool refused {false};
     FilletFallback::Construction construction;
     std::string reason;
 };
@@ -8735,6 +8741,9 @@ std::shared_ptr<DressUpOutcome> buildDressUp(
 )
 {
     auto outcome = std::make_shared<DressUpOutcome>();
+    // Read on the caller's thread: the build below runs on a worker
+    const bool refusedScope = request.kind == FilletFallback::Kind::Fillet
+        && FilletFallback::RefusedResultScope::active();
     std::vector<TopoDS_Shape> edges;
     edges.reserve(inputEdges.size());
     for (const auto& edge : inputEdges) {
@@ -8748,7 +8757,8 @@ std::shared_ptr<DressUpOutcome> buildDressUp(
          request = FilletFallback::Request(request),
          outcome,
          prefer,
-         reflex](const Message_ProgressRange& /*range*/) mutable {
+         reflex,
+         refusedScope](const Message_ProgressRange& /*range*/) mutable {
             DressUpOutcome& out = *outcome;
             if (prefer) {
                 // OCCT's result would be valid but wrong (a tight wall arc): the construction
@@ -8788,8 +8798,10 @@ std::shared_ptr<DressUpOutcome> buildDressUp(
             if (!out.failed && !out.thin && !out.invalid && !out.cusp && !out.turns && !out.ring) {
                 out.wrongWay = FilletFallback::wrongWay(maker->Shape(), base, edges, request);
             }
+            // ops#990: the feature refused OCCT's valid result on an earlier build
+            out.refused = refusedScope && !out.failed && !out.thin && !out.invalid;
             if ((out.failed || out.thin || out.invalid || out.cusp || out.turns || out.reflexFirst
-                 || out.ring || !out.wrongWay.empty())
+                 || out.ring || !out.wrongWay.empty() || out.refused)
                 && !prefer) {
                 // ops#941: OCCT's invalid result where its rounds meet in a mitre at a line's and
                 // an arc's corner (one of its narrow bands of radius): the mitre corners' scope
@@ -8833,7 +8845,7 @@ std::shared_ptr<DressUpOutcome> buildDressUp(
                 }
                 // ops#888: the wider scope only where OCCT built nothing usable, or where its
                 // result is known not to be Onshape's (an arc's tool closing into a ring)
-                request.widerScope = out.failed || out.thin || out.ring;
+                request.widerScope = out.failed || out.thin || out.ring || out.refused;
                 // A cut tool past both its faces (ops#888 A1): only where OCCT built nothing
                 // usable, so that no result OCCT builds today moves
                 request.pastBothFaces = out.failed || out.thin;
@@ -8843,8 +8855,15 @@ std::shared_ptr<DressUpOutcome> buildDressUp(
                 // anyway, so where the construction refused, once more with the wider scope
                 // (concave fills that meet along their intersection, a fill kept over its wall
                 // beside a notch: NS44 Vial Well Atrium #136). Only after a refusal, so nothing
-                // that builds today moves; where this one refuses too, both reasons are given
-                if (!out.constructed && out.reflexFirst && !request.widerScope) {
+                // that builds today moves; where this one refuses too, both reasons are given.
+                // ops#989: likewise where OCCT's result is invalid, which fails the feature: at a
+                // limit OCCT can return an invalid shape where it fails outright on the same
+                // geometry after a round trip, so the rules of the wider scope (an arc's end plane
+                // that misses its axis, Runner #21) are asked there too. Built so, the reverse
+                // order's valid result, which stood before, still comes first
+                const bool invalidWider = out.invalid && !out.mitreAsked
+                    && request.kind == FilletFallback::Kind::Fillet;
+                if (!out.constructed && (out.reflexFirst || invalidWider) && !request.widerScope) {
                     const std::string firstReason = out.reason;
                     request.widerScope = true;
                     out.constructed = FilletFallback::construct(
@@ -8856,6 +8875,9 @@ std::shared_ptr<DressUpOutcome> buildDressUp(
                     );
                     if (!out.constructed) {
                         out.reason = firstReason + " (with the wider scope: " + out.reason + ")";
+                    }
+                    else if (!out.reflexFirst) {
+                        out.widerAfterInvalid = true;
                     }
                 }
             }
@@ -10177,12 +10199,14 @@ TopoShape& TopoShape::makeElementFillet(
     // Also where OCCT's result is invalid and the construction refused it, so that the feature
     // would fail: a line's and an arc's rounds meeting in a mitre at a corner, in OCCT's narrow
     // bands of radius (ops#925), build in the reverse order
-    const bool failsAsIs = outcome->failed || (outcome->invalid && !outcome->constructed);
+    const bool failsAsIs = outcome->failed
+        || (outcome->invalid && (!outcome->constructed || outcome->widerAfterInvalid));
     // The reverse order's result was taken where the mitre corners' scope has just refused on the
     // first order's invalid result: it is not asked again (ops#941). Where OCCT's first order
     // failed outright, it was not asked, and is asked on the second's valid result
     bool retried = false;
-    if (failsAsIs && (!outcome->constructed || outcome->construction.newRule)
+    if (failsAsIs
+        && (!outcome->constructed || outcome->construction.newRule || outcome->widerAfterInvalid)
         && inputEdges.size() > 1) {
         // FreeCAD-CH (Case Base #165): OCCT's walker can fail on a tangent chain by the edge its
         // contour is seeded from (a chain's first listed edge): an ellipse seed then a line whose
@@ -10236,7 +10260,9 @@ TopoShape& TopoShape::makeElementFillet(
         outcome = buildDressUp(mkFillet, input, inputEdges, request, "The fillet", false, reflex);
     }
     if (outcome->failed || outcome->thin || outcome->invalid || outcome->turns
-        || outcome->reflexFirst || outcome->ring || !outcome->wrongWay.empty()) {
+        || outcome->reflexFirst || outcome->ring || !outcome->wrongWay.empty() || outcome->refused) {
+        // (Where the construction refuses OCCT's refused result, OCCT's is returned: the feature's
+        // check refuses it as before, ops#990)
         if (finishConstruction(*this, *outcome, input, op)) {
             return *this;
         }

@@ -521,7 +521,8 @@ names it.
 | `fix/i992-made-together-outside` | fix | ops#992 | - | `integration` `7290ced366` | `4f01351fbb` (fork PR 523), 2026-11-23 | never (fork fix): a Reapply up-to face made together with an earlier feature is outside, as 1.0.4 |
 | `fix/roundonspline-delta-install` | fix | ops#962 | - | integration | `160bc445b0` (fork PR 527), 2026-11-23 | never (fork fix): the gen5 RoundOnSpline delta files are installed with the compat corpus |
 | `fix/i962-notch-end-fillet` | fix | ops#962 | - | integration | `c052eb4918` (fork PR 512), 2026-11-23 | never (fork fix): a concave round that ends at a channel cut lower than its radius, trimmed by the groove and the channel's flat side as Onshape's (ops#962) |
-| `fix/i950-rim-straight-bspline-wall` | fix | ops#950 | - | PR 512 `450b4bca38` (integration `279e29e2b5`) | (fork PR 520) | never (fork fix): a rim wall's straight B-spline edge keeps the loop in the direct rim builder |
+| `fix/i950-rim-straight-bspline-wall` | fix | ops#950 | - | PR 512 `450b4bca38` (integration `279e29e2b5`) | `724b944f81` (fork PR 520), 2026-11-23 | never (fork fix): a rim wall's straight B-spline edge keeps the loop in the direct rim builder |
+| `fix/i989-990-fillet-construction-retries` | fix | ops#989, ops#990 | - | `integration` `2c0e13cf0e` | (fork PR 521) | never (fork fix): a fillet's construction is asked with its wider scope after OCCT's invalid result, and after the feature's lost-material check refused OCCT's valid one |
 
 ## Fork-only commits in carried topics
 

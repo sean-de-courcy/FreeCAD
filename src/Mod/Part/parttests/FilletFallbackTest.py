@@ -8356,3 +8356,59 @@ class StraightBSplineWallTest(unittest.TestCase):
         self.assertAlmostEqual(result.Volume, expected.Volume, delta=1e-8)
         self.assertAlmostEqual(result.Area, expected.Area, delta=1e-7)
         self.assertLess(elapsed, 5.0)
+
+
+class InvalidResultWiderScopeTest(unittest.TestCase):
+    """ops#989 (Runner #21): OCCT's fillet returns an invalid shape where the round takes its
+    strip's whole width, and the exact construction, asked without its wider scope, refused it
+    ("the plane at the end of an arc does not contain its axis"): the feature failed with
+    "Resulting shape is invalid". Onshape builds it. After an invalid result's refusal the
+    construction is asked once more with the wider scope. Designed: a ring (R 100, inner 75, height
+    20) with a step (R 95 up to 28), so the top strip beside the outer arc is 5 wide, kept between
+    the chord planes x = -40 and x = 40 (y > 0), which miss the axis; R = 5 on both outer arcs. The
+    expected result is the base less the two corner rings (a square of side 5 less its quarter
+    disc, revolved), kept between the chord planes"""
+
+    R, rr, H = 100.0, 5.0, 20.0
+
+    def base(self):
+        R, rr, H = self.R, self.rr, self.H
+        ring = Part.makeCylinder(R, H).cut(Part.makeCylinder(R - 25, H))
+        step = Part.makeCylinder(R - rr, H + 8).cut(Part.makeCylinder(R - 25, H + 8))
+        box = Part.makeBox(80, 400, 100, V(-40, 0, -10))
+        return ring.fuse(step).removeSplitter().common(box).removeSplitter(), box
+
+    def corner_ring(self, z0, up):
+        R, rr = self.R, self.rr
+        zc = z0 - rr if up else z0 + rr
+        centre, corner = V(R - rr, 0, zc), V(R, 0, z0)
+        a0, a1 = V(R - rr, 0, z0), V(R, 0, zc)
+        middle = centre + (corner - centre).normalize() * rr
+        section = Part.Face(
+            Part.Wire([Part.makeLine(a0, corner), Part.makeLine(corner, a1), Part.Arc(a1, middle, a0).toShape()])
+        )
+        return section.revolve(V(0, 0, 0), V(0, 0, 1), 360)
+
+    def testRoundAtTheStripsWidthBuilds(self):
+        shape, box = self.base()
+        arcs = [
+            e
+            for e in shape.Edges
+            if e.Curve.TypeId == "Part::GeomCircle" and abs(e.Curve.Radius - self.R) < 1e-9 and not e.isClosed()
+        ]
+        self.assertEqual(len(arcs), 2)
+        tools = self.corner_ring(self.H, True).fuse(self.corner_ring(0.0, False)).common(box)
+        expected = shape.cut(tools).removeSplitter()
+        doc = FreeCAD.newDocument("InvalidResultWiderScope")
+        try:
+            ends = [(tuple(a.Vertexes[0].Point), tuple(a.Vertexes[1].Point)) for a in arcs]
+            fillet, _ = dressed_in_a_body(doc, "Fillet", shape, ends[0], self.rr, ends[1])
+            self.assertTrue(fillet.isValid(), fillet.getStatusString())
+            result = fillet.Shape
+            self.assertTrue(result.isValid())
+            self.assertEqual(len(result.Solids), 1)
+            self.assertAlmostEqual(result.Volume - shape.Volume, expected.Volume - shape.Volume, delta=1e-6)
+            self.assertLess(result.cut(expected).Volume + expected.cut(result).Volume, 1e-6)
+            self.assertEqual(len(result.Faces), len(expected.Faces))
+        finally:
+            FreeCAD.closeDocument(doc.Name)

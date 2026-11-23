@@ -421,7 +421,36 @@ App::DocumentObjectExecReturn* Fillet::build()
         }
         const std::string lost
             = checkLost ? Part::lostMaterial(shape, baseShape, edges, radius) : std::string();
-        if (!lost.empty()) {
+        // ops#990 (HNY-DSN #108, #111): where OCCT's valid round overflows a narrow strip onto a
+        // dip no ball fits into, it rolls on and bridges the dip, and drops a part of the base;
+        // Onshape builds the plain round there. The same selection once more, OCCT's result
+        // refused, so the exact construction is asked; its result stands only where it passes
+        // the same checks. Only where OCCT built it and nothing else changed the shape; where the
+        // construction refuses or throws, the check's error stands
+        bool rebuilt = false;
+        if (!lost.empty() && !recorder.built() && runOut.empty() && arcRunOns.empty()) {
+            ResultCheck::stopIfPastTheLimit("The fillet's exact construction after its check");
+            TopoShape again = makeTopoShape();
+            try {
+                Part::FilletFallback::RefusedResultScope refusedScope;
+                again.makeElementFillet(baseShape, edges, radius, radius);
+            }
+            catch (const Base::Exception&) {
+                again = TopoShape();
+            }
+            catch (const Standard_Failure&) {
+                again = TopoShape();
+            }
+            rebuilt = recorder.built() && !again.isNull()
+                && Part::checkDressUp(again, baseShape, Part::LooseParts::drop)
+                && Part::filledPocket(again, baseShape, edges, radius).empty()
+                && (recorder.rolledOn()
+                    || Part::lostMaterial(again, baseShape, edges, radius).empty());
+            if (rebuilt) {
+                shape = again;
+            }
+        }
+        if (!lost.empty() && !rebuilt) {
             return new App::DocumentObjectExecReturn("The fillet " + lost);
         }
         // OCCT bridges a hole or pocket the band crosses with a B-spline (ops#604 gap 3a)

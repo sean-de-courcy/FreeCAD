@@ -547,6 +547,27 @@ PartExport std::optional<gp_Pnt> materialIn(const TopoDS_Shape& result, const To
  */
 PartExport void noteInvalidResult(const std::string& reason);
 
+/** Within its scope, on this thread, a fillet treats OCCT's valid result as refused (ops#990): the
+ * exact construction is asked, with its wider scope, and its result stands where it builds;
+ * where it refuses, OCCT's result is returned as before. Set by a feature whose own check of
+ * OCCT's result refused it (Part::lostMaterial(): OCCT rolled the ball on over a dip no ball fits
+ * into and bridged it, where Onshape builds the plain round), for one more build of the same
+ * selection, so that nothing that builds today moves.
+ */
+class PartExport RefusedResultScope
+{
+public:
+    RefusedResultScope();
+    ~RefusedResultScope();
+    RefusedResultScope(const RefusedResultScope&) = delete;
+    RefusedResultScope& operator=(const RefusedResultScope&) = delete;
+    /// Whether a scope is open on this thread
+    static bool active();
+
+private:
+    bool outer;
+};
+
 /// The reason noted on this thread since the last call (empty if none), which it clears
 PartExport std::string takeInvalidResult();
 
