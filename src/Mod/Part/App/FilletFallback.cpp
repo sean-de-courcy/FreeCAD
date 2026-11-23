@@ -73,6 +73,7 @@
 #include <Geom2dAPI_Interpolate.hxx>
 #include <Geom2d_BSplineCurve.hxx>
 #include <Geom2d_Line.hxx>
+#include <Geom_ElementarySurface.hxx>
 #include <Geom_CylindricalSurface.hxx>
 #include <Geom_Line.hxx>
 #include <Geom_ToroidalSurface.hxx>
@@ -4214,6 +4215,14 @@ Tool ruledTool(const Context& ctx, const EdgeData& data, const VertexEnd ends[2]
 
 bool inPlane(const TopoDS_Shape& shape, const TrimPlane& plane);
 TopoDS_Shape commonOf(const TopoDS_Shape& shape, const TopoDS_Shape& other);
+/** The construction's sheets on this thread (ops#999; construct()): centred in its second try, and
+ * whether its first made one that the second would centre */
+struct SheetTry
+{
+    bool centred = false;
+    bool movable = false;
+};
+thread_local SheetTry sheets;
 TopoDS_Face sheetOf(
     const Handle(Geom_Surface)& surface,
     const TopLoc_Location& location,
@@ -4953,7 +4962,16 @@ TopoDS_Face wallSheet(
     return sheetUpTo(surface, location, wall, reach, blend);
 }
 
-/// The surface as a face: its natural bounds where finite, else the face's own run on by the reach
+/** The surface as a face: its natural bounds where finite, else the face's own run on by the reach.
+ * In the construction's second try (SheetTry::centred, ops#999), on an elementary surface (a
+ * cylinder, cone, sphere or torus) the sheet is one period centred on the face's own range in each
+ * periodic direction, so its seam lies opposite the face: a wall cylinder whose seam lay on the line
+ * where it is tangent to a round's end plane, a corner line of the tool, left the tool split past the
+ * cylinder's far side. Where the split meets the tool tangentially OCCT's result depends on the
+ * sheet's frame either way (ops#1000), so the natural bounds come first and nothing that builds with
+ * them changes. Other periodic surfaces always keep their natural bounds: a periodic B-spline's sheet
+ * across its knot origin left a face of zero area (review pr999-r1)
+ */
 TopoDS_Face sheetOf(
     const Handle(Geom_Surface)& surface,
     const TopLoc_Location& location,
@@ -4971,6 +4989,22 @@ TopoDS_Face sheetOf(
     double fv0 = 0.0;
     double fv1 = 0.0;
     BRepTools::UVBounds(face, fu0, fu1, fv0, fv1);
+    // One whole period of natural bounds, moved to centre on the face's range in the second try.
+    // In the first try, noted as a sheet the second try would make otherwise
+    const bool elementary = !Handle(Geom_ElementarySurface)::DownCast(surface).IsNull();
+    auto centre = [elementary](bool periodic, double period, double& low, double& high, double f0, double f1) {
+        if (elementary && periodic && !Precision::IsInfinite(low) && !Precision::IsInfinite(high)
+            && std::abs(high - low - period) <= Precision::PConfusion() * std::max(1.0, period)) {
+            if (!sheets.centred) {
+                sheets.movable = true;
+                return;
+            }
+            low = (f0 + f1) / 2 - period / 2;
+            high = low + period;
+        }
+    };
+    centre(surface->IsUPeriodic(), surface->IsUPeriodic() ? surface->UPeriod() : 0.0, u0, u1, fu0, fu1);
+    centre(surface->IsVPeriodic(), surface->IsVPeriodic() ? surface->VPeriod() : 0.0, v0, v1, fv0, fv1);
     if (Precision::IsInfinite(u0)) {
         u0 = fu0 - reach;
     }
@@ -19417,9 +19451,56 @@ bool constructSolid(
     std::string* reason
 );
 
+bool constructOnce(
+    const TopoDS_Shape& base,
+    const std::vector<TopoDS_Shape>& edges,
+    const Request& request,
+    Construction& out,
+    std::string* reason
+);
+
 }  // namespace
 
 bool construct(
+    const TopoDS_Shape& base,
+    const std::vector<TopoDS_Shape>& edges,
+    const Request& request,
+    Construction& out,
+    std::string* reason
+)
+{
+    // ops#999: where the first try refuses and made an end or wall sheet on a cylinder, cone,
+    // sphere or torus (sheetOf), once more with those sheets' seams opposite their faces. Where
+    // both refuse, the first try's reason stands
+    struct Restore
+    {
+        SheetTry outer = sheets;
+        ~Restore()
+        {
+            sheets = outer;
+        }
+    } restore;
+    sheets = SheetTry();
+    if (constructOnce(base, edges, request, out, reason)) {
+        return true;
+    }
+    if (!sheets.movable) {
+        return false;
+    }
+    sheets = SheetTry {true, false};
+    Construction second;
+    std::string secondReason;
+    if (!constructOnce(base, edges, request, second, &secondReason)) {
+        return false;
+    }
+    out = std::move(second);
+    return true;
+}
+
+namespace
+{
+
+bool constructOnce(
     const TopoDS_Shape& base,
     const std::vector<TopoDS_Shape>& edges,
     const Request& request,
@@ -19455,9 +19536,6 @@ bool construct(
     out.shape = compound;
     return true;
 }
-
-namespace
-{
 
 /** A chamfer of one straight edge between two planes whose both ends lie on faces that are not
  * planes, where the strip covers its face whole (ops#936; notes/chamfer-curved-end-936.md): Onshape's
