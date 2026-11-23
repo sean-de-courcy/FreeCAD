@@ -153,6 +153,7 @@
 #include <Base/Exception.h>
 
 #include "FilletFallback.h"
+#include "KernelBudget.h"
 #include "MassProperties.h"
 #include "RollingBallBlend.h"
 #include "TopoShapeMapper.h"
@@ -20889,6 +20890,79 @@ bool build(
     FC_LOG("exact construction refused: " << why);
     if (reason) {
         *reason = why;
+    }
+    return false;
+}
+
+bool buildAcrossRecess(
+    TopoShape& result,
+    const TopoShape& base,
+    const std::vector<TopoShape>& edges,
+    double radius,
+    const char* op,
+    std::string* reason
+)
+{
+    struct Alone
+    {
+        Construction construction;
+        std::string reason;
+        bool built = false;
+    };
+    // OCCT's maker raises its input's tolerances in place: the construction runs on a copy, as
+    // makeElementFillet()'s (ops#345)
+    std::vector<TopoShape> inputEdges = edges;
+    const TopoShape input = makerInput(base, inputEdges);
+    Request request;
+    request.faceTolerances = faceTolerances(input.getShape());
+    request.kind = Kind::Fillet;
+    request.size1 = radius;
+    request.size2 = radius;
+    request.limitOnly = false;
+    // The selection and what OCCT's contours carry it on to along tangent chains (a rim picked by
+    // one edge): the construction rounds them all, as OCCT did. The maker is only read, not built
+    std::vector<TopoDS_Shape> rounded;
+    TopTools_IndexedMapOfShape seen;
+    BRepFilletAPI_MakeFillet maker(input.getShape());
+    for (const auto& edge : inputEdges) {
+        maker.Add(radius, TopoDS::Edge(edge.getShape()));
+        if (seen.Add(edge.getShape()) > static_cast<int>(rounded.size())) {
+            rounded.push_back(edge.getShape());
+        }
+    }
+    for (int i = 1; i <= maker.NbContours(); ++i) {
+        for (int j = 1; j <= maker.NbEdges(i); ++j) {
+            const TopoDS_Shape& edge = maker.Edge(i, j);
+            request.contour.push_back(edge);
+            if (seen.Add(edge) > static_cast<int>(rounded.size())) {
+                rounded.push_back(edge);
+            }
+        }
+    }
+    auto alone = std::make_shared<Alone>();
+    KernelBudget::run(
+        "The fillet",
+        [shape = input.getShape(), rounded, request, alone](const Message_ProgressRange& /*range*/) {
+            alone->built = construct(shape, rounded, request, alone->construction, &alone->reason);
+        }
+    );
+    if (alone->built) {
+        try {
+            TopoShape built(result);
+            finish(built, alone->construction, input, op);
+            result = built;
+            return true;
+        }
+        catch (const Standard_Failure& e) {
+            alone->reason = std::string("OCCT: ") + e.GetMessageString();
+        }
+        catch (const Base::Exception& e) {
+            alone->reason = e.what();
+        }
+    }
+    FC_LOG("the round across a recess not built exactly: " << alone->reason);
+    if (reason) {
+        *reason = alone->reason;
     }
     return false;
 }

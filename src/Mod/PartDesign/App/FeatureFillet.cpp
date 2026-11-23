@@ -46,6 +46,7 @@
 #include <Mod/Part/App/Part2DObject.h>
 #include <Mod/Part/App/FilletFallback.h>
 #include <Mod/Part/App/TopoShape.h>
+#include <Mod/Part/App/TopoShapeOpCode.h>
 #include <Mod/Part/App/TopoShapeRepair.h>
 
 #include "FeatureFillet.h"
@@ -460,7 +461,23 @@ App::DocumentObjectExecReturn* Fillet::build()
         const std::string bridged
             = edges.empty() ? std::string() : Part::bridgedRecess(shape, baseShape, edges, radius);
         if (!bridged.empty()) {
-            return new App::DocumentObjectExecReturn("The fillet" + bridged);
+            // Onshape's round there is the plain round cut by the openings: the exact
+            // construction, below the limit, where it builds a result without a bridge (ops#993).
+            // Not with an arc's run-on (ops#883), which the construction doesn't build
+            TopoShape exact = shape;
+            if (!arcRunOns.empty()
+                || !Part::FilletFallback::buildAcrossRecess(
+                    exact,
+                    baseShape,
+                    edges,
+                    radius,
+                    Part::OpCodes::Fillet
+                )
+                || !Part::checkDressUp(exact, baseShape, Part::LooseParts::drop)
+                || !Part::bridgedRecess(exact, baseShape, edges, radius).empty()) {
+                return new App::DocumentObjectExecReturn("The fillet" + bridged);
+            }
+            shape = exact;
         }
         // ops#655: each chained edge's fillet runs straight on until it leaves the body (GB13)
         for (const auto& edge : runOut) {

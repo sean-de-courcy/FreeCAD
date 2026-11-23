@@ -222,6 +222,30 @@ PartExport bool build(
     std::string* reason = nullptr
 );
 
+/** A round of one radius whose band crosses a hole or pocket, where OCCT's valid result bridges
+ * it with a B-spline (bridgedRecess(), ops#993): the exact construction, asked below the limit
+ * (Request::limitOnly off) on the selection and what OCCT's contours carry it on to along tangent
+ * chains, under the feature's time limit. Onshape's round there is the plain round cut by the
+ * openings, which is what the construction's tools remove from the base. The caller checks the
+ * result again, and keeps its error where it still bridges.
+ *
+ * @param result Receives the shape, named as through the fillet's history (op), when it is
+ *               built; untouched otherwise. Its Tag and hasher name the elements
+ * @param base The shape being dressed up
+ * @param edges The selected edges of the base
+ * @param radius The round's radius
+ * @param reason If not null, receives why the construction refused
+ * @return Whether it was built
+ */
+PartExport bool buildAcrossRecess(
+    TopoShape& result,
+    const TopoShape& base,
+    const std::vector<TopoShape>& edges,
+    double radius,
+    const char* op,
+    std::string* reason = nullptr
+);
+
 /** Whether the selection has a reflex corner with a circle (fillet-tight-arc 8, FSLC #50): a
  * vertex where exactly two selected edges meet, at least one of them a circle, the third edge
  * unselected, and each selected edge leaves the vertex towards the outer side of the other's wall
