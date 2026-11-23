@@ -474,6 +474,9 @@ App::DocumentObjectExecReturn* Fillet::build()
                     Part::OpCodes::Fillet
                 )
                 || !Part::checkDressUp(exact, baseShape, Part::LooseParts::drop)
+                || !Part::filledPocket(exact, baseShape, edges, radius).empty()
+                || (!recorder.rolledOn()
+                    && !Part::lostMaterial(exact, baseShape, edges, radius).empty())
                 || !Part::bridgedRecess(exact, baseShape, edges, radius).empty()) {
                 return new App::DocumentObjectExecReturn("The fillet" + bridged);
             }

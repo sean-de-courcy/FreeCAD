@@ -240,6 +240,9 @@ App::DocumentObjectExecReturn* Fillet::execute()
                     &why
                 )
                 || !Part::checkDressUp(exact, baseTopoShape)
+                || !Part::filledPocket(exact, baseTopoShape, edgeShapes, largest).empty()
+                || (!recorder.rolledOn()
+                    && !Part::lostMaterial(exact, baseTopoShape, edgeShapes, largest).empty())
                 || !Part::bridgedRecess(exact, baseTopoShape, edgeShapes, largest).empty()) {
                 return new App::DocumentObjectExecReturn("The fillet" + bridged);
             }
