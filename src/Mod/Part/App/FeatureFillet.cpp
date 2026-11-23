@@ -243,7 +243,8 @@ App::DocumentObjectExecReturn* Fillet::execute()
                 || !Part::filledPocket(exact, baseTopoShape, edgeShapes, largest).empty()
                 || (!recorder.rolledOn()
                     && !Part::lostMaterial(exact, baseTopoShape, edgeShapes, largest).empty())
-                || !Part::bridgedRecess(exact, baseTopoShape, edgeShapes, largest).empty()) {
+                || !Part::bridgedRecess(exact, baseTopoShape, edgeShapes, largest, smallest, edgeRadii)
+                        .empty()) {
                 return new App::DocumentObjectExecReturn("The fillet" + bridged);
             }
             res = exact;
