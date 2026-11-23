@@ -306,7 +306,10 @@ class InternNamesTest(unittest.TestCase):
                     self.assertInterned(result["names"])
                 else:
                     self.assertPlain(result["names"])
-                self.assertEqual(result["expanded"], expected)
+                # A merge's names carry the merged objects' new IDs (ops#1002): those of a
+                # recompute of them, the file's names with the new IDs
+                self.assertEqual(result["expanded"], result.get("recomputed", expected))
+                self.assertEqual(len(result["expanded"]), len(expected))
                 self.assertEqual(result["found"], len(expected))
 
     def testBuilderWithInputsInBothForms(self):
@@ -509,6 +512,12 @@ def restoreChild(manifestPath):
         doc.InternNames = interned
         doc.mergeProject(files[source][0])
         results[case] = report(doc)
+        # The merge gives the objects new IDs, and their maps' names get them (ops#1002): the
+        # names a recompute of the merged objects gives
+        for obj in doc.Objects:
+            obj.touch()
+        doc.recompute()
+        results[case]["recomputed"] = _expanded(_names(doc.getObject("Fillet").Shape))
         App.closeDocument(doc.Name)
     with open(manifest["out"], "w", encoding="utf-8") as fh:
         json.dump(results, fh)
