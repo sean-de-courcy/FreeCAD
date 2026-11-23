@@ -17140,6 +17140,40 @@ bool preferConstruction(
     return false;
 }
 
+std::vector<bool> coveredEdges(
+    const TopoDS_Shape& baseShape,
+    const std::vector<TopoDS_Shape>& edges,
+    const Request& request
+)
+{
+    std::vector<bool> covered(edges.size(), false);
+    try {
+        const TopoShape base(baseShape);
+        Context ctx(base, request);
+        for (size_t i = 0; i < edges.size(); ++i) {
+            const TopoDS_Shape& edge = edges[i];
+            if (edge.IsNull() || edge.ShapeType() != TopAbs_EDGE) {
+                continue;
+            }
+            try {
+                analyse(ctx, TopoDS::Edge(edge));
+                covered[i] = true;
+            }
+            catch (const Refusal&) {
+            }
+            catch (const Standard_Failure&) {
+            }
+            catch (const Base::Exception&) {
+            }
+        }
+    }
+    catch (const Standard_Failure&) {
+    }
+    catch (const Base::Exception&) {
+    }
+    return covered;
+}
+
 bool contactOnPartOfAnEdge(
     const TopoDS_Shape& baseShape,
     const std::vector<TopoDS_Shape>& edges,

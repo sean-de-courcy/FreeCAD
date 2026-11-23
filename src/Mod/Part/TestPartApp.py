@@ -50,6 +50,7 @@ from parttests.FilletFallbackTest import (
     MitreCornerTest,  # ops#941
     MitreAskTimeTest,  # ops#941
     PinchedVertexTest,  # ops#953
+    MixedCoverageTest,  # ops#952
     CornerWithACircleTest,
     BlendEndTrimTest,
     CurvedEndTrimTest,

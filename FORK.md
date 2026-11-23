@@ -510,7 +510,8 @@ names it.
 | `fix/i951-fullround-name-order` | fix | ops#951 | - | integration | `bcf7ad1195` (fork PR 503), 2026-11-22 | never (fork fix): a merged full round is named by the feature list's order, then the segment drawn first (ops#951, on ops#900) |
 | `fix/i958-worker-net-953-guard` | fix | ops#958, ops#953 | - | `integration` `bcf7ad1195` | `bacc01cf8b` (fork PR 510), 2026-11-22 | never (fork feature) |
 | `fix/i940-solver-order` | fix | ops#940 | - | integration | `f47f9d6683` (fork PR 514), 2026-11-22 | when upstream's planegcs orders its unknowns by the caller's list (then drop changes 1-3; 4 too if `h` is initialized there): the sketch solver solves the same sketch to the same bits in every process (ops#940) |
-| `fix/i963-reapply-own-upto` | fix | ops#963 | - | `integration` `bcf7ad1195` | (fork PR 515) | never (fork fix): Reapply reads an up-to face another original made as the instance's own |
+| `fix/i963-reapply-own-upto` | fix | ops#963 | - | `integration` `bcf7ad1195` | `eca70a549b` (fork PR 515), 2026-11-22 | never (fork fix): Reapply reads an up-to face another original made as the instance's own |
+| `fix/i952-fillet-mixed-coverage` | fix | ops#952 | - | `integration` `f47f9d6683` | (fork PR 508) | never (fork fix): a fillet whose picks mix what OCCT fails on with what the construction doesn't cover builds as the covered group, then the rest |
 
 ## Fork-only commits in carried topics
 

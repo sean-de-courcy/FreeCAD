@@ -7661,3 +7661,81 @@ class PinchedVertexTest(unittest.TestCase):
             body.makeChamfer(1.0, [self.edge(body, 0.0)])
         self.assertIn("touches itself", str(caught.exception))
         self.assertIn("(0, 0, 3)", str(caught.exception))
+
+
+class MixedCoverageTest(unittest.TestCase):
+    """ops#952 (NS88 Labyrinth Fillet 3): one fillet selection mixing a full-round pair, which OCCT
+    fails on and the exact construction builds, with a straight edge on an extruded ellipse, which
+    the construction doesn't cover and OCCT builds alone. Each group builds alone, and the two one
+    after the other build in either order; the selection as one fails both ways. Built as the
+    covered group first, then the rest on its result, where the groups meet at no vertex and the
+    rest changes the volume as on the base. Designed: a prism of height 10 whose profile is
+    (-x0, 0), (30, 0), (30, 4), (x0, 4), an elliptical arc (centre (0, 2), semi-axes 10 and 6)
+    back to (-x0, 4); R = 2 on the edges at (30, 0) and (30, 4), 2R apart (a full round), and on the
+    concave edge at (x0, 4) between the plane y = 4 and the ellipse"""
+
+    R, H, a, b, cy = 2.0, 10.0, 10.0, 6.0, 2.0
+
+    def base(self, lx=30.0):
+        top = 2 * self.R
+        x0 = self.a * math.sqrt(1 - ((top - self.cy) / self.b) ** 2)
+        t0 = math.atan2((top - self.cy) / self.b, x0 / self.a)
+        arc = Part.ArcOfEllipse(Part.Ellipse(V(0, self.cy, 0), self.a, self.b), t0, math.pi - t0)
+        points = [V(-x0, top, 0), V(-x0, 0, 0), V(lx, 0, 0), V(lx, top, 0), V(x0, top, 0)]
+        lines = [Part.makeLine(points[i], points[i + 1]) for i in range(4)]
+        face = Part.Face(Part.Wire(Part.__sortEdges__(lines + [arc.toShape()])))
+        return face.extrude(V(0, 0, self.H)), x0
+
+    def edge_at(self, shape, x, y):
+        for e in shape.Edges:
+            ps = [v.Point for v in e.Vertexes]
+            if len(ps) == 2 and all(abs(p.x - x) < 1e-6 and abs(p.y - y) < 1e-6 for p in ps):
+                return e
+        raise RuntimeError("no vertical edge at (%g, %g)" % (x, y))
+
+    def testMixedSelectionBuildsAsTheGroupsInTurn(self):
+        body, x0 = self.base()
+        R, top = self.R, 2 * self.R
+        keys = [(30, 0), (30, top), (x0, top)]
+        pair = body.makeFillet(R, [self.edge_at(body, *k) for k in keys[:2]])
+        self.assertAlmostEqual(body.Volume - pair.Volume, 2 * (1 - math.pi / 4) * R * R * self.H, delta=1e-6)
+        corner = body.makeFillet(R, [self.edge_at(body, *keys[2])]).Volume - body.Volume
+        self.assertGreater(corner, 1.0)
+        stepwise = pair.makeFillet(R, [self.edge_at(pair, *keys[2])])
+        for order in (keys, keys[::-1]):
+            result = body.makeFillet(R, [self.edge_at(body, *k) for k in order])
+            self.assertTrue(result.isValid())
+            self.assertEqual(len(result.Solids), 1)
+            self.assertAlmostEqual(result.Volume - body.Volume, pair.Volume - body.Volume + corner, delta=1e-6)
+            self.assertLess(result.cut(stepwise).Volume + stepwise.cut(result).Volume, 1e-6)
+
+    def testOverlappingBandsStayRefused(self):
+        # The plane y = 4 shortened until the pair's band (2 from x = lx) and the ellipse edge's
+        # (its setback 1.022142 from x0) overlap by 1e-3: the pair then the edge builds, the edge
+        # then the pair fails, so the order shows (review r1, T1). The selection fails as before
+        body0, x0 = self.base()
+        lx = x0 + 2 + 1.022142 - 1e-3
+        body, _ = self.base(lx)
+        top = 2 * self.R
+        edges = [self.edge_at(body, lx, 0), self.edge_at(body, lx, top), self.edge_at(body, x0, top)]
+        with self.assertRaises(Exception):
+            body.makeFillet(self.R, edges)
+
+    def testGroupsMeetingAtAVertexStayRefused(self):
+        # The top edge along y = 4 (between two planes: covered) meets the ellipse's edge at
+        # (x0, 4, 10): the groups' rounds meet there, so the order would show. The split doesn't
+        # apply; the selection fails as before
+        body, x0 = self.base()
+        top = 2 * self.R
+        along = [
+            e
+            for e in body.Edges
+            if e.Curve.TypeId == "Part::GeomLine"
+            and abs(e.BoundBox.YMin - top) < 1e-9
+            and abs(e.BoundBox.YMax - top) < 1e-9
+            and abs(e.BoundBox.ZMin - self.H) < 1e-9
+        ]
+        self.assertEqual(len(along), 1)
+        edges = [self.edge_at(body, 30, 0), self.edge_at(body, 30, top), self.edge_at(body, x0, top)]
+        with self.assertRaises(Exception):
+            body.makeFillet(self.R, edges + along)

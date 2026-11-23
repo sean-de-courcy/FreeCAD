@@ -9644,6 +9644,180 @@ void makeFilletRollingBall(
 }
 }  // namespace
 
+namespace
+{
+/// Set while the rim split rounds its rest on its stage: the split by coverage doesn't run there,
+/// so that a rest which failed there still falls through to the whole selection (review r1, T3)
+thread_local bool inRimSplitRest = false;
+
+/** ops#952 (NS88 Labyrinth Fillet 3): a fillet whose selection mixes edges OCCT fails on, which
+ * the exact construction builds, with edges the construction doesn't cover (a line on an extruded
+ * ellipse), which OCCT builds alone. Built as one unit it fails both ways; the two groups one
+ * after the other build. Asked only once everything else has failed. The covered group is
+ * rounded first, the rest on its result, as the rim split does. Only where the groups don't meet:
+ * no vertex in common, and the rest changes the volume on the first group's result by what it
+ * changes on the base alone, so the order of the two can't show. Else false: the feature's error
+ * stands
+ */
+bool roundCoveredFirst(
+    TopoShape& result,
+    const TopoShape& shape,
+    const std::vector<TopoShape>& edges,
+    const TopoShape& input,
+    const std::vector<TopoShape>& inputEdges,
+    double radius,
+    const char* op,
+    const FilletFallback::Request& request
+)
+{
+    // On the maker's copy, which the request's face tolerances are of; its edges are the
+    // selection's, in the same order
+    std::vector<TopoDS_Shape> plain;
+    for (const auto& edge : inputEdges) {
+        plain.push_back(edge.getShape());
+    }
+    FilletFallback::Request single = request;
+    single.contour.clear();
+    const std::vector<bool> covered = FilletFallback::coveredEdges(input.getShape(), plain, single);
+    if (covered.size() != edges.size()) {
+        return false;
+    }
+    std::vector<TopoShape> first;
+    std::vector<TopoShape> rest;
+    for (size_t i = 0; i < edges.size(); ++i) {
+        (covered[i] ? first : rest).push_back(edges[i]);
+    }
+    if (inRimSplitRest || first.empty() || rest.empty()) {
+        return false;
+    }
+    TopTools_IndexedMapOfShape firstVertices;
+    for (const auto& edge : first) {
+        TopExp::MapShapes(edge.getShape(), TopAbs_VERTEX, firstVertices);
+    }
+    for (const auto& edge : rest) {
+        for (TopExp_Explorer xv(edge.getShape(), TopAbs_VERTEX); xv.More(); xv.Next()) {
+            if (firstVertices.Contains(xv.Current())) {
+                FC_LOG("fillet by coverage: the groups meet at a vertex");
+                return false;
+            }
+        }
+    }
+    auto volume = [](const TopoShape& s) {
+        GProp_GProps props;
+        BRepGProp::VolumeProperties(s.getShape(), props);
+        return props.Mass();
+    };
+    try {
+        TopoShape alone(result.Tag, result.Hasher, result.getHistoryAlgorithm());
+        alone.makeElementFillet(shape, rest, radius, radius, op);
+        if (!FilletFallback::takeInvalidResult().empty()) {
+            return false;
+        }
+        TopoShape stage(result.Tag, result.Hasher, result.getHistoryAlgorithm());
+        stage.makeElementFillet(shape, first, radius, radius, op);
+        if (!FilletFallback::takeInvalidResult().empty()) {
+            return false;
+        }
+        std::vector<TopoShape> later;
+        // The rest's edges on the first group's result: the same edge, or its copy where a face
+        // next to it was rebuilt (ends and middle where they were; exactly one such edge)
+        auto pointsOf = [](const TopoDS_Edge& edge) {
+            BRepAdaptor_Curve curve(edge);
+            const double a = curve.FirstParameter();
+            const double b = curve.LastParameter();
+            return std::array<gp_Pnt, 3> {curve.Value(a), curve.Value((a + b) / 2), curve.Value(b)};
+        };
+        auto copyOn = [&](const TopoShape& on, const TopoDS_Edge& edge) {
+            int index = on.findShape(edge);
+            if (index > 0) {
+                return index;
+            }
+            const auto want = pointsOf(edge);
+            const double tolerance = std::max(Precision::Confusion(), BRep_Tool::Tolerance(edge));
+            int found = 0;
+            const int count = on.countSubShapes(TopAbs_EDGE);
+            for (int i = 1; i <= count; ++i) {
+                const auto have = pointsOf(TopoDS::Edge(on.getSubShape(TopAbs_EDGE, i)));
+                const bool same = have[1].Distance(want[1]) <= tolerance
+                    && ((have[0].Distance(want[0]) <= tolerance
+                         && have[2].Distance(want[2]) <= tolerance)
+                        || (have[0].Distance(want[2]) <= tolerance
+                            && have[2].Distance(want[0]) <= tolerance));
+                if (same) {
+                    if (found > 0) {
+                        return 0;
+                    }
+                    found = i;
+                }
+            }
+            return found;
+        };
+        for (const auto& edge : rest) {
+            const int index = copyOn(stage, TopoDS::Edge(edge.getShape()));
+            if (index <= 0) {
+                FC_LOG("fillet by coverage: an edge of the rest is not on the first group's result");
+                return false;
+            }
+            later.push_back(stage.getSubTopoShape(TopAbs_EDGE, index));
+        }
+        TopoShape built(result.Tag, result.Hasher, result.getHistoryAlgorithm());
+        built.makeElementFillet(stage, later, radius, radius, op);
+        if (!FilletFallback::takeInvalidResult().empty()) {
+            return false;
+        }
+        // The feature's lost-material check skips a result the construction rolled on over a
+        // tangent edge (Recorder::rolledOn()): the rest's OCCT round is checked here (review r1,
+        // T2)
+        if (const std::string lost = Part::lostMaterial(built, stage, later, radius); !lost.empty()) {
+            FC_LOG("fillet by coverage: the rest " << lost);
+            return false;
+        }
+        // The other order builds too, to the same volume: two groups whose bands meet build in
+        // one order only, or differ (review r1, T1)
+        std::vector<TopoShape> firstLater;
+        for (const auto& edge : first) {
+            const int index = copyOn(alone, TopoDS::Edge(edge.getShape()));
+            if (index <= 0) {
+                FC_LOG("fillet by coverage: an edge of the first group is not on the rest's result");
+                return false;
+            }
+            firstLater.push_back(alone.getSubTopoShape(TopAbs_EDGE, index));
+        }
+        TopoShape reverse(result.Tag, result.Hasher, result.getHistoryAlgorithm());
+        reverse.makeElementFillet(alone, firstLater, radius, radius, op);
+        if (!FilletFallback::takeInvalidResult().empty()) {
+            return false;
+        }
+        const double base = volume(shape);
+        const double onBase = volume(alone) - base;
+        const double onStage = volume(built) - volume(stage);
+        const double change = std::abs(volume(built) - base);
+        const double allowance = std::max(1e-6 * std::abs(onBase), 1e-9 * std::abs(base));
+        if (!(std::abs(onStage - onBase) <= allowance)
+            || !(std::abs(volume(reverse) - volume(built)) <= std::max(allowance, 1e-7 * change))) {
+            FC_LOG("fillet by coverage: the rest changes " << onStage << " on the first group's "
+                   "result, " << onBase << " on the base; the other order "
+                   << volume(reverse) - base << " against " << volume(built) - base);
+            return false;
+        }
+        FC_LOG("fillet by coverage: " << first.size() << " edges, then " << rest.size());
+        result = built;
+        return true;
+    }
+    catch (const Base::CADKernelError& e) {
+        FC_LOG("fillet by coverage: " << e.what());
+        if (KernelBudget::pastDeadline()) {
+            throw;
+        }
+    }
+    catch (const Standard_Failure& e) {
+        FC_LOG("fillet by coverage (OCCT): " << e.GetMessageString());
+    }
+    FilletFallback::takeInvalidResult();
+    return false;
+}
+}  // namespace
+
 TopoShape& TopoShape::makeElementFillet(
     const TopoShape& shape,
     const std::vector<TopoShape>& edges,
@@ -9849,6 +10023,18 @@ TopoShape& TopoShape::makeElementFillet(
             }
             if (named && rest.size() == split->rest.size()) {
                 try {
+                    struct InRest
+                    {
+                        bool outer = inRimSplitRest;
+                        InRest()
+                        {
+                            inRimSplitRest = true;
+                        }
+                        ~InRest()
+                        {
+                            inRimSplitRest = outer;
+                        }
+                    } inRest;
                     makeElementFillet(stage, rest, radius1, radius2, op);
                     // (OCCT's invalid result for the rest, which its construction refused, is
                     // not an error there: it is noted)
@@ -9953,6 +10139,10 @@ TopoShape& TopoShape::makeElementFillet(
     if (outcome->failed || outcome->thin || outcome->invalid || outcome->turns
         || outcome->reflexFirst || outcome->ring || !outcome->wrongWay.empty()) {
         if (finishConstruction(*this, *outcome, input, op)) {
+            return *this;
+        }
+        if (outcome->failed && edges.size() > 1 && radius1 == radius2
+            && roundCoveredFirst(*this, shape, edges, input, inputEdges, radius1, op, request)) {
             return *this;
         }
         if (outcome->failed) {

@@ -1323,6 +1323,23 @@ class TestFillet(unittest.TestCase):
                 answers.add(face.CenterOfMass.y < 2)
         self.assertEqual(len(answers), 1)
 
+    def testFilletMixedCoverageInPartDesign(self):
+        # As FilletFallbackTest.MixedCoverageTest (ops#952, NS88 Labyrinth Fillet 3): a full-round
+        # pair OCCT fails on and an edge on an extruded ellipse the construction doesn't cover,
+        # in one Fillet: the pair first, then the edge on its result
+        mixed = models.MixedCoverageTest()
+        shape, x0 = mixed.base()
+        R, top, H = mixed.R, 2 * mixed.R, mixed.H
+        ends = [((x, y, 0), (x, y, H)) for x, y in ((30, 0), (30, top), (x0, top))]
+        fillet, _ = models.dressed_in_a_body(self.Doc, "Fillet", shape, ends[0], R, *ends[1:])
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+        pair = shape.makeFillet(R, [mixed.edge_at(shape, 30, 0), mixed.edge_at(shape, 30, top)])
+        expected = pair.makeFillet(R, [mixed.edge_at(pair, x0, top)])
+        result = fillet.Shape
+        self.assertTrue(result.isValid())
+        self.assertEqual(len(result.Solids), 1)
+        self.assertLess(result.cut(expected).Volume + expected.cut(result).Volume, 1e-6)
+
     def tearDown(self):
         # closing doc
         FreeCAD.closeDocument("PartDesignTestFillet")
