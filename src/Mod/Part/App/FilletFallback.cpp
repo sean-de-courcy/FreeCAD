@@ -20923,21 +20923,30 @@ bool buildAcrossRecess(
     // one edge): the construction rounds them all, as OCCT did. The maker is only read, not built
     std::vector<TopoDS_Shape> rounded;
     TopTools_IndexedMapOfShape seen;
-    BRepFilletAPI_MakeFillet maker(input.getShape());
-    for (const auto& edge : inputEdges) {
-        maker.Add(radius, TopoDS::Edge(edge.getShape()));
-        if (seen.Add(edge.getShape()) > static_cast<int>(rounded.size())) {
-            rounded.push_back(edge.getShape());
-        }
-    }
-    for (int i = 1; i <= maker.NbContours(); ++i) {
-        for (int j = 1; j <= maker.NbEdges(i); ++j) {
-            const TopoDS_Shape& edge = maker.Edge(i, j);
-            request.contour.push_back(edge);
-            if (seen.Add(edge) > static_cast<int>(rounded.size())) {
-                rounded.push_back(edge);
+    // An error here leaves the caller's own error standing (review pr524 Fable, finding 7)
+    try {
+        BRepFilletAPI_MakeFillet maker(input.getShape());
+        for (const auto& edge : inputEdges) {
+            maker.Add(radius, TopoDS::Edge(edge.getShape()));
+            if (seen.Add(edge.getShape()) > static_cast<int>(rounded.size())) {
+                rounded.push_back(edge.getShape());
             }
         }
+        for (int i = 1; i <= maker.NbContours(); ++i) {
+            for (int j = 1; j <= maker.NbEdges(i); ++j) {
+                const TopoDS_Shape& edge = maker.Edge(i, j);
+                request.contour.push_back(edge);
+                if (seen.Add(edge) > static_cast<int>(rounded.size())) {
+                    rounded.push_back(edge);
+                }
+            }
+        }
+    }
+    catch (const Standard_Failure& e) {
+        if (reason) {
+            *reason = std::string("OCCT: ") + e.GetMessageString();
+        }
+        return false;
     }
     auto alone = std::make_shared<Alone>();
     KernelBudget::run(

@@ -2277,8 +2277,9 @@ class BridgedRecessTest(unittest.TestCase):
 
     def testRoundBossAcrossTheBand(self):
         # O5: its wall 1 mm from the edge. The boss's foot is an inner wire of the top face
-        # The oracle fuses the boss extended to the bottom (notes/fillet-parity.md 2.2 in the ops
-        # repository): the round doesn't run under the boss's foot
+        # Builds, unmeasured: the construction keeps the material under the boss's foot, which is
+        # this oracle's boss extended to the bottom (notes/fillet-parity.md 2.2 in the ops
+        # repository); Onshape's own result is not measured yet (ops#993 review, finding 1)
         boss = Part.makeBox(30, 20, 10).fuse(Part.makeCylinder(3, 4, V(15, 4, 10))).removeSplitter()
         extended = Part.makeCylinder(3, 14, V(15, 4, 0))
         self.assertRight(boss, self.rounded().fuse(extended).removeSplitter())
