@@ -1876,7 +1876,8 @@ bool moveInStudio(App::Document* doc,
 }
 
 std::vector<App::DocumentObject*> readsOfOtherBodies(const App::DocumentObject* member,
-                                                     std::vector<const App::DocumentObject*>* via)
+                                                     std::vector<const App::DocumentObject*>* via,
+                                                     bool ownSolids)
 {
     std::vector<App::DocumentObject*> found;
     const Body* own = member ? Body::findBodyOf(member) : nullptr;
@@ -1889,7 +1890,9 @@ std::vector<App::DocumentObject*> readsOfOtherBodies(const App::DocumentObject* 
             via->push_back(by);
         }
     };
-    std::unordered_set<const App::DocumentObject*> seen {member};
+    // Per (object, the member of own that reads it): one object read on two paths is judged at
+    // both (ops#991 skeptic 1: a sketch made before a delete and one after it, on the same face)
+    std::set<std::pair<const App::DocumentObject*, const App::DocumentObject*>> seen {{member, member}};
     // (reader, the member of own that reads through it)
     std::vector<std::pair<const App::DocumentObject*, const App::DocumentObject*>> readers {
         {member, member}
@@ -1898,22 +1901,24 @@ std::vector<App::DocumentObject*> readsOfOtherBodies(const App::DocumentObject* 
         auto [reader, by] = readers.back();
         readers.pop_back();
         for (auto obj : linkReads(reader)) {
-            if (!obj || !seen.insert(obj).second) {
+            if (!obj) {
                 continue;
             }
             if (auto body = freecad_cast<Body*>(obj)) {
-                if (body != own) {
+                if ((body != own || ownSolids) && seen.emplace(obj, by).second) {
                     add(body, by);
                 }
                 continue;
             }
             if (auto body = Body::findBodyOf(obj)) {
-                if (body != own) {
-                    add(obj, by);
+                if (body != own || (ownSolids && Body::isSolidFeature(obj))) {
+                    if (seen.emplace(obj, by).second) {
+                        add(obj, by);
+                    }
                 }
                 // Its own Body's sketch, datum or binder is read through; a solid feature's own
                 // inputs are its own
-                else if (!Body::isSolidFeature(obj)) {
+                else if (!Body::isSolidFeature(obj) && seen.emplace(obj, obj).second) {
                     readers.emplace_back(obj, obj);
                 }
                 continue;
@@ -1924,7 +1929,9 @@ std::vector<App::DocumentObject*> readsOfOtherBodies(const App::DocumentObject* 
                 || obj->isDerivedFrom<App::DatumElement>() || obj->isDerivedFrom<Part::BodyBase>()) {
                 continue;
             }
-            readers.emplace_back(obj, by);
+            if (seen.emplace(obj, by).second) {
+                readers.emplace_back(obj, by);
+            }
         }
     }
     return found;

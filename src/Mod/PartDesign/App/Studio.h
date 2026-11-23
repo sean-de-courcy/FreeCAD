@@ -87,11 +87,14 @@ PartDesignExport bool moveInStudio(App::Document* doc,
  * directly, through objects outside the Bodies, and through the non-solid members of its own Body
  * (its sketch's support and external geometry, a datum, a binder). Not through another member.
  * With via, via[i] is the member of member's Body that reads the i-th one: member, or the sketch,
- * datum or binder it is read through (the last one on the path)
+ * datum or binder it is read through (the last one on the path). An object read on two paths is
+ * listed once per via (ops#991). With ownSolids, the solid features of member's own Body that it
+ * reads, and that Body whole, are listed too (a sketch's reads, judged at the sketch)
  */
 PartDesignExport std::vector<App::DocumentObject*> readsOfOtherBodies(
     const App::DocumentObject* member,
-    std::vector<const App::DocumentObject*>* via = nullptr
+    std::vector<const App::DocumentObject*>* via = nullptr,
+    bool ownSolids = false
 );
 
 /** Moves every Body's bar after its last solid feature at or above member in studioSequence(),
