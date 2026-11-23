@@ -8784,3 +8784,255 @@ class MitreRunOnTest(unittest.TestCase):
         expected = rimmed.cut([self.column(V(0, 0, 0), self.r, 0, 10), torus]).removeSplitter()
         result = rimmed.makeFillet(self.r, self.picks(rimmed, 0, 0)[:1])
         self.assertBuilt(rimmed, result, expected, -self.change(self.r, self.q, 8.0), (0, 0))
+
+
+class EndOnTangentWallTest(unittest.TestCase):
+    """ops#999 (Vial Well Mini Labyrinth #17): a round on a straight edge between two planes that ends
+    where the next wall is a cylinder tangent to the round's end plane along the edge's end line,
+    with the round's radius. The round's far line on the top face is then tangent to the wall's rim
+    arc at the arc's far end, and the round runs on over the piece of top face between the end
+    plane and the arc; the arc goes (Onshape: +1 face, +2 edges, +1 vertex). OCCT 8.0.1 returns an
+    invalid shape there, or throws Standard_ProgramError, by the wall cylinder's frame. The solid is
+    the same in every frame; only where the cylinder's seam lies and its axis' sense differ.
+    Designed: a block 60 x 40 x 20, a notch x 20..30, y 0..L, 9 deep through the front rim, a pocket
+    5 deep whose outline starts at (20, L), runs as a quarter circle of radius R about (20, L + R) to
+    (20 - R, L + R), then along x = 20 - R and closes as a rectangle. The fillet: the notch's top edge
+    at x = 20, radius R"""
+
+    R, L, TOP = 3.0, 8.0, 20.0
+
+    def base(self, x_axis, axis):
+        R, L, TOP = self.R, self.L, self.TOP
+        block = Part.makeBox(60, 40, TOP)
+        notch = Part.makeBox(10, L, 9, V(20, 0, TOP - 9))
+        z = TOP - 5
+        circle = Part.Circle()
+        circle.Center = V(20, L + R, z)
+        circle.Axis = axis
+        circle.XAxis = x_axis
+        circle.Radius = R
+        a, b = V(20, L, z), V(20 - R, L + R, z)
+        ua, ub = circle.parameter(a), circle.parameter(b)
+        low, high = min(ua, ub), max(ua, ub)
+        if high - low > math.pi:
+            low, high = high, low + 2 * math.pi
+        arc = Part.ArcOfCircle(circle, low, high).toShape()
+        wire = Part.Wire([arc, Part.makePolygon([b, V(20 - R, 30, z), V(50, 30, z), V(50, L, z), a])])
+        pocket = Part.Face(wire).extrude(V(0, 0, 5))
+        body = block.cut(pocket).cut(notch).removeSplitter()
+        found = [
+            e
+            for e in body.Edges
+            if len(e.Vertexes) == 2
+            and abs(e.Length - L) < 1e-9
+            and all(abs(v.X - 20) < 1e-9 and abs(v.Z - TOP) < 1e-9 for v in e.Vertexes)
+        ]
+        self.assertEqual(len(found), 1)
+        return body, found[0]
+
+    def removed(self):
+        # The quarter sliver along the edge, plus its run on up to the wall: the integral over s
+        # from 0 to R of (R - sqrt(R^2 - s^2)) (R - sqrt(R^2 - (R - s)^2)), by the midpoint rule
+        R, n = self.R, 20000
+        run_on = 0.0
+        for i in range(n):
+            s = (i + 0.5) / n * R
+            run_on += (R - math.sqrt(R * R - s * s)) * (R - math.sqrt(R * R - (R - s) ** 2))
+        return R * R * (1 - math.pi / 4) * self.L + run_on * R / n
+
+    def assertRunsOn(self, x_axis, axis, edges=2, vertices=1):
+        body, edge = self.base(x_axis, axis)
+        result = body.makeFillet(self.R, [edge])
+        self.assertTrue(result.isValid())
+        self.assertEqual(len(result.Solids), 1)
+        self.assertEqual(len(result.Faces) - len(body.Faces), 1)
+        self.assertEqual(len(result.Edges) - len(body.Edges), edges)
+        self.assertEqual(len(result.Vertexes) - len(body.Vertexes), vertices)
+        self.assertAlmostEqual(body.Volume - result.Volume, self.removed(), delta=1e-5)
+
+    def testSeamOnTheEndLineRunsOn(self):
+        # The seam on the line where the wall is tangent to the end plane (the studio's frame): the
+        # end face's sheet was split there, and the tool kept ran to the cylinder's far side
+        # ("a dress-up runs past both its faces"). The sheet's seam now lies opposite the face
+        self.assertRunsOn(V(0, -1, 0), V(0, 0, 1))
+        self.assertRunsOn(V(0, -1, 0), V(0, 0, -1))
+
+    def testOcctsProgramErrorAsksTheConstruction(self):
+        # OCCT's maker throws Standard_ProgramError (TopOpeBRepDS_DataStructure::Point): the exact
+        # construction is asked, as where it throws StdFail_NotDone
+        self.assertRunsOn(V(1, 0, 0), V(0, 0, 1))
+        self.assertRunsOn(V(0, 1, 0), V(0, 0, 1))
+
+    def testSeamAtTheArcsFarEndRunsOnInTheSecondTry(self):
+        # The seam at the arc's far end, axis down: OCCT throws, and the splitter with the natural
+        # sheet loses the section where the tool's far side is tangent to the wall at its cusp edge.
+        # The construction's second try, with the sheet's seam opposite the face, builds it
+        self.assertRunsOn(V(-1, 0, 0), V(0, 0, -1))
+
+    def testRefusalAfterAProgramErrorGivesItsReason(self):
+        # The seam away (+x), axis down: OCCT throws and both tries refuse (ops#1000). The error
+        # keeps OCCT's class and text and gives the construction's reason
+        body, edge = self.base(V(1, 0, 0), V(0, 0, -1))
+        with self.assertRaises(Exception) as caught:
+            body.makeFillet(self.R, [edge])
+        self.assertIn("Standard_ProgramError", str(caught.exception))
+        self.assertIn("exact construction refused: ", str(caught.exception))
+
+    def testSeamInsideTheArcRunsOn(self):
+        # The seam inside the arc: the round's edge on the wall is split at the seam into two
+        # (ops#1001: one edge and one vertex more than Onshape's); the volume is the closed form
+        self.assertRunsOn(V(-1, -1, 0), V(0, 0, 1), edges=3, vertices=2)
+
+    def wallBase(self, wall, s, theta, n=24):
+        # The same model at scale s with the pocket's curved wall made by `wall` (review pr999-r1):
+        # "bsp" a periodic B-spline through n points of the circle, its first point at theta (the
+        # arc's ends among them); "rev" a surface of revolution turned by theta
+        R, L, TOP = self.R * s, self.L * s, self.TOP * s
+        c = V(20 * s, L + R, 0)
+        if wall == "bsp":
+            points = [
+                V(c.x + R * math.cos(theta + 2 * math.pi * k / n), c.y + R * math.sin(theta + 2 * math.pi * k / n), TOP - 5 * s)
+                for k in range(n)
+            ]
+            curve = Part.BSplineCurve()
+            curve.interpolate(points, PeriodicFlag=True)
+            # The pocket's outline as base()'s, the wall the spline's quarter from b to a through
+            # its own points, so no Boolean meets the near-tangent wall (PR 528's macOS run: the
+            # boxes' fuse there left an edge of 4 faces at the round's end, by the last digits)
+            z = TOP - 5 * s
+            a, b = V(c.x, c.y - R, z), V(c.x - R, c.y, z)
+            ua, ub = curve.parameter(a), curve.parameter(b)
+            if ua < ub:
+                ua += curve.getKnots()[-1] - curve.getKnots()[0]
+            wire = Part.Wire(
+                [
+                    curve.toShape(ub, ua),
+                    Part.makePolygon([a, V(50 * s, L, z), V(50 * s, 30 * s, z), V(20 * s - R, 30 * s, z), b]),
+                ]
+            )
+            pocket = Part.Face(wire).extrude(V(0, 0, 5 * s))
+        else:
+            profile = Part.makePolygon(
+                [V(c.x, c.y, TOP - 5 * s), V(c.x + R, c.y, TOP - 5 * s), V(c.x + R, c.y, TOP), V(c.x, c.y, TOP), V(c.x, c.y, TOP - 5 * s)]
+            )
+            tool = Part.Face(profile).revolve(V(c.x, c.y, 0), V(0, 0, 1), 360)
+            tool = Part.Solid(Part.Shell(tool.Faces)) if tool.ShapeType != "Solid" else tool
+            tool.rotate(V(c.x, c.y, 0), V(0, 0, 1), math.degrees(theta))
+            z = TOP - 5 * s
+            boxes = Part.makeBox(30 * s + R, 30 * s - L - R, 5 * s, V(20 * s - R, L + R, z)).fuse(
+                Part.makeBox(30 * s, R + 1e-3 * s, 5 * s, V(20 * s, L, z))
+            )
+            pocket = tool.fuse(boxes)
+        block = Part.makeBox(60 * s, 40 * s, TOP)
+        notch = Part.makeBox(10 * s, L, 9 * s, V(20 * s, 0, TOP - 9 * s))
+        body = block.cut(pocket).cut(notch).removeSplitter()
+        # The intended model: every edge between two faces (no pinch)
+        self.assertEqual({len(body.ancestorsOfType(e, Part.Face)) for e in body.Edges}, {2})
+        found = [
+            e
+            for e in body.Edges
+            if len(e.Vertexes) == 2
+            and abs(e.Length - L) < 1e-7 * s
+            and all(abs(v.X - 20 * s) < 1e-7 * s and abs(v.Z - TOP) < 1e-7 * s for v in e.Vertexes)
+        ]
+        self.assertEqual(len(found), 1)
+        return body, found[0]
+
+    def testSplineWallSeamInsideKeepsItsFaces(self):
+        # A periodic B-spline wall whose seam lies inside the arc: OCCT refuses through 48 points with
+        # the seam at 240 degrees, and the construction builds it on its natural sheet (review
+        # pr528-r6, T3). Round 1's face of zero area came with the fused base's sliver face, which
+        # the drawn base no longer has; centring is guarded by testRevolvedWallAt4mBuilds and
+        # testSeamAtTheArcsFarEndRunsOnInTheSecondTry, which both fail with every sheet centred
+        body, edge = self.wallBase("bsp", 1.0, math.radians(240), 48)
+        result = body.makeFillet(self.R, [edge])
+        self.assertTrue(result.isValid())
+        self.assertFalse([f for f in result.Faces if f.Area < 1e-9])
+        self.assertAlmostEqual(body.Volume - result.Volume, self.removed(), delta=1e-3)
+
+    def testRevolvedWallAt4mBuilds(self):
+        # A surface of revolution's wall at 4 m: its natural sheet closes the tool (centred it did not)
+        s = 66.6667
+        body, edge = self.wallBase("rev", s, math.pi)
+        result = body.makeFillet(self.R * s, [edge])
+        self.assertTrue(result.isValid())
+        self.assertAlmostEqual((body.Volume - result.Volume) / s**3, self.removed(), delta=1e-4)
+
+
+class ShallowRidgeTest(unittest.TestCase):
+    """ops#999 (review pr999-r1, T3): OCCT refuses an edge whose faces turn by less than 0.1 rad with
+    Standard_Failure "There are no suitable edges for chamfer or fillet". Any OCCT error now asks the
+    exact construction, which builds such a ridge at the limit (the round's or chamfer's far line on
+    the far edge of the shorter face) and refuses below it. Designed: a prism 30 long whose top is two
+    planes meeting at x = 0, z = 10, turning by phi, over x -20..12"""
+
+    def roof(self, phi_deg, left=20.0, right=12.0, length=30.0):
+        t = math.tan(math.radians(phi_deg) / 2)
+        points = [V(-left, 0, 0), V(right, 0, 0), V(right, 0, 10 - right * t), V(0, 0, 10), V(-left, 0, 10 - left * t), V(-left, 0, 0)]
+        body = Part.Face(Part.makePolygon(points)).extrude(V(0, length, 0))
+        ridge = [e for e in body.Edges if all(abs(v.X) < 1e-9 and abs(v.Z - 10) < 1e-9 for v in e.Vertexes)]
+        self.assertEqual(len(ridge), 1)
+        return body, ridge
+
+    def testAtTheLimitBuildsTheClosedForm(self):
+        phi = math.radians(4.0)
+        w = 12.0 / math.cos(phi / 2)  # the shorter face's width
+        body, ridge = self.roof(4.0)
+        radius = w / math.tan(phi / 2)
+        rounded = body.makeFillet(radius, ridge)
+        self.assertTrue(rounded.isValid())
+        self.assertAlmostEqual(body.Volume - rounded.Volume, radius**2 * (math.tan(phi / 2) - phi / 2) * 30, delta=1e-5)
+        chamfered = body.makeChamfer(w, ridge)
+        self.assertTrue(chamfered.isValid())
+        self.assertAlmostEqual(body.Volume - chamfered.Volume, 0.5 * w * w * math.sin(phi) * 30, delta=1e-5)
+
+    def testBelowTheLimitStaysRefused(self):
+        body, ridge = self.roof(4.0)
+        with self.assertRaises(Exception):
+            body.makeFillet(5.0, ridge)
+
+
+class SmoothEdgeTest(unittest.TestCase):
+    """ops#999 (review pr999-r2, T-A): a fillet of a smooth edge, the line where a side plane is
+    tangent to a corner cylinder of radius 3. No ball of another radius is tangent to both faces
+    there, and OCCT refuses it ("There are no suitable edges for chamfer or fillet"); the exact
+    construction, asked since any OCCT error asks it, must refuse it too rather than roll on over the
+    cylinder's other edge and re-round the corner. Designed: a box 30 x 20 x 10 whose vertical edge
+    at the origin is rounded r 3 (a boss corner), and the same box cut into a block 60 x 40 x 20 from
+    its top as a pocket 5 deep (a pocket corner)"""
+
+    def smoothEdges(self, body, centre):
+        # The two vertical lines where the corner cylinder about `centre` meets its side planes
+        found = [
+            e
+            for e in body.Edges
+            if e.Curve.TypeId == "Part::GeomLine"
+            and abs(e.Vertexes[0].X - e.Vertexes[1].X) < 1e-9
+            and abs(e.Vertexes[0].Y - e.Vertexes[1].Y) < 1e-9
+            and abs(math.hypot(e.Vertexes[0].X - centre.x, e.Vertexes[0].Y - centre.y) - 3) < 1e-7
+        ]
+        self.assertEqual(len(found), 2)
+        return found
+
+    def boss(self):
+        box = Part.makeBox(30, 20, 10)
+        corner = [e for e in box.Edges if all(abs(v.X) < 1e-9 and abs(v.Y) < 1e-9 for v in e.Vertexes)]
+        return box.makeFillet(3, corner)
+
+    def assertRefused(self, body, edges):
+        for edge in edges:
+            for radius in (3.5, 5.0):
+                with self.assertRaises(Exception):
+                    body.makeFillet(radius, [edge])
+            with self.assertRaises(Exception):
+                body.makeChamfer(1.0, [edge])
+
+    def testSmoothEdgeOfABossCornerStaysRefused(self):
+        body = self.boss()
+        self.assertRefused(body, self.smoothEdges(body, V(3, 3, 0)))
+
+    def testSmoothEdgeOfAPocketCornerStaysRefused(self):
+        tool = self.boss()
+        tool.translate(V(10, 10, 15))
+        body = Part.makeBox(60, 40, 20).cut(tool).removeSplitter()
+        self.assertRefused(body, self.smoothEdges(body, V(13, 13, 0)))
