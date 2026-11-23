@@ -12,6 +12,7 @@
 #include <App/Document.h>
 #include <App/Part.h>
 #include <Base/Exception.h>
+#include <Mod/Part/App/Part2DObject.h>
 
 #include "Body.h"
 #include "FeatureBase.h"
@@ -224,13 +225,31 @@ std::string DeletePart::deleteLock(const App::DocumentObject* feature)
     // A part deleted before this feature in history (Onshape: the reference breaks)
     std::vector<App::DocumentObject*> sequence;
     bool sequenced = false;
-    std::vector<const App::DocumentObject*> via;
-    const auto reads = readsOfOtherBodies(feature, &via);
-    for (std::size_t i = 0; i < reads.size(); ++i) {
-        auto read = reads[i];
+    // (the read, where it is made: the feature, or the sketch, datum or binder it is read through)
+    std::vector<std::pair<App::DocumentObject*, const App::DocumentObject*>> work;
+    auto collect = [&work](const App::DocumentObject* reader, bool ownSolids) {
+        std::vector<const App::DocumentObject*> via;
+        const auto reads = readsOfOtherBodies(reader, &via, ownSolids);
+        for (std::size_t i = 0; i < reads.size(); ++i) {
+            work.emplace_back(reads[i], via[i]);
+        }
+    };
+    collect(feature, false);
+    std::unordered_set<const App::DocumentObject*> walked;
+    for (std::size_t i = 0; i < work.size(); ++i) {
+        auto [read, at] = work[i];
         auto other = freecad_cast<Body*>(read);
         if (!other) {
             other = Body::findBodyOf(read);
+        }
+        // A sketch belongs to no part (Onshape DB5: it can't be deleted, ops#991): another Body's
+        // sketch, its Body deleted or not, is read whatever the delete; what the sketch reads
+        // itself is judged at the sketch's place, its own Body's solids included
+        if (read != other && read->isDerivedFrom<Part::Part2DObject>()) {
+            if (walked.insert(read).second) {
+                collect(read, true);
+            }
+            continue;
         }
         DeletePart* deleter = deleterOf(other);
         if (!deleter) {
@@ -251,12 +270,17 @@ std::string DeletePart::deleteLock(const App::DocumentObject* feature)
         }
         // Where the read is made: the feature, or its sketch, datum or binder made before the
         // delete (Onshape: a sketch before the delete keeps its reference, and so does what uses it)
-        auto here = std::ranges::find(sequence, via[i]);
+        auto here = std::ranges::find(sequence, at);
         if (here == sequence.end()) {
             here = std::ranges::find(sequence, feature);
         }
         auto there = std::ranges::find(sequence, deleter);
         if (here != sequence.end() && there != sequence.end() && there < here) {
+            if (at != feature) {
+                return "This feature uses " + quoted(at) + ", which uses " + quoted(read) + " of "
+                    + quoted(other) + ", which " + quoted(deleter) + deletedBefore + ". Repoint "
+                    + quoted(at) + ", or move it before " + quoted(deleter);
+            }
             return "This feature uses " + quoted(read) + " of " + quoted(other) + ", which "
                 + quoted(deleter) + deletedBefore + ". Repoint it, or move it before "
                 + quoted(deleter);
