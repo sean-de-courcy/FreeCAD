@@ -998,9 +998,11 @@ class TestTopologicalNamingProblem(unittest.TestCase):
         self.Doc.recompute()
         # Assert
         self.assertEqual(len(body.Shape.childShapes()), 1)
+        # One face per profile edge and the two caps, as Onshape's (ops#895; one per turn before:
+        # 14, 28, 16)
         self.assertEqual(
             (len(helix.Shape.Faces), len(helix.Shape.Edges), len(helix.Shape.Vertexes)),
-            (14, 28, 16),
+            (6, 12, 8),
         )
         Radius = 0  # Rectangle is on the axis, but wouldn't matter regardless here
         Area = Part.Face(sketch.Shape).Area
@@ -1031,12 +1033,18 @@ class TestTopologicalNamingProblem(unittest.TestCase):
 
     def helixSideFacesFromProfile(self, shape, feature, sketch):
         """Every face of `shape` that isn't planar is named as generated (GEN) under the
-        feature's tag, from names holding the profile sketch's edges."""
+        feature's tag, from names holding the profile sketch's edges. A helix's AddSubShape is
+        its sweep cut at each turn for the boolean (ops#895): a piece's last section is that
+        split (SPT), the one before it the sweep's."""
         sides = [i for i, f in enumerate(shape.Faces, 1) if not isinstance(f.Surface, Part.Plane)]
         self.assertTrue(sides)
         for index in sides:
             name = self.firstName(shape, f"Face{index}")
-            last = App.getDecodedMappedName(name)[-1]
+            sections = App.getDecodedMappedName(name)
+            last = sections[-1]
+            if last["opCode"] == "SPT" and len(sections) > 1:
+                self.assertEqual(last["iterationTag"], str(feature.ID), name)
+                last = sections[-2]
             self.assertEqual(last["iterationTag"], str(feature.ID), name)
             self.assertIn("GEN", last["mapperFlags"], name)
             self.assertIn(f"^;{sketch.ID}^;SKT^;", name)

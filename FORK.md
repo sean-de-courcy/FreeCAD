@@ -513,7 +513,8 @@ names it.
 | `fix/i963-reapply-own-upto` | fix | ops#963 | - | `integration` `bcf7ad1195` | `eca70a549b` (fork PR 515), 2026-11-22 | never (fork fix): Reapply reads an up-to face another original made as the instance's own |
 | `fix/i952-fillet-mixed-coverage` | fix | ops#952 | - | `integration` `f47f9d6683` | `2c0e13cf0e` (fork PR 508), 2026-11-22 | never (fork fix): a fillet whose picks mix what OCCT fails on with what the construction doesn't cover builds as the covered group, then the rest |
 | `fix/i974-oblique-foot` | fix | ops#974 | - | `integration` `eca70a549b` | `15903869d3` (fork PR 518), 2026-11-22 | never (fork fix): a sweep's profile lies where the path crosses its plane |
-| `corpus/i895-helix-whole-faces` | feature | ops#895 | - | `integration` `f47f9d6683` | (fork PR 517) | never (fork tests) |
+| `corpus/i895-helix-whole-faces` | feature | ops#895 | - | `integration` `f47f9d6683` | `62b7d9f1d7` (fork PR 517), 2026-11-22 | never (fork tests) |
+| `fix/i895-helix-faces` | fix | ops#895 | - | `corpus/i895-helix-whole-faces` (fork PR 517) on `integration` `f47f9d6683` | (fork PR 519) | never (fork fix): a helix has one face per profile edge, as Onshape's (ops#895) |
 
 ## Fork-only commits in carried topics
 

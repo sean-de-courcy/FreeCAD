@@ -204,7 +204,11 @@ namespace
 // into a plate's top face; a groove filled flush) takes its name from before the split again,
 // first, when the merged face holds every piece of that split; the pieces' names follow. The
 // elements later features generate on it are named from the whole face, as without the split.
-constexpr int ForkNamingRevision = 20;
+// 21: ops#895, a PartDesign helix sweeps on a one-edge path: one side face per profile edge, not
+// one per turn, named from the profile's edge whatever the turns; cut at each turn for the
+// boolean and merged again after it, its faces and its crest take their whole names back (an
+// edge as a face does). The split's pieces are ordered with one projector per source.
+constexpr int ForkNamingRevision = 21;
 
 // The `.N<n>` of the element map version: the form interned names are saved in (ops#6). 2: the
 // references are indices into the file's table (NamingFormat 2).

@@ -646,7 +646,181 @@ class TestHelix(unittest.TestCase):
             centroid += (x1 + x2) * cross / 6
         centroid /= area
         volume = pi * (r**2 - (r - 1) ** 2) * height + abs(area) * 2 * pi * centroid * height / pitch
-        self.assertAlmostEqual(shape.Volume, volume, delta=5e-4)
+        # 1.4e-7 of the part: the crest joined across the turns' cuts (ops#895) moved it by 5e-4
+        self.assertAlmostEqual(shape.Volume, volume, delta=1e-3)
+
+    # ops#895: a helix has one face per profile edge, as Onshape's (a 10-turn thread there has 9
+    # faces in all), not one per turn. A tube r 10..20 carries a triangular thread profile
+    # (r 20, z 5) .. (r 20, z 6) .. (r 20.8, z 5.5) on its wall, pitch 2.5; the edge on the wall
+    # sweeps into the wall, so the thread shows two flanks. The thread's volume is the profile's
+    # area swept round its centroid (Pappus): 0.4 * 2 pi * 20.2667 per turn.
+    THREAD = [(20.0, 5.0), (20.0, 6.0), (20.8, 5.5)]
+    THREAD_AREA = 0.4
+    THREAD_CENTROID = (20.0 + 20.0 + 20.8) / 3
+
+    def makeThread(self, turns, height=40.0, kind="PartDesign::AdditiveHelix", tube=True, refine=False, reversed_=False):
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        planes = {f.Role: f for f in body.Origin.OriginFeatures}
+        if tube:
+            base = self.Doc.addObject("Part::Feature", "Tube")
+            base.Shape = Part.makeCylinder(20, height).cut(Part.makeCylinder(10, height))
+            body.BaseFeature = base
+        profile = body.newObject("Sketcher::SketchObject", "ThreadProfile")
+        profile.AttachmentSupport = [(planes["XZ_Plane"], "")]
+        profile.MapMode = "FlatFace"
+        corners = list(self.THREAD)
+        if kind == "PartDesign::SubtractiveHelix":
+            corners[2] = (19.2, 5.5)
+        for i in range(3):
+            (x1, y1), (x2, y2) = corners[i], corners[(i + 1) % 3]
+            profile.addGeometry(Part.LineSegment(Base.Vector(x1, y1, 0), Base.Vector(x2, y2, 0)))
+        thread = body.newObject(kind, "Thread")
+        thread.Profile = profile
+        thread.ReferenceAxis = (planes["Z_Axis"], [""])
+        thread.Mode = "pitch-turns-angle"
+        thread.Pitch = 2.5
+        thread.Turns = turns
+        thread.Refine = refine
+        thread.Reversed = reversed_
+        self.Doc.recompute()
+        self.assertTrue(thread.isValid(), thread.getStatusString())
+        self.assertTrue(thread.Shape.isValid())
+        return thread
+
+    def faceKinds(self, shape):
+        kinds = {}
+        for f in shape.Faces:
+            kinds.setdefault(f.Surface.__class__.__name__, []).append(f)
+        return kinds
+
+    def threadVolume(self, turns):
+        return self.THREAD_AREA * 2 * pi * self.THREAD_CENTROID * turns
+
+    def testThreadHasOneFacePerProfileEdge(self):
+        """A thread over several turns has one face per flank, with Refine on or off (ops#895).
+
+        Before, each turn had its own two flank faces (3.4 turns: 8, 10 turns: 21). The wall
+        stays one cylinder face per turn: a cylinder face over more than one period breaks
+        OCCT's booleans (testRefineKeepsThreadWallWithinOnePeriod)."""
+        tube = pi * (20**2 - 10**2) * 40
+        for turns in (1, 2, 3.4, 5, 10):
+            for refine in (False, True):
+                with self.subTest(turns=turns, refine=refine):
+                    thread = self.makeThread(turns, refine=refine)
+                    kinds = self.faceKinds(thread.Shape)
+                    self.assertEqual(len(kinds.get("BSplineSurface", [])), 2)
+                    self.assertEqual(len(kinds.get("Plane", [])), 4)
+                    walls = [f for f in kinds.get("Cylinder", []) if abs(f.Surface.Radius - 20) < 1e-9]
+                    spans = [f.ParameterRange[1] - f.ParameterRange[0] for f in walls]
+                    self.assertTrue(all(s <= 2 * pi + 1e-6 for s in spans), spans)
+                    self.assertAlmostEqual(
+                        thread.Shape.Volume, tube + self.threadVolume(turns), delta=5e-3
+                    )
+                FreeCAD.closeDocument(self.Doc.Name)
+                self.Doc = FreeCAD.newDocument("PartDesignTestHelix")
+
+    def testHelixAloneHasOneFacePerProfileEdge(self):
+        """A helix with no base has one face per profile edge and its two caps (ops#895)."""
+        thread = self.makeThread(3.4, tube=False)
+        kinds = self.faceKinds(thread.Shape)
+        self.assertEqual(len(thread.Shape.Faces), 5)
+        self.assertEqual(len(kinds.get("BSplineSurface", [])), 3)
+        self.assertAlmostEqual(thread.Shape.Volume, self.threadVolume(3.4), delta=1e-3)
+
+    def testThreadRunningOutOfThePartHasOneFacePerProfileEdge(self):
+        """A thread that runs out through the tube's top or bottom face (ops#895).
+
+        Beyond the tube the profile's edge on the wall shows as the thread's inner face, so the
+        thread has one face per profile edge, three: up 5 turns from z 5 on a tube 10 high, and
+        Reversed, down 3.4 turns from z 5 on a tube 30 high. The whole thread adds to the tube."""
+        for turns, height, reversed_ in ((5, 10.0, False), (3.4, 30.0, True)):
+            with self.subTest(reversed=reversed_):
+                thread = self.makeThread(turns, height=height, reversed_=reversed_)
+                kinds = self.faceKinds(thread.Shape)
+                self.assertEqual(len(kinds.get("BSplineSurface", [])), 3)
+                self.assertAlmostEqual(
+                    thread.Shape.Volume,
+                    pi * (20**2 - 10**2) * height + self.threadVolume(turns),
+                    delta=5e-3,
+                )
+            FreeCAD.closeDocument(self.Doc.Name)
+            self.Doc = FreeCAD.newDocument("PartDesignTestHelix")
+
+    def testGrooveHasOneFacePerProfileEdge(self):
+        """A subtractive helix cut into a wall leaves one face per flank (ops#895)."""
+        thread = self.makeThread(3.4, kind="PartDesign::SubtractiveHelix")
+        kinds = self.faceKinds(thread.Shape)
+        self.assertEqual(len(kinds.get("BSplineSurface", [])), 2)
+        centroid = (20.0 + 20.0 + 19.2) / 3
+        groove = self.THREAD_AREA * 2 * pi * centroid * 3.4
+        self.assertAlmostEqual(thread.Shape.Volume, pi * (20**2 - 10**2) * 40 - groove, delta=5e-3)
+
+    def testThreadFacesKeepTheirNamesWhenTheTurnsChange(self):
+        """A flank's, an end cap's and the crest's names don't depend on the turns (ops#895).
+
+        Before, a flank was one face per turn, named by its turn, and the names of the last
+        turn's faces moved with Turns. The crest is the edge between the flanks, at r 20.8; it
+        keeps its name across one turn too, where the cuts per turn begin (review pr895-r1, L1)."""
+        thread = self.makeThread(3.4)
+
+        def names():
+            shape = thread.Shape
+            found = {}
+            for i, f in enumerate(shape.Faces, 1):
+                kind = f.Surface.__class__.__name__
+                # the flanks, and the thread's caps: planes through the axis
+                if kind == "BSplineSurface" or (
+                    kind == "Plane" and abs(f.Surface.Axis.z) < 1e-9
+                ):
+                    mapped = shape.ElementReverseMap.get("Face%d" % i)
+                    found.setdefault(kind, set()).add(mapped if isinstance(mapped, str) else mapped[0])
+            for i, e in enumerate(shape.Edges, 1):
+                points = [v.Point for v in e.Vertexes] + [e.valueAt((e.FirstParameter + e.LastParameter) / 2)]
+                if all(abs(math.hypot(q.x, q.y) - 20.8) < 1e-4 for q in points):
+                    mapped = shape.ElementReverseMap.get("Edge%d" % i)
+                    found.setdefault("crest", set()).add(mapped if isinstance(mapped, str) else mapped[0])
+            return found
+
+        before = names()
+        self.assertEqual(len(before["BSplineSurface"]), 2)
+        self.assertEqual(len(before["Plane"]), 2)
+        self.assertEqual(len(before["crest"]), 1)
+        for turns in (5, 2.2, 0.6, 1.0, 1.0005, 3.4):
+            thread.Turns = turns
+            self.Doc.recompute()
+            self.assertTrue(thread.isValid(), thread.getStatusString())
+            self.assertEqual(names(), before, turns)
+
+    def testThreadStandsLaterBooleans(self):
+        """Booleans after a thread of ten turns, whose flanks are one face each (ops#895).
+
+        A coaxial cut through the crests at r 20.5, a Common with a cylinder r 20.6 and an axial
+        slot across every turn: each result is valid, and the volumes are the exact ones. The
+        crest cut removes the profile's part beyond r 20.5 (a triangle 0.375 x 0.3, its centroid
+        at r 20.6) over ten turns; the Common keeps the tube and the profile's part within r 20.6
+        (all but a triangle 0.25 x 0.2, centroid at r 20.6667). The bound is about 1e-4 of the
+        material the crest cut removes: a face over many turns intersects a little less exactly
+        than one over one turn (0.03 against 0.004 for the per-turn faces before)."""
+        turns = 10
+        thread = self.makeThread(turns)
+        shape = thread.Shape
+        tube = pi * (20**2 - 10**2) * 40
+        crest = Part.makeCylinder(30, 42, Base.Vector(0, 0, -1)).cut(
+            Part.makeCylinder(20.5, 42, Base.Vector(0, 0, -1))
+        )
+        cut = shape.cut(crest)
+        self.assertTrue(cut.isValid())
+        removed = 0.5 * 0.375 * 0.3 * 2 * pi * 20.6 * turns
+        self.assertAlmostEqual(shape.Volume - cut.Volume, removed, delta=0.05)
+        common = shape.common(Part.makeCylinder(20.6, 42, Base.Vector(0, 0, -1)))
+        self.assertTrue(common.isValid())
+        kept = tube + self.threadVolume(turns) - 0.5 * 0.25 * 0.2 * 2 * pi * (20.6 + 0.2 / 3) * turns
+        self.assertAlmostEqual(common.Volume, kept, delta=0.05)
+        slot = Part.makeBox(4, 30, 42, Base.Vector(-2, 0, -1))
+        slotted, inside = shape.cut(slot), shape.common(slot)
+        self.assertTrue(slotted.isValid())
+        self.assertTrue(inside.isValid())
+        self.assertAlmostEqual(slotted.Volume + inside.Volume, shape.Volume, delta=1e-3)
 
     def tearDown(self):
         FreeCAD.closeDocument("PartDesignTestHelix")
