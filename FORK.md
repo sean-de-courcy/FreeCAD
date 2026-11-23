@@ -525,7 +525,8 @@ names it.
 | `fix/i989-990-fillet-construction-retries` | fix | ops#989, ops#990 | - | `integration` `2c0e13cf0e` | `099549b9ef` (fork PR 521), 2026-11-23 | never (fork fix): a fillet's construction is asked with its wider scope after OCCT's invalid result, and after the feature's lost-material check refused OCCT's valid one |
 | `fix/i1002-merge-ids` | fix | ops#1002 | - | `integration` `160bc445b0` | `2197d025e9` (fork PR 529), 2026-11-23 | never (fork fix): imported objects' new IDs stay above the file's own |
 | `fix/i987-chamfer-ruled-edge` | fix | ops#987 | - | `integration` `2c0e13cf0e` | `2eb5c34b36` (fork PR 526), 2026-11-23 | never (fork fix): the exact construction builds a chamfer of a straight edge between a plane and a cylinder along it |
-| `fix/i918-fillet-mitre-runon` | fix | ops#918 | - | `integration` `2eb5c34b36` | (fork PR 525) | never (fork fix): a round whose line runs into the mitre of two earlier rounds runs on to their plane with a torus at its foot |
+| `fix/i918-fillet-mitre-runon` | fix | ops#918 | - | `integration` `2eb5c34b36` | `02f036db52` (fork PR 525), 2026-11-23 | never (fork fix): a round whose line runs into the mitre of two earlier rounds runs on to their plane with a torus at its foot |
+| `fix/i942-chamfer-varying-angle` | fix | ops#942 | - | `integration` `02f036db52` | (fork PR 509) | never (fork fix): equal-distance chamfers along closed edges of varying angle as one rolling ball, as Onshape's (WidthAt, WidthPoints) |
 
 ## Fork-only commits in carried topics
 

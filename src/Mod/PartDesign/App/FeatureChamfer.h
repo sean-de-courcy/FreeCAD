@@ -25,6 +25,7 @@
 
 #pragma once
 
+#include <App/PropertyGeo.h>
 #include <App/PropertyStandard.h>
 #include <App/PropertyUnits.h>
 #include "FeatureDressUp.h"
@@ -47,6 +48,12 @@ public:
     App::PropertyBool UseAllEdges;
     /// Onshape's "Tangent propagation": off chamfers only the picked edges (ops#655)
     App::PropertyBool TangentPropagation;
+    /// Where an equal distance chamfer along a closed edge whose faces' angle varies takes its
+    /// width (ops#942): "Narrowest angle", "Widest angle", "At a reference point", by index
+    /// (Part::FilletFallback::WidthAt); values are only ever appended
+    App::PropertyEnumeration WidthAt;
+    /// "At a reference point": one point per picked edge, in the base shape's coordinates
+    App::PropertyVectorList WidthPoints;
 
     /** @name methods override feature */
     //@{

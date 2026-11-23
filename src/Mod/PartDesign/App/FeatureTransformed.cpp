@@ -1375,6 +1375,8 @@ PartDesignExport Part::TopoShape reapplyDressUp(
     const std::vector<Part::TopoShape>& edges,
     std::string& why
 );
+// FeatureDressUp.cpp (ops#942): the move the next reapplyDressUp() maps a chamfer's points by
+PartDesignExport void setDressUpReapplyMove(const gp_Trsf* move);
 
 extern bool getPDRefineModelParameter();
 
@@ -2373,8 +2375,11 @@ App::DocumentObjectExecReturn* Transformed::execute()
                                         );
                                     }
                                     std::string why;
+                                    // ops#942: a chamfer's reference points move with its edges
+                                    setDressUpReapplyMove(&move);
                                     Part::TopoShape made =
                                         reapplyDressUp(item.dressUp, supportShape, edges, why);
+                                    setDressUpReapplyMove(nullptr);
                                     if (made.isNull()) {
                                         return new App::DocumentObjectExecReturn(
                                             quoted(item.named) + " at " + instance + ": " + why,

@@ -1195,6 +1195,70 @@ def MitreAtLobeCorners(make):
     return {"volumes": {"FootMitre": plate + lobes + mitre_fill_volume(radius, steps=4000)}}
 
 
+def ChamferVaryingAngle(make):
+    """Equal distance chamfers along closed edges whose faces' angle varies, as Onshape's: one ball
+    rolled round each edge (ops#942, notes/chamfer-varying-angle-942.md).
+
+    Body: a block whose top is the plane z = x tan 20 deg (60 x 60, 30 deep at x = 0), with a
+    cylinder of radius 10 from z = -20 to 20 fused in (a boss); its foot chamfered 2, Narrowest
+    angle: d = 2 tan 35 deg, the fill pi d^2 (R + d / 3) (1 + sin^2 t / 2) / cos t = 72.6404
+    (section 2's closed form). Body001: a cone of radius 20 at z = 0 leaning in by 10 deg, 20 high,
+    four holes of radius 3 square to its axis at z = 10 and 45, 135, 225 and 315 deg; their rims
+    chamfered 1, Narrowest angle (77.8565 deg): each cuts 8.584185, TestChamfer's own integral of
+    the ball's sweep (_coneWallChamfer). On each chamfer, points at the centres of mass of a chamfer
+    face and of its two rails, so that the names of the face and the rails are kept in the file.
+    fork-1.0.0's OCCT chamfer puts the width on both faces all round instead: a file saved with the
+    rule must reopen with it (R3)."""
+    doc = make("ChamferVaryingAngle")
+    R, t = 10.0, math.radians(20)
+    k = math.tan(t)
+    corners = [V(-30, -30, -30), V(30, -30, -30), V(30, -30, 30 * k), V(-30, -30, -30 * k)]
+    plate = Part.Face(Part.makePolygon(corners + corners[:1])).extrude(V(0, 60, 0))
+    boss = plate.fuse(Part.makeCylinder(R, 40, V(0, 0, -20))).removeSplitter()
+    draft = math.radians(10)
+    cone = Part.makeCone(20, 20 - 20 * math.tan(draft), 20)
+    for degrees in (45.0, 135.0, 225.0, 315.0):
+        p = math.radians(degrees)
+        along = V(math.cos(p), math.sin(p), 0)
+        cone = cone.cut(Part.makeCylinder(3, 20, V(0, 0, 10) + along * 10, along))
+    cone = cone.removeSplitter()
+    volumes = {}
+    for name, shape, kind, size in (("Body", boss, "Part::GeomEllipse", 2.0),
+                                    ("Body001", cone, "Part::GeomBSplineCurve", 1.0)):
+        base = doc.addObject("Part::Feature", name + "Base")
+        base.Shape = shape
+        body = newBody(doc, name)
+        body.BaseFeature = base
+        doc.recompute()
+        edges = ["Edge%d" % (i + 1) for i, e in enumerate(shape.Edges)
+                 if e.Curve.TypeId == kind and e.isClosed()]
+        chamfer = body.newObject("PartDesign::Chamfer", "Chamfer" if name == "Body" else "HoleChamfer")
+        chamfer.Base = (base, edges)
+        chamfer.Size = size
+        doc.recompute()
+        face = [i + 1 for i, f in enumerate(chamfer.Shape.Faces)
+                if f.Surface.TypeId == "Part::GeomBSplineSurface"][0]
+        rails = [e for e in chamfer.Shape.Faces[face - 1].Edges
+                 if not e.isSeam(chamfer.Shape.Faces[face - 1])]
+        names = ["Face%d" % face] + [
+            "Edge%d" % (i + 1) for i, e in enumerate(chamfer.Shape.Edges)
+            if any(e.isSame(rail) for rail in rails)
+        ]
+        for index, element in enumerate(names):
+            point = body.newObject("PartDesign::Point", "%sPoint%d" % (chamfer.Name, index))
+            point.AttachmentSupport = [(chamfer, element)]
+            point.MapMode = "CenterOfMass"
+        body.Tip = chamfer
+        doc.recompute()
+        if name == "Body":
+            d = 2 * math.tan((math.pi / 2 - t) / 2)
+            fill = math.pi * d * d * (R + d / 3) * (1 + math.sin(t) ** 2 / 2) / math.cos(t)
+            volumes[chamfer.Name] = shape.Volume + fill
+        else:
+            volumes[chamfer.Name] = shape.Volume - 4 * 8.584185
+    return {"volumes": volumes}
+
+
 MODELS = [
     RevolutionGroove,
     SidedVariants,
@@ -1214,4 +1278,7 @@ MODELS = [
     RoundUnderLeaningWall,
     LoftNormalToProfile,
     MitreAtLobeCorners,
+
+
+    ChamferVaryingAngle,
 ]

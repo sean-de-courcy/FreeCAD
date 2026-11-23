@@ -30,6 +30,7 @@
 #include <TopoDS.hxx>
 #include <TopoDS_Edge.hxx>
 #include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
+#include <gp_Trsf.hxx>
 #include <ShapeFix_Shape.hxx>
 #include <Standard_Version.hxx>
 
@@ -60,6 +61,8 @@ PartDesignExport std::string dressUpFailure(const char* verb, const std::string&
 PartDesignExport bool isDressUpFailure(const std::string& what);
 // FeatureDressUp.cpp (FreeCAD-CH ops#654 T3; declared where used)
 PartDesignExport bool dressUpReapplying(Part::TopoShape& base, std::vector<Part::TopoShape>& edges);
+// ops#942 (FeatureDressUp.cpp): a pattern instance's move from the seed's base
+PartDesignExport bool dressUpReapplyMove(gp_Trsf& move);
 PartDesignExport void dressUpReapplied(const Part::TopoShape& result);
 // ops#796 (FeatureDressUp.cpp): a studio step takes what its owner's try built
 PartDesignExport void dressUpReappliedFrom(const Part::TopoShape& raw,
@@ -93,6 +96,8 @@ PartDesignExport TopoDS_Shape runOutCut(
 PROPERTY_SOURCE(PartDesign::Chamfer, PartDesign::DressUp)
 
 const char* ChamferTypeEnums[] = {"Equal distance", "Two distances", "Distance and Angle", nullptr};
+// ops#942: Part::FilletFallback::WidthAt, by index; values are only ever appended
+const char* WidthAtEnums[] = {"Narrowest angle", "Widest angle", "At a reference point", nullptr};
 const App::PropertyQuantityConstraint::Constraints Chamfer::floatSize
     = {0.0, std::numeric_limits<float>::max(), 0.1};
 const App::PropertyAngle::Constraints Chamfer::floatAngle = {0.0, 180.0, 1.0};
@@ -140,6 +145,25 @@ Chamfer::Chamfer()
         "Off: only the picked edges; where a picked straight edge continues tangentially, the\n"
         "chamfer (equal distance only) runs straight on until it leaves the body, as Onshape's does."
     );
+    ADD_PROPERTY_TYPE(
+        WidthAt,
+        (0L),
+        "Chamfer",
+        App::Prop_None,
+        "Equal distance, along a closed edge whose faces meet at an angle that varies round it:\n"
+        "where the chamfer has the width typed. It keeps one distance to both faces all round.\n"
+        "Narrowest angle: the width is the chamfer's longest leg. Widest angle: its shortest.\n"
+        "At a reference point: at the station of each edge's point in WidthPoints."
+    );
+    WidthAt.setEnums(WidthAtEnums);
+    ADD_PROPERTY_TYPE(
+        WidthPoints,
+        (),
+        "Chamfer",
+        App::Prop_None,
+        "For each picked edge, a point at the station whose angle sets the chamfer's distance;\n"
+        "set by the transfer, or typed. Used with WidthAt 'At a reference point' only."
+    );
 
     updateProperties();
 }
@@ -152,7 +176,8 @@ short Chamfer::mustExecute() const
 
     switch (chamferType) {
         case 0:  // "Equal distance"
-            touched = Size.isTouched() || ChamferType.isTouched();
+            touched = Size.isTouched() || ChamferType.isTouched() || WidthAt.isTouched()
+                || WidthPoints.isTouched();
             break;
         case 1:  // "Two distances"
             touched = Size.isTouched() || ChamferType.isTouched() || Size2.isTouched();
@@ -233,6 +258,41 @@ App::DocumentObjectExecReturn* Chamfer::build()
     // edge's opening near 180 degrees: unknown, so that check doesn't run (PR review r1, T2)
     double reach = std::max(size, size2);
     bool setbacksDiffer = false;
+    // ops#942: where the chamfer takes its width along an edge whose faces' angle varies
+    Part::FilletFallback::ChamferWidth width;
+    width.at = static_cast<Part::FilletFallback::WidthAt>(WidthAt.getValue());
+    for (const auto& point : WidthPoints.getValues()) {
+        width.points.emplace_back(point.x, point.y, point.z);
+    }
+    if (width.at == Part::FilletFallback::WidthAt::atPoint
+        && static_cast<Part::ChamferType>(chamferType) == Part::ChamferType::equalDistance) {
+        // The points are the Body's; the base shape is computed in its own feature's frame
+        // (notes/chamfer-varying-angle-942.md section 4 point 8)
+        const Part::TopoShape own = getBaseTopoShape(/*silent=*/true);
+        if (!own.isNull()) {
+            const gp_Trsf toOwn = own.getShape().Location().Transformation().Inverted();
+            for (auto& point : width.points) {
+                point.Transform(toOwn);
+            }
+        }
+    }
+    if (reapplying && width.at == Part::FilletFallback::WidthAt::atPoint
+        && static_cast<Part::ChamferType>(chamferType) == Part::ChamferType::equalDistance) {
+        // At a pattern's instance the points move with the edges (section 4 point 10); a studio
+        // step's part has a frame of its own, not measured, so the value fails there
+        gp_Trsf move;
+        if (!dressUpReapplyMove(move)) {
+            return new App::DocumentObjectExecReturn(QT_TRANSLATE_NOOP(
+                "Exception",
+                "Chamfer: 'At a reference point' is not available on a chamfer over several "
+                "parts; choose Narrowest angle or Widest angle"
+            ));
+        }
+        for (auto& point : width.points) {
+            point.Transform(move);
+        }
+    }
+    bool varying = false;
     if (static_cast<Part::ChamferType>(chamferType) == Part::ChamferType::equalDistance) {
         // A chain of edges at different angles gets Onshape's setbacks, which can exceed the
         // size (0.714 of it beside a 110-degree first edge): the largest, as makeElementChamfer's
@@ -243,6 +303,27 @@ App::DocumentObjectExecReturn* Chamfer::build()
             for (double setback : Part::FilletFallback::chainSetbacks(input, copies, size)) {
                 reach = std::max(reach, setback);
                 setbacksDiffer = setbacksDiffer || setback != size;
+            }
+            // One ball rolled round each edge (ops#942): its longest leg is the width at the
+            // narrowest angle, and more with the width elsewhere
+            Part::FilletFallback::Request request;
+            request.kind = Part::FilletFallback::Kind::Chamfer;
+            request.size1 = size;
+            request.size2 = size;
+            request.flipDirection = flipDirection ? Part::Flip::flip : Part::Flip::none;
+            request.widthAt = width.at;
+            request.widthPoints = width.points;
+            std::vector<TopoDS_Shape> plain;
+            for (const auto& edge : copies) {
+                plain.push_back(edge.getShape());
+            }
+            if (!setbacksDiffer
+                && Part::FilletFallback::variesAlongLoneEdge(input.getShape(), plain, request)) {
+                varying = true;
+                reach = std::max(
+                    reach,
+                    Part::FilletFallback::longestLeg(input.getShape(), plain, request)
+                );
             }
         }
         catch (const Base::Exception&) {
@@ -305,6 +386,9 @@ App::DocumentObjectExecReturn* Chamfer::build()
                 shape = TopShape;
             }
             else {
+                // The retry with w on both faces (below) is by two distances: the rule is read
+                // only by equal distances
+                Part::FilletFallback::ChamferWidthScope scope(width);
                 shape.makeElementChamfer(
                     TopShape,
                     passEdges,
@@ -422,13 +506,26 @@ App::DocumentObjectExecReturn* Chamfer::build()
     // every edge, today's result (Add(w, w) as makeElementChamfer's own retry), reaching w: a
     // chamfer that built with w never starts failing (ruling A, review r1 T1). Its error, if it
     // fails too, is the one reported
-    if (result != App::DocumentObject::StdReturn && setbacksDiffer) {
+    // Along an edge of varying angle (ops#942) the same, with the width at the narrowest angle
+    // only: with the width elsewhere, the result with w on both faces is far from the one asked
+    // for, and the chamfer fails instead (notes/chamfer-varying-angle-942.md 4, point 10)
+    const bool retry = setbacksDiffer
+        || (varying && width.at == Part::FilletFallback::WidthAt::narrowest);
+    if (result != App::DocumentObject::StdReturn && retry) {
         FC_LOG(
-            getFullName() << ": the chain's setbacks failed (" << result->Why
+            getFullName() << ": the chain's setbacks or the rolling ball failed (" << result->Why
                           << "), building the chamfer again with " << size << " on every edge"
         );
+        // Along an edge of varying angle the rolling ball's refusal says more than OCCT's failure
+        // with w (the cause the user can act on: notes/chamfer-varying-angle-942.md T6)
+        App::DocumentObjectExecReturn* again
+            = chamferWith(Part::ChamferType::twoDistances, size, size);
+        if (again != App::DocumentObject::StdReturn && varying && !setbacksDiffer) {
+            delete again;
+            return result;
+        }
         delete result;
-        result = chamferWith(Part::ChamferType::twoDistances, size, size);
+        result = again;
     }
     return result;
 }
@@ -478,7 +575,7 @@ void Chamfer::migrateFlippedProperties(const Base::XMLReader& reader)
 
 void Chamfer::onChanged(const App::Property* prop)
 {
-    if (prop == &ChamferType) {
+    if (prop == &ChamferType || prop == &WidthAt) {
         updateProperties();
     }
 
@@ -493,6 +590,9 @@ void Chamfer::updateProperties()
         prop->setStatus(App::Property::ReadOnly, on);
     };
 
+    // ops#942: the width rule by equal distances only; its points with "At a reference point"
+    disableproperty(&this->WidthAt, chamferType != 0);
+    disableproperty(&this->WidthPoints, chamferType != 0 || WidthAt.getValue() != 2);
     switch (chamferType) {
         case 0:  // "Equal distance"
             disableproperty(&this->Angle, true);

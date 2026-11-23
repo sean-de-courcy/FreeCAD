@@ -698,6 +698,50 @@ class TestStudioPatterns(unittest.TestCase):
         chamfered = solid.makeChamfer(1, top)
         self.assertTipVolume(60 * 20 * 5 + 3 * chamfered.Volume)
 
+    def testChamferAtAReferencePointAmongTheOriginals(self):
+        """ops#942 section 4 point 10: a boss of radius 10 through a plate whose top is tilted 20 deg,
+        its foot chamfered 2 with its width at a reference point (the narrow side's, in the Body's
+        frame), patterned with the chamfer +y 30 x 2: the instance's point moves with its edge, and
+        each foot gets the narrow side's chamfer, +72.6404 (notes/chamfer-varying-angle-942.md)."""
+        R, t = 10.0, math.radians(20)
+        k = math.tan(t)
+        points = [V(-60, -60, -30), V(60, -60, -30), V(60, -60, 60 * k), V(-60, -60, -60 * k)]
+        plate = Part.Face(Part.makePolygon(points + [points[0]])).extrude(V(0, 120, 0))
+        doc = App.newDocument("TestStudioPatterns")
+        self.docs.append(doc.Name)
+        doc.UndoMode = 1
+        self.doc = doc
+        self.S = doc.addObject("App::Part", "S")
+        base = doc.addObject("Part::Feature", "Plate")
+        base.Shape = plate
+        p = doc.addObject("PartDesign::Body", "P")
+        self.S.addObject(p)
+        p.BaseFeature = base
+        doc.recompute()
+        studioList(doc)
+        sk = studioSketch(doc, self.S, "BossSk", z=-20.0, circles=((0.0, 0.0, R),))
+        boss = makeOwner(doc, self.S, "Pad", "Boss", sk, ("P",), Length=40, Refine=True)
+        doc.recompute()
+        step = PartDesign.studioStepOf(boss, p)
+        edges = [f"Edge{i}" for i, e in enumerate(step.Shape.Edges, 1)
+                 if e.Curve.TypeId == "Part::GeomEllipse"]
+        self.assertEqual(len(edges), 1)
+        chamfer = p.newObject("PartDesign::Chamfer", "Chamfer")
+        chamfer.Base = (step, edges)
+        chamfer.Size = 2
+        chamfer.WidthAt = "At a reference point"
+        chamfer.WidthPoints = [V(R, 0, R * k)]
+        listed(chamfer)
+        lp = linear(p, "LP", [boss, chamfer], Y_AXIS, 30, 2)
+        self.doc.recompute()
+        self.assertValid(chamfer, lp)
+        d = 2 * math.tan((math.pi / 2 - t) / 2)
+        fill = math.pi * d * d * (R + d / 3) * (1 + math.sin(t) ** 2 / 2) / math.cos(t)
+        bosses = plate.fuse(Part.makeCylinder(R, 40, V(0, 0, -20))).fuse(
+            Part.makeCylinder(R, 40, V(0, 30, -20)))
+        # The fills alone (the whole body's measure is good to about 4e-7 of it)
+        self.assertLess(abs(self.tipShape().cut(bosses).Volume - 2 * fill), 1e-5 * 2 * fill)
+
     def testSuppressedOriginalContributesNothing(self):
         """The original suppressed: its step passes its base through, and so does the pattern
         (it kept its last shape, the copies included); unsuppressed, the three holes are back."""

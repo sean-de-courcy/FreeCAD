@@ -55,6 +55,46 @@ enum class Kind
     Chamfer
 };
 
+/** Where a chamfer by equal distances along a closed edge whose faces' angle varies takes its width
+ * (notes/chamfer-varying-angle-942.md section 4; PartDesign::Chamfer's WidthAt, by its index).
+ * The chamfer is one ball's (both faces offset by one distance d) and d = w tan(a / 2), a the angle
+ * between the faces on the ball's side at the reference station: the narrowest angle (the width
+ * is the chamfer's longest leg), the widest (its shortest), or the station of a reference point.
+ */
+enum class WidthAt
+{
+    narrowest,
+    widest,
+    atPoint
+};
+
+/// The width rule of one chamfer, as PartDesign::Chamfer passes it (ChamferWidthScope)
+struct ChamferWidth
+{
+    WidthAt at = WidthAt::narrowest;
+    /// WidthAt::atPoint: one point per picked edge, in the base shape's coordinates
+    std::vector<gp_Pnt> points;
+};
+
+/** Sets, for its own life, the width rule makeElementChamfer reads on this thread
+ * (chamferWidth()): PartDesign::Chamfer's WidthAt and WidthPoints, without a change to
+ * makeElementChamfer's signature. Scopes nest; the outer one's rule comes back at the end.
+ */
+class PartExport ChamferWidthScope
+{
+public:
+    explicit ChamferWidthScope(ChamferWidth width);
+    ~ChamferWidthScope();
+    ChamferWidthScope(const ChamferWidthScope&) = delete;
+    ChamferWidthScope& operator=(const ChamferWidthScope&) = delete;
+
+private:
+    ChamferWidth previous;
+};
+
+/// The width rule set on this thread (ChamferWidthScope): the narrowest angle outside any scope
+PartExport const ChamferWidth& chamferWidth();
+
 /// What the caller asked for, as passed to makeElementFillet / makeElementChamfer
 struct Request
 {
@@ -95,6 +135,14 @@ struct Request
     /// refusal before any Boolean unless every selected edge ends at two corners of
     /// mitreCircleCorner() (closed loops of that corner kind)
     bool mitreOnly = false;
+    /// A chamfer by equal distances whose every edge is a closed contour of its own, one of them
+    /// of varying angle (variesAlongLoneEdge()): the construction takes a closed ellipse between
+    /// a plane and a cylinder (ops#942). Set by makeElementChamfer only for the construction it
+    /// runs before OCCT; every other caller of the analysis keeps today's refusal there
+    bool varyingAngle = false;
+    /// Where such a chamfer takes its width (WidthAt; ChamferWidth::points for atPoint)
+    WidthAt widthAt = WidthAt::narrowest;
+    std::vector<gp_Pnt> widthPoints;
 };
 
 /// Each face's largest tolerance, with its edges and vertices: Request::faceTolerances
@@ -397,6 +445,36 @@ PartExport bool constructMitreRunOns(
     Construction& out,
     std::vector<TopoDS_Shape>& rest,
     std::string* reason
+);
+
+/** Whether a chamfer by equal distances is one the construction builds before OCCT because a
+ * picked edge's faces meet at an angle that varies along it (ops#942,
+ * notes/chamfer-varying-angle-942.md section 3 c and section 4 point 12): every picked edge is a
+ * closed contour of its own (no two share a vertex) of a covered kind, a closed ellipse between a
+ * plane and a cylinder it is not square to, or a closed circle between a plane and its cylinder,
+ * and at least one of them varies in angle (anglesVary()). Reads only plain shapes and runs no
+ * Boolean. False for any other chamfer.
+ */
+PartExport bool variesAlongLoneEdge(
+    const TopoDS_Shape& base,
+    const std::vector<TopoDS_Shape>& edges,
+    const Request& request
+);
+
+/** Whether the angle between the faces of some edge varies along it, sampled at stations along
+ * each edge (by more than 1e-7 rad): the edges where WidthAt matters. Edges without two faces
+ * count as not varying.
+ */
+PartExport bool anglesVary(const TopoDS_Shape& base, const std::vector<TopoDS_Shape>& edges);
+
+/** The longest leg of the chamfer variesAlongLoneEdge() builds, over its edges: the width w with
+ * WidthAt::narrowest, w (1 + sin t) / (1 - sin t) with WidthAt::widest on an edge of tilt t
+ * (PartDesign::Chamfer's reach). The width where an edge can't be analysed.
+ */
+PartExport double longestLeg(
+    const TopoDS_Shape& base,
+    const std::vector<TopoDS_Shape>& edges,
+    const Request& request
 );
 
 /** Whether the construction should run before OCCT, whose own checks never ask it where its
