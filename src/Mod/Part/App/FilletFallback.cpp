@@ -1625,6 +1625,10 @@ struct Context
     /// A concave arc's end at a cusp of its floor was built (VertexEnd::stripCusp): a rule new
     /// with ops#898 cause B (Construction::newRule)
     mutable bool cuspLifted = false;
+    /// A chamfer's ends on a face that is not a plane (Request::chamferSurfaceEnd, ops#1009): at
+    /// each, the chamfer's wedge run on from the vertex along the edge's line through the part,
+    /// which the result must leave empty
+    mutable std::vector<TopoDS_Shape> runOns;
     /// The blends' continuations built so far, by wall and end (blendBeyond): one per end, so that
     /// every tool cut by it is cut by the same surface
     struct KnownBlend
@@ -3292,7 +3296,13 @@ VertexEnd classify(
         // A round ending against a curved face (Case Base #105: a lip's round at its limit, cut
         // off by an end blend's B-spline face, as Onshape's): the face's surface, extended past
         // the face, bounds the tool, as OCCT's own fillet ends there below the limit (lineTool)
-        if (ctx.request.kind != Kind::Fillet) {
+        // A chamfer ends so only on the second pass (Request::chamferSurfaceEnd, ops#1009), and
+        // only on a straight edge between two planes, the end face not tangent to it (below)
+        const bool chamferEnd = ctx.request.kind == Kind::Chamfer && ctx.request.chamferSurfaceEnd
+            && data.line && !data.ruled
+            && BRepAdaptor_Surface(data.faces[0], Standard_False).GetType() == GeomAbs_Plane
+            && BRepAdaptor_Surface(data.faces[1], Standard_False).GetType() == GeomAbs_Plane;
+        if (ctx.request.kind != Kind::Fillet && !chamferEnd) {
             end.reason = chamferCurvedEndRefusal;
             return end;
         }
@@ -3307,6 +3317,10 @@ VertexEnd classify(
             return end;
         }
         gp_Dir normal(tangentNormal);
+        if (chamferEnd && std::abs(normal.Dot(away)) < 1e-6) {
+            end.reason = chamferCurvedEndRefusal;  // a chamfer there is not known from Onshape
+            return end;
+        }
         if (std::abs(normal.Dot(away)) < 1e-6) {
             // The end face is tangent to the edge at the vertex: a blend that runs out tangent to
             // one of the edge's faces, which is what Case Base #105's ends are (the fork's own
@@ -5533,6 +5547,17 @@ std::optional<Tool> lineTool(const Context& ctx, const EdgeData& data, const Ver
                     : TopoDS_Edge(),
                 ends[i].bound
             );
+            if (ctx.request.kind == Kind::Chamfer) {
+                // The wedge run on past this end through the part (ops#1009): the section at the
+                // vertex, swept outward a base size and the margin
+                const double reach = ctx.scale + margin;
+                gp_Trsf at;
+                at.SetTranslation(step * (i == 0 ? -reach : length));
+                TopoDS_Face from = TopoDS::Face(section.face().Moved(TopLoc_Location(at)));
+                ctx.runOns.push_back(
+                    BRepPrimAPI_MakePrism(from, step * reach, Standard_True).Shape()
+                );
+            }
             continue;
         }
         for (const auto& plane : ends[i].trims) {
@@ -11612,7 +11637,8 @@ TopoDS_Shape constructShape(
     int& cornerCount,
     bool& rolledOn,
     bool* keptOverFace = nullptr,
-    MergedNames* mergedNames = nullptr
+    MergedNames* mergedNames = nullptr,
+    std::vector<TopoDS_Shape>* runOns = nullptr
 )
 {
     rolledOn = false;
@@ -13908,6 +13934,9 @@ TopoDS_Shape constructShape(
     // A cusp end is cause B's rule: what built before it still does (review of PR 487, T3)
     if (keptOverFace && ctx.cuspLifted) {
         *keptOverFace = true;
+    }
+    if (runOns) {
+        *runOns = ctx.runOns;
     }
     return shape;
 }
@@ -19921,7 +19950,8 @@ bool constructSolid(
     }
     // A chamfer whose ends lie on faces that are not planes: the plain wedge run on through the
     // part (ops#936). Only where that was the refusal: nothing built before changes
-    if (why == chamferCurvedEndRefusal) {
+    const bool curvedEnd = why == chamferCurvedEndRefusal;
+    if (curvedEnd) {
         std::string wedgeWhy;
         try {
             auto mapper = std::make_shared<ShapeMapper>();
@@ -19986,6 +20016,79 @@ bool constructSolid(
     }
     if (!second.empty()) {
         why += "; built in front of the face its edge ends against: " + second;
+    }
+    // A chamfer whose straight edges end on faces that are not planes, where the wedge run on
+    // through the part refused (a chain, an edge with one plane end; ops#1009): once more, each
+    // such end bounded by its face's surface as a round's (Request::chamferSurfaceEnd). Kept only
+    // where nothing of the result lies in the wedge run on past each such end: there the run-on
+    // reading (ops#936) and the picked-wall one (oracle HT2) are the same solid. Only where OCCT
+    // failed and every route above refused: nothing built before changes, and the result is a
+    // new rule (Construction::newRule), behind OCCT's retry in the reverse order
+    if (curvedEnd && request.kind == Kind::Chamfer && request.widerScope) {
+        std::string surfaceWhy;
+        try {
+            Request surfaceRequest = request;
+            surfaceRequest.chamferSurfaceEnd = true;
+            auto mapper = std::make_shared<ShapeMapper>();
+            int corners = 0;
+            bool rolledOn = false;
+            bool keptOverFace = false;
+            MergedNames mergedNames;
+            std::vector<TopoDS_Shape> runOns;
+            TopoDS_Shape shape = constructShape(
+                base,
+                edges,
+                surfaceRequest,
+                *mapper,
+                corners,
+                rolledOn,
+                &keptOverFace,
+                &mergedNames,
+                &runOns
+            );
+            if (keptOverFace) {
+                refuse("a fill kept over its face");
+            }
+            if (runOns.empty()) {
+                refuse("no end on a face that is not a plane");
+            }
+            const double bound = volumeTolerance * volumeOf(base);
+            for (const auto& runOn : runOns) {
+                const double left = volumeOf(commonOf(shape, runOn));
+                if (left > bound) {
+                    refuse("the wedge run on past an end holds " + describe(left) + " of the part");
+                }
+            }
+            TopTools_IndexedMapOfShape selected;
+            for (const auto& edge : edges) {
+                selected.Add(edge);
+            }
+            out.shape = shape;
+            out.mapper = mapper;
+            out.merged = std::move(mergedNames);
+            out.edges = selected.Extent();
+            out.corners = corners;
+            out.rolledOn = rolledOn;
+            out.newRule = true;
+            return true;
+        }
+        catch (const Refusal& refusal) {
+            surfaceWhy = refusal.reason;
+        }
+        catch (const Standard_Failure& e) {
+            surfaceWhy = std::string("OCCT: ") + e.GetMessageString();
+        }
+        catch (const Base::Exception& e) {
+            surfaceWhy = e.what();
+        }
+        catch (const std::exception& e) {
+            surfaceWhy = e.what();
+        }
+        catch (...) {
+            surfaceWhy = "an unknown exception";
+        }
+        // The refusal above stands as it was; this pass's own reason only in the log
+        FC_LOG("chamfer bounded by its end faces' surfaces not built: " << surfaceWhy);
     }
     // The cause the user can act on first, where there is one (ops#640)
     std::string strip;

@@ -46,6 +46,7 @@ from parttests.FilletFallbackTest import (
     BridgedRecessTest,
     RimAcrossCountersinkTest,  # ops#993
     ChamferRunThroughTest,  # ops#936
+    ChamferSurfaceEndTest,  # ops#1009
     CornerBandRetryTest,  # ops#925
     ConeFootTest,
     MitreCornerTest,  # ops#941

@@ -4706,3 +4706,74 @@ TEST_F(FilletFallbackTest, optionalRunStopsAtItsOwnLimit)
     EXPECT_LT(duration<double>(steady_clock::now() - start).count(), 10.0);
     EXPECT_TRUE(Part::KernelBudget::runOptional("A spin", spin(0.05), 5.0));
 }
+
+namespace
+{
+
+/// ops#1009 (designed, after Old Pheidole dugasi #9): a plate 80 x 40 x 2 (z from -2 to 0) with a
+/// ridge on it, x from -5 to 50, its section a trapezoid 6 wide at its foot (y from -3 to 3), 2
+/// at its top, 2 high (45 degree sides); and a tongue over the ridge's start, 2 high: the
+/// rectangle x from -8 to 6, y from -3 to 3, with a half disc of radius 3 at x = -8, cut off by a
+/// vertical cylinder of radius sqrt(409) about (-20, 0), which passes through (0, +-3). The
+/// tongue's top chain (line, half circle, line) ends on that cylinder at both free ends
+TopoDS_Shape tongueOnARidge()
+{
+    BRepBuilderAPI_MakePolygon polygon;
+    for (auto [y, z] : std::vector<std::pair<double, double>> {{-3, 0}, {3, 0}, {1, 2}, {-1, 2}}) {
+        polygon.Add(gp_Pnt(-5, y, z));
+    }
+    polygon.Close();
+    TopoDS_Face section = BRepBuilderAPI_MakeFace(polygon.Wire(), Standard_True).Face();
+    TopoDS_Shape ridge = BRepPrimAPI_MakePrism(section, gp_Vec(55, 0, 0)).Shape();
+    BRepAlgoAPI_Fuse rounded(
+        box(14, 6, 2, gp_Pnt(-8, -3, 0)),
+        BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(-8, 0, 0), gp::DZ()), 3, 2).Shape()
+    );
+    BRepAlgoAPI_Common tongue(
+        rounded.Shape(),
+        BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(-20, 0, 0), gp::DZ()), std::sqrt(409.0), 2).Shape()
+    );
+    BRepAlgoAPI_Fuse onPlate(box(80, 40, 2, gp_Pnt(-30, -20, -2)), ridge);
+    BRepAlgoAPI_Fuse all(onPlate.Shape(), tongue.Shape());
+    ShapeUpgrade_UnifySameDomain unify(all.Shape());
+    unify.Build();
+    return unify.Shape();
+}
+
+int refinedFaces(const TopoDS_Shape& shape)
+{
+    ShapeUpgrade_UnifySameDomain unify(shape);
+    unify.Build();
+    return count(unify.Shape(), TopAbs_FACE);
+}
+
+}  // namespace
+
+TEST_F(FilletFallbackTest, chamferChainEndsOnCylindersAtTheWallsHeight)
+{
+    // ops#1009: the tongue's top chain chamfered by its walls' height. OCCT is not done at that
+    // limit; the construction refused at the cylinders, and the wedge run on through the part
+    // takes one edge only. Onshape (#9's capture) consumes both end patches and the walls, and
+    // each chamfer plane is one face with the ridge's side beyond: nothing of the part lies in
+    // the wedge run on past each end. Removed: the tongue over the ridge, the ridge's section
+    // kept from x = -8, and half a cone frustum (radii 3 and 1, height 2):
+    // 6400 + 8 * 58 + 13 pi / 3
+    TopoShape base(tongueOnARidge(), 1L);
+    ASSERT_EQ(base.countSubElements("Face"), 14);
+    auto edges = edgesWhere(base, [](const gp_Pnt& p) {
+        return std::abs(p.Z() - 2) < 1e-7 && std::abs(std::abs(p.Y()) - 3) < 1e-7 && p.X() < 1e-7;
+    });
+    ASSERT_EQ(edges.size(), 3U);
+    ASSERT_TRUE(occtFails(base, edges, chamfer(2)));
+    const double expected = 6400 + 8 * 58 + 13 * std::numbers::pi / 3;
+    TopoShape result = dressUp(base, edges, chamfer(2));
+    EXPECT_TRUE(exact(result, expected));
+    // Onshape's 10 faces (a cone and 9 planes); unrefined, each chamfer plane is a face of its own
+    // beside the coplanar ridge side, as on the planar-end control
+    EXPECT_EQ(refinedFaces(result.getShape()), 10);
+    // A set: the reversed pick builds the same
+    std::vector<TopoShape> reversed(edges.rbegin(), edges.rend());
+    EXPECT_TRUE(exact(dressUp(base, reversed, chamfer(2)), expected));
+    // Below the limit OCCT builds, as before
+    EXPECT_FALSE(occtFails(base, edges, chamfer(1.9)));
+}
