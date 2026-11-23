@@ -9920,14 +9920,22 @@ bool roundCoveredFirst(
         if (!FilletFallback::takeInvalidResult().empty()) {
             return false;
         }
+        double base = 0.0;
+        double onBase = 0.0;
+        double onStage = 0.0;
+        double vBuilt = 0.0;
+        double vReverse = 0.0;
         auto orderShows = [&]() {
-            const double base = volume(shape);
-            const double onBase = volume(alone) - base;
-            const double onStage = volume(built) - volume(stage);
-            const double change = std::abs(volume(built) - base);
+            // Each solid measured once a pass (review pr509-r8: the cost of a refusal)
+            base = volume(shape);
+            vBuilt = volume(built);
+            onBase = volume(alone) - base;
+            onStage = vBuilt - volume(stage);
+            vReverse = volume(reverse);
+            const double change = std::abs(vBuilt - base);
             const double allowance = std::max(1e-6 * std::abs(onBase), 1e-9 * std::abs(base));
             return !(std::abs(onStage - onBase) <= allowance)
-                || !(std::abs(volume(reverse) - volume(built)) <= std::max(allowance, 1e-7 * change));
+                || !(std::abs(vReverse - vBuilt) <= std::max(allowance, 1e-7 * change));
         };
         bool shows = orderShows();
         if (shows) {
@@ -9935,12 +9943,9 @@ bool roundCoveredFirst(
             shows = orderShows();
         }
         if (shows) {
-            const double base = volume(shape);
-            const double onBase = volume(alone) - base;
-            const double onStage = volume(built) - volume(stage);
             FC_LOG("fillet by coverage: the rest changes " << onStage << " on the first group's "
                    "result, " << onBase << " on the base; the other order "
-                   << volume(reverse) - base << " against " << volume(built) - base);
+                   << vReverse - base << " against " << vBuilt - base);
             return false;
         }
         FC_LOG("fillet by coverage: " << first.size() << " edges, then " << rest.size());
