@@ -65,6 +65,7 @@
 #include <TopoDS_Wire.hxx>
 #include <gp_Ax3.hxx>
 #include <gp_Pln.hxx>
+#include <gp_Pnt2d.hxx>
 #include <Precision.hxx>
 
 
@@ -81,6 +82,13 @@
 #include "FeatureLoft.h"
 #include "ProfileRegions.h"
 using namespace PartDesign;
+
+namespace Part
+{
+/// FreeCAD-CH ops#963 B: a loft's flat B-spline faces as planes and straight edges as lines, the
+/// topology, its order and so the names kept (TopoShapeExpansion.cpp, makeElementLoft's last step)
+PartExport void makeLoftCanonical(TopoShape& loft);
+}  // namespace Part
 
 namespace
 {
@@ -536,9 +544,19 @@ bool crossesACap(const TopoDS_Shape& solid, const TopoDS_Shape& first, const Top
         double v0 = 0;
         double v1 = 0;
         BRepTools::UVBounds(face, u0, u1, v0, v1);
+        // ops#963 B: a flat side is a plane (makeLoftCanonical), whose UV bounds are its
+        // pcurves' box, not the face: only the samples on the face count there. A B-spline
+        // side's domain is the face itself, as before
+        const bool trimmed = surface.GetType() == GeomAbs_Plane;
         for (int i = 0; i <= rows; ++i) {
             for (double v : spans) {
-                const gp_Pnt point = surface.Value(u0 + (u1 - u0) * i / rows, v0 + (v1 - v0) * v);
+                const gp_Pnt2d uv(u0 + (u1 - u0) * i / rows, v0 + (v1 - v0) * v);
+                if (trimmed
+                    && BRepClass_FaceClassifier(face, uv, Precision::Confusion()).State()
+                        == TopAbs_OUT) {
+                    continue;
+                }
+                const gp_Pnt point = surface.Value(uv.X(), uv.Y());
                 for (int k = 0; k < 2; ++k) {
                     const double depth = gp_Vec(planes[k].Location(), point).Dot(gp_Vec(inward[k]));
                     if (depth > -1e-6) {
@@ -2033,6 +2051,10 @@ App::DocumentObjectExecReturn* Loft::execute()
                     EndMagnitude.getValue(),
                     legacy
                 );
+                // ops#963 B: the conditions rebuild every side as a B-spline; a flat one is a plane
+                // again, as makeElementLoft left it and as Onshape's is, so refine merges it with
+                // the faces in its plane (a circular pattern's copies of it)
+                Part::makeLoftCanonical(shell);
             }
             shells.push_back(shell);
         }

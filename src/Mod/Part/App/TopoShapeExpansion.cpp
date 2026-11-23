@@ -11107,9 +11107,13 @@ public:
     }
 };
 
+}  // namespace
+
 // The same shape with its flat faces as planes and its straight edges as lines, when the result is
-// valid, has the same topology in the same order (so the names stay), and the same vertices
-void makeLoftCanonical(TopoShape& loft)
+// valid, has the same topology in the same order (so the names stay), and the same vertices.
+// FreeCAD-CH ops#963 B: also run by PartDesign's loft after its profile conditions rebuild the sides
+// (FeatureLoft.cpp, where it is declared)
+PartExport void makeLoftCanonical(TopoShape& loft)
 {
     const TopoDS_Shape& shape = loft.getShape();
     if (shape.IsNull()) {
@@ -11148,7 +11152,6 @@ void makeLoftCanonical(TopoShape& loft)
         // The loft as OCCT made it
     }
 }
-}  // namespace
 
 TopoShape& TopoShape::makeElementLoft(
     const std::vector<TopoShape>& shapes,

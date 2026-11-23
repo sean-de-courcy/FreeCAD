@@ -230,6 +230,78 @@ class TestLoftOnshapeConditions(LoftCase):
         loft = self.loft(square(20), [Part.Point(V(0, 0, 0))], EndCondition="Normal to profile")
         self.assertStops(loft, "normal to profile", "point")
 
+    # ops#963 B: the conditions rebuild every side as a cubic B-spline; a side whose poles all lie in one
+    # plane is that plane, as Onshape's is (a studio's flat loft side is a PLANE face there, and eight
+    # copies of it around a circular pattern are one face). Designed model: the square x 0..20,
+    # y 0..20 at z 0 to the square x 5..15, y 0..10 at z 10, both with an edge in the plane y = 0, so
+    # the side between those edges lies in y = 0 whatever the rows' cubic (scripts/repro_963_loft_planar_side.py)
+    @staticmethod
+    def flatSide():
+        return models.rectangle(0, 0, 20, 20), models.rectangle(5, 0, 15, 10)
+
+    def assertFlatSideIsAPlane(self, shape):
+        inPlane = [f for f in shape.Faces if all(abs(v.Point.y) < 1e-9 for v in f.Vertexes)]
+        self.assertEqual(len(inPlane), 1)
+        self.assertIsInstance(inPlane[0].Surface, Part.Plane)
+        self.assertAlmostEqual(abs(inPlane[0].Surface.Axis.y), 1, delta=1e-12)
+        return inPlane[0]
+
+    def testFlatSideIsAPlane(self):
+        bottom, top = self.flatSide()
+        loft = self.loft(bottom, top, height=10)
+        for start, end in (("None", "Normal to profile"), ("Normal to profile", "None"),
+                           ("Normal to profile", "Normal to profile")):
+            with self.subTest(start=start, end=end):
+                loft.StartCondition = start
+                loft.EndCondition = end
+                self.doc.recompute()
+                self.assertTrue(loft.isValid(), loft.getStatusString())
+                kinds = sorted(type(f.Surface).__name__ for f in loft.Shape.Faces)
+                # the two caps and the flat side are planes; the three other sides curve
+                self.assertEqual(kinds, ["BSplineSurface"] * 3 + ["Plane"] * 3)
+                self.assertFlatSideIsAPlane(loft.Shape)
+
+    def testFlatSideMergesWithThePlatesSide(self):
+        """On a plate x -10..30, y 0..20, z -5..0 the flat side and the plate's side y = 0 are one face:
+        the plate's bottom, its top in two pieces, its four sides, the loft's three curved sides and its
+        top, 11 faces, 8 of them planes (refine merges plane faces only)."""
+        plate = models.pad(self.body, models.sketch(self.doc, "Plate", models.rectangle(-10, 0, 30, 20),
+                                                    self.body, z=-5), 5, "PlatePad")
+        bottom, top = self.flatSide()
+        loft = self.loft(bottom, top, height=10, EndCondition="Normal to profile", Refine=True)
+        self.assertTrue(plate.isValid() and loft.isValid(), loft.getStatusString())
+        shape = loft.Shape
+        self.assertEqual(len(shape.Solids), 1)
+        self.assertEqual(len(shape.Faces), 11)
+        self.assertEqual(sum(isinstance(f.Surface, Part.Plane) for f in shape.Faces), 8)
+        side = [f for f in shape.Faces if isinstance(f.Surface, Part.Plane)
+                and abs(f.Surface.Axis.y) > 1 - 1e-12 and abs(f.CenterOfMass.y) < 1e-9]
+        self.assertEqual(len(side), 1)
+        self.assertAlmostEqual(side[0].BoundBox.ZMax, 10, delta=1e-9)  # it reaches the loft's top
+
+    def testCurvedSidesStayBSplines(self):
+        """The control: concentric squares have no flat side, and every side stays a B-spline."""
+        loft = self.loft(square(20), square(10), StartCondition="Normal to profile")
+        kinds = sorted(type(f.Surface).__name__ for f in loft.Shape.Faces)
+        self.assertEqual(kinds, ["BSplineSurface"] * 4 + ["Plane"] * 2)
+
+    def testFlatSidesOfAnLDontCrossACap(self):
+        """Review pr963b-r1: the L x 0..20, y 0..20 (its notch x 10..20, y 10..20) lofted 10 up to
+        the narrower L x 5..20 (notch x 15..20, y 10..20). Its flat sides are planes now, and the
+        cap check samples only points on them (a plane's UV box is wider than the face): the loft
+        builds, as before, with the end condition 2686.7623 and with both 2750."""
+        bottom = models.polygon([(0, 0), (20, 0), (20, 10), (10, 10), (10, 20), (0, 20)])
+        top = models.polygon([(5, 0), (20, 0), (20, 10), (15, 10), (15, 20), (5, 20)])
+        loft = self.loft(bottom, top, height=10, EndCondition="Normal to profile")
+        for start, volume in (("None", 2686.7623), ("Normal to profile", 2750.0)):
+            with self.subTest(start=start):
+                loft.StartCondition = start
+                self.doc.recompute()
+                self.assertTrue(loft.isValid(), loft.getStatusString())
+                self.assertAlmostEqual(loft.Shape.Volume, volume, places=3)
+                kinds = sorted(type(f.Surface).__name__ for f in loft.Shape.Faces)
+                self.assertEqual(kinds, ["BSplineSurface"] * 2 + ["Plane"] * 6)
+
 
 
 def sides(shape):

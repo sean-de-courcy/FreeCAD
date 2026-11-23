@@ -516,7 +516,8 @@ names it.
 | `corpus/i895-helix-whole-faces` | feature | ops#895 | - | `integration` `f47f9d6683` | `62b7d9f1d7` (fork PR 517), 2026-11-22 | never (fork tests) |
 | `fix/i895-helix-faces` | fix | ops#895 | - | `corpus/i895-helix-whole-faces` (fork PR 517) on `integration` `f47f9d6683` | `7290ced366` (fork PR 519), 2026-11-22 | never (fork fix): a helix has one face per profile edge, as Onshape's (ops#895) |
 | `fix/i968-corner-arc-bridged-recess` | fix | ops#968 | - | integration | `32b8bf81e8` (fork PR 516), 2026-11-22 | never (fork fix): a rim fillet over a convex corner arc smaller than its radius builds again, OCCT's B-spline there not read as a bridged hole, and a bridge elsewhere on that rim still refused (ops#968) |
-| `fix/i991-delete-part-sketches` | fix | ops#991 | - | `integration` `15903869d3` | (fork PR 522) | never (fork fix): a deleted part's sketches stay readable, judged at their own place |
+| `fix/i991-delete-part-sketches` | fix | ops#991 | - | `integration` `15903869d3` | `53aba2277b` (fork PR 522), 2026-11-22 | never (fork fix): a deleted part's sketches stay readable, judged at their own place |
+| `fix/i963-loft-flat-side` | fix | ops#963 | - | `integration` `7290ced366` | (fork PR 513) | never (fork fix): a conditioned loft's flat side is a plane, so refine merges it |
 
 ## Fork-only commits in carried topics
 
