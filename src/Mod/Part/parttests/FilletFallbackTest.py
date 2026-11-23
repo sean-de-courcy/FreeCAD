@@ -8630,6 +8630,59 @@ class MitreRunOnTest(unittest.TestCase):
         result = base.makeFillet(self.r, self.picks(base, 0, 0))
         self.assertBuilt(base, result, expected, -self.change(self.r, self.q, 8.0), (0, 0))
 
+    def testAtOtherSizes(self):
+        # Built at size, not scaled after: the tools' common with the base was 0.1-0.5 % off at
+        # some sizes and the exact cut lost the solid at others (review fix918-r1, L2); r = 2q,
+        # where OCCT's revolution may be a surface of revolution, not a torus (L1)
+        s = 1 - math.pi / 4
+        for q, r in ((self.q, self.r), (2.0, 4.0), (2.5, 5.0)):
+            for k in (1.5, 3.0, 10.0, 50.0, 200.0):
+                for convex in (True, False):
+                    with self.subTest(q=q, r=r, k=k, convex=convex):
+                        if convex:
+                            box = Part.makeBox(20 * k, 20 * k, 10 * k)
+                            rim = [e for e in box.Edges if e.BoundBox.ZMax < 1e-9 * k]
+                            base, x = box.makeFillet(q * k, rim), 0.0
+                        else:
+                            block = Part.makeBox(40 * k, 40 * k, 20 * k).cut(
+                                Part.makeBox(20 * k, 20 * k, 10 * k, V(10 * k, 10 * k, 10 * k))
+                            )
+                            tol = 1e-7 * k
+                            floor = [
+                                e
+                                for e in block.Edges
+                                if e.Curve.TypeId == "Part::GeomLine"
+                                and abs(e.BoundBox.ZMax - 10 * k) < tol
+                                and abs(e.BoundBox.ZMin - 10 * k) < tol
+                                and 10 * k - tol < e.BoundBox.XMin
+                                and e.BoundBox.XMax < 30 * k + tol
+                                and 10 * k - tol < e.BoundBox.YMin
+                                and e.BoundBox.YMax < 30 * k + tol
+                            ]
+                            self.assertEqual(len(floor), 4)
+                            base, x = block.makeFillet(q * k, floor), 10.0 * k
+                        tol = 1e-7 * k
+                        line = [
+                            e
+                            for e in base.Edges
+                            if e.Curve.TypeId == "Part::GeomLine"
+                            and abs(e.BoundBox.XMin - x) < tol
+                            and abs(e.BoundBox.XMax - x) < tol
+                            and abs(e.BoundBox.YMin - x) < tol
+                            and abs(e.BoundBox.YMax - x) < tol
+                        ]
+                        self.assertEqual(len(line), 1)
+                        result = base.makeFillet(r * k, line)
+                        self.assertTrue(result.isValid())
+                        self.assertEqual(len(result.Faces), len(base.Faces) + 2)
+                        K = s * q * q * (r - q) + q**3 / 6
+                        change = (r * r * s * 10 + (math.pi / 2 - 2) * K) * k**3
+                        self.assertAlmostEqual(
+                            result.Volume - base.Volume,
+                            -change if convex else change,
+                            delta=1e-6 * change,
+                        )
+
     def testTheRestIsRoundedOnTheResult(self):
         # One corner and a plain edge elsewhere: the block's top front edge, a straight round
         # between its end faces

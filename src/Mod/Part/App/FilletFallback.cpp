@@ -17118,6 +17118,8 @@ struct RunOnCorner
     double q {0};         // the earlier rounds' radius
     double height {0};    // from F to L's other end: |L| + q
     bool convex {false};
+    double change {0};    // the volume the corner adds (concave) or takes (convex), closed form
+    double tools {0};     // the column's and the torus's volumes
 };
 
 /// The edges at a vertex, without seams and degenerate edges
@@ -17437,6 +17439,30 @@ TopoDS_Shape runOnTorus(const RunOnCorner& corner, double r)
     return revolution.Shape();
 }
 
+/// The box about a corner's reach: the r-square at the corner and margin beyond each side, from
+/// margin below F to margin beyond L's other end
+TopoDS_Shape runOnReach(const RunOnCorner& corner, double r, double margin)
+{
+    const gp_Vec a(corner.into[0]);
+    const gp_Vec b(corner.into[1]);
+    const gp_Vec up(corner.up);
+    const gp_Pnt p0 = corner.foot.Translated((a + b + up) * -margin);
+    const double side = r + 2 * margin;
+    BRepBuilderAPI_MakePolygon square(
+        p0,
+        p0.Translated(a * side),
+        p0.Translated((a + b) * side),
+        p0.Translated(b * side),
+        Standard_True
+    );
+    BRepBuilderAPI_MakeFace face(square.Wire(), Standard_True);
+    BRepPrimAPI_MakePrism prism(face.Face(), up * (corner.height + 2 * margin));
+    if (!prism.IsDone()) {
+        refuse("a mitre corner's reach failed");
+    }
+    return prism.Shape();
+}
+
 }  // namespace
 
 bool constructMitreRunOns(
@@ -17533,7 +17559,7 @@ bool constructMitreRunOns(
                     for (const auto& b : corners[j].rounds) {
                         if (a.IsSame(b)
                             && corners[i].foot.Distance(corners[j].foot)
-                                <= 2 * r + linearTolerance) {
+                                <= 2 * (r + corners[i].q / 4) + linearTolerance) {
                             refuse("two mitre corners on one earlier round within twice the radius");
                         }
                     }
@@ -17547,10 +17573,19 @@ bool constructMitreRunOns(
         // The tools, each measured against its closed form, and what of the base lies in them:
         // the earlier rounds' fill in the kite (2K), or for a convex corner the material less
         // what they cut (skeptic 2)
-        std::vector<std::pair<TopoDS_Shape, const RunOnCorner*>> pieces;
+        // Each tool, its corner, and whether it is the torus (named from E, by its role: OCCT's
+        // revolution is a torus or a surface of revolution by the numbers; review fix918-r1, L1)
+        struct Piece
+        {
+            TopoDS_Shape first;
+            const RunOnCorner* second;
+            bool torus;
+        };
+        std::vector<Piece> pieces;
+        std::vector<TopoDS_Shape> reaches;
         double expected = 0;
         double toolVolume = 0;
-        for (const auto& corner : corners) {
+        for (auto& corner : corners) {
             const double q = corner.q;
             const double area = r * r * s;
             const double k = s * q * q * (r - q) + q * q * q / 6;
@@ -17563,26 +17598,24 @@ bool constructMitreRunOns(
                 refuse("a mitre run-on tool's volume differs from its closed form");
             }
             const double volume = columnVolume + torusVolume;
-            BRep_Builder pair;
-            TopoDS_Compound both;
-            pair.MakeCompound(both);
-            pair.Add(both, column);
-            pair.Add(both, torus);
-            const double inBase = volumeOf(commonOf(base, both));
-            const double want = convex ? volume - 2 * k : 2 * k;
-            if (std::abs(inBase - want) > volumeTolerance * volume) {
-                refuse("the base in a mitre corner's reach is " + describe(inBase) + ", not "
-                       + describe(want) + ": more than the earlier rounds lie there");
-            }
-            expected += area * corner.height + (pi / 2 - 2) * k;
+            // What the corner changes is measured on the result, in a box about its reach (the
+            // kite and q / 4 beyond it, from below F to above the end plane), against its closed
+            // form: material in the reach other than the earlier rounds changes it (skeptic 2).
+            // Not as the tools' common with the base: the tools touch the earlier rounds
+            // tangentially, and OCCT's common was 0.1-0.5 % off 2K at some sizes (review
+            // fix918-r1, L2), while the box's faces cross every face at an angle
+            reaches.push_back(runOnReach(corner, r, q / 4));
+            corner.change = area * corner.height + (pi / 2 - 2) * k;
+            corner.tools = volume;
+            expected += corner.change;
             toolVolume += volume;
-            pieces.emplace_back(column, &corner);
-            pieces.emplace_back(torus, &corner);
+            pieces.push_back({column, &corner, false});
+            pieces.push_back({torus, &corner, true});
         }
         // Each tool its own Boolean tool: the column and its torus share their face on the new
         // round's cylinder, which the Boolean intersects only between separate tools (as one
         // compound it stays, a second face on the cylinder)
-        auto boolean = [&pieces](BRepAlgoAPI_BooleanOperation& operation,
+        auto boolean = [&pieces, r](BRepAlgoAPI_BooleanOperation& operation,
                                  const TopoDS_Shape& argument) {
             TopTools_ListOfShape arguments;
             arguments.Append(argument);
@@ -17594,6 +17627,11 @@ bool constructMitreRunOns(
             operation.SetTools(tools);
             operation.SetNonDestructive(Standard_True);
             operation.SetRunParallel(Standard_False);
+            // The new cylinder touches each earlier round at a point, the torus each round along
+            // its end arc: at some sizes the exact Boolean split off slivers or lost the solid
+            // (review fix918-r1, L2: convex 10x to 200x); a fuzzy value of 1e-7 r builds every
+            // size from 0.5x to 200x exactly, within the volume checks below
+            operation.SetFuzzyValue(1e-7 * r);
             operation.Build();
             if (!operation.IsDone() || operation.HasErrors()) {
                 refuse("the mitre run-ons' Boolean failed");
@@ -17668,6 +17706,16 @@ bool constructMitreRunOns(
             refuse("the mitre run-ons changed the volume by " + describe(change) + ", not "
                    + describe(expected));
         }
+        for (size_t i = 0; i < corners.size(); ++i) {
+            const double before = volumeOf(commonOf(base, reaches[i]));
+            const double after = volumeOf(commonOf(shape, reaches[i]));
+            const double here = convex ? before - after : after - before;
+            if (std::abs(here - corners[i].change) > volumeTolerance * corners[i].tools) {
+                refuse("a mitre corner changed the volume in its reach by " + describe(here)
+                       + ", not " + describe(corners[i].change)
+                       + ": more than the earlier rounds lie there");
+            }
+        }
         // The rest of the picks, each an edge of the result
         TopTools_IndexedMapOfShape used;
         for (const auto& corner : corners) {
@@ -17706,11 +17754,8 @@ bool constructMitreRunOns(
         }
         TopTools_IndexedMapOfShape named;
         for (const auto& piece : pieces) {
+            const TopoDS_Shape& source = piece.torus ? piece.second->mitre : piece.second->line;
             for (TopExp_Explorer it(piece.first, TopAbs_FACE); it.More(); it.Next()) {
-                const bool torus = BRepAdaptor_Surface(TopoDS::Face(it.Current()), Standard_False)
-                                       .GetType()
-                    == GeomAbs_Torus;
-                const TopoDS_Shape& source = torus ? piece.second->mitre : piece.second->line;
                 for (const auto& image : imagesThrough(stages, 0, it.Current())) {
                     if (image.ShapeType() == TopAbs_FACE && !baseImages.Contains(image)
                         && !named.Contains(image)) {
