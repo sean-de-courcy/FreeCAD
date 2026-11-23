@@ -8970,3 +8970,49 @@ class ShallowRidgeTest(unittest.TestCase):
         body, ridge = self.roof(4.0)
         with self.assertRaises(Exception):
             body.makeFillet(5.0, ridge)
+
+
+class SmoothEdgeTest(unittest.TestCase):
+    """ops#999 (review pr999-r2, T-A): a fillet of a smooth edge, the line where a side plane is
+    tangent to a corner cylinder of radius 3. No ball of another radius is tangent to both faces
+    there, and OCCT refuses it ("There are no suitable edges for chamfer or fillet"); the exact
+    construction, asked since any OCCT error asks it, must refuse it too rather than roll on over the
+    cylinder's other edge and re-round the corner. Designed: a box 30 x 20 x 10 whose vertical edge
+    at the origin is rounded r 3 (a boss corner), and the same box cut into a block 60 x 40 x 20 from
+    its top as a pocket 5 deep (a pocket corner)"""
+
+    def smoothEdges(self, body, centre):
+        # The two vertical lines where the corner cylinder about `centre` meets its side planes
+        found = [
+            e
+            for e in body.Edges
+            if e.Curve.TypeId == "Part::GeomLine"
+            and abs(e.Vertexes[0].X - e.Vertexes[1].X) < 1e-9
+            and abs(e.Vertexes[0].Y - e.Vertexes[1].Y) < 1e-9
+            and abs(math.hypot(e.Vertexes[0].X - centre.x, e.Vertexes[0].Y - centre.y) - 3) < 1e-7
+        ]
+        self.assertEqual(len(found), 2)
+        return found
+
+    def boss(self):
+        box = Part.makeBox(30, 20, 10)
+        corner = [e for e in box.Edges if all(abs(v.X) < 1e-9 and abs(v.Y) < 1e-9 for v in e.Vertexes)]
+        return box.makeFillet(3, corner)
+
+    def assertRefused(self, body, edges):
+        for edge in edges:
+            for radius in (3.5, 5.0):
+                with self.assertRaises(Exception):
+                    body.makeFillet(radius, [edge])
+            with self.assertRaises(Exception):
+                body.makeChamfer(1.0, [edge])
+
+    def testSmoothEdgeOfABossCornerStaysRefused(self):
+        body = self.boss()
+        self.assertRefused(body, self.smoothEdges(body, V(3, 3, 0)))
+
+    def testSmoothEdgeOfAPocketCornerStaysRefused(self):
+        tool = self.boss()
+        tool.translate(V(10, 10, 15))
+        body = Part.makeBox(60, 40, 20).cut(tool).removeSplitter()
+        self.assertRefused(body, self.smoothEdges(body, V(13, 13, 0)))

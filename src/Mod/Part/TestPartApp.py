@@ -57,6 +57,7 @@ from parttests.FilletFallbackTest import (
     MitreRunOnTest,  # ops#918
     EndOnTangentWallTest,  # ops#999
     ShallowRidgeTest,  # ops#999
+    SmoothEdgeTest,  # ops#999
     CornerWithACircleTest,
     BlendEndTrimTest,
     CurvedEndTrimTest,

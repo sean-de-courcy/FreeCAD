@@ -170,6 +170,8 @@ constexpr double pi = std::numbers::pi;
 constexpr double linearTolerance = 1e-7;  // Precision::Confusion()
 /// Directions whose cross product is this small are parallel
 constexpr double angularTolerance = 1e-9;
+/// Faces whose inward directions at an edge are this close to opposite meet smoothly there
+constexpr double smoothEdgeAngle = 1e-6;
 /// Every measured volume must equal its closed form to this, relative to the tool volumes
 constexpr double volumeTolerance = 1e-6;
 
@@ -1866,6 +1868,17 @@ EdgeData analyse(const Context& ctx, const TopoDS_Edge& edge)
     gp_Pnt point = curve.Value(middle);
     gp_Dir inward1 = inwardIn(data.faces[1], edge, middle);
     data.convex = inward1.Dot(outwardNormal(data.faces[0], point)) < 0;
+    // A smooth edge (its faces tangent along it, as where a Boolean leaves a wall tangent to a
+    // corner cylinder): no ball is tangent to both faces at a radius other than the corner's own,
+    // and OCCT refuses it ("There are no suitable edges"). The tool would roll on over the next
+    // edge and silently re-round the corner (review pr999-r2, T-A), so it stays refused
+    for (double at : {data.first, middle, data.last}) {
+        const double turn = std::acos(std::clamp(
+            inwardIn(data.faces[0], edge, at).Dot(inwardIn(data.faces[1], edge, at)), -1.0, 1.0));
+        if (pi - turn < smoothEdgeAngle) {
+            refuse("a smooth edge (its faces are tangent along it)");
+        }
+    }
     // On a cone only what Onshape was measured on (ops#935): a concave round, the fill at the foot
     // of a cone standing on the plane. A convex circle on a cone (a frustum's top), or a chamfer,
     // is refused as before
