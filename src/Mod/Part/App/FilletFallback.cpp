@@ -17578,8 +17578,8 @@ bool constructMitreRunOns(
         struct Piece
         {
             TopoDS_Shape first;
-            const RunOnCorner* second;
-            bool torus;
+            const RunOnCorner* second {nullptr};
+            bool torus {false};
         };
         std::vector<Piece> pieces;
         std::vector<TopoDS_Shape> reaches;
