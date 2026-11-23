@@ -874,7 +874,10 @@ struct ReapplyCollector
         if (face) {
             // A face refine merged from the original's face and one already there (the pocket's
             // wall and the plate's side in one plane): the history follows one of them, so it is
-            // told by the maker's base, where the face is partly there already
+            // told by the maker's base, where the face is partly there already. Such a face is the
+            // earlier feature's, as Onshape names it (ops#992: the team's case wall that a slot's
+            // side extends is the wall sketch's face), so it is outside: the same face at every
+            // instance, as before ops#963 A
             if (auto feature = freecad_cast<PartDesign::Feature*>(maker)) {
                 if (const App::DocumentObject* baseObject = feature->getBaseObject(/*silent=*/true)) {
                     const TopoDS_Shape base = Part::Feature::getTopoShape(
@@ -889,10 +892,7 @@ struct ReapplyCollector
                     }
                     for (const gp_Pnt& point : insidePoints(TopoDS::Face(element), 9)) {
                         if (pointsOn({point}, faces, tol)) {
-                            why = "Reapply isn't available yet for an extrusion up to a face that "
-                                + quoted(maker) + " and an earlier feature made together: " + name
-                                + unavailable;
-                            return -1;
+                            return 0;
                         }
                     }
                 }

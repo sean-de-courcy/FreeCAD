@@ -35,9 +35,9 @@
   warning (Onshape gives none), while another original is made; a pattern that makes nothing at
   all is refused (ops#640, a replica's circular pattern; Onshape builds it).
 - Reapply on, an up-to face or vertex another original of the pattern made (ops#963 A): each
-  instance reads its own copy of it; a maker listed after its reader, a face made together with
-  an earlier feature, are a warning or a refusal; an outside face stays the same face at every
-  instance (Onshape O6).
+  instance reads its own copy of it; a maker listed after its reader is a warning; a face made
+  together with an earlier feature is that feature's, outside (ops#992); an outside face stays
+  the same face at every instance (Onshape O6).
 
 Designed models, built by each test:
 - Block: a 40 x 20 x 10 pad, x -20..20, y -10..10, z 0..10: 8000.
@@ -685,23 +685,61 @@ class TestPatternRules(unittest.TestCase):
         self.assertTrue(self.inside(-32.5, 0, 7))
         self.assertFalse(self.inside(0, 32.5, 7))
 
-    def testReapplyUpToAFaceMadeTogetherWithTheBaseIsRefused(self):
-        """A Boss on the plate's top flush with its side (x 40..50, y -5..5, z 10..15, refined):
-        its side x = 50 merges with the plate's into one face, which neither alone made. A pad up
-        to that face (from x = 45, inside the Boss) can't be told own or outside: refused."""
+    def testReapplyUpToAFaceMadeTogetherWithTheBaseIsOutside(self):
+        """ops#992 (the team's mirrored case walls): a face refine merged from an original's face
+        and an earlier feature's is the earlier feature's, as Onshape names it, so it stays outside
+        (the same face at every instance, Onshape O6). The plate x -50..50, y -50..50, z 0..10
+        (100000) and the Wall on it, x -50..50, y 40..50, z 10..20 (10000): its front y = 40. The
+        Step on the Wall, x 20..30, y 40..50, z 20..25 (500, refined): its front merges with the
+        Wall's into one face. The Rib, x 22..28, z 12..14, from the plane y = 30 up to that face
+        (y 30..40, 120). Mirrored across YZ with Reapply: the Step and the Rib at x -30..-20, the Rib
+        up to the mirrored part's y = 40: 100000 + 10000 + 2 x (500 + 120) = 111240, no warning.
+        Before: refused ("made together")."""
         self.block(-50, -50, 50, 50)
-        boss = self.topPad("Boss", 40, -5, 50, 5)
-        boss.Refine = True
+        wallSketch = models.sketch(
+            self.doc, "WallSketch", models.rectangle(-50, 40, 50, 50), self.body, z=10
+        )
+        models.pad(self.body, wallSketch, 10, name="Wall")
+        stepSketch = models.sketch(
+            self.doc, "StepSketch", models.rectangle(20, 40, 30, 50), self.body, z=20
+        )
+        step = models.pad(self.body, stepSketch, 5, name="Step")
+        step.Refine = True
         self.recompute()
-        side = self.faceOf(boss, V(50, 0, 75 / 14), 100 * 10 + 10 * 5)
-        sketch = self.xSketch("RibSketch", 45, models.rectangle(-2, 11, 2, 13))
+        self.assertBody(110500)
+        front = self.faceOf(step, V(50 * 25 / 1050, 40, (1000 * 15 + 50 * 22.5) / 1050), 1050)
+        # A sketch on the plane y = 30: sketch x along x, sketch y along z, its normal -y
+        sketch = models.sketch(
+            self.doc,
+            "RibSketch",
+            models.rectangle(22, 12, 28, 14),
+            self.body,
+            placement=App.Placement(V(0, 30, 0), App.Rotation(V(1, 0, 0), 90)),
+        )
         rib = self.body.newObject("PartDesign::Pad", "Rib")
         rib.Profile = sketch
         rib.Type = "UpToFace"
-        rib.UpToFace = (boss, [side])
+        rib.UpToFace = (step, [front])
+        for reversed_ in (True, False):
+            rib.Reversed = reversed_
+            self.recompute()
+            if rib.isValid() and abs(self.body.Shape.Volume - 110620) < 1e-6:
+                break
+        self.assertValid(rib)
+        self.assertBody(110620)
+        mirrored = self.body.newObject("PartDesign::Mirrored", "Mirrored")
+        mirrored.Originals = [step, rib]
+        mirrored.MirrorPlane = self.axis("YZ_Plane")
+        mirrored.Refine = True
+        mirrored.Reapply = True
+        self.body.Tip = mirrored
         self.recompute()
-        pattern = self.quarterTurns([boss, rib])
-        self.assertFailed(pattern, "made together")
+        self.assertValid(mirrored)
+        self.assertNoWarning(mirrored)
+        self.assertBody(111240)
+        for x in (25, -25):
+            self.assertTrue(self.inside(x, 35, 13), f"no rib at x = {x}")
+            self.assertTrue(self.inside(x, 45, 22.5), f"no step at x = {x}")
 
     def testReapplyUpToAnOutsideFaceWithATurnedTwin(self):
         """Onshape O6q (oracle963b, 11-22): an outside face stays the same face at every instance
