@@ -3844,6 +3844,7 @@ Tool ruledChamfer(
     const gp_Pnt& corner = data.start;
     gp_Pnt touches[2];
     gp_Pnt middles[2];
+    double thetas[2] = {0.0, 0.0};
     for (int k = 0; k < 2; ++k) {
         const RuledTrace& t = traces[k];
         if (!t.circle) {
@@ -3862,6 +3863,21 @@ Tool ruledChamfer(
             >= gp_Vec(corner, minus).Dot(gp_Vec(t.inward));
         touches[k] = plusSide ? plus : minus;
         middles[k] = corner.Rotated(axis, plusSide ? theta / 2 : -theta / 2);
+        thetas[k] = theta;
+    }
+    // Where the material lies outside the cylinder (a bore's edge), the chord must not enter the
+    // bore at its end on the cylinder (review pr987-r1 F2: w near the bore's radius)
+    for (int k = 0; k < 2; ++k) {
+        const RuledTrace& t = traces[k];
+        if (!t.circle) {
+            continue;
+        }
+        const bool materialInside
+            = gp_Vec(t.centre, corner).Dot(gp_Vec(outwardNormal(data.faces[k], corner))) > 0;
+        if (!materialInside
+            && gp_Vec(touches[k], touches[1 - k]).Dot(gp_Vec(touches[k], t.centre)) > 0) {
+            refuse("a chamfer whose face would cross the bore it ends on");
+        }
     }
     auto side = [&](const gp_Pnt& a, const gp_Pnt& b, const gp_Pnt& p) {
         return gp_Vec(a, b).Crossed(gp_Vec(a, p)).Dot(gp_Vec(direction));
@@ -3876,8 +3892,7 @@ Tool ruledChamfer(
         }
         walls[k] = BRepBuilderAPI_MakeEdge(GC_MakeArcOfCircle(corner, middles[k], touches[k]).Value())
                        .Edge();
-        const double theta = 2 * std::asin(std::min(1.0, w / (2 * t.radius)));
-        const double segment = t.radius * t.radius * (theta - std::sin(theta)) / 2;
+        const double segment = t.radius * t.radius * (thetas[k] - std::sin(thetas[k])) / 2;
         // Bulging away from the triangle adds the segment, into it takes it away
         const bool bulges = side(corner, touches[k], middles[k])
                 * side(corner, touches[k], touches[1 - k])
@@ -3917,11 +3932,13 @@ Tool ruledTool(const Context& ctx, const EdgeData& data, const VertexEnd ends[2]
     double length = data.start.Distance(data.end);
     for (int i = 0; i < 2; ++i) {
         if (!ends[i].surfaceEnd.IsNull()) {
-            refuse("a round of a straight edge on a cylinder that ends on a face that is not a plane");
+            refuse(
+                "a dress-up of a straight edge on a cylinder that ends on a face that is not a plane"
+            );
         }
         if (ends[i].kind != VertexClass::FreeEnd || ends[i].trims.size() != 1
             || !parallel(ends[i].trims.front().normal, direction)) {
-            refuse("a round of a straight edge on a cylinder that does not end square to it");
+            refuse("a dress-up of a straight edge on a cylinder that does not end square to it");
         }
     }
     const gp_Pnt& corner = data.start;
