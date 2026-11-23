@@ -2484,19 +2484,26 @@ class BridgedRecessTest(unittest.TestCase):
                     "Part::GeomBSplineSurface", {f.Surface.TypeId for f in fillet.Shape.Faces}
                 )
 
-    def testRimWithEveryArcAtOrAboveTheRadiusAcrossACountersinkFails(self):
+    def testRimWithEveryArcAtOrAboveTheRadiusAcrossACountersinkBuilds(self):
         # ops#968: the check still runs on a rim loop whose arcs are all at or above the radius,
         # the arc equal to it included: the round r 2's band crosses the countersink's rim, where
-        # OCCT bridges it with a B-spline, and the fillet is refused, as in rimBlock()'s case
+        # OCCT bridges it with a B-spline. As in rimBlock()'s case, the exact construction then
+        # builds the plain round cut by the countersink (ops#993)
+        sink = (
+            Part.makeCone(2, 4, 2, V(30, 5, 1))
+            .fuse(Part.makeCylinder(2, 3, V(30, 5, 0)))
+            .removeSplitter()
+        )
         for small in (5, 2):
             with self.subTest(small=small):
                 shape = self.cornerPlate(small, sink=True)
                 fillet = filleted_in_a_body(self.doc, shape, self.topRim, 2)
-                self.assertFalse(fillet.isValid())
-                status = fillet.getStatusString()
-                self.assertTrue(
-                    status.startswith("The fillet's band crosses a hole or pocket on Face"), status
-                )
+                self.assertTrue(fillet.isValid(), fillet.getStatusString())
+                kinds = {f.Surface.TypeId for f in fillet.Shape.Faces}
+                self.assertNotIn("Part::GeomBSplineSurface", kinds)
+                plain = self.cornerPlate(small)
+                right = plain.makeFillet(2, self.topRim(plain)).cut(sink)
+                self.assertLess(symmetric_difference(fillet.Shape, right), 1e-6)
 
     @staticmethod
     def pocketBlock(hole=False):
