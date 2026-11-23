@@ -43,7 +43,6 @@
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <gp_Pnt2d.hxx>
 #include <BRepBndLib.hxx>
-#include <BRepBuilderAPI_Transform.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
 #include <BRepGProp.hxx>
 #include <BRepIntCurveSurface_Inter.hxx>
@@ -52,8 +51,6 @@
 #include <BRepFeat_MakePrism.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
 #include <Bnd_Box.hxx>
-#include <GeomAPI_ProjectPointOnSurf.hxx>
-#include <Geom_Surface.hxx>
 #include <gp.hxx>
 #include <gp_Dir.hxx>
 #include <gp_Lin.hxx>
@@ -1218,43 +1215,42 @@ bool reapplyMerged(const FeatureExtrude& feature, const App::Property& prop)
     return (reapplyRun->own & bit) != 0;
 }
 
-/// ops#992: a merged up-to face (in the feature's frame) carried back by toSeed must lie on its own
-/// surface, face by face: then the outside face and the instance's own copy are the same there.
-/// Otherwise the run stops with mergedDiffers
+/// ops#992: a merged up-to face (in the feature's frame) carried back by toSeed must be on its own
+/// plane exactly, face by face: the carried plane's normal parallel to the face's and its
+/// location on it (review pr992-r2: sampled points on the pattern's axis passed a tilted plane).
+/// Then the outside face and the instance's own copy lie in one plane. A face that isn't a plane
+/// can't be told: the run stops with mergedDiffers, as it does where the planes differ
 void requireMergedAgrees(const TopoDS_Shape& unmoved)
 {
-    std::vector<TopoDS_Face> faces;
-    for (TopExp_Explorer x(unmoved, TopAbs_FACE); x.More(); x.Next()) {
-        faces.push_back(TopoDS::Face(x.Current()));
-    }
     Bnd_Box box;
     BRepBndLib::Add(unmoved, box);
     if (!reapplyRun->base.isNull()) {
         BRepBndLib::Add(reapplyRun->base.getShape(), box);
     }
     const double tol = std::max(1e-6, 1e-7 * std::sqrt(box.SquareExtent()));
-    for (const TopoDS_Face& face : faces) {
-        const Handle(Geom_Surface) surface = BRep_Tool::Surface(face);
-        const TopoDS_Shape carried = BRepBuilderAPI_Transform(face, reapplyRun->toSeed, true).Shape();
-        std::vector<gp_Pnt> points;
-        for (TopExp_Explorer v(carried, TopAbs_VERTEX); v.More(); v.Next()) {
-            points.push_back(BRep_Tool::Pnt(TopoDS::Vertex(v.Current())));
+    auto differs = [](const char* how) {
+        throw Base::ValueError(
+            std::string(mergedDiffers)
+            + ": its up-to face was made by one of the pattern's originals and an earlier feature "
+              "together, and " + how
+        );
+    };
+    bool any = false;
+    for (TopExp_Explorer x(unmoved, TopAbs_FACE); x.More(); x.Next()) {
+        any = true;
+        BRepAdaptor_Surface surface(TopoDS::Face(x.Current()));
+        if (surface.GetType() != GeomAbs_Plane) {
+            differs("it isn't a plane");
         }
-        BRepAdaptor_Surface along(TopoDS::Face(carried));
-        points.push_back(along.Value(
-            (along.FirstUParameter() + along.LastUParameter()) / 2,
-            (along.FirstVParameter() + along.LastVParameter()) / 2
-        ));
-        for (const gp_Pnt& point : points) {
-            GeomAPI_ProjectPointOnSurf projection(point, surface);
-            if (projection.NbPoints() == 0 || projection.LowerDistance() > tol) {
-                throw Base::ValueError(
-                    std::string(mergedDiffers)
-                    + ": its up-to face was made by one of the pattern's originals and an earlier "
-                      "feature together, and at this instance the pattern moves it off itself"
-                );
-            }
+        const gp_Pln plane = surface.Plane();
+        const gp_Pln carried = plane.Transformed(reapplyRun->toSeed);
+        if (!carried.Axis().Direction().IsParallel(plane.Axis().Direction(), Precision::Angular())
+            || plane.Distance(carried.Location()) > tol) {
+            differs("at this instance the pattern moves it off its plane");
         }
+    }
+    if (!any) {
+        differs("it has no face");
     }
 }
 
