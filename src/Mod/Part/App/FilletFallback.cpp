@@ -1610,6 +1610,8 @@ struct Context
     }
 };
 
+bool equalDistances(const Request& request);
+
 EdgeData analyse(const Context& ctx, const TopoDS_Edge& edge)
 {
     EdgeData data;
@@ -1673,7 +1675,11 @@ EdgeData analyse(const Context& ctx, const TopoDS_Edge& edge)
         if (!both) {
             refuse("a straight edge between faces that are not planes or cylinders along it");
         }
-        if (data.ruled && ctx.request.kind != Kind::Fillet) {
+        // ops#987: a chamfer by equal distances between a plane and a cylinder along the edge
+        // has a tool (ruledChamfer()); any other chamfer of such an edge has none
+        if (data.ruled && ctx.request.kind != Kind::Fillet
+            && (!equalDistances(ctx.request)
+                || (s0.GetType() == GeomAbs_Plane) == (s1.GetType() == GeomAbs_Plane))) {
             refuse("a chamfer of a straight edge on a cylinder");
         }
         if (data.start.Distance(data.end) < linearTolerance) {
@@ -3811,17 +3817,128 @@ Tool rolledTool(
     return tool;
 }
 
+/** ops#987 (Runner Clamp #14): a chamfer by equal distances of a convex straight edge between a
+ * plane and a cylinder along it, as Onshape builds it: its line on the plane lies at the width w
+ * from the edge, and on the cylinder at the same straight-line distance w from the edge (the
+ * captured volume change to 8e-12 relative over six edges; the distance along the arc is 1e-5
+ * off). The tool is the corner's region cut off by the chord between those two lines, swept along
+ * the edge, whose ends are square to it (ruledTool() checked them). Its area in closed form: the
+ * triangle of the corner and the two points, plus or minus the cylinder's segment over its chord.
+ * Each strip is w wide, so the strip checks decide the limit, as for a round
+ */
+Tool ruledChamfer(
+    const EdgeData& data,
+    const VertexEnd ends[2],
+    const RuledTrace traces[2],
+    const gp_Dir& direction,
+    double length,
+    double w
+)
+{
+    if (!data.convex) {
+        refuse("a chamfer of a concave straight edge on a cylinder");
+    }
+    if (traces[0].circle == traces[1].circle) {
+        refuse("a chamfer of a straight edge that is not between a plane and a cylinder");
+    }
+    const gp_Pnt& corner = data.start;
+    gp_Pnt touches[2];
+    gp_Pnt middles[2];
+    double thetas[2] = {0.0, 0.0};
+    for (int k = 0; k < 2; ++k) {
+        const RuledTrace& t = traces[k];
+        if (!t.circle) {
+            touches[k] = corner.Translated(gp_Vec(t.inward) * w);
+            continue;
+        }
+        if (!(w < 2 * t.radius)) {
+            refuse("a chamfer as wide as the cylinder it cuts");
+        }
+        // The point of the circle at the chord w from the corner, on the face's side of it
+        const double theta = 2 * std::asin(w / (2 * t.radius));
+        const gp_Ax1 axis(t.centre, direction);
+        const gp_Pnt plus = corner.Rotated(axis, theta);
+        const gp_Pnt minus = corner.Rotated(axis, -theta);
+        const bool plusSide = gp_Vec(corner, plus).Dot(gp_Vec(t.inward))
+            >= gp_Vec(corner, minus).Dot(gp_Vec(t.inward));
+        touches[k] = plusSide ? plus : minus;
+        middles[k] = corner.Rotated(axis, plusSide ? theta / 2 : -theta / 2);
+        thetas[k] = theta;
+    }
+    // Where the material lies outside the cylinder (a bore's edge), the chord must not enter the
+    // bore at its end on the cylinder (review pr987-r1 F2: w near the bore's radius)
+    for (int k = 0; k < 2; ++k) {
+        const RuledTrace& t = traces[k];
+        if (!t.circle) {
+            continue;
+        }
+        const bool materialInside
+            = gp_Vec(t.centre, corner).Dot(gp_Vec(outwardNormal(data.faces[k], corner))) > 0;
+        if (!materialInside
+            && gp_Vec(touches[k], touches[1 - k]).Dot(gp_Vec(touches[k], t.centre)) > 0) {
+            refuse("a chamfer whose face would cross the bore it ends on");
+        }
+    }
+    auto side = [&](const gp_Pnt& a, const gp_Pnt& b, const gp_Pnt& p) {
+        return gp_Vec(a, b).Crossed(gp_Vec(a, p)).Dot(gp_Vec(direction));
+    };
+    double area = std::abs(side(corner, touches[0], touches[1])) / 2;
+    TopoDS_Edge walls[2];
+    for (int k = 0; k < 2; ++k) {
+        const RuledTrace& t = traces[k];
+        if (!t.circle) {
+            walls[k] = BRepBuilderAPI_MakeEdge(corner, touches[k]).Edge();
+            continue;
+        }
+        walls[k] = BRepBuilderAPI_MakeEdge(GC_MakeArcOfCircle(corner, middles[k], touches[k]).Value())
+                       .Edge();
+        const double segment = t.radius * t.radius * (thetas[k] - std::sin(thetas[k])) / 2;
+        // Bulging away from the triangle adds the segment, into it takes it away
+        const bool bulges = side(corner, touches[k], middles[k])
+                * side(corner, touches[k], touches[1 - k])
+            < 0;
+        area += bulges ? segment : -segment;
+    }
+    if (area <= linearTolerance * w) {
+        refuse("a chamfer of a straight edge on a cylinder has no section");
+    }
+    const TopoDS_Edge chord = BRepBuilderAPI_MakeEdge(touches[0], touches[1]).Edge();
+    BRepBuilderAPI_MakeWire wire(walls[0], chord, walls[1]);
+    if (!wire.IsDone()) {
+        refuse("building a chamfer's section failed");
+    }
+    TopoDS_Face face = BRepBuilderAPI_MakeFace(wire.Wire(), Standard_True).Face();
+    Tool tool;
+    tool.source = data.edge;
+    tool.cut = true;
+    tool.volume = area * length;
+    tool.solid = BRepPrimAPI_MakePrism(face, gp_Vec(direction) * length, Standard_True).Shape();
+    tool.strips.resize(2);
+    for (int k = 0; k < 2; ++k) {
+        tool.strips[k].face = data.faces[k];
+        tool.strips[k].width = corner.Distance(touches[k]);
+        tool.strips[k].farSide.valid = true;
+        tool.strips[k].farSide.lin = gp_Lin(touches[k], direction);
+    }
+    for (int i = 0; i < 2; ++i) {
+        tool.caps.push_back(ends[i].trims.front());
+    }
+    return tool;
+}
+
 Tool ruledTool(const Context& ctx, const EdgeData& data, const VertexEnd ends[2], double r)
 {
     gp_Dir direction(gp_Vec(data.start, data.end));
     double length = data.start.Distance(data.end);
     for (int i = 0; i < 2; ++i) {
         if (!ends[i].surfaceEnd.IsNull()) {
-            refuse("a round of a straight edge on a cylinder that ends on a face that is not a plane");
+            refuse(
+                "a dress-up of a straight edge on a cylinder that ends on a face that is not a plane"
+            );
         }
         if (ends[i].kind != VertexClass::FreeEnd || ends[i].trims.size() != 1
             || !parallel(ends[i].trims.front().normal, direction)) {
-            refuse("a round of a straight edge on a cylinder that does not end square to it");
+            refuse("a dress-up of a straight edge on a cylinder that does not end square to it");
         }
     }
     const gp_Pnt& corner = data.start;
@@ -3836,6 +3953,9 @@ Tool ruledTool(const Context& ctx, const EdgeData& data, const VertexEnd ends[2]
             inwardIn(data.faces[k], data.edge, data.first),
             r
         );
+    }
+    if (ctx.request.kind == Kind::Chamfer) {
+        return ruledChamfer(data, ends, traces, direction, length, r);
     }
     // The arc's centre: on the line, or the circle, offset by r from each trace; of the two
     // solutions the one nearer the corner

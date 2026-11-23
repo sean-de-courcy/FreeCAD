@@ -4249,11 +4249,27 @@ class CurvedWallEndTest(unittest.TestCase):
                 self.assertEqual(len(shape.Solids), 1)
                 self.assertAlmostEqual(shape.Volume, sector.Volume - removed, delta=1e-6)
 
-    def testChamferOfACurvedWallsEndFails(self):
-        # Not built yet: a chamfer's distances along a cylinder
+    def testChamferOfACurvedWallsEndIsTheChordRule(self):
+        # ops#987: OCCT fails; the construction builds each edge's chamfer by Onshape's chord rule
+        # (on the end face at w from the edge, on the cylinder at the same straight-line distance
+        # w). Per edge, h times the triangle of the corner and the two points, plus the outer
+        # cylinder's segment over its chord, less the inner's. At w = half the wall's thickness the
+        # two chamfers meet on the end face's middle line and the end face goes (7 faces)
         sector, edges = self.wall(10, 11.5, 4)
-        with self.assertRaises(Part.OCCError):
-            sector.makeChamfer(0.75, edges)
+        for w, faces in ((0.5, 8), (0.75, 7)):
+            with self.subTest(w=w):
+                removed = 0.0
+                for R, inside in ((11.5, True), (10.0, False)):
+                    theta = 2 * math.asin(w / (2 * R))
+                    segment = R * R * (theta - math.sin(theta)) / 2
+                    along = R - w if inside else R + w
+                    triangle = abs((along - R) * R * math.sin(theta)) / 2
+                    removed += 4 * (triangle + segment if inside else triangle - segment)
+                shape = sector.makeChamfer(w, edges)
+                self.assertTrue(shape.isValid())
+                self.assertEqual(len(shape.Solids), 1)
+                self.assertEqual(len(shape.Faces), faces)
+                self.assertAlmostEqual(sector.Volume - shape.Volume, removed, delta=1e-6)
 
     def testFullRoundOfAWallOnABase(self):
         # ops#640 F1. The round ends square on the base's top: it removes the section over the
@@ -8412,3 +8428,72 @@ class InvalidResultWiderScopeTest(unittest.TestCase):
             self.assertEqual(len(result.Faces), len(expected.Faces))
         finally:
             FreeCAD.closeDocument(doc.Name)
+
+
+class RuledChamferTest(unittest.TestCase):
+    """ops#987 (Runner Clamp #14): a chamfer of a straight edge between a plane strip and a cylinder
+    along it, its width the strip's whole width. OCCT fails at that limit, and the exact
+    construction had no chamfer of such an edge ("a chamfer of a straight edge on a cylinder").
+    Onshape builds it: its line on the plane at the width from the edge, on the cylinder at the
+    same straight-line distance from the edge, and the strip vanishes. Designed: a ring segment
+    (outer R 100 from -20 to 0 deg, a radial strip 2 wide at 0 deg, a floor arc of radius 98 from 0
+    to 20 deg, inner radius 88), extruded 20; the chamfer of the straight edge at (100, 0) between
+    the strip and the outer cylinder. The expected result is the base less the corner's region cut
+    off by the chord between the two lines"""
+
+    R, w, L = 100.0, 2.0, 20.0
+
+    def base(self):
+        R, w = self.R, self.w
+        t0, t1, t2 = math.radians(-20), 0.0, math.radians(20)
+
+        def pt(rad, t):
+            return V(rad * math.cos(t), rad * math.sin(t), 0)
+
+        profile = [
+            Part.Arc(pt(R, t0), pt(R, (t0 + t1) / 2), pt(R, t1)).toShape(),
+            Part.makeLine(pt(R, t1), pt(R - w, t1)),
+            Part.Arc(pt(R - w, t1), pt(R - w, (t1 + t2) / 2), pt(R - w, t2)).toShape(),
+            Part.makeLine(pt(R - w, t2), pt(R - 12, t2)),
+            Part.Arc(pt(R - 12, t2), pt(R - 12, (t0 + t2) / 2), pt(R - 12, t0)).toShape(),
+            Part.makeLine(pt(R - 12, t0), pt(R, t0)),
+        ]
+        return Part.Face(Part.Wire(profile)).extrude(V(0, 0, self.L))
+
+    def expected(self, shape, width):
+        corner = V(self.R, 0, 0)
+        on_plane = V(self.R - width, 0, 0)
+        theta = -2 * math.asin(width / (2 * self.R))
+        on_cylinder = V(self.R * math.cos(theta), self.R * math.sin(theta), 0)
+        chord = on_cylinder - on_plane
+        out = corner - (on_plane + on_cylinder) * 0.5
+        out = out - chord * (out.dot(chord) / chord.dot(chord))
+        out.normalize()
+        beyond = Part.Face(
+            Part.makePolygon([on_plane, on_cylinder, on_cylinder + out * 5, on_plane + out * 5, on_plane])
+        ).extrude(V(0, 0, self.L))
+        return shape.cut(beyond).removeSplitter()
+
+    def chamfer(self, width):
+        shape = self.base()
+        doc = FreeCAD.newDocument("RuledChamfer")
+        try:
+            chamfer, _ = dressed_in_a_body(doc, "Chamfer", shape, ((self.R, 0, 0), (self.R, 0, self.L)), width)
+            self.assertTrue(chamfer.isValid(), chamfer.getStatusString())
+            result = chamfer.Shape.copy()
+        finally:
+            FreeCAD.closeDocument(doc.Name)
+        expected = self.expected(shape, width)
+        self.assertTrue(result.isValid())
+        self.assertEqual(len(result.Solids), 1)
+        self.assertAlmostEqual(result.Volume - shape.Volume, expected.Volume - shape.Volume, delta=1e-6)
+        self.assertLess(result.cut(expected).Volume + expected.cut(result).Volume, 1e-6)
+        self.assertEqual(len(result.Faces), len(expected.Faces))
+        return result, shape
+
+    def testBelowTheStripsWidthIsOcctsChamfer(self):
+        self.chamfer(0.9 * self.w)
+
+    def testAtTheStripsWidthTheStripVanishes(self):
+        result, shape = self.chamfer(self.w)
+        self.assertEqual(len(result.Faces), len(shape.Faces))
