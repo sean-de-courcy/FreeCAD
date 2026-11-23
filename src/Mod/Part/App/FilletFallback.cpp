@@ -13582,6 +13582,27 @@ std::string takeInvalidResult()
 
 namespace
 {
+thread_local bool refusedResult = false;
+}
+
+RefusedResultScope::RefusedResultScope()
+    : outer(refusedResult)
+{
+    refusedResult = true;
+}
+
+RefusedResultScope::~RefusedResultScope()
+{
+    refusedResult = outer;
+}
+
+bool RefusedResultScope::active()
+{
+    return refusedResult;
+}
+
+namespace
+{
 /// +1 for an edge convex along its whole length, -1 for a concave one, 0 where it can't be told
 /// (not between two faces, faces tangent there, or the sign changes along it)
 int convexity(const TopTools_IndexedDataMapOfShapeListOfShape& edgeFaces, const TopoDS_Shape& shape)

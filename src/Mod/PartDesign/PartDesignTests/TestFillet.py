@@ -1340,6 +1340,55 @@ class TestFillet(unittest.TestCase):
         self.assertEqual(len(result.Solids), 1)
         self.assertLess(result.cut(expected).Volume + expected.cut(result).Volume, 1e-6)
 
+    def testRoundOverANarrowStripOntoADipIsThePlainRound(self):
+        # ops#990 (HNY-DSN #108, #111): a wall meets a floor that slopes down from it by 16 deg
+        # (an opening of 106 deg) for a strip 3 wide, then dips into a concave arc of radius 12 and
+        # rises over a bump. The round of radius 10 at the wall's foot has a setback of 7.536, past
+        # the strip, and no ball fits into the dip: OCCT rolls the ball on to the bump and bridges
+        # the dip, and the feature's check refused it ("drops a part of the base"). Onshape builds
+        # the plain round, tangent to the wall and to the strip's own plane, the part of its fill in
+        # the material absorbed: the base fused with that fill
+        from math import radians, sin, cos, tan
+
+        V = FreeCAD.Vector
+        r, L, a, s, Rd, H = 10.0, 20.0, radians(16.0), 3.0, 12.0, 25.0
+        p0 = V(0, 0, 0)
+        d1 = V(cos(a), -sin(a), 0)
+        p1 = p0 + d1 * s
+        c1 = p1 + V(sin(a), cos(a), 0) * Rd
+        p2 = V(2 * c1.x - p1.x, p1.y, 0)
+        p3 = p2 + V(cos(a), sin(a), 0) * s
+        c2 = p3 - V(-sin(a), cos(a), 0) * Rd
+        p4 = V(2 * c2.x - p3.x, p3.y, 0)
+        p5 = p4 + V(cos(a), -sin(a), 0) * 6.0
+        profile = [Part.makeLine(V(0, H, 0), p0), Part.makeLine(p0, p1)]
+        profile.append(Part.Arc(p1, c1 + V(0, -Rd, 0), p2).toShape())
+        profile.append(Part.makeLine(p2, p3))
+        profile.append(Part.Arc(p3, c2 + V(0, Rd, 0), p4).toShape())
+        corners = [p4, p5, V(p5.x, -15, 0), V(-8, -15, 0), V(-8, H, 0), V(0, H, 0)]
+        profile += [Part.makeLine(corners[i], corners[i + 1]) for i in range(len(corners) - 1)]
+        shape = Part.Face(Part.Wire(profile)).extrude(V(0, 0, L))
+        opening = pi / 2 + a
+        setback = r / tan(opening / 2)
+        self.assertGreater(setback, s)
+        ta, tb = V(0, setback, 0), d1 * setback
+        bisector = (V(0, 1, 0) + d1).normalize()
+        centre = bisector * (r / sin(opening / 2))
+        fill = Part.Face(
+            Part.Wire(
+                [Part.makeLine(p0, ta), Part.Arc(ta, centre - bisector * r, tb).toShape(), Part.makeLine(tb, p0)]
+            )
+        ).extrude(V(0, 0, L))
+        expected = shape.fuse(fill).removeSplitter()
+        fillet, _ = models.dressed_in_a_body(self.Doc, "Fillet", shape, ((0, 0, 0), (0, 0, L)), r)
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+        result = fillet.Shape
+        self.assertTrue(result.isValid())
+        self.assertEqual(len(result.Solids), 1)
+        self.assertAlmostEqual(result.Volume - shape.Volume, expected.Volume - shape.Volume, delta=1e-6)
+        self.assertLess(result.cut(expected).Volume + expected.cut(result).Volume, 1e-6)
+        self.assertEqual(len(result.Faces), len(expected.Faces))
+
     def tearDown(self):
         # closing doc
         FreeCAD.closeDocument("PartDesignTestFillet")
