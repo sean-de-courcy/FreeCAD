@@ -220,6 +220,36 @@ bool parallel(const gp_Dir& a, const gp_Dir& b)
     return gp_Vec(a).Crossed(gp_Vec(b)).Magnitude() < angularTolerance;
 }
 
+/// Whether an edge's curve is straight with its parameter affine in length: a line, or a B-spline
+/// or Bezier curve of degree 1 with two poles and no weights (one span: a constant derivative).
+/// Its direction, and its speed (mm per unit of parameter)
+bool straightCurve(const BRepAdaptor_Curve& curve, gp_Dir& along, double& speed)
+{
+    switch (curve.GetType()) {
+        case GeomAbs_Line:
+            along = curve.Line().Direction();
+            speed = 1;
+            return true;
+        case GeomAbs_BSplineCurve:
+        case GeomAbs_BezierCurve: {
+            if (curve.Degree() != 1 || curve.NbPoles() != 2 || curve.IsRational()) {
+                return false;
+            }
+            gp_Pnt point;
+            gp_Vec d1;
+            curve.D1(curve.FirstParameter(), point, d1);
+            speed = d1.Magnitude();
+            if (speed < 1e-12) {
+                return false;
+            }
+            along = gp_Dir(d1);
+            return true;
+        }
+        default:
+            return false;
+    }
+}
+
 double volumeOf(const TopoDS_Shape& shape)
 {
     return MassProperties::volume(shape);
@@ -14872,8 +14902,17 @@ std::vector<RimLoop> rimLoops(
             refuse("a rim vertex without an edge down from it");
         }
         BRepAdaptor_Curve curve(vertex.upright);
-        if (curve.GetType() != GeomAbs_Line || !parallel(curve.Line().Direction(), loop.normal)) {
+        // A line, or a straight B-spline or Bezier curve as a Boolean or an import leaves a wall's
+        // edge (ops#950); its parameter runs at `speed` mm per unit
+        gp_Dir along;
+        double speed = 0;
+        if (!straightCurve(curve, along, speed) || !parallel(along, loop.normal)) {
             refuse("the edge down from a rim vertex is not square to the plane face");
+        }
+        if (curve.GetType() != GeomAbs_Line
+            && (!BRep_Tool::SameParameter(vertex.upright)
+                || !BRep_Tool::SameRange(vertex.upright))) {
+            refuse("the edge down from a rim vertex is not same-parameter");
         }
         TopoDS_Vertex forward;
         TopoDS_Vertex reversed;
@@ -14889,14 +14928,15 @@ std::vector<RimLoop> rimLoops(
             >= 0) {
             refuse("a rim whose walls rise from its plane face");
         }
-        double length = curve.LastParameter() - curve.FirstParameter();
+        double length = (curve.LastParameter() - curve.FirstParameter()) * speed;
         if (length < r + 1000 * rimTolerance) {
             refuse("a wall no higher than the round");
         }
         loop.height = std::max(loop.height, length);
         bool atFirst = forward.IsSame(vertex.vertex);
-        double keepFirst = atFirst ? curve.FirstParameter() + r : curve.FirstParameter();
-        double keepLast = atFirst ? curve.LastParameter() : curve.LastParameter() - r;
+        const double down = r / speed;  // the round's height, in the edge's parameter
+        double keepFirst = atFirst ? curve.FirstParameter() + down : curve.FirstParameter();
+        double keepLast = atFirst ? curve.LastParameter() : curve.LastParameter() - down;
         // (with the base vertex's tolerance: its edges' curves end within that of it)
         vertex.lowered = rimVertex(
             loop.point(vertex.plan, -r),

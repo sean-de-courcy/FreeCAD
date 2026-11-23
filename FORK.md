@@ -520,7 +520,8 @@ names it.
 | `fix/i963-loft-flat-side` | fix | ops#963 | - | `integration` `7290ced366` | `279e29e2b5` (fork PR 513), 2026-11-23 | never (fork fix): a conditioned loft's flat side is a plane, so refine merges it |
 | `fix/i992-made-together-outside` | fix | ops#992 | - | `integration` `7290ced366` | `4f01351fbb` (fork PR 523), 2026-11-23 | never (fork fix): a Reapply up-to face made together with an earlier feature is outside, as 1.0.4 |
 | `fix/roundonspline-delta-install` | fix | ops#962 | - | integration | `160bc445b0` (fork PR 527), 2026-11-23 | never (fork fix): the gen5 RoundOnSpline delta files are installed with the compat corpus |
-| `fix/i962-notch-end-fillet` | fix | ops#962 | - | integration | (fork PR 512) | never (fork fix): a concave round that ends at a channel cut lower than its radius, trimmed by the groove and the channel's flat side as Onshape's (ops#962) |
+| `fix/i962-notch-end-fillet` | fix | ops#962 | - | integration | `c052eb4918` (fork PR 512), 2026-11-23 | never (fork fix): a concave round that ends at a channel cut lower than its radius, trimmed by the groove and the channel's flat side as Onshape's (ops#962) |
+| `fix/i950-rim-straight-bspline-wall` | fix | ops#950 | - | PR 512 `450b4bca38` (integration `279e29e2b5`) | (fork PR 520) | never (fork fix): a rim wall's straight B-spline edge keeps the loop in the direct rim builder |
 
 ## Fork-only commits in carried topics
 
