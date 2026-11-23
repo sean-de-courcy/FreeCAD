@@ -25,6 +25,8 @@
 
 #pragma once
 
+#include <map>
+
 #include <Base/BoundBox.h>
 #include <Base/Matrix.h>
 #include <Base/Placement.h>
@@ -566,6 +568,17 @@ public:
     //@}
 
     void afterRestore() override;
+
+    /** The element map's names with the object IDs  ids holds as the IDs they map to, in place:
+     * an import's object, whose map holds its file's IDs (FreeCAD-CH ops#1002,
+     * `notes/merge-tags-1002.md`). The owner isn't touched and nothing is signalled: called while
+     * the document restores. True if any name changed; none here (geometry without names)
+     */
+    virtual bool remapImportedTags(const std::map<long, long>& ids)
+    {
+        (void)ids;
+        return false;
+    }
 };
 
 }  // namespace App

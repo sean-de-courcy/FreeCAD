@@ -11,6 +11,7 @@
 #include "ElementMap.h"
 #include "ElementMapOrder.h"
 #include "ElementNamingUtils.h"
+#include "ImportedTags.h"
 #include "ElementSolver.h"
 #include "NameTable.h"
 
@@ -2142,6 +2143,39 @@ ElementMapPtr ElementMap::copy() const
         }
     }
     return res;
+}
+
+bool ElementMap::remapTags(const std::map<long, long>& ids)
+{
+    std::vector<std::pair<MappedNameRef*, MappedName>> renamed;
+    for (auto& indexedNameEntry : indexedNames) {
+        for (MappedNameRef& head : indexedNameEntry.second.names) {
+            // An element's second and later names are in its first name's chain
+            for (MappedNameRef* ref = &head; ref; ref = ref->next.get()) {
+                if (auto text = remapElementTags(ref->name.toString(), ids)) {
+                    renamed.emplace_back(ref, MappedName(*text));
+                }
+            }
+        }
+    }
+    if (renamed.empty()) {
+        return false;
+    }
+    forgetTakenCounts();
+    std::vector<std::pair<decltype(mappedNames)::node_type, MappedName>> moved;
+    moved.reserve(renamed.size());
+    for (auto& [ref, name] : renamed) {
+        auto it = mappedNames.find(ref->name);
+        if (it != mappedNames.end()) {
+            moved.emplace_back(mappedNames.extract(it), name);
+        }
+        ref->name = name;
+    }
+    for (auto& [node, name] : moved) {
+        node.key() = name;
+        mappedNames.insert(std::move(node));
+    }
+    return true;
 }
 
 void ElementMap::retagElementMap(long newTag) {

@@ -25,6 +25,7 @@
 
 #pragma once
 
+#include <map>
 #include <optional>
 #include <string>
 
@@ -98,5 +99,22 @@ AppExport std::optional<ImportedSource> importedSource(const DocumentObject* obj
 /// document's UUID and the `@<document>` name it was exported under, both doc's. A name can be
 /// another document's once the first is closed, and two open documents can share a UUID (ops#171)
 AppExport bool importedWithin(const ImportedSource& source, const Document& doc);
+
+/// The new ID of each object that came in with the running import from the source target came
+/// from (saved ID -> new ID; ops#1002, `notes/merge-tags-1002.md`): target's own source, a document
+/// by its UUID and the `@<document>` its objects were exported under. Null when target didn't come
+/// in with a running import
+AppExport const std::map<long, long>* importedIds(const DocumentObject* target);
+
+/// \a name (a subname, a shadow or a bare mapped name of an element of \a target) with the tags
+/// of the objects that came in with target's import as their new IDs (Data::remapNameTags()).
+/// None when target didn't come in with a running import, or nothing changed
+AppExport std::optional<std::string> importedElementName(const DocumentObject* target,
+                                                         const std::string& name);
+
+/// \a text (a fingerprint of an element of \a target) with the IDs of the objects that came in
+/// with target's import as their new IDs (Data::remapFingerprintIds()); none as above
+AppExport std::optional<std::string> importedFingerprint(const DocumentObject* target,
+                                                         const std::string& text);
 
 }  // namespace App

@@ -71,9 +71,11 @@
 #include <HLRBRep_Algo.hxx>
 #include <HLRBRep_HLRToShape.hxx>
 
+#include <App/Application.h>
 #include <App/Document.h>
 #include <App/ElementNamingUtils.h>
 #include <App/Expression.h>
+#include <App/MergeDocuments.h>
 #include <App/ExpressionParser.h>
 #include <App/IndexedName.h>
 #include <App/MappedName.h>
@@ -6992,3 +6994,83 @@ std::string SketchObject::getGeometryReference(int GeoId) const {
     return ref;
 }
 // clang-format on
+
+namespace
+{
+/** Merge project keeps each external geometry's `Ref`, the key its link had in the file:
+ * `<object>.<element name>` (updateGeometryRefs()), the object's saved name and the file's IDs in
+ * the name. The import may rename the object, and gives the objects new IDs, which
+ * App::Document::afterRestore() then gives the links' names (ops#1002, notes/merge-tags-1002.md):
+ * the old key matched no link and the geometry went missing at the first recompute. Each
+ * geometry whose Ref is a link's key in the file gets that link's index (RefIndex), as an export
+ * gives it, so that updateGeometryRefs() at the restore takes the key from the link as the import
+ * renamed it; its Source (a name of the source edge) gets the new IDs. Before the links' names
+ * are renamed: a slot of signalImportObjects, which runs before Document::afterRestore()
+ */
+void importExternalRefs(const std::vector<App::DocumentObject*>& objs, Base::XMLReader& /*reader*/)
+{
+    for (auto obj : objs) {
+        auto sketch = freecad_cast<SketchObject*>(obj);
+        if (!sketch || !sketch->isAttachedToDocument() || !App::importedSource(sketch)) {
+            continue;
+        }
+        const auto& targets = sketch->ExternalGeometry.getValues();
+        const auto& subs = sketch->ExternalGeometry.getSubValues();
+        const auto& shadows = sketch->ExternalGeometry.getShadowSubs();
+        std::vector<std::string> keys;
+        std::vector<std::string> legacyKeys;
+        for (std::size_t i = 0; i < targets.size() && i < subs.size(); ++i) {
+            auto target = targets[i];
+            std::string name;
+            if (auto saved = App::importedSource(target)) {
+                name = saved->name.substr(0, saved->name.find('@'));
+            }
+            else if (target && target->isAttachedToDocument()) {
+                name = target->getNameInDocument();
+            }
+            const std::string& sub = i < shadows.size() && !shadows[i].newName.empty()
+                ? shadows[i].newName
+                : subs[i];
+            std::string key = name + '.';
+            legacyKeys.push_back(key + Data::oldElementName(sub.c_str()));
+            if (!target || !target->isDerivedFrom<Part::Datum>()) {
+                key += Data::newElementName(sub.c_str());
+            }
+            keys.push_back(std::move(key));
+        }
+        for (auto geo : sketch->ExternalGeo.getValues()) {
+            auto egf = ExternalGeometryFacade::getFacade(geo);
+            if (egf->getRefIndex() >= 0 || egf->getRef().empty()) {
+                continue;  // a copy's: the export gave it its index
+            }
+            auto it = std::find(keys.begin(), keys.end(), egf->getRef());
+            if (it == keys.end()) {
+                it = std::find(legacyKeys.begin(), legacyKeys.end(), egf->getRef());
+                if (it == legacyKeys.end()) {
+                    continue;
+                }
+                it = keys.begin() + (it - legacyKeys.begin());
+            }
+            const auto index = static_cast<std::size_t>(it - keys.begin());
+            // In place, as the restore's own migration sets them (SketchObject::onChanged())
+            egf->setRefIndex(static_cast<int>(index));
+            if (auto source = App::importedElementName(targets[index], egf->getSource())) {
+                egf->setSource(*source);
+            }
+        }
+    }
+}
+}  // namespace
+
+void Sketcher::registerExternalImport()
+{
+    auto watch = [](App::Document& doc) {
+        doc.signalImportObjects.connect(&importExternalRefs);
+    };
+    for (auto doc : App::GetApplication().getDocuments()) {
+        watch(*doc);
+    }
+    App::GetApplication().signalNewDocument.connect([watch](const App::Document& doc, bool) {
+        watch(const_cast<App::Document&>(doc));
+    });
+}

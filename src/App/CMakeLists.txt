@@ -209,6 +209,7 @@ SET(Document_CPP_SRCS
     VRMLObject.cpp
     MaterialObject.cpp
     MergeDocuments.cpp
+    ImportedTags.cpp
     TextDocument.cpp
     Link.cpp
     LinkBaseExtensionPyImp.cpp
@@ -266,6 +267,7 @@ SET(Document_HPP_SRCS
     VRMLObject.h
     MaterialObject.h
     MergeDocuments.h
+    ImportedTags.h
     TextDocument.h
     VarSet.h
     VarSetCopy.h

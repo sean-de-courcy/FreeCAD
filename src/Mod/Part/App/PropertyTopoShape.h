@@ -112,6 +112,9 @@ public:
     }
 
     void afterRestore() override;
+    /// The shape's element map renamed in place (ops#1002): its caches of named elements and the
+    /// owner's cached shapes are dropped with it
+    bool remapImportedTags(const std::map<long, long>& ids) override;
 
     /** Names \a shape, a result without an element map, by a verified match against this
      * property's value (Part::nameByMatch(), FreeCAD-CH, ops#502), with ids from this property's
@@ -324,6 +327,8 @@ public:
     static PropertyShapeCache* get(const App::DocumentObject* obj, bool create);
     static bool getShape(const App::DocumentObject* obj, TopoShape& shape, const char* subname = 0);
     static void setShape(const App::DocumentObject* obj, const TopoShape& shape, const char* subname = 0);
+    /// Drops obj's cached shapes (ops#1002: its shape's names were renamed in place)
+    static void clear(const App::DocumentObject* obj);
 
 private:
     void slotChanged(const App::DocumentObject&, const App::Property& prop);

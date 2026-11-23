@@ -352,6 +352,14 @@ public:
     /// re-encoded: the prefix `~<ID>` and the embedded IDs are kept.
     void retagElementMap(long newTag);
 
+    /** Every name with the object IDs  ids holds as the IDs they map to
+     * (Data::remapElementTags()), the keys of `mappedNames` with them: an imported object's map,
+     * which holds its file's IDs (FreeCAD-CH ops#1002). Two phases: all names are made first, so a
+     * new name equal to an old one not yet renamed (overlapping IDs) loses no entry. True if any
+     * changed
+     */
+    bool remapTags(const std::map<long, long>& ids);
+
 private:
     /** Serialize this map
      * @param stream: serialized stream

@@ -79,6 +79,10 @@ enum class ExtType
     Both
 };
 
+/// Connects the slot that keeps a merged sketch's external geometry keys (ops#1002), to every
+/// document, open and new; once, at the module's load
+SketcherExport void registerExternalImport();
+
 class SketcherExport SketchObject: public Part::Part2DObject
 {
     typedef Part::Part2DObject inherited;

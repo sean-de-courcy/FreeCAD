@@ -274,16 +274,16 @@ bool nameByRestoredMap(
     long& nextId
 )
 {
-    // An open only, not an import: an imported object's map holds its file's tags, and its first
-    // recompute names it (ops#502). The restored map is read by then: Property::afterRestore()
+    // An open, and Merge project: an import's map holds its new IDs by then (Document::afterRestore()
+    // renames them, ops#1002). A copy's (a paste's) shape has no map: the export wrote none, and its
+    // first recompute names it (ops#502). The restored map is read by then: Property::afterRestore()
     // runs before any object's onDocumentRestored(), and RestoreDocFile() takes the map out
     // while it reads the shape
     auto owner = freecad_cast<Part::Feature*>(property.getContainer());
     if (!owner || !owner->isAttachedToDocument() || owner->getPropertyOfGeometry() != &property
         || owner->getSelectedHistoryAlgorithm() != App::HistoryAlgorithm::V2 || shape.isNull()
         || shape.getElementMapSize() > 0 || restored.getElementMapSize() == 0
-        || !owner->getDocument()->testStatus(App::Document::Restoring)
-        || owner->getDocument()->testStatus(App::Document::Importing)) {
+        || !owner->getDocument()->testStatus(App::Document::Restoring)) {
         return false;
     }
     // Its elements keep the ids they were saved with. All of them or none: an id given now would
@@ -947,6 +947,16 @@ void PropertyPartShape::Restore(Base::XMLReader& reader)
     }
 }
 
+bool PropertyPartShape::remapImportedTags(const std::map<long, long>& ids)
+{
+    if (!_Shape.remapElementTags(ids)) {
+        return false;
+    }
+    _Shape.initCache(1);
+    PropertyShapeCache::clear(freecad_cast<App::DocumentObject*>(getContainer()));
+    return true;
+}
+
 void PropertyPartShape::afterRestore()
 {
     if (_Shape.isRestoreFailed()) {
@@ -1608,6 +1618,13 @@ void PropertyShapeCache::setShape(const App::DocumentObject* obj, const TopoShap
         subname = "";
     }
     prop->cache[subname] = shape;
+}
+
+void PropertyShapeCache::clear(const App::DocumentObject* obj)
+{
+    if (auto prop = get(obj, false)) {
+        prop->cache.clear();
+    }
 }
 
 void PropertyShapeCache::slotChanged(const App::DocumentObject&, const App::Property& prop)

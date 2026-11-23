@@ -328,6 +328,20 @@ ComplexGeoData::getElementMappedNames(const IndexedName& element, bool needUnmap
     return {std::make_pair(MappedName(element), ElementIDRefs())};
 }
 
+bool ComplexGeoData::remapElementTags(const std::map<long, long>& ids)
+{
+    if (ids.empty() || getElementMapSize() == 0) {
+        return false;
+    }
+    auto map = ensureElementMap();
+    // `map` itself is the second reference
+    if (map.use_count() > 2) {
+        map = map->copy();
+        resetElementMap(map);
+    }
+    return map->remapTags(ids);
+}
+
 ElementMapPtr ComplexGeoData::resetElementMap(ElementMapPtr elementMap)
 {
     _elementMap.swap(elementMap);

@@ -1454,6 +1454,101 @@ bool PropertyLinkBase::_updateElementFingerprints(App::DocumentObject* feature,
     return holdsElements;
 }
 
+namespace
+{
+// The object whose element sub names (ops#1002): obj for a sub without a path, else the object its
+// path gives
+App::DocumentObject* elementOwnerOf(App::DocumentObject* obj, const std::string& sub)
+{
+    if (!obj || !obj->isAttachedToDocument()) {
+        return nullptr;
+    }
+    const char* element = Data::findElementName(sub.c_str());
+    if (!element || element == sub.c_str()) {
+        return obj;
+    }
+    return obj->getSubObject(std::string(sub.c_str(), element).c_str());
+}
+
+// text, a name of an element of target, with the import's new IDs (importedElementName())
+bool remapImportedName(std::string& text, const App::DocumentObject* target)
+{
+    if (text.empty()) {
+        return false;
+    }
+    if (auto remapped = App::importedElementName(target, text)) {
+        text = std::move(*remapped);
+        return true;
+    }
+    return false;
+}
+
+// text, a fingerprint of an element of target, with the import's new IDs (importedFingerprint())
+bool remapImportedFingerprint(std::string& text, const App::DocumentObject* target)
+{
+    if (text.empty()) {
+        return false;
+    }
+    if (auto remapped = App::importedFingerprint(target, text)) {
+        text = std::move(*remapped);
+        return true;
+    }
+    return false;
+}
+}  // namespace
+
+bool PropertyLinkBase::_remapImportedTags(App::DocumentObject* obj,
+                                          const std::vector<App::DocumentObject*>* objs,
+                                          std::vector<std::string>& subs,
+                                          std::vector<ShadowSub>& shadows,
+                                          std::vector<std::string>& fingerprints,
+                                          std::vector<std::string>& expandedFrom,
+                                          std::vector<ElementRecords>& records)
+{
+    auto owner = freecad_cast<DocumentObject*>(getContainer());
+    auto doc = owner ? owner->getDocument() : nullptr;
+    bool changed = false;
+    for (std::size_t i = 0; i < subs.size(); ++i) {
+        auto linked = objs ? (i < objs->size() ? (*objs)[i] : nullptr) : obj;
+        // Only a reference into an object that came in: one into an object that didn't (a copy's
+        // link to an original, in a paste within the document) holds that object's names, right
+        // as they are, though some of their tags may be IDs of objects that were copied
+        auto target = elementOwnerOf(linked, subs[i]);
+        if (target && importedIds(target)) {
+            changed = remapImportedName(subs[i], target) || changed;
+            if (i < shadows.size()) {
+                changed = remapImportedName(shadows[i].newName, target) || changed;
+                changed = remapImportedName(shadows[i].oldName, target) || changed;
+            }
+            if (i < fingerprints.size()) {
+                changed = remapImportedFingerprint(fingerprints[i], target) || changed;
+            }
+            if (i < expandedFrom.size()) {
+                changed = remapImportedName(expandedFrom[i], target) || changed;
+            }
+            if (i < records.size()) {
+                auto& guess = records[i].guess;
+                changed = remapImportedName(guess.origName, target) || changed;
+                changed = remapImportedFingerprint(guess.origFingerprint, target) || changed;
+            }
+        }
+        // A re-target record names an element of its own object, which the import has already
+        // named as its copy where it came in (importRetargetTarget())
+        if (i < records.size() && doc && !records[i].retarget.empty()) {
+            auto& record = records[i].retarget;
+            auto recordTarget = doc->getObject(record.target.c_str());
+            if (recordTarget && record.isTarget(recordTarget->getID())) {
+                changed = remapImportedName(record.origName, recordTarget) || changed;
+                changed = remapImportedFingerprint(record.origFp, recordTarget) || changed;
+                changed = remapImportedName(record.guess.origName, recordTarget) || changed;
+                changed =
+                    remapImportedFingerprint(record.guess.origFingerprint, recordTarget) || changed;
+            }
+        }
+    }
+    return changed;
+}
+
 void PropertyLinkBase::_registerElementReference(App::DocumentObject* obj,
                                                  std::string& sub,
                                                  ShadowSub& shadow)
@@ -3504,6 +3599,17 @@ void PropertyLinkSub::onContainerRestored()
     _updateElementFingerprints(nullptr, _pcLinkSub, nullptr, _cSubList, _ShadowSubList, _Fingerprints);
 }
 
+bool PropertyLinkSub::remapImportedTags()
+{
+    return _remapImportedTags(_pcLinkSub,
+                              nullptr,
+                              _cSubList,
+                              _ShadowSubList,
+                              _Fingerprints,
+                              _ExpandedFrom,
+                              _Records);
+}
+
 void PropertyLinkSub::updateElementReference(DocumentObject* feature, bool reverse, bool notify)
 {
     // Without a feature, a setter's: it has kept the records of the references it keeps
@@ -5088,6 +5194,17 @@ void PropertyLinkSubList::onContainerRestored()
         _registerElementReference(_lValueList[i], _lSubList[i], _ShadowSubList[i]);
     }
     _updateElementFingerprints(nullptr, nullptr, &_lValueList, _lSubList, _ShadowSubList, _Fingerprints);
+}
+
+bool PropertyLinkSubList::remapImportedTags()
+{
+    return _remapImportedTags(nullptr,
+                              &_lValueList,
+                              _lSubList,
+                              _ShadowSubList,
+                              _Fingerprints,
+                              _ExpandedFrom,
+                              _Records);
 }
 
 bool PropertyLinkSubList::updateElementFingerprints()
@@ -7435,6 +7552,17 @@ void PropertyXLink::onContainerRestored()
     _updateElementFingerprints(nullptr, _pcLink, nullptr, _SubList, _ShadowSubList, _Fingerprints);
 }
 
+bool PropertyXLink::remapImportedTags()
+{
+    return _remapImportedTags(_pcLink,
+                              nullptr,
+                              _SubList,
+                              _ShadowSubList,
+                              _Fingerprints,
+                              _ExpandedFrom,
+                              _Records);
+}
+
 void PropertyXLink::updateElementReference(DocumentObject* feature, bool reverse, bool notify)
 {
     // Without a feature, a setter's: it has kept the records of the references it keeps
@@ -8642,6 +8770,15 @@ void PropertyXLinkSubList::onContainerRestored()
     }
 }
 
+bool PropertyXLinkSubList::remapImportedTags()
+{
+    bool changed = false;
+    for (auto& link : _Links) {
+        changed = link.remapImportedTags() || changed;
+    }
+    return changed;
+}
+
 void PropertyXLinkSubList::updateElementReference(DocumentObject* feature,
                                                   bool reverse,
                                                   bool notify)
@@ -9436,6 +9573,17 @@ void PropertyXLinkContainer::Save(Base::Writer& writer) const
     writer.decInd();
 
     writer.Stream() << writer.ind() << "</XLinks>" << std::endl;
+}
+
+bool PropertyXLinkContainer::remapImportedTags()
+{
+    bool changed = false;
+    for (auto& [name, link] : _XLinks) {
+        if (link) {
+            changed = link->remapImportedTags() || changed;
+        }
+    }
+    return changed;
 }
 
 void PropertyXLinkContainer::Restore(Base::XMLReader& reader)

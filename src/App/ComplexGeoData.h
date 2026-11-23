@@ -540,6 +540,12 @@ public:
      */
     virtual ElementMapPtr resetElementMap(ElementMapPtr elementMap = ElementMapPtr());
 
+    /** The element map's names with the object IDs  ids holds as the IDs they map to, in place
+     * (ElementMap::remapTags(); FreeCAD-CH ops#1002, an imported object's map). A map this shares
+     * with other data is copied first. True if any name changed
+     */
+    bool remapElementTags(const std::map<long, long>& ids);
+
     /// Get the entire element map.
     std::vector<MappedElement> getElementMap() const;
 

@@ -81,10 +81,10 @@ def placedSketch(body, name, *rects):
     return s
 
 
-def buildStudio(name, shift):
+def buildStudio(name, shift, doc=None):
     """A document holding one studio (an App::Part with the parts A and B), moved by shift along
-    the frame's x."""
-    doc = App.newDocument(name)
+    the frame's x; built in doc if given."""
+    doc = doc or App.newDocument(name)
     studio = doc.addObject("App::Part", "Studio")
     a = doc.addObject("PartDesign::Body", "A")
     studio.addObject(a)
@@ -172,6 +172,16 @@ def inError(doc):
     return {obj.Name: obj.getStatusString() for obj in doc.Objects if not obj.isValid()}
 
 
+def warned(doc):
+    """The objects whose last recompute warned: a reference resolved by geometry, not by name
+    (ops#1002)."""
+    return {
+        obj.Name: obj.getStatusString()
+        for obj in doc.Objects
+        if obj.getStatusString().startswith("Warning")
+    }
+
+
 class TestImportReferences(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp(prefix="TestImportReferences")
@@ -210,6 +220,8 @@ class TestImportReferences(unittest.TestCase):
         """The copies compute as the file alone, and the studio the document held is as it was."""
         self.touchAll(host)
         self.assertEqual(inError(host), {})
+        # Every reference resolves by name, as in its file (ops#1002)
+        self.assertEqual(warned(host), {})
         # By the label's first letter: a copy's label is "A" or, where labels must differ, "A001"
         bodies = {obj.Label[:1]: obj for obj in copies if obj.isDerivedFrom("PartDesign::Body")}
         self.assertEqual(sorted(bodies), ["A", "B"])
@@ -263,6 +275,7 @@ class TestImportReferences(unittest.TestCase):
                     self.assertEqual(len(copies), len(ids))
                     self.touchAll(host)
                     self.assertEqual(inError(host), {})
+                    self.assertEqual(warned(host), {})
                     bodies = {o.Label[:1]: o for o in copies if o.isDerivedFrom("PartDesign::Body")}
                     self.assertEqual(sorted(bodies), ["A", "B"])
                     for label, body in bodies.items():
@@ -288,6 +301,80 @@ class TestImportReferences(unittest.TestCase):
                 App.closeDocument(source.Name)
 
         self.checkWhateverTheNewIds(copy)
+
+    def testMergedIntoItsOwnFile(self):
+        """ops#1002: the file merged into itself. The copies' saved IDs are the IDs of the
+        originals beside them, and the copies get new ones: the copies' names get the new IDs,
+        the originals' keep theirs, and both studios compute as the file, every reference by name."""
+        host = App.openDocument(self.file, hidden=True)
+        before = {obj.Name for obj in host.Objects}
+        host.mergeProject(self.file)
+        copies = [obj for obj in host.Objects if obj.Name not in before]
+        self.touchAll(host)
+        self.assertEqual(inError(host), {})
+        self.assertEqual(warned(host), {})
+        bodies = {o.Label[:1]: o for o in copies if o.isDerivedFrom("PartDesign::Body")}
+        self.assertEqual(sorted(bodies), ["A", "B"])
+        for label, body in bodies.items():
+            self.assertEqual(measure(body), self.alone[label], label)
+            self.assertEqual(measure(host.getObject(label)), self.alone[label], "the original " + label)
+
+    def checkIdsAcrossAPowerOfTen(self, fileLast, hostLast):
+        """The file's objects built with IDs from fileLast + 1 on, merged into a document whose last
+        ID is hostLast: a list of names sorted by bytes sorts the IDs' digits, so a translation
+        across 1000 or 10000 reorders it (ops#1002)."""
+        path = os.path.join(self.dir, "ids%d.FCStd" % fileLast)
+        saveWithLastId(path, fileLast)
+        doc = App.openDocument(path, hidden=True)
+        buildStudio(doc.Name, 0, doc)
+        ids = [obj.ID for obj in doc.Objects]
+        doc.save()
+        App.closeDocument(doc.Name)
+        target = os.path.join(self.dir, "host%d.FCStd" % hostLast)
+        saveWithLastId(target, hostLast)
+        host = App.openDocument(target, hidden=True)
+        host.mergeProject(path)
+        copies = list(host.Objects)
+        self.touchAll(host)
+        self.assertEqual(inError(host), {})
+        self.assertEqual(warned(host), {})
+        bodies = {o.Label[:1]: o for o in copies if o.isDerivedFrom("PartDesign::Body")}
+        for label, body in bodies.items():
+            self.assertEqual(measure(body), self.alone[label], label)
+        return ids, [obj.ID for obj in copies]
+
+    def testMergedIdsAcrossAThousand(self):
+        ids, new = self.checkIdsAcrossAPowerOfTen(985, 5000)
+        self.assertLess(min(ids), 1000)
+        self.assertGreater(max(ids), 1000)
+
+    def testMergedIdsIntoTenThousand(self):
+        ids, new = self.checkIdsAcrossAPowerOfTen(1985, 9985)
+        self.assertLess(min(new), 10000)
+        self.assertGreater(max(new), 10000)
+
+    def testPastedWithinItsDocument(self):
+        """ops#1002: the pocket and its sketch copied within the document. The copied sketch stays
+        on the original fillet's face, whose names hold the originals' IDs, some of them IDs of
+        objects copied now: the copies' references into objects that weren't copied keep their
+        names, and the originals compute as before, every reference by name."""
+        doc = App.openDocument(self.file, hidden=True)
+        self.touchAll(doc)
+        before = {obj.Name for obj in doc.Objects}
+        objs = [doc.getObject("ASketch2"), doc.getObject("APocket")]
+        doc.copyObject(objs, False, False)
+        copies = {obj.Name for obj in doc.Objects if obj.Name not in before}
+        self.touchAll(doc)
+        originals = lambda found: {k: v for k, v in found.items() if k not in copies}
+        self.assertEqual(originals(warned(doc)), {})
+        self.assertEqual(originals(inError(doc)), {})
+        for name in ("A", "B"):
+            self.assertEqual(measure(doc.getObject(name)), self.alone[name], name)
+        sketch = [doc.getObject(n) for n in copies if doc.getObject(n).isDerivedFrom("Sketcher::SketchObject")]
+        self.assertEqual(len(sketch), 1)
+        self.assertEqual(sketch[0].AttachmentSupport, doc.getObject("ASketch2").AttachmentSupport)
+        self.assertNotIn(sketch[0].Name, warned(doc))
+        self.assertNotIn(sketch[0].Name, inError(doc))
 
     def testCopyStaysRightAfterSaveAndReopen(self):
         host = App.openDocument(self.other, hidden=True)
@@ -763,6 +850,25 @@ class TestImportedSketchOnAFace(unittest.TestCase):
         self.assertAlmostEqual(
             copy["Body"].Shape.Volume, source.getObject("Body").Shape.Volume, places=6
         )
+
+    def testMergedIntoItsFileKeepsItsExternalGeometry(self):
+        """ops#1002: merged beside objects of the same names, the merged sketches' external
+        geometry kept the file's keys (`Pad.<name with the file's IDs>`), matched no link and went
+        missing at the first recompute: the sketch on the face in error, the sweep and the
+        follower after it. Every copy computes as the file, every reference by name."""
+        host = App.openDocument(self.file, hidden=True)
+        before = {obj.Name for obj in host.Objects}
+        host.mergeProject(self.file)
+        copy = {obj.Name.rstrip("0123456789"): obj for obj in host.Objects if obj.Name not in before}
+        for obj in host.Objects:
+            obj.touch()
+        host.recompute()
+        self.assertEqual(self.inError(host), {})
+        self.assertEqual(warned(host), {})
+        self.assertEqual(self.externalLine(copy["Follower"]), {self.A, self.B})
+        self.assertEqual(len(copy["OnTop"].ExternalGeo), len(host.getObject("OnTop").ExternalGeo))
+        self.assertAlmostEqual(copy["Body"].Shape.Volume, self.VOLUME, places=4)
+        self.assertAlmostEqual(host.getObject("Body").Shape.Volume, self.VOLUME, places=4)
 
     def testCopiedExternalGeometryFollowsTheSameEdge(self):
         """The silent case: another sketch's external geometry names the edge by index."""

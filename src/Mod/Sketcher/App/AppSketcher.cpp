@@ -102,6 +102,9 @@ PyMOD_INIT_FUNC(Sketcher)
     Sketcher::Constraint::init();
     Sketcher::PropertyConstraintList::init();
 
+    // Merged sketches' external geometry keys (ops#1002)
+    Sketcher::registerExternalImport();
+
     // connect to unified measurement facility
     Sketcher::Measure::initialize();
 
