@@ -1380,6 +1380,61 @@ class TestChamfer(unittest.TestCase):
         self.assertFalse(chamfer.isValid())
         self.assertIn("closed edge of its own", chamfer.getStatusString())
 
+    def _holeChamferedPrism(self):
+        # ops#952's prism (FilletFallbackTest.MixedCoverageTest: R 2, height 10) with a hole r 1.5
+        # through its front wall y = 0..4, its axis through (17, 2, 5) tilted 20 deg from the
+        # wall's normal in the plane z = 5, so its rim on y = 0 is a closed ellipse of varying
+        # angle; that rim chamfered 0.5 by the construction. The hole and its chamfer lie inside
+        # x 13..21, apart from the fillets' bands at x = 30 and x0
+        mixed = models.MixedCoverageTest()
+        prism, x0 = mixed.base()
+        t = math.radians(20)
+        d = FreeCAD.Vector(math.sin(t), math.cos(t), 0)
+        hole = Part.makeCylinder(1.5, 20, FreeCAD.Vector(17, 2, 5) - d * 10, d)
+        drilled = Part.Solid(prism.cut(hole).removeSplitter().Solids[0])
+        rim = ["Edge%d" % (i + 1) for i, e in enumerate(drilled.Edges)
+               if e.isClosed() and all(abs(p.y) < 1e-6 and 13 < p.x < 21 for p in e.discretize(12))]
+        self.assertEqual(len(rim), 1)
+        _, chamfer = self._varyingChamfer(drilled, 0, rim, 0.5)
+        self.assertTrue(chamfer.isValid(), chamfer.getStatusString())
+        # The construction's fill: a rational B-spline face (OCCT's chamfer has none here)
+        self.assertTrue(any(f.Surface.TypeId == "Part::GeomBSplineSurface"
+                            for f in chamfer.Shape.Faces))
+        return mixed, prism, x0, chamfer.Shape
+
+    def testMixedSelectionAfterAVaryingAngleChamfer(self):
+        # Review pr509-r7 L1: ops#952's mixed selection (the full-round pair at x = 30 and the
+        # concave line at x0) on a solid that carries a varying-angle chamfer's construction
+        # faces builds, and removes what it removes from the plain prism: the default volume
+        # integration on the construction's rational B-spline faces is off by about 1000 times
+        # the coverage split's allowance, the shapes agree to 5e-7
+        mixed, prism, x0, shape = self._holeChamferedPrism()
+        top = 2 * mixed.R
+        keys = [(30, 0), (30, top), (x0, top)]
+        plain = prism.makeFillet(mixed.R, [mixed.edge_at(prism, *k) for k in keys])
+        result = shape.makeFillet(mixed.R, [mixed.edge_at(shape, *k) for k in keys])
+        self.assertTrue(result.isValid())
+        self.assertEqual(len(result.Solids), 1)
+        self.assertAlmostEqual(shape.Volume - result.Volume, prism.Volume - plain.Volume, delta=1e-5)
+
+    def testFullRoundAfterAVaryingAngleChamferIsOneFace(self):
+        # Review pr509-r7 L2: the full round of the pair at x = 30 (R 2, the wall 4) on a solid
+        # that carries a varying-angle chamfer's construction faces is one half cylinder about
+        # (28, 2) with one top arc of length 2 pi, as on the plain prism and as Onshape's
+        mixed, prism, x0, shape = self._holeChamferedPrism()
+        R, top, H = mixed.R, 2 * mixed.R, mixed.H
+        result = shape.makeFillet(R, [mixed.edge_at(shape, 30, 0), mixed.edge_at(shape, 30, top)])
+        self.assertTrue(result.isValid())
+        self.assertAlmostEqual(shape.Volume - result.Volume, 2 * (1 - pi / 4) * R * R * H, delta=1e-5)
+        rounds = [f for f in result.Faces
+                  if f.Surface.TypeId == "Part::GeomCylinder" and f.BoundBox.XMin > 27.9]
+        self.assertEqual(len(rounds), 1)
+        self.assertAlmostEqual(rounds[0].Area, pi * R * H, delta=1e-6)
+        arcs = [e for e in result.Edges if e.BoundBox.XMin > 27.9
+                and abs(e.BoundBox.ZMin - H) < 1e-6 and abs(e.BoundBox.ZMax - H) < 1e-6]
+        self.assertEqual(len(arcs), 1)
+        self.assertAlmostEqual(arcs[0].Length, pi * R, delta=1e-6)
+
     def tearDown(self):
         # closing doc
         FreeCAD.closeDocument("PartDesignTestChamfer")

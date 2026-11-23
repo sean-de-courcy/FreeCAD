@@ -9826,7 +9826,15 @@ bool roundCoveredFirst(
             }
         }
     }
-    auto volume = [](const TopoShape& s) {
+    // Measured by the default integration, and where that says the order shows, again
+    // adaptively: on faces a construction bounded by rational B-spline rails (a varying-angle
+    // chamfer's, ops#942) the default is off by about 1000 times the allowance below while the
+    // shapes agree to 5e-7 (review pr509-r7 L1)
+    bool adaptive = false;
+    auto volume = [&adaptive](const TopoShape& s) {
+        if (adaptive) {
+            return MassProperties::volume(s.getShape(), true);
+        }
         GProp_GProps props;
         BRepGProp::VolumeProperties(s.getShape(), props);
         return props.Mass();
@@ -9912,13 +9920,24 @@ bool roundCoveredFirst(
         if (!FilletFallback::takeInvalidResult().empty()) {
             return false;
         }
-        const double base = volume(shape);
-        const double onBase = volume(alone) - base;
-        const double onStage = volume(built) - volume(stage);
-        const double change = std::abs(volume(built) - base);
-        const double allowance = std::max(1e-6 * std::abs(onBase), 1e-9 * std::abs(base));
-        if (!(std::abs(onStage - onBase) <= allowance)
-            || !(std::abs(volume(reverse) - volume(built)) <= std::max(allowance, 1e-7 * change))) {
+        auto orderShows = [&]() {
+            const double base = volume(shape);
+            const double onBase = volume(alone) - base;
+            const double onStage = volume(built) - volume(stage);
+            const double change = std::abs(volume(built) - base);
+            const double allowance = std::max(1e-6 * std::abs(onBase), 1e-9 * std::abs(base));
+            return !(std::abs(onStage - onBase) <= allowance)
+                || !(std::abs(volume(reverse) - volume(built)) <= std::max(allowance, 1e-7 * change));
+        };
+        bool shows = orderShows();
+        if (shows) {
+            adaptive = true;
+            shows = orderShows();
+        }
+        if (shows) {
+            const double base = volume(shape);
+            const double onBase = volume(alone) - base;
+            const double onStage = volume(built) - volume(stage);
             FC_LOG("fillet by coverage: the rest changes " << onStage << " on the first group's "
                    "result, " << onBase << " on the base; the other order "
                    << volume(reverse) - base << " against " << volume(built) - base);

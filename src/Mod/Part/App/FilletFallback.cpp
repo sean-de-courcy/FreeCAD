@@ -13522,11 +13522,23 @@ TopoDS_Shape constructShape(
                 const TopoDS_Shape unified = unify.Shape();
                 TopTools_IndexedMapOfShape facesAfter;
                 TopExp::MapShapes(unified, TopAbs_FACE, facesAfter);
+                // The same volume and area; where the default integration says not, measured
+                // again adaptively: on a base with a construction's rational B-spline faces (a
+                // varying-angle chamfer's, ops#942) it is off by more than the tolerance between
+                // the copy and its unify (review pr509-r7 L2: a full round kept as two faces)
+                auto sameMeasures = [&](bool adaptive) {
+                    const double v0 = adaptive ? MassProperties::volume(shape, true) : volumeBefore;
+                    const double a0 = adaptive ? MassProperties::area(shape, true) : areaBefore;
+                    const double v1 = adaptive ? MassProperties::volume(unified, true)
+                                               : volumeOf(unified);
+                    const double a1 = adaptive ? MassProperties::area(unified, true)
+                                               : areaOf(unified);
+                    return std::abs(v1 - v0) <= volumeTolerance * std::abs(v0)
+                        && std::abs(a1 - a0) <= volumeTolerance * a0;
+                };
                 if (facesAfter.Extent() < facesBefore.Extent() && countSolids(unified) == 1
                     && BRepCheck_Analyzer(unified).IsValid()
-                    && std::abs(volumeOf(unified) - volumeBefore)
-                        <= volumeTolerance * std::abs(volumeBefore)
-                    && std::abs(areaOf(unified) - areaBefore) <= volumeTolerance * areaBefore) {
+                    && (sameMeasures(false) || sameMeasures(true))) {
                     shape = unified;
                     stages.emplace_back(unify.History(), shape);
                     merged = true;
