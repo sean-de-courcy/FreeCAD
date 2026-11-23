@@ -607,6 +607,33 @@ class TestChamfer(unittest.TestCase):
         far = Part.makeBox(R, R, L, FreeCAD.Vector(-R, 0, 0))
         self.assertGreater(shape.common(far).Volume - result.common(far).Volume, 1.0)
 
+    def testChamferChainEndsOnCylindersInPartDesign(self):
+        # As FilletFallbackTest.ChamferSurfaceEndTest (ops#1009, Old Pheidole dugasi #9): a chain
+        # of line, half circle, line chamfered by its walls' height, both free ends on a cylinder;
+        # the PartDesign Chamfer builds what makeChamfer does
+        shape, chain = models.ChamferSurfaceEndTest().tongue()
+        self.assertEqual(len(chain), 3)
+        lines = [e for e in chain if isinstance(e.Curve, Part.Line)]
+        pairs = [(tuple(e.Vertexes[0].Point), tuple(e.Vertexes[1].Point)) for e in lines]
+        chamfer, _ = models.dressed_in_a_body(self.Doc, "Chamfer", shape, pairs[0], 2.0, pairs[1])
+        names = list(chamfer.Base[1])
+        names.append(
+            "Edge%d"
+            % next(
+                i
+                for i, e in enumerate(chamfer.Base[0].Shape.Edges, 1)
+                if isinstance(e.Curve, Part.Circle)
+                and abs(e.Curve.Radius - 3) < 1e-7
+                and e.BoundBox.ZMin > 2 - 1e-7
+            )
+        )
+        chamfer.Base = (chamfer.Base[0], names)
+        self.Doc.recompute()
+        self.assertTrue(chamfer.isValid(), chamfer.getStatusString())
+        expected = 6400 + 8 * 58 + 13 * math.pi / 3
+        self.assertAlmostEqual(chamfer.Shape.Volume, expected, delta=1e-6 * expected)
+        self.assertEqual(len(chamfer.Shape.Faces), 10)
+
     # ops#942 (notes/chamfer-varying-angle-942.md sections 2 and 6): an equal distance chamfer along
     # a closed edge between a cylinder of radius R and a plane tilted by t from its cross-section
     # is one ball rolled round the edge, d = w tan(a / 2) at the reference angle a; it fills or

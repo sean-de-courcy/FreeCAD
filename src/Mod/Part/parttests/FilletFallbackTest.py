@@ -8025,6 +8025,242 @@ class ChamferRunThroughTest(unittest.TestCase):
         self.assertAlmostEqual(result.common(ends).Volume, block.common(ends).Volume, delta=1e-6)
 
 
+class ChamferSurfaceEndTest(unittest.TestCase):
+    """ops#1009 (Old Pheidole dugasi #9): a chamfer of straight edges between planes that end on
+    faces that are not planes, where the wedge run on through the part (ops#936) refuses: a chain,
+    an edge with one plane end. Each such end is bounded by its face's surface, as a round's, and
+    kept only where nothing of the result lies in the wedge run on past it, where the run-on reading
+    (ops#936) and the picked-wall one (oracle HT2) are the same solid. Designed: a plate 80 x 40 x 2
+    (z -2 to 0); a ridge on it to x 50 of trapezoid section (foot y -3 to 3, top y -1 to 1, height
+    2); a bar 2 high over the ridge's start (y -3 to 3), cut at its +x end by a vertical cylinder of
+    radius sqrt(409) about (-20, 0), which passes through (0, +-3). Each case's expected volume in
+    closed form: L(w, b, r, k) is the integral over y in [b - w, b] of (y - b + w) (sqrt(r^2 - y^2) + k),
+    the volume of a 45 degree chamfer wedge of width w between a plane x = const and the cylinder's
+    surface (the skeptic's cases, ops#1009)"""
+
+    S409 = math.sqrt(409)
+    REFUSAL = "a chamfer's end face that is not a plane"
+
+    @staticmethod
+    def L(w, b, r, k, sign=1):
+        def F(y):
+            return y / 2 * math.sqrt(r * r - y * y) + r * r / 2 * math.asin(y / r)
+
+        def G(y):
+            return -((r * r - y * y) ** 1.5) / 3
+
+        a = b - w
+        return sign * (G(b) - G(a) - a * (F(b) - F(a))) + k * w * w / 2
+
+    @staticmethod
+    def plate():
+        return Part.makeBox(80, 40, 2, V(-30, -20, -2))
+
+    @staticmethod
+    def ridge(top=1.0):
+        points = [V(-5, -3, 0), V(-5, 3, 0), V(-5, top, 2), V(-5, -top, 2), V(-5, -3, 0)]
+        return Part.Face(Part.makePolygon(points)).extrude(V(55, 0, 0))
+
+    def end(self, cx=-20.0, turn=180):
+        """The vertical cylinder of radius sqrt(409) about (cx, 0), its seam turned away"""
+        c = Part.makeCylinder(self.S409, 2, V(cx, 0, 0))
+        c.rotate(V(cx, 0, 0), V(0, 0, 1), turn)
+        return c
+
+    @staticmethod
+    def bar(x0=-8.0, x1=6.0):
+        return Part.makeBox(x1 - x0, 6, 2, V(x0, -3, 0))
+
+    @staticmethod
+    def xline(shape, y, z):
+        return [
+            e
+            for e in shape.Edges
+            if isinstance(e.Curve, Part.Line)
+            and abs(e.tangentAt(e.FirstParameter).x) > 0.99
+            and abs(e.CenterOfMass.y - y) < 1e-7
+            and abs(e.CenterOfMass.z - z) < 1e-7
+        ]
+
+    def tongue(self):
+        """The bar with a half disc of radius 3 at x -8, over the ridge; its top chain (line, half
+        circle, line) ends on the cylinder at both free ends (the repro of work/rc1009/repro.py)"""
+        bar = self.bar().fuse(Part.makeCylinder(3, 2, V(-8, 0, 0)))
+        shape = self.plate().fuse(self.ridge()).fuse(bar.common(self.end())).removeSplitter()
+        chain = [
+            e
+            for e in shape.Edges
+            if e.BoundBox.ZMin > 2 - 1e-7
+            and (
+                (isinstance(e.Curve, Part.Line) and abs(abs(e.CenterOfMass.y) - 3) < 1e-7
+                 and e.BoundBox.XMax < 1e-7)
+                or (isinstance(e.Curve, Part.Circle) and abs(e.Curve.Radius - 3) < 1e-7)
+            )
+        ]
+        return shape, chain
+
+    def built(self, shape, edges, removed, size=2.0, size2=None):
+        result = shape.makeChamfer(size, size if size2 is None else size2, edges)
+        self.assertTrue(result.isValid())
+        self.assertEqual(len(result.Solids), 1)
+        self.assertAlmostEqual(shape.Volume - result.Volume, removed, delta=1e-6 * shape.Volume)
+        return result
+
+    def refused(self, shape, edges, size=2.0):
+        with self.assertRaises(Exception) as caught:
+            shape.makeChamfer(size, size, edges)
+        self.assertIn(self.REFUSAL, str(caught.exception))
+
+    def testChainEndsOnCylindersAtTheWallsHeight(self):
+        # The studio's case: OCCT is not done at the walls' height. Onshape consumes both end
+        # patches and the walls, and each chamfer plane is one face with the ridge's side:
+        # 6400 + 8 * 58 + 13 pi / 3, 10 faces (a cone, 9 planes)
+        shape, chain = self.tongue()
+        self.assertEqual(len(chain), 3)
+        expected = 6400 + 8 * 58 + 13 * math.pi / 3
+        for edges in (chain, chain[::-1]):
+            result = self.built(shape, edges, shape.Volume - expected)
+            self.assertAlmostEqual(result.Volume, expected, delta=1e-6 * expected)
+            self.assertEqual(len(result.removeSplitter().Faces), 10)
+        # Below the limit, OCCT's own, as before: the ridge's section and half a frustum less
+        for w in (1.0, 1.9):
+            removed = 2 * self.L(w, 3, self.S409, -12) + math.pi * (3 - w / 3) * w * w / 2
+            self.built(shape, chain, removed, w)
+
+    def testChainPartChamfer(self):
+        # Part::Chamfer builds what makeChamfer does (its lost-material check passes)
+        shape, chain = self.tongue()
+        doc = FreeCAD.newDocument("ChamferSurfaceEnd")
+        try:
+            base = doc.addObject("Part::Feature", "Base")
+            base.Shape = shape
+            feature = doc.addObject("Part::Chamfer", "Chamfer")
+            feature.Base = base
+            feature.Edges = [
+                (next(i for i, e in enumerate(shape.Edges, 1) if e.isSame(edge)), 2.0, 2.0)
+                for edge in chain
+            ]
+            doc.recompute()
+            self.assertTrue(feature.isValid(), feature.getStatusString())
+            expected = 6400 + 8 * 58 + 13 * math.pi / 3
+            self.assertAlmostEqual(feature.Shape.Volume, expected, delta=1e-6 * expected)
+        finally:
+            FreeCAD.closeDocument(doc.Name)
+
+    def testOnePlaneEndOneCurvedEnd(self):
+        # The bar's edge y 3, z 2 from its plane end at x -8 to the cylinder: the wedge refuses a
+        # plane end; nothing lies in the run-on past the cylinder (the ridge's slope is the chamfer's
+        # plane, or below it at a top of 0.95)
+        for top in (1.0, 0.95):
+            shape = self.plate().fuse(self.ridge(top)).fuse(self.bar().common(self.end()))
+            shape = shape.removeSplitter()
+            edges = self.xline(shape, 3, 2)
+            self.assertEqual(len(edges), 1)
+            self.built(shape, edges, self.L(2, 3, self.S409, -12))
+        # Two distances, 2 on the wall and 1 on the top: the asymmetric wedge, 2 L(1, 3, ., -12)
+        shape = self.plate().fuse(self.ridge()).fuse(self.bar().common(self.end())).removeSplitter()
+        self.built(shape, self.xline(shape, 3, 2), 2 * self.L(1, 3, self.S409, -12), 2.0, 1.0)
+
+    def testConcaveEnd(self):
+        # The bar cut at +x by the cylinder about (20, 0): its end leans back over the edge
+        shape = self.plate().fuse(self.ridge()).fuse(self.bar().cut(self.end(20.0, 0)))
+        shape = shape.removeSplitter()
+        self.built(shape, self.xline(shape, 3, 2), self.L(2, 3, self.S409, 28, -1))
+
+    def testCollinearEdgesAcrossANotch(self):
+        # A bar x -8 to 8 notched by a cylinder of radius 5.5 about (0, 6): both pieces of its edge
+        # y 3, z 2 picked, each run-on emptied by the other's tool. One piece alone: the run-on
+        # crosses the notch into the other piece, refused
+        bar = self.bar(-8, 8).cut(Part.makeCylinder(5.5, 2, V(0, 6, 0)))
+        shape = self.plate().fuse(bar).removeSplitter()
+        edges = self.xline(shape, 3, 2)
+        self.assertEqual(len(edges), 2)
+        r = 5.5
+
+        def F(y):
+            return y / 2 * math.sqrt(r * r - y * y) + r * r / 2 * math.asin(y / r)
+
+        def G(y):
+            return -((r * r - y * y) ** 1.5) / 3
+
+        self.built(shape, edges, 2 * (16 - (5 * (F(5) - F(3)) - (G(5) - G(3)))))
+        self.refused(shape, [e for e in edges if e.CenterOfMass.x < 0])
+
+    def testMaterialInTheRunOnIsRefused(self):
+        # A block on the edge's line 44 mm on past the cylinder: the run-on reading would cut it
+        shape = self.plate().fuse(self.bar().common(self.end()))
+        shape = shape.fuse(Part.makeBox(6, 6, 2, V(44, 0, 0))).removeSplitter()
+        self.refused(shape, self.xline(shape, 3, 2))
+        # The ridge a little wider than the chamfer's plane: a sliver in the run-on
+        shape = self.plate().fuse(self.ridge(1.05)).fuse(self.bar().common(self.end()))
+        shape = shape.removeSplitter()
+        self.refused(shape, self.xline(shape, 3, 2))
+        # An end against a post (a curved wall the edge runs into)
+        shape = self.plate().fuse(self.bar(-8, 4)).fuse(Part.makeCylinder(4, 5, V(4, 0, 0)))
+        shape = shape.removeSplitter()
+        self.refused(shape, self.xline(shape, 3, 2))
+
+    def testMaterialInTheRunOnOfALargePartRefused(self):
+        # The block on the edge's line on a plate 600 x 400 x 100: the check is against the run-on
+        # wedge, not the part, whose 1e-6 would pass the block's 12 mm3 (review r1, R1-A). With
+        # nothing in the run-on the large part builds
+        big = Part.makeBox(600, 400, 100, V(-300, -200, -100))
+        clear = big.fuse(self.bar().common(self.end())).removeSplitter()
+        self.built(clear, self.xline(clear, 3, 2), self.L(2, 3, self.S409, -12))
+        shape = big.fuse(self.bar().common(self.end()))
+        shape = shape.fuse(Part.makeBox(6, 6, 2, V(44, 0, 0))).removeSplitter()
+        self.refused(shape, self.xline(shape, 3, 2))
+
+    def testMaterialBetweenARecedingEndSurfaceAndTheVertexRefused(self):
+        # The bar x -8 to 1 cut by a hole of radius 3.5 about (sqrt(3.25), 0), through (0, +-3):
+        # the end surface recedes behind the vertex's plane over the section, and the tool stops at
+        # it. Alone it builds (both readings the same); a post in the hole, inside the plain wedge
+        # between the surface and the vertex's plane, is refused (review r1, R1-B)
+        cx = math.sqrt(3.25)
+        bar = self.bar(-8, 1.0).cut(Part.makeCylinder(3.5, 2, V(cx, 0, 0)))
+        shape = self.plate().fuse(bar).removeSplitter()
+        edges = self.xline(shape, 3, 2)
+        self.assertEqual(len(edges), 1)
+        result = shape.makeChamfer(2.0, 2.0, edges)
+        self.assertTrue(result.isValid())
+        # Removed: the integral over y in [1, 3] of (y - 1) (cx - sqrt(12.25 - y^2) + 8), by the
+        # closed forms of L with the circle about x = cx
+        r = 3.5
+
+        def F(y):
+            return y / 2 * math.sqrt(r * r - y * y) + r * r / 2 * math.asin(y / r)
+
+        def G(y):
+            return -((r * r - y * y) ** 1.5) / 3
+
+        removed = -(G(3) - G(1) - (F(3) - F(1))) + (cx + 8) * 2
+        self.assertAlmostEqual(shape.Volume - result.Volume, removed, delta=1e-6 * shape.Volume)
+        post = Part.makeBox(0.9, 0.8, 2, V(cx - 2.8, 1.2, 0))
+        shape = self.plate().fuse(bar).fuse(post).removeSplitter()
+        self.refused(shape, self.xline(shape, 3, 2))
+
+    def testConcaveEdgeStaysRefused(self):
+        # The bar's foot edge on the plate, filled at the walls' height and ending on the cylinder:
+        # a fill ended on an end surface is not known from Onshape (review r1, trace 3)
+        shape = self.plate().fuse(self.bar().common(self.end())).removeSplitter()
+        self.refused(shape, self.xline(shape, 3, 0))
+
+    def testArcsAndRuledEdgesStayRefused(self):
+        # An arc ending on the cylinder, and a straight edge beside a cylinder: not opened
+        shape = self.plate().fuse(Part.makeCylinder(3, 2).common(self.end())).removeSplitter()
+        arcs = [
+            e
+            for e in shape.Edges
+            if isinstance(e.Curve, Part.Circle)
+            and abs(e.Curve.Radius - 3) < 1e-7
+            and abs(e.valueAt((e.FirstParameter + e.LastParameter) / 2).z - 2) < 1e-7
+        ]
+        self.refused(shape, arcs)
+        half = Part.makeCylinder(3, 14, V(-8, 0, 0), V(1, 0, 0)).common(self.bar())
+        shape = self.plate().fuse(half.common(self.end())).removeSplitter()
+        self.refused(shape, self.xline(shape, math.sqrt(5), 2), 2.5)
+
+
 class WallOnASplitFloorTest(unittest.TestCase):
     """ops#938 (Heat Wire Clip #10, Wall Fillet 1): a wall's two end edges rounded just past half
     its width, so the two rounds overlap and its end face vanishes, where one edge's foot is a

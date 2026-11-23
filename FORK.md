@@ -528,7 +528,8 @@ names it.
 | `fix/i918-fillet-mitre-runon` | fix | ops#918 | - | `integration` `2eb5c34b36` | `02f036db52` (fork PR 525), 2026-11-23 | never (fork fix): a round whose line runs into the mitre of two earlier rounds runs on to their plane with a torus at its foot |
 | `fix/i942-chamfer-varying-angle` | fix | ops#942 | - | `integration` `02f036db52` | `7f18318617` (fork PR 509), 2026-11-23 | never (fork fix): equal-distance chamfers along closed edges of varying angle as one rolling ball, as Onshape's (WidthAt, WidthPoints) |
 | `fix/i999-end-on-tangent-wall` | fix | ops#999 | - | `integration` `4f01351fbb` | `ead68e0530` (fork PR 528), 2026-11-23 | never (fork fix): a round's construction tries again with elementary end and wall sheets' seams opposite their faces; OCCT's other errors from a dress-up maker ask the construction |
-| `fix/i993-rim-countersink` | fix | ops#993 | - | integration | (fork PR 524) | never (fork fix): a round whose band crosses an opening in its face (countersink, hole, slot) is the plain round cut by the opening, built by the exact construction where OCCT's result bridges it or can't be made exact (ops#993) |
+| `fix/i993-rim-countersink` | fix | ops#993 | - | integration | `18abf496bc` (fork PR 524), 2026-11-23 | never (fork fix): a round whose band crosses an opening in its face (countersink, hole, slot) is the plain round cut by the opening, built by the exact construction where OCCT's result bridges it or can't be made exact (ops#993) |
+| `fix/i1009-chamfer-curved-end` | fix | ops#1009 | - | integration | (fork PR 531) | never (fork fix): a straight chamfer between two planes that ends on a non-plane end face is built with the round's end form in a second pass after the ops#936 wedge, kept only where the run-on wedge past each end holds nothing of the part (ops#1009) |
 
 ## Fork-only commits in carried topics
 

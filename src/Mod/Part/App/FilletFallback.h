@@ -140,6 +140,12 @@ struct Request
     /// a plane and a cylinder (ops#942). Set by makeElementChamfer only for the construction it
     /// runs before OCCT; every other caller of the analysis keeps today's refusal there
     bool varyingAngle = false;
+    /// A chamfer of a straight edge between two planes may end on a face that is not a plane, not
+    /// tangent to the edge there, as a round does: its tool bounded by that face's surface
+    /// (ops#1009). Set only by the construction's own second pass, after the run-on wedge
+    /// (ops#936) refused, and kept only where nothing of the result lies in the wedge run on past
+    /// each such end
+    bool chamferSurfaceEnd = false;
     /// Where such a chamfer takes its width (WidthAt; ChamferWidth::points for atPoint)
     WidthAt widthAt = WidthAt::narrowest;
     std::vector<gp_Pnt> widthPoints;
