@@ -2911,6 +2911,15 @@ void Document::exportObjects(const std::vector<DocumentObject*>& obj, std::ostre
              // L2): an import doesn't read it from a copy today
              << " NamingRevision=\"" << namingRevisionToSave(this) << '"'
              << " ForkRelease=\"" << ForkRelease << '"';  // ops#323
+    // The highest ID the objects' documents gave (ops#1002): the IDs their names and references
+    // carry, which the importing document's new IDs then stay above (importObjects())
+    long lastId = 0;
+    for (const Document* source : sources) {
+        lastId = std::max(lastId, source->d->lastObjectId);
+    }
+    if (lastId > 0) {
+        startTag << " LastObjectId=\"" << lastId << '"';
+    }
     if (oneSource) {
         startTag << ' ' << fcAttrSourceDocument << "=\"" << sources.front()->Uid.getValueStr()
                  << '"';
@@ -3435,6 +3444,21 @@ std::vector<DocumentObject*> Document::importObjects(Base::XMLReader& reader)
     }
     else {
         reader.FileVersion = 0;
+    }
+    // The imported objects get new IDs, counted on from this document's last one (FreeCAD-CH
+    // ops#1002). Their saved element names and their references' saved names carry the file's
+    // IDs as tags, while the references' fingerprints are measured again at the import, under the
+    // new IDs; the solver compares the two as numbers. Each document starts its IDs at a random
+    // offset, so by chance the new IDs lay a few above or below the file's own: a mark then stood
+    // for another object (the right element refused as "there before", "Ambiguous edge reference:
+    // Edge29 moved and Edge29 sits where it was"), or a new name equalled an old one of another
+    // element. New IDs above every ID the file gave never equal one of its tags: the merge then
+    // computes the same whatever this document held.
+    if (reader.hasAttribute("LastObjectId")) {
+        const long fileLast = reader.getAttribute<long>("LastObjectId");
+        if (fileLast > d->lastObjectId) {
+            d->lastObjectId = fileLast;
+        }
     }
     if (reader.hasAttribute(fcAttrSourceDocuments)) {
         auto& sources = importSourceDocuments[this];

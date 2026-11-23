@@ -27,9 +27,11 @@
 
 import math
 import os
+import re
 import shutil
 import tempfile
 import unittest
+import zipfile
 
 import FreeCAD as App
 import Part
@@ -146,6 +148,26 @@ def measure(body, shift=0.0):
     )
 
 
+def saveWithLastId(path, last):
+    """An empty document saved at path whose saved LastObjectId is last: the objects a merge then
+    adds get the IDs from last + 1 on."""
+    doc = App.newDocument("TestImportReferencesEmpty")
+    doc.saveAs(path)
+    App.closeDocument(doc.Name)
+    temporary = path + ".tmp"
+    with zipfile.ZipFile(path) as zin, zipfile.ZipFile(temporary, "w", zipfile.ZIP_DEFLATED) as zout:
+        for item in zin.infolist():
+            data = zin.read(item.filename)
+            if item.filename == "Document.xml":
+                text, count = re.subn(
+                    r'LastObjectId="\d+"', 'LastObjectId="%d"' % last, data.decode("utf-8"), count=1
+                )
+                assert count == 1, "Document.xml has no LastObjectId"
+                data = text.encode("utf-8")
+            zout.writestr(item, data)
+    os.replace(temporary, path)
+
+
 def inError(doc):
     return {obj.Name: obj.getStatusString() for obj in doc.Objects if not obj.isValid()}
 
@@ -218,6 +240,54 @@ class TestImportReferences(unittest.TestCase):
         before = {obj.Name for obj in host.Objects}
         host.mergeProject(self.file)
         self.assertAsAlone(host, [obj for obj in host.Objects if obj.Name not in before])
+
+    def checkWhateverTheNewIds(self, bring):
+        """ops#1002: Merge project and a copy give the file's objects new IDs, counted on from the
+        receiving document's last one. Each document starts its IDs at a random offset, so by
+        chance the receiving document's last ID could lie a few below or above the file's IDs (seen
+        once in about 20 full suite runs, on Windows and on macOS: with the new IDs the file's
+        shifted by 1 to 15 the notch's fillet broke, "Ambiguous edge reference: Edge29 moved and
+        Edge29 sits where it was"; by -3 to -1 the pad, fillet or sketch before it). Whatever it
+        is, the copies compute as the file alone. The receiving document's last ID is set here by
+        its saved LastObjectId; bring(host) copies the file's objects into it."""
+        doc = App.openDocument(self.file, hidden=True)
+        ids = [obj.ID for obj in doc.Objects]
+        App.closeDocument(doc.Name)
+        for shift in (-40, -3, -2, -1, 0, 1, 2, 5, 11, 15, 40):
+            with self.subTest(shift=shift):
+                path = os.path.join(self.dir, "empty%+d.FCStd" % shift)
+                saveWithLastId(path, min(ids) - 1 + shift)
+                host = App.openDocument(path, hidden=True)
+                try:
+                    copies = bring(host)
+                    self.assertEqual(len(copies), len(ids))
+                    self.touchAll(host)
+                    self.assertEqual(inError(host), {})
+                    bodies = {o.Label[:1]: o for o in copies if o.isDerivedFrom("PartDesign::Body")}
+                    self.assertEqual(sorted(bodies), ["A", "B"])
+                    for label, body in bodies.items():
+                        self.assertEqual(measure(body), self.alone[label], label)
+                    # the new IDs never equal one the file gave
+                    self.assertGreater(min(obj.ID for obj in copies), max(ids))
+                finally:
+                    App.closeDocument(host.Name)
+
+    def testMergedStudioComputesAsItsFileWhateverTheNewIds(self):
+        def merge(host):
+            host.mergeProject(self.file)
+            return list(host.Objects)
+
+        self.checkWhateverTheNewIds(merge)
+
+    def testCopiedStudioComputesAsItsFileWhateverTheNewIds(self):
+        def copy(host):
+            source = App.openDocument(self.file, hidden=True)
+            try:
+                return host.copyObject(list(source.Objects), False, False)
+            finally:
+                App.closeDocument(source.Name)
+
+        self.checkWhateverTheNewIds(copy)
 
     def testCopyStaysRightAfterSaveAndReopen(self):
         host = App.openDocument(self.other, hidden=True)
