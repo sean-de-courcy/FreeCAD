@@ -10600,7 +10600,21 @@ TopoShape& TopoShape::makeElementFillet(
     }
     if (radius2 == radius1) {
         // FreeCAD-CH (Case Base #163): a stretch over a gap in the round's wall, exact
-        makeRoundCanonical(*this, input, radius1);
+        try {
+            makeRoundCanonical(*this, input, radius1);
+        }
+        catch (const Base::CADKernelError&) {
+            // ops#993: where that stretch can't be made exact with OCCT's topology (a countersink
+            // the band crosses within a line's round), Onshape's round is still the plain round cut
+            // by the opening: the exact construction below the limit, or the error
+            TopoShape exact(*this);
+            std::string why;
+            if (!FilletFallback::buildAcrossRecess(exact, shape, edges, radius1, op, &why)) {
+                FC_LOG("the round over a gap in its wall not built exactly: " << why);
+                throw;
+            }
+            *this = exact;
+        }
     }
     return *this;
 }
