@@ -17106,6 +17106,646 @@ bool constructRims(
 namespace
 {
 
+/// One picked line's corner where it runs into the mitre of two earlier rounds (ops#918)
+struct RunOnCorner
+{
+    TopoDS_Edge line;     // L, picked
+    TopoDS_Edge mitre;    // E, picked: the earlier rounds' mitre, from V to W
+    TopoDS_Face rounds[2];  // CA, CB
+    gp_Pnt foot;          // L's line on the plane F of the earlier rounds
+    gp_Dir up;            // along L, from F toward L's other end
+    gp_Dir into[2];       // in A and in B, normal to L, into the face
+    double q {0};         // the earlier rounds' radius
+    double height {0};    // from F to L's other end: |L| + q
+    bool convex {false};
+};
+
+/// The edges at a vertex, without seams and degenerate edges
+std::vector<TopoDS_Edge> edgesAt(
+    const TopTools_IndexedDataMapOfShapeListOfShape& vertexEdges,
+    const TopTools_IndexedDataMapOfShapeListOfShape& edgeFaces,
+    const TopoDS_Vertex& vertex
+)
+{
+    std::vector<TopoDS_Edge> result;
+    if (!vertexEdges.Contains(vertex)) {
+        return result;
+    }
+    for (const auto& shape : vertexEdges.FindFromKey(vertex)) {
+        const TopoDS_Edge& edge = TopoDS::Edge(shape);
+        if (BRep_Tool::Degenerated(edge)) {
+            continue;
+        }
+        if (edgeFaces.Contains(edge)) {
+            const auto& faces = edgeFaces.FindFromKey(edge);
+            if (faces.Extent() == 1 && BRep_Tool::IsClosed(edge, TopoDS::Face(faces.First()))) {
+                continue;
+            }
+        }
+        result.push_back(edge);
+    }
+    return result;
+}
+
+std::vector<TopoDS_Face> facesAt(
+    const TopTools_IndexedDataMapOfShapeListOfShape& vertexFaces,
+    const TopoDS_Vertex& vertex
+)
+{
+    std::vector<TopoDS_Face> result;
+    if (vertexFaces.Contains(vertex)) {
+        for (const auto& shape : vertexFaces.FindFromKey(vertex)) {
+            result.push_back(TopoDS::Face(shape));
+        }
+    }
+    return result;
+}
+
+bool hasFace(const TopTools_IndexedDataMapOfShapeListOfShape& edgeFaces, const TopoDS_Edge& edge,
+             const TopoDS_Face& face)
+{
+    if (!edgeFaces.Contains(edge)) {
+        return false;
+    }
+    for (const auto& shape : edgeFaces.FindFromKey(edge)) {
+        if (shape.IsSame(face)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// The face of the edge other than the one given
+TopoDS_Face otherFace(const TopTools_IndexedDataMapOfShapeListOfShape& edgeFaces,
+                      const TopoDS_Edge& edge, const TopoDS_Face& face)
+{
+    if (!edgeFaces.Contains(edge) || edgeFaces.FindFromKey(edge).Extent() != 2) {
+        refuse("an edge at the mitre corner without two faces");
+    }
+    for (const auto& shape : edgeFaces.FindFromKey(edge)) {
+        if (!shape.IsSame(face)) {
+            return TopoDS::Face(shape);
+        }
+    }
+    refuse("an edge at the mitre corner with one face on both sides");
+}
+
+/** The corner of a picked line L, between planes A and B, at its vertex V, where L runs into the
+ * mitre E of two earlier rounds (notes/fillet-mitre-runon-918.md, the rule and its addendum).
+ * Refuses unless every condition holds: A normal to B; at V exactly L, E, lA (A and CA) and lB (B
+ * and CB); CA and CB cylinders of one radius q, r >= 2q, tangent to A and B along lA and lB, their
+ * axes meeting at the point q from F, A and B on the kite's side; E picked, leaving V along L, to
+ * W on F (3 edges, 3 faces there), F a plane normal to L at q from V whose material lies where L's
+ * does; lA and lB longer than r; L's other end a free end on a plane normal to L.
+ */
+RunOnCorner runOnCorner(
+    const TopoDS_Edge& line,
+    const TopoDS_Face (&faces)[2],
+    const TopoDS_Vertex& vertex,
+    const TopoDS_Vertex& otherEnd,
+    double r,
+    const TopTools_IndexedMapOfShape& picked,
+    const TopTools_IndexedDataMapOfShapeListOfShape& edgeFaces,
+    const TopTools_IndexedDataMapOfShapeListOfShape& vertexEdges,
+    const TopTools_IndexedDataMapOfShapeListOfShape& vertexFaces
+)
+{
+    // Where the earlier rounds' fillet put their vertices and axes (OCCT's, to its tolerances)
+    const double tolerance = 1e-6 * std::max(1.0, r);
+    const double square = 1e-9;  // of unit directions
+    RunOnCorner corner;
+    corner.line = line;
+    const gp_Pnt v = BRep_Tool::Pnt(vertex);
+    corner.up = awayFrom(line, vertex);
+    const gp_Pln planes[2] = {BRepAdaptor_Surface(faces[0], Standard_False).Plane(),
+                              BRepAdaptor_Surface(faces[1], Standard_False).Plane()};
+    if (std::abs(planes[0].Axis().Direction().Dot(planes[1].Axis().Direction())) > square) {
+        refuse("the mitre corner's faces are not at a right angle");
+    }
+    const auto at = edgesAt(vertexEdges, edgeFaces, vertex);
+    if (at.size() != 4 || facesAt(vertexFaces, vertex).size() != 4) {
+        refuse("the mitre corner is not a vertex of 4 edges and 4 faces");
+    }
+    TopoDS_Edge feet[2];
+    for (const auto& edge : at) {
+        if (edge.IsSame(line)) {
+            continue;
+        }
+        bool onFace = false;
+        for (int i = 0; i < 2; ++i) {
+            if (hasFace(edgeFaces, edge, faces[i])) {
+                if (!feet[i].IsNull() || onFace) {
+                    refuse("two edges at the mitre corner on one face");
+                }
+                feet[i] = edge;
+                onFace = true;
+            }
+        }
+        if (!onFace) {
+            if (!corner.mitre.IsNull()) {
+                refuse("two edges at the mitre corner on neither face");
+            }
+            corner.mitre = edge;
+        }
+    }
+    if (feet[0].IsNull() || feet[1].IsNull() || corner.mitre.IsNull()) {
+        refuse("the mitre corner's edges are not a foot on each face and a mitre");
+    }
+    // E leaves V along L, away from it: picked, or in the tangent chain OCCT's contour adds
+    if (awayFrom(corner.mitre, vertex).Dot(corner.up) > -1 + tangentTolerance) {
+        refuse("the earlier rounds' mitre does not leave the corner along the line");
+    }
+    const double middle = (BRepAdaptor_Curve(line).FirstParameter()
+                           + BRepAdaptor_Curve(line).LastParameter())
+        / 2;
+    gp_Lin axes[2];
+    for (int i = 0; i < 2; ++i) {
+        corner.rounds[i] = otherFace(edgeFaces, feet[i], faces[i]);
+        corner.into[i] = inwardIn(faces[i], line, middle);
+        BRepAdaptor_Curve foot(feet[i]);
+        BRepAdaptor_Surface round(corner.rounds[i], Standard_False);
+        if (foot.GetType() != GeomAbs_Line || round.GetType() != GeomAbs_Cylinder) {
+            refuse("an earlier round at the mitre corner is not a cylinder along a line");
+        }
+        const gp_Dir along = awayFrom(feet[i], vertex);
+        const gp_Cylinder cylinder = round.Cylinder();
+        if (!parallel(cylinder.Axis().Direction(), along)
+            || std::abs(along.Dot(corner.up)) > square) {
+            refuse("an earlier round's axis is not along its foot, normal to the line");
+        }
+        if (i == 0) {
+            corner.q = cylinder.Radius();
+        }
+        else if (std::abs(cylinder.Radius() - corner.q) > tolerance) {
+            refuse("the earlier rounds' radii differ");
+        }
+        axes[i] = gp_Lin(cylinder.Axis());
+        // Tangent to its face along its foot: the axis at q from the face's plane and from V
+        if (std::abs(planes[i].Distance(axes[i].Location()) - corner.q) > tolerance
+            || std::abs(axes[i].Distance(v) - corner.q) > tolerance) {
+            refuse("an earlier round is not tangent to its face along its foot");
+        }
+        // Room: the foot runs on past the new round's reach
+        TopoDS_Vertex ends[2];
+        TopExp::Vertices(feet[i], ends[0], ends[1]);
+        const TopoDS_Vertex& beyond = ends[0].IsSame(vertex) ? ends[1] : ends[0];
+        if (BRep_Tool::Pnt(beyond).Distance(v) <= r + tolerance) {
+            refuse("the earlier rounds end within the new round's reach");
+        }
+    }
+    const double q = corner.q;
+    if (r < 2 * q - tolerance) {
+        // r in (q, 2q): not measured on Onshape (notes/fillet-mitre-runon-918.md, skeptic 9)
+        refuse("the earlier rounds' radius above half the new one");
+    }
+    corner.convex = gp_Vec(corner.into[1]).Dot(gp_Vec(outwardNormal(faces[0], v))) < 0;
+    corner.foot = v.Translated(gp_Vec(corner.up) * -q);
+    const gp_Vec kite = gp_Vec(corner.into[0]) + gp_Vec(corner.into[1]);
+    // The axes meet at the point q from F, A and B, on the kite's side of both (skeptic 1)
+    const gp_Pnt meet = corner.foot.Translated(kite * q + gp_Vec(corner.up) * q);
+    if (axes[0].Distance(meet) > tolerance || axes[1].Distance(meet) > tolerance) {
+        refuse("the earlier rounds' axes do not meet on the corner's side");
+    }
+    if (!(corner.rounds[0].IsSame(otherFace(edgeFaces, corner.mitre, corner.rounds[1])))) {
+        refuse("the mitre is not between the earlier rounds");
+    }
+    // W, the mitre's other end, on F at q from both walls
+    TopoDS_Vertex ends[2];
+    TopExp::Vertices(corner.mitre, ends[0], ends[1]);
+    const TopoDS_Vertex& w = ends[0].IsSame(vertex) ? ends[1] : ends[0];
+    const gp_Pnt pw = BRep_Tool::Pnt(w);
+    if (pw.Distance(corner.foot.Translated(kite * q)) > tolerance) {
+        refuse("the mitre does not end on the earlier rounds' plane at the corner");
+    }
+    {
+        BRepAdaptor_Curve mitre(corner.mitre);
+        const gp_Pnt mid = mitre.Value((mitre.FirstParameter() + mitre.LastParameter()) / 2);
+        if (std::abs(planes[0].Distance(mid) - planes[1].Distance(mid)) > tolerance) {
+            refuse("the mitre is not on the plane bisecting the corner");
+        }
+    }
+    const auto atW = edgesAt(vertexEdges, edgeFaces, w);
+    const auto facesW = facesAt(vertexFaces, w);
+    if (atW.size() != 3 || facesW.size() != 3) {
+        refuse("the mitre's other end is not a vertex of 3 edges and 3 faces");
+    }
+    TopoDS_Face floor;
+    for (const auto& face : facesW) {
+        if (!face.IsSame(corner.rounds[0]) && !face.IsSame(corner.rounds[1])) {
+            floor = face;
+        }
+    }
+    if (floor.IsNull() || BRepAdaptor_Surface(floor, Standard_False).GetType() != GeomAbs_Plane) {
+        refuse("the earlier rounds do not stand on a plane face");
+    }
+    const gp_Pln floorPlane = BRepAdaptor_Surface(floor, Standard_False).Plane();
+    if (!parallel(floorPlane.Axis().Direction(), corner.up)
+        || std::abs(floorPlane.Distance(v) - q) > tolerance) {
+        refuse("the earlier rounds' plane is not normal to the line at their radius");
+    }
+    // The earlier rounds of the line's sign: a concave corner's floor faces up along it, a convex
+    // edge's foot face away (skeptic 1: a boss's edge into the floor's concave rounds)
+    const double facing = gp_Vec(outwardNormal(floor, pw)).Dot(gp_Vec(corner.up));
+    if (corner.convex ? facing > -1 + square : facing < 1 - square) {
+        refuse("the earlier rounds are not of the line's convexity");
+    }
+    // L's other end: a free end on a plane normal to it
+    const auto atU = edgesAt(vertexEdges, edgeFaces, otherEnd);
+    const auto facesU = facesAt(vertexFaces, otherEnd);
+    if (atU.size() != 3 || facesU.size() != 3) {
+        refuse("the line's other end is not a vertex of 3 edges and 3 faces");
+    }
+    for (const auto& edge : atU) {
+        if (!edge.IsSame(line) && picked.Contains(edge)) {
+            refuse("the line's other end meets another picked edge");
+        }
+    }
+    for (const auto& face : facesU) {
+        if (face.IsSame(faces[0]) || face.IsSame(faces[1])) {
+            continue;
+        }
+        BRepAdaptor_Surface end(face, Standard_False);
+        if (end.GetType() != GeomAbs_Plane || !parallel(end.Plane().Axis().Direction(), corner.up)) {
+            refuse("the line's other end is not on a plane normal to it");
+        }
+    }
+    corner.height = gp_Vec(corner.foot, BRep_Tool::Pnt(otherEnd)).Dot(gp_Vec(corner.up));
+    return corner;
+}
+
+/// The column: the r-square at the corner less the disc about the new round's axis, from F to
+/// L's other end
+TopoDS_Shape runOnColumn(const RunOnCorner& corner, double r)
+{
+    const gp_Vec a = gp_Vec(corner.into[0]) * r;
+    const gp_Vec b = gp_Vec(corner.into[1]) * r;
+    const gp_Pnt p0 = corner.foot;
+    const gp_Pnt p1 = p0.Translated(a);
+    const gp_Pnt p2 = p0.Translated(b);
+    const gp_Pnt centre = p0.Translated(a + b);
+    const gp_Pnt mid = centre.Translated((a + b) * (-1 / std::sqrt(2.0)));
+    Handle(Geom_TrimmedCurve) arc = GC_MakeArcOfCircle(p1, mid, p2).Value();
+    BRepBuilderAPI_MakeWire wire(
+        BRepBuilderAPI_MakeEdge(p0, p1).Edge(),
+        BRepBuilderAPI_MakeEdge(arc).Edge(),
+        BRepBuilderAPI_MakeEdge(p2, p0).Edge()
+    );
+    if (!wire.IsDone()) {
+        refuse("the run-on column's section failed");
+    }
+    BRepBuilderAPI_MakeFace face(wire.Wire(), Standard_True);
+    BRepPrimAPI_MakePrism prism(face.Face(), gp_Vec(corner.up) * corner.height);
+    if (!prism.IsDone()) {
+        refuse("the run-on column failed");
+    }
+    return prism.Shape();
+}
+
+/// The torus at the column's foot: the earlier round's section in the meridian plane (the q-square
+/// at the new round's surface on F, less the quarter disc), a quarter turn about the new round's
+/// axis, from A's foot to B's
+TopoDS_Shape runOnTorus(const RunOnCorner& corner, double r)
+{
+    const double q = corner.q;
+    const gp_Pnt centre = corner.foot.Translated(
+        (gp_Vec(corner.into[0]) + gp_Vec(corner.into[1])) * r
+    );
+    // Toward A's foot (the point of A nearest the axis) and toward B's
+    const gp_Vec toA = gp_Vec(corner.into[1]) * -1;
+    const gp_Vec toB = gp_Vec(corner.into[0]) * -1;
+    const gp_Vec up(corner.up);
+    auto at = [&](double rho, double h) {
+        return centre.Translated(toA * rho + up * h);
+    };
+    const double s = 1 / std::sqrt(2.0);
+    Handle(Geom_TrimmedCurve) arc
+        = GC_MakeArcOfCircle(at(r - q, 0), at(r - q + q * s, q - q * s), at(r, q)).Value();
+    BRepBuilderAPI_MakeWire wire(
+        BRepBuilderAPI_MakeEdge(at(r, 0), at(r - q, 0)).Edge(),
+        BRepBuilderAPI_MakeEdge(arc).Edge(),
+        BRepBuilderAPI_MakeEdge(at(r, q), at(r, 0)).Edge()
+    );
+    if (!wire.IsDone()) {
+        refuse("the run-on torus's section failed");
+    }
+    BRepBuilderAPI_MakeFace face(wire.Wire(), Standard_True);
+    const double turn = up.Crossed(toA).Dot(toB) > 0 ? pi / 2 : -pi / 2;
+    BRepPrimAPI_MakeRevol revolution(face.Face(), gp_Ax1(centre, corner.up), turn);
+    if (!revolution.IsDone()) {
+        refuse("the run-on torus failed");
+    }
+    return revolution.Shape();
+}
+
+}  // namespace
+
+bool constructMitreRunOns(
+    const TopoDS_Shape& base,
+    const std::vector<TopoDS_Shape>& edges,
+    const Request& request,
+    Construction& out,
+    std::vector<TopoDS_Shape>& rest,
+    std::string* reason
+)
+{
+    rest.clear();
+    try {
+        if (request.kind != Kind::Fillet || request.size1 <= 0
+            || std::abs(request.size1 - request.size2) > linearTolerance || edges.empty()
+            || countSolids(base) != 1) {
+            refuse("not a fillet of one radius on one solid");
+        }
+        const double r = request.size1;
+        TopTools_IndexedDataMapOfShapeListOfShape edgeFaces;
+        TopTools_IndexedDataMapOfShapeListOfShape vertexEdges;
+        TopTools_IndexedDataMapOfShapeListOfShape vertexFaces;
+        TopExp::MapShapesAndUniqueAncestors(base, TopAbs_EDGE, TopAbs_FACE, edgeFaces);
+        TopExp::MapShapesAndUniqueAncestors(base, TopAbs_VERTEX, TopAbs_EDGE, vertexEdges);
+        TopExp::MapShapesAndUniqueAncestors(base, TopAbs_VERTEX, TopAbs_FACE, vertexFaces);
+        TopTools_IndexedMapOfShape picked;
+        for (const auto& edge : edges) {
+            if (edge.IsNull() || edge.ShapeType() != TopAbs_EDGE || !edgeFaces.Contains(edge)) {
+                refuse("a pick that is not an edge of the base");
+            }
+            picked.Add(edge);
+        }
+        // Each picked line between two planes with a picked curved edge at an end is a candidate,
+        // and every candidate must be a mitre corner
+        std::vector<RunOnCorner> corners;
+        for (int i = 1; i <= picked.Extent(); ++i) {
+            const TopoDS_Edge& line = TopoDS::Edge(picked(i));
+            if (BRepAdaptor_Curve(line).GetType() != GeomAbs_Line
+                || edgeFaces.FindFromKey(line).Extent() != 2) {
+                continue;
+            }
+            TopoDS_Face faces[2] = {TopoDS::Face(edgeFaces.FindFromKey(line).First()),
+                                    TopoDS::Face(edgeFaces.FindFromKey(line).Last())};
+            if (BRepAdaptor_Surface(faces[0], Standard_False).GetType() != GeomAbs_Plane
+                || BRepAdaptor_Surface(faces[1], Standard_False).GetType() != GeomAbs_Plane) {
+                continue;
+            }
+            TopoDS_Vertex ends[2];
+            TopExp::Vertices(line, ends[0], ends[1]);
+            int found = 0;
+            for (int end = 0; end < 2; ++end) {
+                bool candidate = false;
+                for (const auto& edge : edgesAt(vertexEdges, edgeFaces, ends[end])) {
+                    // A curved edge at the end, picked or tangent to the line (the contour)
+                    if (!edge.IsSame(line)
+                        && BRepAdaptor_Curve(edge).GetType() != GeomAbs_Line
+                        && BRepAdaptor_Curve(edge).GetType() != GeomAbs_Circle
+                        && (picked.Contains(edge)
+                            || awayFrom(edge, ends[end]).Dot(awayFrom(line, ends[end]))
+                                < -1 + tangentTolerance)) {
+                        candidate = true;
+                    }
+                }
+                if (!candidate) {
+                    continue;
+                }
+                corners.push_back(runOnCorner(
+                    line,
+                    faces,
+                    ends[end],
+                    ends[1 - end],
+                    r,
+                    picked,
+                    edgeFaces,
+                    vertexEdges,
+                    vertexFaces
+                ));
+                ++found;
+            }
+            if (found > 1) {
+                refuse("a line with a mitre corner at both ends");
+            }
+        }
+        if (corners.empty()) {
+            refuse("no mitre corner");
+        }
+        const double s = 1 - pi / 4;
+        for (size_t i = 0; i < corners.size(); ++i) {
+            if (corners[i].convex != corners.front().convex) {
+                refuse("mitre corners of both convexities");
+            }
+            for (size_t j = 0; j < i; ++j) {
+                for (const auto& a : corners[i].rounds) {
+                    for (const auto& b : corners[j].rounds) {
+                        if (a.IsSame(b)
+                            && corners[i].foot.Distance(corners[j].foot)
+                                <= 2 * r + linearTolerance) {
+                            refuse("two mitre corners on one earlier round within twice the radius");
+                        }
+                    }
+                    if (corners[i].mitre.IsSame(corners[j].mitre)) {
+                        refuse("two lines into one mitre");
+                    }
+                }
+            }
+        }
+        const bool convex = corners.front().convex;
+        // The tools, each measured against its closed form, and what of the base lies in them:
+        // the earlier rounds' fill in the kite (2K), or for a convex corner the material less
+        // what they cut (skeptic 2)
+        std::vector<std::pair<TopoDS_Shape, const RunOnCorner*>> pieces;
+        double expected = 0;
+        double toolVolume = 0;
+        for (const auto& corner : corners) {
+            const double q = corner.q;
+            const double area = r * r * s;
+            const double k = s * q * q * (r - q) + q * q * q / 6;
+            const TopoDS_Shape column = runOnColumn(corner, r);
+            const TopoDS_Shape torus = runOnTorus(corner, r);
+            const double columnVolume = volumeOf(column);
+            const double torusVolume = volumeOf(torus);
+            if (std::abs(columnVolume - area * corner.height) > volumeTolerance * columnVolume
+                || std::abs(torusVolume - pi / 2 * k) > volumeTolerance * torusVolume) {
+                refuse("a mitre run-on tool's volume differs from its closed form");
+            }
+            const double volume = columnVolume + torusVolume;
+            BRep_Builder pair;
+            TopoDS_Compound both;
+            pair.MakeCompound(both);
+            pair.Add(both, column);
+            pair.Add(both, torus);
+            const double inBase = volumeOf(commonOf(base, both));
+            const double want = convex ? volume - 2 * k : 2 * k;
+            if (std::abs(inBase - want) > volumeTolerance * volume) {
+                refuse("the base in a mitre corner's reach is " + describe(inBase) + ", not "
+                       + describe(want) + ": more than the earlier rounds lie there");
+            }
+            expected += area * corner.height + (pi / 2 - 2) * k;
+            toolVolume += volume;
+            pieces.emplace_back(column, &corner);
+            pieces.emplace_back(torus, &corner);
+        }
+        // Each tool its own Boolean tool: the column and its torus share their face on the new
+        // round's cylinder, which the Boolean intersects only between separate tools (as one
+        // compound it stays, a second face on the cylinder)
+        auto boolean = [&pieces](BRepAlgoAPI_BooleanOperation& operation,
+                                 const TopoDS_Shape& argument) {
+            TopTools_ListOfShape arguments;
+            arguments.Append(argument);
+            TopTools_ListOfShape tools;
+            for (const auto& piece : pieces) {
+                tools.Append(piece.first);
+            }
+            operation.SetArguments(arguments);
+            operation.SetTools(tools);
+            operation.SetNonDestructive(Standard_True);
+            operation.SetRunParallel(Standard_False);
+            operation.Build();
+            if (!operation.IsDone() || operation.HasErrors()) {
+                refuse("the mitre run-ons' Boolean failed");
+            }
+            return operation.Shape();
+        };
+        BRepAlgoAPI_Fuse fuse;
+        BRepAlgoAPI_Cut cut;
+        BRepAlgoAPI_BooleanOperation& operation = convex
+            ? static_cast<BRepAlgoAPI_BooleanOperation&>(cut)
+            : static_cast<BRepAlgoAPI_BooleanOperation&>(fuse);
+        TopoDS_Shape shape = boolean(operation, base);
+        std::vector<Stage> stages;
+        stages.emplace_back(operation.History(), shape);
+        // The tools' faces on A, B, F and the end plane merge with them: only their edges are free
+        // to go (skeptic 4)
+        TopTools_IndexedMapOfShape unlocked;
+        for (const auto& piece : pieces) {
+            for (TopExp_Explorer it(piece.first, TopAbs_FACE); it.More(); it.Next()) {
+                for (const auto& image : stages.front().images(it.Current())) {
+                    if (image.ShapeType() == TopAbs_FACE) {
+                        TopExp::MapShapes(image, TopAbs_EDGE, unlocked);
+                    }
+                }
+            }
+        }
+        {
+            NCollection_Map<TopoDS_Shape, TopTools_ShapeMapHasher> keep;
+            TopTools_IndexedMapOfShape allEdges;
+            TopExp::MapShapes(shape, TopAbs_EDGE, allEdges);
+            for (int i = 1; i <= allEdges.Extent(); ++i) {
+                if (!unlocked.Contains(allEdges(i))) {
+                    keep.Add(allEdges(i));
+                }
+            }
+            ShapeUpgrade_UnifySameDomain unify(shape, false, true, false);
+            unify.KeepShapes(keep);
+            unify.Build();
+            shape = unify.Shape();
+            stages.emplace_back(unify.History(), shape);
+        }
+        // The checks of the result
+        if (countSolids(shape) != 1) {
+            refuse("the mitre run-ons' result is not one solid");
+        }
+        if (!BRepCheck_Analyzer(shape).IsValid()) {
+            refuse("the mitre run-ons' result is not valid");
+        }
+        if (!thinFace(shape, base).IsNull()) {
+            refuse("the mitre run-ons' result has a face of zero width");
+        }
+        TopTools_IndexedMapOfShape baseFaces;
+        TopTools_IndexedMapOfShape resultFaces;
+        TopExp::MapShapes(base, TopAbs_FACE, baseFaces);
+        TopExp::MapShapes(shape, TopAbs_FACE, resultFaces);
+        // A notch, a hole or a boss in a corner's reach leaves the volumes as they are and adds a
+        // face (skeptic 3)
+        if (resultFaces.Extent() != baseFaces.Extent() + 2 * static_cast<int>(corners.size())) {
+            refuse("the mitre run-ons' result has " + std::to_string(resultFaces.Extent())
+                   + " faces, not the base's " + std::to_string(baseFaces.Extent()) + " and 2 per corner");
+        }
+        if (convex) {
+            for (const auto& piece : pieces) {
+                if (materialIn(shape, piece.first)) {
+                    refuse("the mitre run-ons' cut left material");
+                }
+            }
+        }
+        const double baseVolume = volumeOf(base);
+        const double change = convex ? baseVolume - volumeOf(shape) : volumeOf(shape) - baseVolume;
+        if (std::abs(change - expected) > volumeTolerance * toolVolume + 1e-9 * baseVolume) {
+            refuse("the mitre run-ons changed the volume by " + describe(change) + ", not "
+                   + describe(expected));
+        }
+        // The rest of the picks, each an edge of the result
+        TopTools_IndexedMapOfShape used;
+        for (const auto& corner : corners) {
+            used.Add(corner.line);
+            used.Add(corner.mitre);
+        }
+        TopTools_IndexedMapOfShape kept;
+        TopExp::MapShapes(shape, TopAbs_EDGE, kept);
+        for (const auto& edge : edges) {
+            if (used.Contains(edge)) {
+                continue;
+            }
+            if (!kept.Contains(edge)) {
+                refuse("a picked edge that a mitre run-on changes");
+            }
+            rest.push_back(edge);
+        }
+        // The history: the base's elements modified into their images; the new round's cylinder
+        // generated by L, the torus by E, any other face of a tool by L
+        auto mapper = std::make_shared<ShapeMapper>();
+        TopTools_IndexedMapOfShape baseImages;
+        for (auto type : {TopAbs_FACE, TopAbs_EDGE, TopAbs_VERTEX}) {
+            for (TopExp_Explorer it(base, type); it.More(); it.Next()) {
+                const TopoDS_Shape& element = it.Current();
+                auto images = imagesThrough(stages, 0, element);
+                for (const auto& image : images) {
+                    baseImages.Add(image);
+                }
+                if (images.size() == 1 && images.front().IsSame(element)) {
+                    continue;
+                }
+                for (const auto& image : images) {
+                    mapper->insert(MappingStatus::Modified, element, image);
+                }
+            }
+        }
+        TopTools_IndexedMapOfShape named;
+        for (const auto& piece : pieces) {
+            for (TopExp_Explorer it(piece.first, TopAbs_FACE); it.More(); it.Next()) {
+                const bool torus = BRepAdaptor_Surface(TopoDS::Face(it.Current()), Standard_False)
+                                       .GetType()
+                    == GeomAbs_Torus;
+                const TopoDS_Shape& source = torus ? piece.second->mitre : piece.second->line;
+                for (const auto& image : imagesThrough(stages, 0, it.Current())) {
+                    if (image.ShapeType() == TopAbs_FACE && !baseImages.Contains(image)
+                        && !named.Contains(image)) {
+                        named.Add(image);
+                        mapper->insert(MappingStatus::Generated, source, image);
+                    }
+                }
+            }
+        }
+        FC_LOG("mitre run-ons built: " << corners.size() << " corners, rest " << rest.size()
+                                       << " edges");
+        out.shape = shape;
+        out.mapper = mapper;
+        out.edges = static_cast<int>(used.Extent());
+        out.corners = static_cast<int>(corners.size());
+        return true;
+    }
+    catch (const Refusal& refusal) {
+        if (reason) {
+            *reason = refusal.reason;
+        }
+    }
+    catch (const Standard_Failure& e) {
+        if (reason) {
+            *reason = std::string("OCCT: ") + e.GetMessageString();
+        }
+    }
+    FC_LOG("mitre run-ons not built: " << (reason ? *reason : std::string()));
+    rest.clear();
+    return false;
+}
+
+namespace
+{
+
 /** Where a selected edge's round or chamfer, with OCCT's tangent chain, would run across a strip of
  * face narrower than its setback, onto the face beyond: the user's reason when the dress-up fails
  * (ops#640; a 0.06 mm strip between a hole's round and the plate's outer round). The strip is the
