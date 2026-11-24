@@ -162,6 +162,11 @@ bool indicesToRefs(std::string& text,
         if (digits == 0 || digits > maxDigits || (end == text.size() && isBase32Digit(next))) {
             continue;
         }
+        // A twin place's duplicate count `<k>of<n>~<m>` (ElementMap::addName) is literal: a
+        // reference starts the text or follows a separator, never a digit (ops#978)
+        if (pos > 0 && text[pos - 1] >= '0' && text[pos - 1] <= '9') {
+            continue;
+        }
         std::size_t index = 0;
         bool decimal = true;
         for (std::size_t i = pos + 1; i < end; ++i) {
