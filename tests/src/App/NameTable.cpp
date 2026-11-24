@@ -986,6 +986,37 @@ TEST_F(NameTableTest, fileFormNeverPutsAnIndexBeforeADigit)
     }
 }
 
+TEST_F(NameTableTest, fileFormKeepsATwinPlacesDuplicateCount)
+{
+    // A twin place's duplicate count `<k>of<n>~<m>` is literal: the reader converts the
+    // reference `~0` and leaves `~2` after the digit as it is (ops#978)
+    // Arrange
+    NameTable table;
+    std::string face = table.toInterned(Example().face);  // `_;~<edge>;7;...`
+    std::string data = face.substr(0, 2 + NameTable::RefLength);  // `_;~<edge>`
+    Data::NameRefCollector collector;
+    collector.add(face);
+    collector.entries(table);
+    std::stringstream file;
+    NameTable::writeEntries(file, collector.fileEntries(table));
+    Data::NameRemap remap(table);
+    remap.load(file, Data::NamingFormatWritten);
+    const std::string twinTail = ";7;FUS;0;E;0of4~2;UPP;_";
+
+    // Act
+    std::string text = "_;~0" + twinTail;
+    bool changed = remap.fromFileForm(text);
+    std::string literalOnly = "_;Edge1;7;FUS;0;E;2of4~3;UPP;_";
+    bool literalChanged = remap.fromFileForm(literalOnly);
+
+    // Assert
+    EXPECT_TRUE(changed);
+    EXPECT_EQ(text, data + twinTail);
+    EXPECT_FALSE(literalChanged);
+    EXPECT_EQ(literalOnly, "_;Edge1;7;FUS;0;E;2of4~3;UPP;_");
+    EXPECT_EQ(remap.unknownCount(), 0U);
+}
+
 TEST_F(NameTableTest, readEntriesTakesWindowsLineEndsAndCountsMalformedLines)
 {
     // Arrange: entry 0 is the edge, 1 the face (refers to 0); 2 is empty, 3 has a space, 4

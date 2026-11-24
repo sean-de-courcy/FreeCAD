@@ -1,7 +1,0 @@
-# The fresh compat generation at naming revision 21 (ops#895) refuses MitreAtLobeCorners, which reopens with
-# different names: a restore defect a revision bump exposes, not ops#895's. Remove this file with ops#978's fix.
-
-issue: ops#978
-
-reason: MitreAtLobeCorners reopens with names different from the saved document (ops#978)
-cli  PartDesignTests.Compat.TestCompatCorpus.TestCompatCorpus.testFreshGeneration
