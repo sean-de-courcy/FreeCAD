@@ -1171,8 +1171,13 @@ def MitreAtLobeCorners(make):
     doc = make("MitreAtLobeCorners")
     # The plate as its file holds it: the noise in its axes is below what a saved shape keeps,
     # and the mitre turns that last digit into 2e-10 of its volume at a reopen (ops#978)
+    named = lobed_plate(True)
     shape = Part.Shape()
-    shape.importBrepFromString(lobed_plate(True).exportBrepToString())
+    shape.importBrepFromString(named.exportBrepToString())
+    # The plate with its history's names, from which nothing is computed: its twin places'
+    # duplicate counts `<k>of<n>~<m>` must reopen as saved (ops#978)
+    twins = doc.addObject("Part::Feature", "TwinNames")
+    twins.Shape = named
     base = doc.addObject("Part::Feature", "Lobes")
     base.Shape = shape
     body = newBody(doc, "Body")
