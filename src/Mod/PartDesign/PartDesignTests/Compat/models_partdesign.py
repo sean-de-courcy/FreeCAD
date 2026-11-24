@@ -1169,7 +1169,10 @@ def MitreAtLobeCorners(make):
 
     radius = 0.588
     doc = make("MitreAtLobeCorners")
-    shape = lobed_plate(True)
+    # The plate as its file holds it: the noise in its axes is below what a saved shape keeps,
+    # and the mitre turns that last digit into 2e-10 of its volume at a reopen (ops#978)
+    shape = Part.Shape()
+    shape.importBrepFromString(lobed_plate(True).exportBrepToString())
     base = doc.addObject("Part::Feature", "Lobes")
     base.Shape = shape
     body = newBody(doc, "Body")
