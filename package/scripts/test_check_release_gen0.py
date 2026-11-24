@@ -278,7 +278,11 @@ class CheckReleaseGen0(unittest.TestCase):
 
     def test_no_previous_release_is_exit_2(self):
         make_source(self.root, 15, {1: 15}, tag=None)
-        self.assert_exit_2("git describe --tags --abbrev=0 --match fork-* --exclude fork-0.8.0 HEAD failed")
+        self.assert_exit_2(
+            "git describe --tags --abbrev=0 --match fork-* "
+            + " ".join("--exclude " + t for t in gen0check.SUPERSEDED)
+            + " HEAD failed"
+        )
         # a tag from before the revision line
         self.fresh_root()
         make_source(self.root, 15, {1: 15}, previous=None)

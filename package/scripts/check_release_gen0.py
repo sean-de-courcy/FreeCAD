@@ -43,8 +43,12 @@ DOCUMENT = os.path.join("src", "App", "Document.cpp")
 HALVES = ("", "-macos")
 # Tagged releases replaced before they were handed off, never a previous release: their own build
 # couldn't save their generation. fork-0.8.0: a datum point's names were lost at a reopen (ops#633),
-# so its gen2 can't be saved; fork-0.8.1 replaced it (decision 296, ops#628).
-SUPERSEDED = ("fork-0.8.0",)
+# so its gen2 can't be saved; fork-0.8.1 replaced it (decision 296, ops#628). fork-1.0.6: its
+# package was refused by its own compat gate (ops#978: a twin place's duplicate count misread at a
+# reopen), so no build of it exists to save gen6; fork-1.0.7 carried the fix but was tagged on a
+# source whose previous release was fork-1.0.6, so its release run was refused too; fork-1.0.8
+# replaced both (ops#978).
+SUPERSEDED = ("fork-0.8.0", "fork-1.0.6", "fork-1.0.7")
 REVISION_LINE = re.compile(r"^constexpr int ForkNamingRevision = (\d+);", re.MULTILINE)
 
 
