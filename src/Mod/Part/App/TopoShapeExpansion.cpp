@@ -10449,18 +10449,23 @@ TopoShape& TopoShape::makeElementFillet(
     {
         // ops#1027: overflowing a strip while the chain turns round a convex arc smaller than the
         // radius fails in Onshape (RB25); OCCT can build a valid, wrong shape there (RB6 r 1.0)
-        std::vector<TopoDS_Shape> picked;
-        for (const auto& edge : inputEdges) {
-            picked.push_back(edge.getShape());
+        // Judged per chain (review pr1027-r1, T1): a tight arc in one chain and a narrow strip
+        // beside another, disjoint chain are not RB25's case
+        auto chains = makerContours(*mkFillet);
+        if (chains.empty()) {
+            chains.emplace_back();
+            for (const auto& edge : inputEdges) {
+                chains.back().push_back(edge.getShape());
+            }
         }
-        FilletFallback::Request chainRequest = request;
-        for (const auto& contour : makerContours(*mkFillet)) {
-            chainRequest.contour.insert(chainRequest.contour.end(), contour.begin(), contour.end());
-        }
-        const std::string tight
-            = FilletFallback::overflowPastTightArc(input.getShape(), picked, chainRequest);
-        if (!tight.empty()) {
-            FC_THROWM(Base::CADKernelError, tight);
+        for (const auto& chainEdges : chains) {
+            FilletFallback::Request chainRequest = request;
+            chainRequest.contour = chainEdges;
+            const std::string tight
+                = FilletFallback::overflowPastTightArc(input.getShape(), {}, chainRequest);
+            if (!tight.empty()) {
+                FC_THROWM(Base::CADKernelError, tight);
+            }
         }
     }
     auto outcome = buildDressUp(mkFillet, input, inputEdges, request, "The fillet", prefer, reflex);

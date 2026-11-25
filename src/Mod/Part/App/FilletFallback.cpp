@@ -20365,6 +20365,35 @@ bool acrossEdge(const TopoDS_Edge& edge, const BRepExtrema_DistShapeShape& dista
     return false;
 }
 
+/** Whether an edge joins two faces smoothly where it lies nearest the chain edge: a round rolls
+ * over such a seam (a wall above a tangent bottom round), so it bounds no strip (review
+ * pr1027-r1, T2). */
+bool smoothSeam(
+    const TopoDS_Edge& other,
+    const TopTools_IndexedDataMapOfShapeListOfShape& edgeFaces,
+    const BRepExtrema_DistShapeShape& distance
+)
+{
+    if (!edgeFaces.Contains(other) || distance.NbSolution() < 1) {
+        return false;
+    }
+    const TopTools_ListOfShape& faces = edgeFaces.FindFromKey(other);
+    if (faces.Extent() != 2) {
+        return false;
+    }
+    try {
+        const gp_Pnt at = distance.PointOnShape2(1);
+        return outwardNormalAny(TopoDS::Face(faces.First()), at)
+                   .Angle(outwardNormalAny(TopoDS::Face(faces.Last()), at))
+            < 1e-2;
+    }
+    catch (const Refusal&) {
+    }
+    catch (const Standard_Failure&) {
+    }
+    return false;
+}
+
 }  // namespace
 
 std::string overflowPastTightArc(
@@ -20501,7 +20530,7 @@ std::string overflowPastTightArc(
                 }
                 BRepExtrema_DistShapeShape distance(edge, other);
                 if (distance.IsDone() && distance.Value() < setback - linearTolerance
-                    && acrossEdge(edge, distance)) {
+                    && acrossEdge(edge, distance) && !smoothSeam(other, edgeFaces, distance)) {
                     width = std::min(width, distance.Value());
                 }
             }
