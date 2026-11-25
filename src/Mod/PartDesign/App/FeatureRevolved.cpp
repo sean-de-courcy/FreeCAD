@@ -60,6 +60,7 @@
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakeRevol.hxx>
 #include <BRepTools.hxx>
+#include <BRepTopAdaptor_FClass2d.hxx>
 #include <BOPTools_AlgoTools3D.hxx>
 #include <ElCLib.hxx>
 #include <ElSLib.hxx>
@@ -1929,6 +1930,101 @@ double largestTolerance(const TopoDS_Shape& shape)
     return largest;
 }
 
+// Whether a fuse, cut or common of a revolution's tool with the base agrees with the tool where
+// the tool's cone points sit on the base's boundary (ops#1048). OCCT found no intersection of a
+// cone with a cylinder wall whose seam ran 1e-12 to 1e-7 beside the cone's apex: the fuse added
+// nothing, or the whole cone as a second solid overlapping the base, and the cut removed nothing,
+// all inside the volume bounds (notes\kernel-robustness.md section 35). Each tool face with a
+// degenerated edge (a pole) whose vertex lies on the base's boundary is sampled on a 4 x 4 grid of
+// its parameters. A sample outside the base must be on the result's boundary after a fuse and
+// outside it after a cut or common; a sample inside the base inside the result after a fuse and
+// on its boundary after a cut or common. No sample may be inside one of the result's solids and
+// in or on another (overlapping solids). Samples on the base's boundary say nothing.
+bool toolAgreesAtPoles(
+    const TopoDS_Shape& base,
+    const TopoDS_Shape& tool,
+    const TopoDS_Shape& result,
+    bool fuse
+)
+{
+    const double tolerance = std::max(
+        {Precision::Confusion(), largestTolerance(base), largestTolerance(tool)}
+    );
+    std::unique_ptr<SolidStates> baseStates;
+    std::vector<std::unique_ptr<BRepClass3d_SolidClassifier>> resultSolids;
+    for (TopExp_Explorer faces(tool, TopAbs_FACE); faces.More(); faces.Next()) {
+        const TopoDS_Face& face = TopoDS::Face(faces.Current());
+        bool poleOnBase = false;
+        for (TopExp_Explorer edges(face, TopAbs_EDGE); edges.More() && !poleOnBase; edges.Next()) {
+            const TopoDS_Edge& edge = TopoDS::Edge(edges.Current());
+            if (!BRep_Tool::Degenerated(edge)) {
+                continue;
+            }
+            TopoDS_Vertex v1;
+            TopoDS_Vertex v2;
+            TopExp::Vertices(edge, v1, v2);
+            if (v1.IsNull()) {
+                continue;
+            }
+            if (!baseStates) {
+                baseStates = std::make_unique<SolidStates>(base);
+            }
+            poleOnBase = (*baseStates)(BRep_Tool::Pnt(v1), tolerance) == TopAbs_ON;
+        }
+        if (!poleOnBase) {
+            continue;
+        }
+        if (resultSolids.empty()) {
+            for (TopExp_Explorer solids(result, TopAbs_SOLID); solids.More(); solids.Next()) {
+                resultSolids.push_back(
+                    std::make_unique<BRepClass3d_SolidClassifier>(solids.Current())
+                );
+            }
+        }
+        double uMin = 0.0;
+        double uMax = 0.0;
+        double vMin = 0.0;
+        double vMax = 0.0;
+        BRepTools::UVBounds(face, uMin, uMax, vMin, vMax);
+        const BRepAdaptor_Surface surface(face);
+        BRepTopAdaptor_FClass2d inFace(face, Precision::PConfusion());
+        constexpr int grid = 4;
+        for (int i = 0; i < grid; ++i) {
+            for (int j = 0; j < grid; ++j) {
+                const double u = uMin + (uMax - uMin) * (i + 0.5) / grid;
+                const double v = vMin + (vMax - vMin) * (j + 0.5) / grid;
+                if (inFace.Perform(gp_Pnt2d(u, v)) != TopAbs_IN) {
+                    continue;
+                }
+                const gp_Pnt point = surface.Value(u, v);
+                const TopAbs_State inBase = (*baseStates)(point, tolerance);
+                if (inBase == TopAbs_ON) {
+                    continue;
+                }
+                int in = 0;
+                int on = 0;
+                for (const auto& classifier : resultSolids) {
+                    classifier->Perform(point, tolerance);
+                    in += classifier->State() == TopAbs_IN ? 1 : 0;
+                    on += classifier->State() == TopAbs_ON ? 1 : 0;
+                }
+                if (in > 1 || (in == 1 && on > 0)) {
+                    return false;  // overlapping solids
+                }
+                const TopAbs_State inResult = in > 0 ? TopAbs_IN
+                    : on > 0                         ? TopAbs_ON
+                                                     : TopAbs_OUT;
+                const TopAbs_State wanted = inBase == TopAbs_OUT ? (fuse ? TopAbs_ON : TopAbs_OUT)
+                                                                 : (fuse ? TopAbs_IN : TopAbs_ON);
+                if (inResult != wanted) {
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
 // Whether a tool up to a face is built to the precision of its inputs: no vertex or edge
 // tolerance above 1e-3 of its size, or ten times its inputs' largest. Correct tools up to
 // B-spline walls reach 1.7e-4 of their size (an intersection curve's approximation: 5.5e-4 on a
@@ -3617,6 +3713,19 @@ void Revolved::setResult(const TopoShape& base, const TopoShape& revolved, bool 
                 throw Base::RuntimeError(QT_TRANSLATE_NOOP(
                     "Exception",
                     "Could not combine the revolution with the base: the result's volume is wrong"
+                ));
+            }
+            // OCCT missed where the tool's cone meets the base, inside the volume bounds (ops#1048)
+            if (!toolAgreesAtPoles(
+                    base.getShape(),
+                    tool.getShape(),
+                    result.getShape(),
+                    getAddSubType() == FeatureAddSub::Type::Additive && !intersects
+                )) {
+                throw Base::RuntimeError(QT_TRANSLATE_NOOP(
+                    "Exception",
+                    "Could not combine the revolution with the base: the result does not follow "
+                    "the revolution where its apex meets the base"
                 ));
             }
             if (checkVolume

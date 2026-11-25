@@ -104,6 +104,7 @@ set(PartDesign_TestScripts
     PartDesignTests/TestMerge.py
     PartDesignTests/TestNewPart.py
     PartDesignTests/TestRevolveOperations.py
+    PartDesignTests/TestRevolveApexSeam.py
     PartDesignTests/TestRevolveFaceProfile.py
     PartDesignTests/TestSiblings.py
     PartDesignTests/TestSketch.py
