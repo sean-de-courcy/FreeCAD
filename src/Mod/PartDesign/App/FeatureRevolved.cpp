@@ -3182,27 +3182,34 @@ App::DocumentObjectExecReturn* Revolved::executeRevolved(Part::RevolMode revolMo
     App::DocumentObjectExecReturn* retried = executeRevolvedOnce(revolMode);
     splineConeLines = false;
     pointCheckRefused = false;
-    // the revolution surfaces give the first result's volume, which was valid: the point check
-    // refused a right result (near a tangent contact, review r1). It is kept, names and all
+    // the revolution surfaces give the first result's volume and solids, and it was valid: the
+    // point check refused a right result (near a tangent contact, review r1). It is kept, names
+    // and all
     const bool firstRight = refusedValid && refusedVolume >= 0.0 && retriedVolume >= 0.0
-        && std::abs(retriedVolume - refusedVolume)
-            <= 1e-6 * refusedBaseVolume + Precision::Confusion();
+        && refusedSolids == retriedSolids
+        && std::abs(retriedVolume - refusedVolume) <= keptTolerance();
     if (firstRight) {
         delete retried;  // NOLINT: StdReturn is null
         skipPointCheck = true;
         retried = executeRevolvedOnce(revolMode);
         skipPointCheck = false;
     }
+    const bool built = retried == App::DocumentObject::StdReturn;
     // one line per retry, so a sweep's logs show where this path acts
     Base::Console().warning(
         "%s: OCCT missed where the revolution's apex meets the base; rebuilt with revolution "
         "surfaces at the apex (%s)\n",
         getFullLabel().c_str(),
-        firstRight                                          ? "the first result agrees: kept"
-            : retried == App::DocumentObject::StdReturn     ? "built"
-                                                            : "refused"
+        !built           ? "refused"
+            : firstRight ? "the first result agrees: kept"
+                         : "built"
     );
     return retried;
+}
+
+double Revolved::keptTolerance() const
+{
+    return 1e-3 * refusedToolVolume + Precision::Confusion();
 }
 
 App::DocumentObjectExecReturn* Revolved::executeRevolvedOnce(Part::RevolMode revolMode)
@@ -3836,8 +3843,9 @@ void Revolved::setResult(const TopoShape& base, const TopoShape& revolved, bool 
                 pointCheckRefused = !splineConeLines;
                 if (pointCheckRefused) {
                     refusedVolume = precise(result).value;
-                    refusedBaseVolume = precise(base).value;
+                    refusedToolVolume = precise(tool).value;
                     refusedValid = BRepCheck_Analyzer(result.getShape()).IsValid();
+                    refusedSolids = result.countSubShapes(TopAbs_SOLID);
                 }
                 throw Base::RuntimeError(QT_TRANSLATE_NOOP(
                     "Exception",
@@ -3850,6 +3858,16 @@ void Revolved::setResult(const TopoShape& base, const TopoShape& revolved, bool 
             // (executeRevolved()), and an invalid retried result is refused
             if (splineConeLines) {
                 retriedVolume = precise(result).value;
+                retriedSolids = result.countSubShapes(TopAbs_SOLID);
+            }
+            // the kept first result, computed again with the check off, is the one refused
+            if (skipPointCheck
+                && std::abs(precise(result).value - refusedVolume) > keptTolerance()) {
+                throw Base::RuntimeError(QT_TRANSLATE_NOOP(
+                    "Exception",
+                    "Could not combine the revolution with the base: the result does not follow "
+                    "the revolution where its apex meets the base"
+                ));
             }
             if (splineConeLines && !BRepCheck_Analyzer(result.getShape()).IsValid()) {
                 throw Base::RuntimeError(QT_TRANSLATE_NOOP(

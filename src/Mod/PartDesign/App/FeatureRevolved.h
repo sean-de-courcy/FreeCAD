@@ -141,11 +141,18 @@ private:
     // review r1: the refused first result (its volume, the base's, valid or not) and the retry's
     // volume once it passed the point check (-1: not reached); a retry that agrees with a valid
     // first result keeps the first (the check refused a right result), computed with the check off
+    // (review r2: the agreement scales with the tool, and the solids must match)
     double refusedVolume = -1.0;
-    double refusedBaseVolume = 0.0;
+    double refusedToolVolume = 0.0;
     bool refusedValid = false;
+    unsigned long refusedSolids = 0;
     double retriedVolume = -1.0;
+    unsigned long retriedSolids = 0;
     bool skipPointCheck = false;
+    // how far the retry's volume may be from the refused first result's for the first to be
+    // kept: 1e-3 of the tool's volume (a miss differs by a large part of the tool; the
+    // retry's revolution surfaces by about 1e-5 of the change)
+    double keptTolerance() const;
 
     double getStartReferenceAngle(
         const TopoShape& profileShape,
