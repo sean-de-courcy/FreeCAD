@@ -149,6 +149,17 @@ public:
         (void)notify;
     }
 
+    /** The saved names and records of the references whose targets came in with the running
+     * import, with the import's new IDs as their tags (FreeCAD-CH ops#1002,
+     * `notes/merge-tags-1002.md`): Document::afterRestore() calls it on an import's objects,
+     * before onContainerRestored(). The members are set as Restore() sets them, unsignalled. True
+     * if any changed
+     */
+    virtual bool remapImportedTags()
+    {
+        return false;
+    }
+
     /// Clear internal element reference registration
     void unregisterElementReference();
 
@@ -444,6 +455,16 @@ public:
                                               App::DocumentObject* obj,
                                               const std::string& sub,
                                               const ShadowSub& shadow);
+
+    /// remapImportedTags() of a list of references: obj, or each of objs, with its subs and the
+    /// lists parallel to them (shorter ones are taken as far as they go)
+    bool _remapImportedTags(App::DocumentObject* obj,
+                            const std::vector<App::DocumentObject*>* objs,
+                            std::vector<std::string>& subs,
+                            std::vector<ShadowSub>& shadows,
+                            std::vector<std::string>& fingerprints,
+                            std::vector<std::string>& expandedFrom,
+                            std::vector<ElementRecords>& records);
 
     /** Refreshes fingerprints[i] for every reference i that resolves (to an element of feature,
      * if given), in solver documents only and not while restoring. The target is obj, or
@@ -1068,6 +1089,7 @@ public:
 
     void afterRestore() override;
     void onContainerRestored() override;
+    bool remapImportedTags() override;
 
     /** Sets the property
      */
@@ -1258,6 +1280,7 @@ public:
 
     void afterRestore() override;
     void onContainerRestored() override;
+    bool remapImportedTags() override;
 
     int getSize() const;
     void setSize(int newSize);
@@ -1472,6 +1495,7 @@ public:
 
     void afterRestore() override;
     void onContainerRestored() override;
+    bool remapImportedTags() override;
 
     void setValue(App::DocumentObject*) override;
     void setValue(App::DocumentObject*, const char* subname);
@@ -1690,6 +1714,7 @@ public:
 
     void afterRestore() override;
     void onContainerRestored() override;
+    bool remapImportedTags() override;
 
     int getSize() const;
 
@@ -1854,6 +1879,7 @@ public:
     ~PropertyXLinkContainer() override;
 
     void afterRestore() override;
+    bool remapImportedTags() override;
     int checkRestore(std::string* msg = nullptr) const override;
     void Save(Base::Writer& writer) const override;
     void Restore(Base::XMLReader& reader) override;

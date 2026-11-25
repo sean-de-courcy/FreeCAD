@@ -144,7 +144,9 @@
 #include <TopTools_MapOfShape.hxx>
 
 
+#include <App/Application.h>
 #include <App/Document.h>
+#include <App/MergeDocuments.h>
 #include <App/DocumentObject.h>
 #include <App/NameTable.h>
 #include <Base/Console.h>
@@ -10288,4 +10290,149 @@ void Pipe::handleChangedPropertyName(Base::XMLReader& reader, const char* TypeNa
     else {
         ProfileBased::handleChangedPropertyName(reader, TypeName, PropName);
     }
+}
+
+namespace
+{
+/** Import, merge and paste (ops#1002, notes/merge-tags-1002.md): a sweep's records of its spine
+ * name the spine's object and its elements' names (spineIdentity()), with the file's object names
+ * and IDs. The import may rename the objects and gives them new IDs, which the spine's names get:
+ * the records no longer matched their input, and the sweep's first recompute took them as stored
+ * for another spine (its start as if never stored). Each object that came in with the sweep is named
+ * as its copy, and its elements' names get the new IDs (App::importedElementName()), sorted again
+ * as spineIdentity() sorts them; an object that didn't come in keeps its name and names */
+void importSpineRecords(const std::vector<App::DocumentObject*>& objs, Base::XMLReader& /*reader*/)
+{
+    for (auto obj : objs) {
+        auto pipe = freecad_cast<Pipe*>(obj);
+        auto source = pipe ? App::importedSource(pipe) : std::nullopt;
+        if (!source || !pipe->isAttachedToDocument()) {
+            continue;
+        }
+        // The objects that came in from the sweep's source, by the name each was saved under
+        // (without a copy's `@<document>`, which a record's names don't have)
+        const auto at = source->name.find('@');
+        const std::string suffix = at == std::string::npos ? "" : source->name.substr(at);
+        std::map<std::string, App::DocumentObject*> copies;
+        for (auto other : objs) {
+            auto saved = App::importedSource(other);
+            if (!saved || !other->isAttachedToDocument()) {
+                continue;
+            }
+            const auto otherAt = saved->name.find('@');
+            if ((otherAt == std::string::npos ? "" : saved->name.substr(otherAt)) == suffix) {
+                copies[saved->name.substr(0, otherAt)] = other;
+            }
+        }
+        // A list of identities, each `<object>[ *] <names...>`, joined by `+` (SpineMore), and
+        // in an earlier record's list each followed by "": rewritten in place. firsts gets each
+        // record's first object (null if it didn't come in), for the names stored with it
+        auto remapIdentities = [&](std::vector<std::string>& values,
+                                   std::vector<App::DocumentObject*>& firsts) {
+            bool changed = false;
+            bool recordStart = true;
+            std::size_t i = 0;
+            while (i < values.size()) {
+                if (values[i].empty()) {  // an earlier record's end
+                    recordStart = true;
+                    ++i;
+                    continue;
+                }
+                // one identity: its object, its mark, its names up to "+" or ""
+                auto it = copies.find(values[i]);
+                App::DocumentObject* target = it == copies.end() ? nullptr : it->second;
+                if (recordStart) {
+                    firsts.push_back(target);
+                    recordStart = false;
+                }
+                if (target && values[i] != target->getNameInDocument()) {
+                    values[i] = target->getNameInDocument();
+                    changed = true;
+                }
+                std::size_t first = ++i;
+                if (first < values.size() && values[first] == "*") {
+                    first = ++i;
+                }
+                while (i < values.size() && !values[i].empty() && values[i] != "+") {
+                    ++i;
+                }
+                bool namesChanged = false;
+                for (std::size_t k = first; target && k < i; ++k) {
+                    if (auto renamed = App::importedElementName(target, values[k])) {
+                        values[k] = std::move(*renamed);
+                        namesChanged = true;
+                    }
+                }
+                if (namesChanged) {
+                    std::sort(values.begin() + static_cast<long>(first),
+                              values.begin() + static_cast<long>(i));
+                    changed = true;
+                }
+                if (i < values.size() && values[i] == "+") {
+                    ++i;
+                }
+            }
+            return changed;
+        };
+        // Names stored with each record (its lines), each record's followed by "" in an earlier
+        // list: through the record's first object
+        auto remapNames = [&](std::vector<std::string>& values,
+                              const std::vector<App::DocumentObject*>& firsts,
+                              bool separated) {
+            bool changed = false;
+            std::size_t record = 0;
+            for (auto& value : values) {
+                if (separated && value.empty()) {
+                    ++record;
+                    continue;
+                }
+                auto target = record < firsts.size() ? firsts[record] : nullptr;
+                if (!target) {
+                    continue;
+                }
+                if (auto renamed = App::importedElementName(target, value)) {
+                    value = std::move(*renamed);
+                    changed = true;
+                }
+            }
+            return changed;
+        };
+        auto apply = [](App::PropertyStringList& property,
+                        const std::function<bool(std::vector<std::string>&)>& remap) {
+            auto values = property.getValues();
+            if (remap(values)) {
+                property.setValues(values);
+            }
+        };
+        std::vector<App::DocumentObject*> unused;
+        apply(pipe->SpineEndsOf, [&](auto& values) { return remapIdentities(values, unused); });
+        std::vector<App::DocumentObject*> startFirsts;
+        apply(pipe->SpineStartOf, [&](auto& values) { return remapIdentities(values, startFirsts); });
+        apply(pipe->SpineStartNames,
+              [&](auto& values) { return remapNames(values, startFirsts, false); });
+        std::vector<App::DocumentObject*> earlierFirsts;
+        apply(pipe->EarlierSpineStartsOf,
+              [&](auto& values) { return remapIdentities(values, earlierFirsts); });
+        apply(pipe->EarlierSpineStartNames,
+              [&](auto& values) { return remapNames(values, earlierFirsts, true); });
+    }
+}
+}  // namespace
+
+namespace PartDesign
+{
+void registerPipeImport();  // AppPartDesign.cpp calls it at the module's load
+}  // namespace PartDesign
+
+void PartDesign::registerPipeImport()
+{
+    auto watch = [](App::Document& doc) {
+        doc.signalImportObjects.connect(&importSpineRecords);
+    };
+    for (auto doc : App::GetApplication().getDocuments()) {
+        watch(*doc);
+    }
+    App::GetApplication().signalNewDocument.connect([watch](const App::Document& doc, bool) {
+        watch(const_cast<App::Document&>(doc));
+    });
 }

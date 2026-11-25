@@ -28,6 +28,7 @@
 #include <App/Document.h>
 #include <App/DocumentObject.h>
 #include <App/ElementNamingUtils.h>
+#include <App/ImportedTags.h>
 #include <App/ElementSolver.h>
 #include <App/GeoFeatureGroupExtension.h>
 #include <App/GroupExtension.h>
@@ -1269,69 +1270,8 @@ std::string pieceInheritedName(const Body* body)
 
 namespace
 {
-/// name (a full V2 name) with each section's object ID (its iteration tag) that ids holds replaced
-/// by the ID it maps to, the sign kept, also in the names its Linked Names and Connected Elements
-/// embed (a list that was sorted is sorted again: its order goes by the names' bytes, the IDs'
-/// digits included). Only the sections from the last boundary section (EXT) on are this document's:
-/// those before it, and the names they embed, hold another document's IDs and are kept. None when
-/// nothing changed, or when the name doesn't encode back to itself byte for byte (then it is no V2
-/// name this can rewrite, and it is kept as it is)
-std::optional<std::string> remapTags(const std::string& name, const std::map<long, long>& ids, int depth)
-{
-    if (depth > 64 || name.empty()) {
-        return std::nullopt;
-    }
-    // A copy: the decoding is shared, and the recursion below decodes other strings
-    Data::DecodedMappedName decoded = Data::MappedName::getDecodedMappedName(name);
-    if (decoded.empty() || Data::MappedName::makeEncodedName(decoded) != name) {
-        return std::nullopt;
-    }
-    std::size_t first = 0;
-    for (std::size_t i = 0; i < decoded.size(); ++i) {
-        if (decoded[i].opCode == Part::OpCodes::External) {
-            first = i;
-        }
-    }
-    bool changed = false;
-    auto remapList = [&](std::vector<std::string>& names) {
-        const bool sorted = std::ranges::is_sorted(names);
-        bool listChanged = false;
-        for (auto& embedded : names) {
-            if (auto remapped = remapTags(embedded, ids, depth + 1)) {
-                embedded = std::move(*remapped);
-                listChanged = true;
-            }
-        }
-        if (listChanged) {
-            if (sorted) {
-                std::ranges::sort(names);
-            }
-            changed = true;
-        }
-    };
-    for (std::size_t i = first; i < decoded.size(); ++i) {
-        auto& section = decoded[i];
-        long tag = 0;
-        const auto& text = section.iterationTag;
-        const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), tag);
-        if (error == std::errc() && end == text.data() + text.size() && tag != 0) {
-            auto it = ids.find(std::abs(tag));
-            if (it != ids.end() && it->second != std::abs(tag)) {
-                section.iterationTag = std::to_string(tag < 0 ? -it->second : it->second);
-                changed = true;
-            }
-        }
-        remapList(section.linkedNames);
-        remapList(section.connectedElements);
-    }
-    if (!changed) {
-        return std::nullopt;
-    }
-    return Data::MappedName::makeEncodedName(decoded);
-}
-
 /// witness's entries ("<tier> <name>", the name interned) with the IDs ids holds rewritten
-/// (remapTags), sorted as pieceWitness() writes them; true if any changed
+/// (Data::remapElementTags()), sorted as pieceWitness() writes them; true if any changed
 bool remapWitness(std::vector<std::string>& witness, const std::map<long, long>& ids)
 {
     auto& table = Data::NameTable::instance();
@@ -1341,7 +1281,7 @@ bool remapWitness(std::vector<std::string>& witness, const std::map<long, long>&
             continue;
         }
         const std::string plain = table.toPlain(std::string_view(entry).substr(2));
-        if (auto remapped = remapTags(plain, ids, 0)) {
+        if (auto remapped = Data::remapElementTags(plain, ids)) {
             entry = entry.substr(0, 2) + table.toInterned(*remapped);
             changed = true;
         }
@@ -1368,16 +1308,19 @@ void importPieceWitnesses(const std::vector<App::DocumentObject*>& objs, Base::X
         if (source && source->id > 0 && obj->isAttachedToDocument()) {
             ids[source->document][source->id] = obj->getID();
         }
-        if (source && obj->isFreezed()) {
+        // A copy only: Merge project keeps a frozen object's map, and the import gives it the new
+        // IDs too (Document::afterRestore(), ops#1002); a copy's frozen object has no map, and
+        // keeps the file's names (a saved project has no document UUID)
+        if (source && obj->isFreezed() && !source->document.empty()) {
             frozen.insert(source->document);
         }
     }
     std::set<std::string> renamed;  // the documents copied from whose witnesses were rewritten
     for (auto obj : objs) {
         auto source = App::importedSource(obj);
-        // A frozen object keeps the shape and the names the file gave it, with the file's IDs,
-        // and what follows it is named from them: a file that brings one keeps its records as
-        // they were (review pr920pre-r1 F1)
+        // A frozen object keeps the shape and the names the file gave it, and what follows it is
+        // named from them: a copy that brings one keeps its records as they were (review
+        // pr920pre-r1 F1). A merge's are renamed with its map (ops#1002)
         if (!source || !obj->isAttachedToDocument() || frozen.contains(source->document)) {
             continue;
         }

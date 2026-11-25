@@ -260,6 +260,13 @@ def _childMerge(manifest):
                 "raw": dump._dumpFeatures(model, features, None, "V2"),
                 "expanded": dump._dumpFeatures(model, features, None, "V2i"),
             }
+            # The merge gives the objects new IDs, and their names get them (ops#1002): the
+            # names a recompute of the merged objects gives
+            for obj in doc.Objects:
+                obj.touch()
+            doc.recompute()
+            out[model]["recomputed"] = dump._dumpFeatures(model, features, None, "V2")
+            out[model]["recomputedExpanded"] = dump._dumpFeatures(model, features, None, "V2i")
             App.closeDocument(doc.Name)
         except Exception:
             out[model] = {"error": traceback.format_exc()}
@@ -537,14 +544,22 @@ class TestNamingSaveReopen(unittest.TestCase):
 
 class TestNamingSaveMerge(unittest.TestCase):
     """Another process merges the file into a new document (File > Merge project): every
-    reference resolves, and the names are the saved ones."""
+    reference resolves, and the names are the saved ones with the merged objects' new IDs
+    (ops#1002): those a recompute of the merged objects gives."""
 
     def check(self, model):
         info = saved()["models"][model]
         result = child(self, "merged", model)
         self.assertEqual(result["unresolved"], [])
-        self.assertEqual(result["raw"], info["raw"], "names after the merge")
-        self.assertEqual(result["expanded"], info["expanded"], "expanded names after the merge")
+        self.assertEqual(result["raw"], result["recomputed"], "names after the merge")
+        self.assertEqual(
+            result["expanded"], result["recomputedExpanded"], "expanded names after the merge"
+        )
+        self.assertEqual(
+            len(result["expanded"].splitlines()),
+            len(info["expanded"].splitlines()),
+            "the merge's names, counted",
+        )
 
 
 class TestNamingSavePlain(unittest.TestCase):

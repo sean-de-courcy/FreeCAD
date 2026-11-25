@@ -2367,9 +2367,29 @@ void importParkedLines(const std::vector<App::DocumentObject*>& objs, Base::XMLR
             std::vector<std::string> uncopied;
             if (auto copy = copyOf(item->target, item->targetId)) {
                 item->setTarget(copy);
-                // The mapped name's tags are the source objects' IDs, which the copies don't
-                // have: the reference goes back by its index, as an imported link's does
-                item->shadowNew.clear();
+                // The mapped names' tags are the source objects' IDs: they get the copies' as an
+                // imported link's do (ops#1002, App::importedElementName()). A shadow that can't
+                // is dropped, and the reference goes back by its index
+                auto rename = [&](std::string& text) {
+                    if (auto renamed = App::importedElementName(copy, text)) {
+                        text = std::move(*renamed);
+                        return true;
+                    }
+                    return false;
+                };
+                auto refingerprint = [&](std::string& text) {
+                    if (auto renamed = App::importedFingerprint(copy, text)) {
+                        text = std::move(*renamed);
+                    }
+                };
+                rename(item->sub);
+                if (!rename(item->shadowNew)) {
+                    item->shadowNew.clear();
+                }
+                rename(item->shadowOld);
+                refingerprint(item->fp);
+                rename(item->guess.origName);
+                refingerprint(item->guess.origFingerprint);
             }
             else if (!sameDocument) {
                 item->targetId = -1;

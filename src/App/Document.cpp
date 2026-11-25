@@ -89,10 +89,12 @@
 #include "ElementSolverEdits.h"
 #include "ExpressionParser.h"
 #include "GeoFeature.h"
+#include "PropertyGeo.h"
 #include "GroupExtension.h"
 #include "License.h"
 #include "Link.h"
 #include "MergeDocuments.h"
+#include "ImportedTags.h"
 #include "NameTable.h"
 #include "ReferenceReport.h"
 #include "ElementReferences.h"
@@ -262,6 +264,18 @@ std::map<const Document*, DocumentForkRelease> documentForkReleases;
 // The saved names and IDs of the objects each document's running import read (importedSource,
 // ops#158)
 std::map<const Document*, std::map<const DocumentObject*, ImportedSource>> importedSources;
+
+// Of each running import, saved ID -> new ID per source (importedIds(), ops#1002), made when first
+// asked, after readObjects() created every object
+std::map<const Document*, std::map<std::string, std::map<long, long>>> importedIdMaps;
+
+// The source an imported object came from: the document's UUID and the `@<document>` it was
+// exported under (two open documents can share a UUID; a saved project has neither)
+std::string importedSourceKey(const ImportedSource& source)
+{
+    const auto at = source.name.find('@');
+    return source.document + (at == std::string::npos ? std::string() : source.name.substr(at));
+}
 
 // The id each running Save a Copy gives its file (ops#640, A1): a copy is a document of its own
 std::map<const Document*, std::string> copyUids;
@@ -597,6 +611,42 @@ bool App::importedWithin(const ImportedSource& source, const Document& doc)
         || (former != formerUids.end() && former->second.contains(source.document));
     return !source.document.empty() && ownId && at != std::string::npos
         && source.name.compare(at + 1, std::string::npos, doc.getName()) == 0;
+}
+
+const std::map<long, long>* App::importedIds(const DocumentObject* target)
+{
+    auto source = importedSource(target);
+    if (!source || source->id <= 0) {
+        return nullptr;
+    }
+    const Document* doc = target->getDocument();
+    auto& maps = importedIdMaps[doc];
+    const std::string key = importedSourceKey(*source);
+    auto it = maps.find(key);
+    if (it == maps.end()) {
+        std::map<long, long> ids;
+        for (const auto& [obj, saved] : importedSources[doc]) {
+            if (saved.id > 0 && obj->isAttachedToDocument() && importedSourceKey(saved) == key) {
+                ids[saved.id] = obj->getID();
+            }
+        }
+        it = maps.emplace(key, std::move(ids)).first;
+    }
+    return &it->second;
+}
+
+std::optional<std::string> App::importedElementName(const DocumentObject* target,
+                                                    const std::string& name)
+{
+    auto ids = importedIds(target);
+    return ids ? Data::remapNameTags(name, *ids) : std::nullopt;
+}
+
+std::optional<std::string> App::importedFingerprint(const DocumentObject* target,
+                                                    const std::string& text)
+{
+    auto ids = importedIds(target);
+    return ids ? Data::remapFingerprintIds(text, *ids) : std::nullopt;
 }
 
 int App::forkNamingRevision()
@@ -3410,6 +3460,7 @@ std::vector<DocumentObject*> Document::importObjects(Base::XMLReader& reader)
         ~ForgetSources()
         {
             importedSources.erase(doc);
+            importedIdMaps.erase(doc);
             importSourceDocuments.erase(doc);
             if (!outer.empty()) {
                 importedSources[doc] = std::move(outer);
@@ -3423,6 +3474,7 @@ std::vector<DocumentObject*> Document::importObjects(Base::XMLReader& reader)
         forgetSources.outer = std::move(it->second);
         importedSources.erase(it);
     }
+    importedIdMaps.erase(this);
     if (auto it = importSourceDocuments.find(this); it != importSourceDocuments.end()) {
         forgetSources.outerDocument = std::move(it->second);
         importSourceDocuments.erase(it);
@@ -4408,6 +4460,47 @@ bool Document::afterRestore(const bool checkPartial)
     return true;
 }
 
+namespace
+{
+// An import's saved tags (FreeCAD-CH ops#1002, notes/merge-tags-1002.md), before the links
+// register and take their fingerprints again: the element maps of the objects' shapes first,
+// through each owner's source, then the links' names and records, each through its target's
+// source (importedIds()). In the import's order of objects
+void remapImportedTags(const std::vector<DocumentObject*>& objs,
+                       const std::map<DocumentObject*, std::vector<Property*>>& propMap)
+{
+    for (const bool maps : {true, false}) {
+        for (auto obj : objs) {
+            auto it = propMap.find(obj);
+            if (!obj || !obj->isAttachedToDocument() || it == propMap.end()) {
+                continue;
+            }
+            const std::map<long, long>* ids = maps ? importedIds(obj) : nullptr;
+            if (maps && !ids) {
+                continue;
+            }
+            for (auto prop : it->second) {
+                try {
+                    if (maps) {
+                        if (auto geo = freecad_cast<PropertyComplexGeoData*>(prop)) {
+                            geo->remapImportedTags(*ids);
+                        }
+                    }
+                    else if (auto link = freecad_cast<PropertyLinkBase*>(prop)) {
+                        link->remapImportedTags();
+                    }
+                }
+                catch (const Base::Exception& e) {
+                    FC_ERR("Failed to rename the imported tags of " << obj->getFullName() << '.'
+                                                                    << prop->getName() << ": "
+                                                                    << e.what());
+                }
+            }
+        }
+    }
+}
+}  // namespace
+
 bool Document::afterRestore(const std::vector<DocumentObject*>& objArray, bool checkPartial)
 {
     checkPartial = checkPartial && testStatus(Document::PartialDoc);
@@ -4439,6 +4532,10 @@ bool Document::afterRestore(const std::vector<DocumentObject*>& objArray, bool c
     if (checkPartial && !d->touchedObjs.empty()) {
         // partial document touched, signal full reload
         return false;
+    }
+
+    if (testStatus(Status::Importing)) {
+        remapImportedTags(objArray, propMap);
     }
 
     std::set<DocumentObject*> objSet(objArray.begin(), objArray.end());
