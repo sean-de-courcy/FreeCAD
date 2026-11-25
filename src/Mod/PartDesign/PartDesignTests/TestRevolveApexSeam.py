@@ -173,6 +173,40 @@ class TestRevolveApexSeam(unittest.TestCase):
         doc.recompute()
         return rev, base.Volume, V_OUT / 2
 
+    def coneGrooveModel(self, delta):
+        """Review r1: a Groove of the same triangle on a conical base, cone Part.makeCone(10, 6,
+        6), whose wall leans in at atan(4 / 6), the tool's half angle: the tool lies outside and
+        touches the wall along one line, so it removes nothing."""
+        doc = self.newDoc()
+        base = Part.makeCone(10, 6, 6)
+        feature = doc.addObject("Part::Feature", "Base")
+        feature.Shape = base
+        body = doc.addObject("PartDesign::Body", "Body")
+        body.BaseFeature = feature
+        doc.recompute()
+        r = 10 - 4 * Z0 / 6
+        xa = math.sqrt(r * r - delta * delta)
+        tri = body.newObject("Sketcher::SketchObject", "Tri")
+        tri.Placement = App.Placement(V(0, delta, 0), App.Rotation(V(1, 0, 0), 90))
+        points = [V(xa, Z0, 0), V(xa, Z0 + HC, 0), V(xa + W, Z0 + HC, 0)]
+        for i in range(3):
+            tri.addGeometry(Part.LineSegment(points[i], points[(i + 1) % 3]))
+        doc.recompute()
+        groove = body.newObject("PartDesign::Groove", "Groove")
+        groove.Profile = tri
+        groove.ReferenceAxis = (tri, ["Edge1"])
+        groove.Angle = 360
+        doc.recompute()
+        return groove, base.Volume, 0.0
+
+    def testGrooveTangentToConeWallAtSeam(self):
+        """Review r1: removes nothing and stays one valid solid (the point check refused it, and
+        the retry left two sliver faces, Up-to-date)."""
+        for delta in (0.0, -1e-10, -1e-9, 1e-9):
+            groove, base, expected = self.coneGrooveModel(delta)
+            label = "cone groove delta %g" % delta
+            self.assertEqual(self.checkResult(groove, base, expected, label), "right", label)
+
     def testExpectedVolumes(self):
         """The geometric expectations themselves: V_out lies between 0 and the cone."""
         self.assertAlmostEqual(V_OUT, 6.483319, places=5)
