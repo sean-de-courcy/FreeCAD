@@ -5832,9 +5832,9 @@ def rectangleOnX(body, x, y0, y1, z0, z1):
     return sketch
 
 
-def padUpToACurvedFace(doc, kind, x, y0, y1, z0, z1, start=-30.0, sense=-1):
-    """ops#1039: a Pad of rectangleOnX() along (`sense`, 0, 0) up to curvedFaceWall()'s face, the
-    wall a separate Part::Feature. Recomputed, not checked"""
+def padUpToACurvedFace(doc, kind, x, y0, y1, z0, z1, start=-30.0, sense=-1, direction=None):
+    """ops#1039: a Pad of rectangleOnX() along (`sense`, 0, 0), or `direction`, up to
+    curvedFaceWall()'s face, the wall a separate Part::Feature. Recomputed, not checked"""
     V = FreeCAD.Vector
     solid, name = curvedFaceWall(kind, start)
     wall = doc.addObject("Part::Feature", "Wall")
@@ -5846,7 +5846,7 @@ def padUpToACurvedFace(doc, kind, x, y0, y1, z0, z1, start=-30.0, sense=-1):
     pad.UpToFace = (wall, [name])
     pad.UseCustomVector = True
     pad.AlongSketchNormal = False
-    pad.Direction = V(sense, 0, 0)
+    pad.Direction = direction if direction is not None else V(sense, 0, 0)
     doc.recompute()
     return pad
 
@@ -5995,6 +5995,23 @@ class TestUpToACurvedFace(unittest.TestCase):
                         self.refused(pad)
                     finally:
                         FreeCAD.closeDocument(doc.Name)
+
+    def testPadUpToACylinderFaceObliqueDirection(self):
+        # Along (-1, 0, -0.3), the rectangle's centre line missing the face: refused, never up to
+        # the half of the cylinder the face isn't on, nor from a profile the surface cuts (review
+        # pr1039-r2). The face at 150..210 degrees, the rectangle beside it at x = 40; the face at
+        # -30..30, the rectangle on the plane x = 10 inside and outside the cylinder
+        V = FreeCAD.Vector
+        for start, x, y0, y1 in ((150, 40, -14, -12), (-30, 10, -19, -12)):
+            with self.subTest(start=start, x=x):
+                doc = FreeCAD.newDocument("PadUpToACylinderFaceObliqueDirection")
+                try:
+                    pad = padUpToACurvedFace(
+                        doc, "pie", x, y0, y1, 4, 6, start=start, direction=V(-1, 0, -0.3)
+                    )
+                    self.refused(pad)
+                finally:
+                    FreeCAD.closeDocument(doc.Name)
 
     def testPocketUpToACylinderFaceBeside(self):
         # The pie slice joined with the block x 0..30, y 8..18, z 0..10: the face now spans

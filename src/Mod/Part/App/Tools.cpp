@@ -23,8 +23,6 @@
  ***************************************************************************/
 
 #include <cassert>
-#include <cmath>
-#include <limits>
 #include <BRep_Tool.hxx>
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
@@ -39,7 +37,6 @@
 #include <Geom_Line.hxx>
 #include <Geom_Plane.hxx>
 #include <Geom_Point.hxx>
-#include <GeomAPI_IntCS.hxx>
 #include <GeomAPI_IntSS.hxx>
 #include <GeomAPI_ProjectPointOnSurf.hxx>
 #include <GeomAdaptor_Curve.hxx>
@@ -834,44 +831,20 @@ bool Part::Tools::isConcave(const TopoDS_Face& face, const gp_Pnt& pointOfVue, c
     BRepIntCurveSurface_Inter mkSection;
     mkSection.Init(face, line, Precision::Confusion());
 
-    // Where the line meets the face, or, when it misses the face, the face's surface without its
-    // limits. Read without asking, a miss raised StdFail_NotDone, whose message is empty: an
-    // extrusion up to a face beside the profile's centre failed saying nothing (ops#1039). A line
-    // that misses the surface too keeps the face's limits
-    double hitU = 0.0;
-    double hitV = 0.0;
-    if (mkSection.More()) {
-        hitU = mkSection.U();
-        hitV = mkSection.V();
-    }
-    else {
-        GeomAPI_IntCS unlimited(new Geom_Line(line), surf);
-        if (!unlimited.IsDone() || unlimited.NbPoints() < 1) {
-            return true;
-        }
-        // The first crossing ahead of the point along the line, else the nearest behind it (the
-        // crossings come in no order along the line; review pr1039-r1f)
-        double best = std::numeric_limits<double>::max();
-        bool ahead = false;
-        for (int i = 1; i <= unlimited.NbPoints(); ++i) {
-            double u = 0.0;
-            double v = 0.0;
-            double w = 0.0;
-            unlimited.Parameters(i, u, v, w);
-            const bool isAhead = w >= 0.0;
-            if ((isAhead && !ahead) || (isAhead == ahead && std::abs(w) < best)) {
-                ahead = isAhead;
-                best = std::abs(w);
-                hitU = u;
-                hitV = v;
-            }
-        }
+    // Where the line meets the face. Read without asking, a miss raised StdFail_NotDone, whose
+    // message is empty: an extrusion up to a face beside the profile's centre failed saying
+    // nothing (ops#1039). A miss keeps the face's limits: the prism then goes up to the face as it
+    // is, and a face that doesn't cover the profile is extended only by makeElementPrismUntil()'s
+    // full turn, on the face's side of its surface (review pr1039-r2: the surface without limits,
+    // read off the face, sent oblique profiles to the half of a cylinder away from the face)
+    if (!mkSection.More()) {
+        return true;
     }
 
     // compute normals at the intersection
     gp_Pnt iPnt;
     gp_Vec dU, dV;
-    surf->D1(hitU, hitV, iPnt, dU, dV);
+    surf->D1(mkSection.U(), mkSection.V(), iPnt, dU, dV);
 
     // check normals orientation
     gp_Dir dirdU(dU);
