@@ -839,9 +839,10 @@ class TestStudioOwner(unittest.TestCase):
                 self.assertTrue(boss.isValid(), boss.getStatusString())
                 self.assertAlmostEqual(boss.AddSubShape.Volume, tool, places=3)
 
-    def testUpToConeFaceSplitAndShortenedDoesNotComeBack(self):
+    def testUpToConeFaceSplitAndShortenedGoesToTheWholeCone(self):
         """A pocket lowers the part's top to z 12.5 and a slot splits the cone: a boss that met
-        the cone near z 13 fails, as with the lowering alone: the cut part stays away."""
+        the cone near z 13 still ends on the cone extended around, as Onshape builds it
+        (orc1125c, RB34; ops#848 had refused it)."""
         for between in (
             (self.slotAcross((4, 2, 10, 8), 14, 1.5),),
             (self.slotAcross((4, 2, 10, 8), 14, 1.5), self.slotAcross((4, 4.9, 10, 5.1), 14, 4)),
@@ -852,23 +853,22 @@ class TestStudioOwner(unittest.TestCase):
                 boss, tool = self.coneAndBoss((7, 6.47), 0.1)
                 self.assertTrue(boss.isValid(), boss.getStatusString())
                 self.membersBefore(boss, between)
-                self.assertFalse(boss.isValid(), "the boss went up to a cone a pocket removed")
+                self.assertTrue(boss.isValid(), boss.getStatusString())
+                self.assertAlmostEqual(boss.AddSubShape.Volume, tool, places=3)
 
-    def testUpToConeFaceWithAWedgeRemovedDoesNotComeBack(self):
+    def testUpToConeFaceWithAWedgeRemovedGoesToTheWholeCone(self):
         """A pocket x 4..6.5, y 4..6 cuts a wedge out of the cone's -x side, where its seam may
-        lie: a boss in the wedge fails; one under what is left ends on the cone."""
-        for centre, inside in (((5.4, 5), True), ((7, 3.4), False), ((8.6, 5), False)):
+        lie: a boss in the wedge ends on the cone extended around, V 0.282834 in Onshape
+        (orc1125c, RB34; ops#848 had refused it); one under what is left ends on the cone."""
+        for centre in ((5.4, 5), (7, 3.4), (8.6, 5)):
             with self.subTest(centre=centre):
                 self.tearDown()
                 self.setUp()
                 boss, tool = self.coneAndBoss(centre, 0.2)
                 self.assertTrue(boss.isValid(), boss.getStatusString())
                 self.membersBefore(boss, (self.slotAcross((4, 4, 6.5, 6), 14, 4),))
-                if inside:
-                    self.assertFalse(boss.isValid(), "the boss went up to a cut-away cone")
-                else:
-                    self.assertTrue(boss.isValid(), boss.getStatusString())
-                    self.assertAlmostEqual(boss.AddSubShape.Volume, tool, places=3)
+                self.assertTrue(boss.isValid(), boss.getStatusString())
+                self.assertAlmostEqual(boss.AddSubShape.Volume, tool, places=3)
 
     def testUpToFaceAfterAnOutwardThicknessWithItsOuterFaceRemoved(self):
         """An outward Thickness, then a pocket z 14.5..15 over the whole top: nothing faces as

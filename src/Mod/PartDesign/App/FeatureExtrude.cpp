@@ -1418,41 +1418,6 @@ TopoShape ownerUpToPerRegion(
     tool.makeElementFuse(prisms, Part::OpCodes::Extrude);
     return tool;
 }
-// Up to a curved face that a feature between the picked part and this owner cut (ops#848): what
-// is left of it, never its surface extended past it (ops#1039). The face as picked and the face
-// used differ in area. A plane is extended whatever cut it (Onshape UF1, UT1)
-bool isCutCurvedFace(const App::PropertyLinkSub& link, const TopoShape& used)
-{
-    App::DocumentObject* ref = link.getValue();
-    const auto& subs = link.getSubValues();
-    if (!ref || subs.size() != 1 || used.shapeType(true) != TopAbs_FACE) {
-        return false;
-    }
-    const TopoDS_Face usedFace = TopoDS::Face(used.getShape());
-    if (BRepAdaptor_Surface(usedFace).GetType() == GeomAbs_Plane) {
-        return false;
-    }
-    TopoShape picked;
-    try {
-        picked = Part::Feature::getTopoShape(
-            ref,
-            Part::ShapeOption::NeedSubElement | Part::ShapeOption::ResolveLink
-                | Part::ShapeOption::Transform,
-            subs.front().c_str()
-        );
-    }
-    catch (Base::Exception&) {
-        return false;
-    }
-    if (picked.isNull() || picked.shapeType(true) != TopAbs_FACE) {
-        return false;
-    }
-    GProp_GProps before;
-    GProp_GProps after;
-    BRepGProp::SurfaceProperties(picked.getShape(), before);
-    BRepGProp::SurfaceProperties(usedFace, after);
-    return std::fabs(before.Mass() - after.Mass()) > 1e-6 * std::max(1.0, before.Mass());
-}
 }  // namespace
 
 App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions options)
@@ -2372,11 +2337,9 @@ TopoShape FeatureExtrude::generateSingleExtrusionSide(
 
         TopoShape upToShape = makeTopoShape();
         int faceCount = 1;
-        bool keepLimits = false;  // ops#1039, isCutCurvedFace()
         // Find a valid shape, face or datum plane to extrude up to
         if (method == "UpToFace") {
             getUpToFaceFromLinkSub(upToShape, upToFacePropHandle);
-            keepLimits = isCutCurvedFace(upToFacePropHandle, upToShape);
             upToShape.move(invObjLoc);
             if (reapplyOwn(*this, upToFacePropHandle)) {
                 requireOwnOnRunBase(upToShape.getShape());  // ops#963 A: the instance's own, unmoved
@@ -2428,7 +2391,7 @@ TopoShape FeatureExtrude::generateSingleExtrusionSide(
                 upToShape,
                 dir,
                 TopoShape::PrismMode::None,
-                !keepLimits /*CheckUpToFaceLimits.getValue()*/
+                true /*CheckUpToFaceLimits.getValue()*/
             );
         }
         catch (Base::RuntimeError&) {

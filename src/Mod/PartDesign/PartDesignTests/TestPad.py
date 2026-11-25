@@ -5879,10 +5879,11 @@ def cylinderReach(x, y0, y1, z0, z1, sense=-1):
 
 class TestUpToACurvedFace(unittest.TestCase):
     """ops#1039: a Pad or a Pocket up to one face of a cylinder, a cone or a sphere that doesn't
-    cover the profile goes up to the face's surface without its limits, each point to its first
-    crossing, on the side of the surface the face is on. It failed: with an empty message where
-    the line from the profile's centre missed the face, or "part of the profile doesn't meet it"
-    for a cylinder across its axis, whose limits were never removed"""
+    cover the profile, or isn't where the profile's lines first meet its surface, goes up to the
+    face's surface extended around, each point to its first crossing, as Onshape does (orc1125c,
+    RB34). It failed: with an empty message where the line from the profile's centre missed the
+    face, or "part of the profile doesn't meet it" for a cylinder across its axis, whose limits
+    were never removed"""
 
     def setUp(self):
         self.Doc = FreeCAD.newDocument("UpToACurvedFace")
@@ -5895,6 +5896,13 @@ class TestUpToACurvedFace(unittest.TestCase):
         prism = pad.AddSubShape
         self.assertTrue(prism.isValid())
         self.assertEqual(len(prism.Solids), 1)
+        self.assertAlmostEqual(prism.Volume, expected, delta=PRISM_VOLUME_RELATIVE * expected)
+
+    def checkSolids(self, pad, expected, count):
+        self.assertTrue(pad.isValid(), pad.getStatusString())
+        prism = pad.AddSubShape
+        self.assertTrue(prism.isValid())
+        self.assertEqual(len(prism.Solids), count)
         self.assertAlmostEqual(prism.Volume, expected, delta=PRISM_VOLUME_RELATIVE * expected)
 
     def refused(self, pad, text=None):
@@ -5953,23 +5961,36 @@ class TestUpToACurvedFace(unittest.TestCase):
     def testPadUpToACylinderFaceRefusals(self):
         # Still refused, with a message: a rectangle that passes the cylinder wholly (y 24..26:
         # its lines miss the surface, and the Pad turns away from it) or in part (y 19..21,
-        # saying so); and, beside the face on the cylinder's far side (150..210 degrees), where
-        # the near side of the cylinder, not the face's side, would stop it (ops#353 review M1;
-        # the oracle's case 3 decides whether that stays refused)
-        for y0, y1, start in ((24, 26, -30), (19, 21, -30), (14, 16, 150)):
-            with self.subTest(y0=y0, y1=y1, start=start):
+        # saying so). Onshape fails both (orc1125c, case 6)
+        for y0, y1 in ((24, 26), (19, 21)):
+            with self.subTest(y0=y0, y1=y1):
                 doc = FreeCAD.newDocument("PadUpToACylinderFaceRefusals")
                 try:
-                    pad = padUpToACurvedFace(doc, "pie", 40, y0, y1, 4, 6, start=start)
+                    pad = padUpToACurvedFace(doc, "pie", 40, y0, y1, 4, 6)
                     self.refused(pad, "doesn't meet" if y0 == 19 else None)
+                finally:
+                    FreeCAD.closeDocument(doc.Name)
+
+    def testPadUpToACylinderFaceOnTheFarSide(self):
+        # The face on the cylinder's far side (150..210 degrees), the rectangle at x = 40: the
+        # near side of the cylinder, where no face is, stops it, covered (y -1..1) or beside
+        # (y 14..16): Onshape's case 3, 80.033346 and 107.200907 (orc1125c, RB34)
+        for y0, y1 in ((-1, 1), (14, 16)):
+            with self.subTest(y0=y0, y1=y1):
+                doc = FreeCAD.newDocument("PadUpToACylinderFaceOnTheFarSide")
+                try:
+                    pad = padUpToACurvedFace(doc, "pie", 40, y0, y1, 4, 6, start=150)
+                    self.check(pad, cylinderReach(40, y0, y1, 4, 6))
                 finally:
                     FreeCAD.closeDocument(doc.Name)
 
     def testPadUpToACurvedFaceRegionsOnBothSides(self):
         # A sketch of two rectangles, one outside the surface and one inside, neither covered by
-        # the face: refused in either drawing order, never one region up to the half of the
-        # surface away from the face (review pr1039-r1 T1, r1f T1). The cylinder from x = 19
-        # towards -x; the ball from x = -15 towards +x
+        # the face: each goes to its own first crossing of the surface extended around, the
+        # outside one to the near half and the inside one to the half ahead, in either drawing
+        # order (reviews pr1039-r1 T1, r1f T1 found the second order taken from the first;
+        # orc1125c, RB34: the first crossing). The cylinder from x = 19 towards -x; the ball from
+        # x = -15 towards +x
         def addRectangle(sketch, y0, y1, z0, z1):
             V = FreeCAD.Vector
             first = sketch.GeometryCount
@@ -5981,9 +6002,25 @@ class TestUpToACurvedFace(unittest.TestCase):
                     Sketcher.Constraint("Coincident", first + i, 2, first + (i + 1) % 4, 1)
                 )
 
-        for kind, x, sense, outside, inside in (
-            ("pie", 19, -1, (12, 14, 4, 6), (-1, 1, 12, 14)),
-            ("ball", -15, 1, (14, 16, -1, 1), (-1, 1, -1, 1)),
+        ball = lambda y, z: math.sqrt(400 - z * z)
+        for kind, x, sense, outside, inside, expected in (
+            (
+                "pie",
+                19,
+                -1,
+                (12, 14, 4, 6),
+                (-1, 1, 12, 14),
+                cylinderReach(19, 12, 14, 4, 6) + cylinderReach(-19, -1, 1, 12, 14, sense=1),
+            ),
+            (
+                "ball",
+                -15,
+                1,
+                (14, 16, -1, 1),
+                (-1, 1, -1, 1),
+                reachToCurvedFace(ball, 15, 14, 16, -1, 1)
+                + reachToCurvedFace(ball, -15, -1, 1, -1, 1, sense=1),
+            ),
         ):
             for first, second in ((outside, inside), (inside, outside)):
                 with self.subTest(kind=kind, first=first):
@@ -5992,15 +6029,17 @@ class TestUpToACurvedFace(unittest.TestCase):
                         pad = padUpToACurvedFace(doc, kind, x, *first, sense=sense)
                         addRectangle(pad.Profile[0], *second)
                         doc.recompute()
-                        self.refused(pad)
+                        self.checkSolids(pad, expected, 2)
                     finally:
                         FreeCAD.closeDocument(doc.Name)
 
     def testPadUpToACylinderFaceObliqueDirection(self):
-        # Along (-1, 0, -0.3), the rectangle's centre line missing the face: refused, never up to
-        # the half of the cylinder the face isn't on, nor from a profile the surface cuts (review
-        # pr1039-r2). The face at 150..210 degrees, the rectangle beside it at x = 40; the face at
-        # -30..30, the rectangle on the plane x = 10 inside and outside the cylinder
+        # Along (-1, 0, -0.3), the rectangle's centre line missing the face (review pr1039-r2).
+        # The face at 150..210 degrees, the rectangle beside it at x = 40: up to the cylinder's
+        # near side, below the face's height (the surface is unbounded along its axis, orc1125c,
+        # RB34); the volume is the one along -x, the prism only sheared along the axis. The face
+        # at -30..30, the rectangle on the plane x = 10 inside and outside the cylinder: the
+        # surface cuts the profile, refused
         V = FreeCAD.Vector
         for start, x, y0, y1 in ((150, 40, -14, -12), (-30, 10, -19, -12)):
             with self.subTest(start=start, x=x):
@@ -6009,15 +6048,19 @@ class TestUpToACurvedFace(unittest.TestCase):
                     pad = padUpToACurvedFace(
                         doc, "pie", x, y0, y1, 4, 6, start=start, direction=V(-1, 0, -0.3)
                     )
-                    self.refused(pad)
+                    if x == 40:
+                        self.check(pad, cylinderReach(40, y0, y1, 4, 6))
+                    else:
+                        self.refused(pad)
                 finally:
                     FreeCAD.closeDocument(doc.Name)
 
     def testPadUpToACylinderFaceCentreThroughAWindowBehind(self):
         # The pie slice's face with a window y -2..2, z 3..7; two rectangles y 4..6 and -6..-4,
         # z 4..6, on the plane x = 0, padded along -x, away from the face: the line from the
-        # profile's centre passes through the window. Refused, saying so, never a prism ending off
-        # the face (review pr1039-r3: a retry ended it 1 mm short)
+        # profile's centre passes through the window. Each rectangle goes to its first crossing
+        # ahead, the cylinder's half at x < 0 (orc1125c, RB34), never a prism ending off the
+        # surface (review pr1039-r3: a retry ended it 1 mm short)
         V = FreeCAD.Vector
         solid, _ = curvedFaceWall("pie")
         solid = solid.cut(Part.makeBox(30, 4, 4, V(0, -2, 3)))
@@ -6047,7 +6090,7 @@ class TestUpToACurvedFace(unittest.TestCase):
         pad.AlongSketchNormal = False
         pad.Direction = V(-1, 0, 0)
         self.Doc.recompute()
-        self.refused(pad)
+        self.checkSolids(pad, 2 * cylinderReach(0, 4, 6, 4, 6, sense=1), 2)
 
     def testPocketUpToACylinderFaceBeside(self):
         # The pie slice joined with the block x 0..30, y 8..18, z 0..10: the face now spans
