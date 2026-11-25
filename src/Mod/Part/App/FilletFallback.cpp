@@ -19310,7 +19310,24 @@ Handle(BRepTools_History) runOnExactArcs(
     if (done.IsEmpty()) {
         return {};
     }
+    const TopoDS_Shape before = shape;
     shape = reshape.Apply(shape);
+    // Every face holding a replaced edge or a dropped wire is rebuilt as a new face: recorded as
+    // modified into it, else the stages lose it and the mapper names neither the earlier round
+    // nor the corner face (review fx1025-r2: LOW names, references to them broke at 600 mm, N 4
+    // r 2q included)
+    TopTools_IndexedMapOfShape after;
+    TopExp::MapShapes(shape, TopAbs_FACE, after);
+    for (TopExp_Explorer it(before, TopAbs_FACE); it.More(); it.Next()) {
+        const TopoDS_Shape& face = it.Current();
+        if (history->IsRemoved(face) || after.Contains(face)) {
+            continue;
+        }
+        const TopoDS_Shape now = reshape.Value(face);
+        if (!now.IsNull() && now.ShapeType() == TopAbs_FACE && after.Contains(now)) {
+            history->AddModified(face, now);
+        }
+    }
     return history;
 }
 
