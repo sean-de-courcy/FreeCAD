@@ -4933,3 +4933,41 @@ TEST_F(FilletFallbackTest, roundPastTwoWallsOnOneFootLineAndAFrontWallIsNotCutAw
         EXPECT_FALSE(built) << second << " " << size << " " << round;
     }
 }
+
+TEST_F(FilletFallbackTest, dressUpWhoseFaceAWallCutsAwayWholeRefuses)
+{
+    // ops#1026, review pr1026-r1c: RB22's two walls (W 11 over x 0..15, W 6 over x 15..30, one
+    // foot line). At chamfer 2, W 6's plane run on (z = 2y + 8) passes through the chamfer's
+    // front edge (0, 8): the piece that stays holds no chamfer face, and a notch with no chamfer
+    // face must not build. The same with a front wall on W 6's plane under both halves (W 6 |
+    // W 11 on top, round 2.6: that wall is on W 6's own surface, so W 6 must not take the pair's
+    // path alone). Integration refuses both; no oracle covers them
+    auto stretch = [](double w, double x0, double x1, bool frontWall) {
+        // RB22's section, or with the front face ending 2 below the edge at a wall on W 6's plane
+        std::vector<std::pair<double, double>> section = frontWall
+            ? std::vector<std::pair<double, double>> {{20, -10}, {20, 20}, {w, 20}, {1, 10}, {0, 10}, {0, 8}, {-9, -10}}
+            : std::vector<std::pair<double, double>> {{0, 0}, {20, 0}, {20, 20}, {w, 20}, {1, 10}, {0, 10}};
+        TopoDS_Shape prism = profileAlongX(section, x1 - x0);
+        gp_Trsf move;
+        move.SetTranslation(gp_Vec(x0, 0, 0));
+        return prism.Moved(TopLoc_Location(move));
+    };
+    for (auto [first, second, frontWall, size, round] :
+         {std::tuple {11.0, 6.0, false, 2.0, false},
+          std::tuple {6.0, 11.0, true, 2.6, true},
+          std::tuple {6.0, 11.0, true, 2.5, true}}) {
+        BRepAlgoAPI_Fuse fuse(stretch(first, 0, 15, frontWall), stretch(second, 15, 30, frontWall));
+        ShapeUpgrade_UnifySameDomain unify(fuse.Shape());
+        unify.Build();
+        TopoShape base(unify.Shape(), 1L);
+        TopoShape front = edgeBetween(base, {0, 0, 10}, {30, 0, 10});
+        bool built = false;
+        try {
+            TopoShape result = dressUp(base, {front}, round ? fillet(size) : chamfer(size));
+            built = !result.isNull() && volume(result.getShape()) > 0;
+        }
+        catch (...) {
+        }
+        EXPECT_FALSE(built) << first << " " << second << " " << size << " " << round;
+    }
+}

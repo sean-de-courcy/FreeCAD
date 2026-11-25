@@ -10701,7 +10701,8 @@ bool trimByWall(
         refuse("a tool has no strip on the face it runs off into a wall");
     }
     // On the tool's edge, at the selected edge's middle
-    const gp_Pnt beside = sectionAt(ctx, data, (data.first + data.last) / 2).corner;
+    const Section middle = sectionAt(ctx, data, (data.first + data.last) / 2);
+    const gp_Pnt beside = middle.corner;
     const TopoDS_Vertex onEdge = BRepBuilderAPI_MakeVertex(beside);
     auto holds = [&](const TopoDS_Shape& piece) {
         for (TopExp_Explorer it(piece, TopAbs_SHELL); it.More(); it.Next()) {
@@ -10897,6 +10898,45 @@ bool trimByWall(
                 "a wall's surface leaves " + std::to_string(holding)
                 + " pieces of a dress-up on its edge"
             );
+        }
+        // A plane wall leaves some of the dress-up's own face on the edge's side (review pr1026-r1c:
+        // RB22's chamfer 2, where W 6's plane run on passes through the chamfer's front edge, kept
+        // a notch with no chamfer face). In the middle section, the chamfer's line or the round's
+        // arc must reach past the plane on the corner's side: the line's farthest point is an
+        // end, the arc's an end or where its radius points along the plane's normal
+        if (BRepAdaptor_Surface(at.wall, Standard_True).GetType() == GeomAbs_Plane) {
+            const gp_Pln plane = BRepAdaptor_Surface(at.wall, Standard_True).Plane();
+            const gp_Dir normal = plane.Axis().Direction();
+            auto height = [&](const gp_Pnt& point) {
+                return gp_Vec(plane.Location(), point).Dot(gp_Vec(normal));
+            };
+            const double side = height(middle.corner) >= 0 ? 1.0 : -1.0;
+            double farthest = std::max(side * height(middle.ends[0]), side * height(middle.ends[1]));
+            if (middle.fillet && middle.radius > 0) {
+                const gp_Vec first(middle.centre, middle.ends[0]);
+                const gp_Vec last(middle.centre, middle.ends[1]);
+                const gp_Vec across = first.Crossed(last);
+                if (across.Magnitude() > linearTolerance * middle.radius) {
+                    const gp_Vec axis = across.Normalized();
+                    gp_Vec toward = gp_Vec(normal) * side;
+                    toward -= axis * toward.Dot(axis);
+                    if (toward.Magnitude() > linearTolerance) {
+                        toward.Normalize();
+                        // Within the arc (the short one between its ends): the angles add up
+                        const double spread = first.Angle(last);
+                        if (std::abs(first.Angle(toward) + toward.Angle(last) - spread)
+                            <= 1e-9 * std::max(1.0, spread)) {
+                            farthest = std::max(
+                                farthest,
+                                side * height(middle.centre.Translated(toward * middle.radius))
+                            );
+                        }
+                    }
+                }
+            }
+            if (farthest <= std::max(2 * footTolerance, 1000 * linearTolerance)) {
+                refuse("a wall's surface cuts a dress-up's own face away whole");
+            }
         }
         // What is left no longer runs off over the wall's foot
         bool stillPast = false;
@@ -13308,9 +13348,14 @@ TopoDS_Shape constructShape(
             // face, or on another foot line) takes the old path for all of them (review pr1026-r1b:
             // a wall on the other face trimmed first while the pair waited, and the round was cut
             // away whole)
-            if (std::any_of(otherWalls.begin(), otherWalls.end(), [](const OtherWall& o) {
-                    return !o.oneFootLine;
-                })) {
+            // Over all of the tool's walls, those on this wall's own surface too (review pr1026-r1c:
+            // a front wall on W 6's plane is skipped above, so W 6 alone kept its flag)
+            const bool elsewhere
+                = std::any_of(surfaceWalls.begin(), surfaceWalls.end(), [&](const SurfaceWall& other) {
+                      return other.tool == at.tool && !other.wall.IsSame(at.wall)
+                          && !(other.face.IsSame(at.face) && onOneFootLine(at.foot, other.foot));
+                  });
+            if (elsewhere) {
                 for (auto& other : otherWalls) {
                     other.oneFootLine = false;
                 }
