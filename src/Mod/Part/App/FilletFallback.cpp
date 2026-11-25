@@ -18682,6 +18682,7 @@ struct RunOnCorner
     double sine {1};
     double setback {0};   // from the corner to the new round's tangent points: r cot(t / 2)
     bool convex {false};
+    bool sphere {false};  // r = q: the torus's major radius is 0 (ops#1025)
     double change {0};    // the volume the corner adds (concave) or takes (convex), closed form
     double tools {0};     // the column's and the torus's volumes
 };
@@ -18760,7 +18761,8 @@ TopoDS_Face otherFace(const TopTools_IndexedDataMapOfShapeListOfShape& edgeFaces
  * mitre E of two earlier rounds (notes/fillet-mitre-runon-918.md, the rule and its addendum).
  * Refuses unless every condition holds: A and B at an angle t of 90 degrees, or of 90 to 135
  * degrees for a convex corner (ops#1020, notes/fillet-mitre-angle-1020-design.md); at V exactly L,
- * E, lA (A and CA) and lB (B and CB); CA and CB cylinders of one radius q, r >= 2q, tangent to A
+ * E, lA (A and CA) and lB (B and CB); CA and CB cylinders of one radius q, r >= q (ops#1024,
+ * ops#1025: a sphere at r = q), tangent to A
  * and B along lA and lB, their axes meeting at the point q from F, A and B on the kite's side; E
  * picked, leaving V along L, to W on F (3 edges, 3 faces there), F a plane normal to L at q from V
  * whose material lies where L's does; lA and lB longer than the setback r cot(t / 2); L's other
@@ -18871,10 +18873,13 @@ RunOnCorner runOnCorner(
         }
     }
     const double q = corner.q;
-    if (r < 2 * q - tolerance) {
-        // r in (q, 2q): not measured on Onshape (notes/fillet-mitre-runon-918.md, skeptic 9)
-        refuse("the earlier rounds' radius above half the new one");
+    if (r < q - tolerance) {
+        // Below q Onshape's corner is a free-form patch (oracle RB27, ops#1025): not this rule
+        refuse("the new round's radius below the earlier rounds'");
     }
+    // From q to 2q the same torus, major r - q below its minor (oracle RB10-RB12, ops#1024); at
+    // r = q its major is 0 and it is a sphere q about the axes' meeting point (RB15, RB27, ops#1025)
+    corner.sphere = r <= q + tolerance;
     corner.convex = gp_Vec(corner.into[1]).Dot(gp_Vec(outwardNormal(faces[0], v))) < 0;
     if (!corner.convex && corner.cosine < -square) {
         // RB8's plates are convex; the concave corners measured are at 90 degrees (ops#1020)
@@ -19026,12 +19031,17 @@ TopoDS_Shape runOnTorus(const RunOnCorner& corner, double r)
         return centre.Translated(toA * rho + up * h);
     };
     const double s = 1 / std::sqrt(2.0);
+    // At r = q the section's inner corner is put on the axis itself, so the revolution is a
+    // sphere (OCCT's sweep stores an arc about a point of its axis as one), not a torus of major
+    // radius a rounding error
+    const double inner = corner.sphere ? 0.0 : r - q;
+    const double outer = inner + q;
     Handle(Geom_TrimmedCurve) arc
-        = GC_MakeArcOfCircle(at(r - q, 0), at(r - q + q * s, q - q * s), at(r, q)).Value();
+        = GC_MakeArcOfCircle(at(inner, 0), at(inner + q * s, q - q * s), at(outer, q)).Value();
     BRepBuilderAPI_MakeWire wire(
-        BRepBuilderAPI_MakeEdge(at(r, 0), at(r - q, 0)).Edge(),
+        BRepBuilderAPI_MakeEdge(at(outer, 0), at(inner, 0)).Edge(),
         BRepBuilderAPI_MakeEdge(arc).Edge(),
-        BRepBuilderAPI_MakeEdge(at(r, q), at(r, 0)).Edge()
+        BRepBuilderAPI_MakeEdge(at(outer, q), at(outer, 0)).Edge()
     );
     if (!wire.IsDone()) {
         refuse("the run-on torus's section failed");
@@ -19429,7 +19439,9 @@ bool constructMitreRunOns(
             const double area = runOnColumnArea(corner, r);
             const double turn = runOnTurn(corner);
             const double c = corner.setback / r;
-            const double k = s * q * q * (r - q) + q * q * q / 6;
+            // K by Pappus: the section's area s q^2 about the axis at r - q, its quarter disc's
+            // q^3 / 6 (at r = q only the latter: the sphere, ops#1025)
+            const double k = s * q * q * (corner.sphere ? 0.0 : r - q) + q * q * q / 6;
             const TopoDS_Shape column = runOnColumn(corner, r);
             const TopoDS_Shape torus = runOnTorus(corner, r);
             const double columnVolume = volumeOf(column);

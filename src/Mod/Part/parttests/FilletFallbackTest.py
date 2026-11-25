@@ -9116,14 +9116,51 @@ class MitreRunOnTest(unittest.TestCase):
         ]
         self.assertEqual(tori, [])
 
-    def testEqualRadiiRefused(self):
-        base = self.pocket(q=self.r)
-        self.assertRefused(base, self.picks(base, 10, 10))
+    def assertRunOnOf(self, base, result, r, q, kind, change):
+        """One corner built: valid, 2 faces more, no B-spline face, the round's cylinder and the
+        corner face of the kind given, the volume changed by the closed form"""
+        self.assertTrue(result.isValid())
+        self.assertEqual(len(result.Faces), len(base.Faces) + 2)
+        types = [f.Surface.TypeId for f in result.Faces]
+        self.assertNotIn("Part::GeomBSplineSurface", types)
+        self.assertNotIn("Part::GeomToroid", types)
+        self.assertEqual(types.count(kind), 1)
+        if kind == "Part::GeomSphere":
+            sphere = [f for f in result.Faces if f.Surface.TypeId == kind][0]
+            self.assertAlmostEqual(sphere.Surface.Radius, q, delta=1e-9)
+            # A quarter turn of a quarter sphere: (pi / 2) q^2
+            self.assertAlmostEqual(sphere.Area, math.pi / 2 * q * q, delta=1e-6)
+        self.assertAlmostEqual(result.Volume - base.Volume, change, delta=1e-5)
 
-    def testSpindleRangeRefused(self):
-        # r 3, q 2: r in (q, 2q) is not measured on Onshape
+    def testEqualRadiiBuildASphere(self):
+        # ops#1025: at r = q the torus's major radius is 0, and Onshape's corner is a sphere q
+        # (oracle RB15, RB27); before, refused and OCCT failed. q = r = 5, |L| 5
+        base = self.pocket(q=self.r)
+        result = base.makeFillet(self.r, self.picks(base, 10, 10))
+        self.assertRunOnOf(
+            base, result, self.r, self.r, "Part::GeomSphere", self.change(self.r, self.r, 5.0)
+        )
+
+    def testSpindleRangeBuilds(self):
+        # ops#1024: r 3, q 2, r in (q, 2q): Onshape's torus of major r - q below its minor (oracle
+        # RB10-RB12); OCCT's revolution stores it as a surface of revolution. Before, refused
         base = self.pocket()
-        self.assertRefused(base, self.picks(base, 10, 10), r=3.0)
+        result = base.makeFillet(3.0, self.picks(base, 10, 10))
+        self.assertRunOnOf(
+            base, result, 3.0, self.q, "Part::GeomSurfaceOfRevolution", self.change(3.0, self.q, 8.0)
+        )
+
+    def testBelowTheEarlierRadiusRefused(self):
+        # r below q: Onshape's corner is a free-form patch (oracle RB27), not this rule
+        base = self.pocket(q=self.r)
+        self.assertRefused(base, self.picks(base, 10, 10), r=4.0)
+        try:
+            result = base.makeFillet(4.0, self.picks(base, 10, 10))
+        except Exception:
+            return
+        types = [f.Surface.TypeId for f in result.Faces]
+        self.assertNotIn("Part::GeomSphere", types)
+        self.assertNotIn("Part::GeomSurfaceOfRevolution", types)
 
     def testBumpInTheKiteRefused(self):
         # A bump on wall x = 10 within the new round's reach, above the floor rounds
@@ -9257,7 +9294,14 @@ class MitreRunOnAngleTest(unittest.TestCase):
         return lines + mitres
 
     def tori(self, result, r):
-        """The run-on's tori (at r = 2q OCCT's revolution may be a surface of revolution)"""
+        """The run-on's tori (for r in (q, 2q], OCCT's revolution may be a surface of revolution;
+        at r = q a sphere q, ops#1025)"""
+        if abs(r - self.q) < 1e-9:
+            return [
+                f
+                for f in result.Faces
+                if f.Surface.TypeId == "Part::GeomSphere" and abs(f.Surface.Radius - self.q) < 1e-9
+            ]
         return [
             f
             for f in result.Faces
@@ -9278,7 +9322,9 @@ class MitreRunOnAngleTest(unittest.TestCase):
         cylinders = [
             f
             for f in result.Faces
-            if f.Surface.TypeId == "Part::GeomCylinder" and abs(f.Surface.Radius - r) < 1e-6
+            if f.Surface.TypeId == "Part::GeomCylinder"
+            and abs(f.Surface.Radius - r) < 1e-6
+            and abs(f.Surface.Axis.z) > 0.999  # not the rim's, of radius q
         ]
         self.assertEqual(len(cylinders), corners)
         self.assertEqual(len(self.tori(result, r)), corners)
@@ -9440,11 +9486,96 @@ class MitreRunOnAngleTest(unittest.TestCase):
         self.assertNotTaken(base, self.chain(base), 30.0)
 
     def testOutsideTheMeasuredRangeNotTaken(self):
-        # 60 and 150 degrees; r below 2 q
-        for n, r in ((3, 6.0), (12, 6.0), (6, 2.5)):
+        # 60 and 150 degrees
+        for n, r in ((3, 6.0), (12, 6.0)):
             with self.subTest(n=n, r=r):
                 base = self.rimmed(self.prism(self.polygon(n)))
                 self.assertNotTaken(base, self.chain(base), r)
+
+    # Oracle RB27 and ops#1024's RB15-RB19 cross-check (notes/onshape-facts.md): r = q, N, volume,
+    # area or None, faces, the sphere's area per corner ((pi - t) q^2)
+    sphereRows = (
+        (4, 10680.580716, 7754.555261, 18, 3.534292),
+        (6, 9252.0217542, 6720.3769043, 26, 2.3561945),
+        (8, 8851.1147166, 6430.1478046, 34, 1.7671459),
+    )
+
+    def testSphereAtEqualRadii(self):
+        # ops#1025: at r = q the torus's major radius is 0: per corner a cylinder q and a sphere q,
+        # the other order's solid. Before: N 4 raised, N 6 and 8 had OCCT's B-spline corners
+        for n, volume, area, faces, sphere in self.sphereRows:
+            with self.subTest(n=n):
+                prism = self.prism(self.polygon(n))
+                base = self.rimmed(prism)
+                t = math.pi - 2 * math.pi / n
+                result = base.makeFillet(self.q, self.chain(base))
+                self.assertRunOn(base, result, n, self.q, n * self.change(self.q, t))
+                self.assertEqual(len(result.Faces), faces)
+                self.assertAlmostEqual(result.Volume, volume, delta=1e-5)
+                self.assertAlmostEqual(result.Area, area, delta=1e-5)
+                for face in self.tori(result, self.q):
+                    self.assertAlmostEqual(face.Area, sphere, delta=1e-6)
+                    self.assertAlmostEqual(face.Area, (math.pi - t) * self.q**2, delta=1e-6)
+                self.assertSame(result, self.otherOrder(prism, self.q))
+
+    def testSphereOneCornerAlone(self):
+        points = self.polygon(8)
+        prism = self.prism(points)
+        base = self.rimmed(prism)
+        result = base.makeFillet(self.q, self.chain(base, [points[0]]))
+        self.assertRunOn(base, result, 1, self.q, self.change(self.q, 0.75 * math.pi))
+        self.assertSame(result, self.otherOrder(prism, self.q, [points[0]]))
+
+    def testSphereInAPocket(self):
+        # Concave, RB11's pocket: block 100 x 100 x 10, a square pocket 40 across, 5 deep, its
+        # floor edges q first; V 92084.653786 (RB27), material added
+        block = Part.makeBox(100, 100, 10, V(-50, -50, 0)).cut(Part.makeBox(40, 40, 6, V(-20, -20, 5)))
+        floor = [
+            e
+            for e in block.Edges
+            if abs(e.BoundBox.ZMax - 5) < 1e-9 and abs(e.BoundBox.ZMin - 5) < 1e-9
+        ]
+        self.assertEqual(len(floor), 4)
+        base = block.makeFillet(self.q, floor)
+        lines = [e for e in self.vertical(base) if e.BoundBox.ZMin > 5 - 1e-9 and abs(e.BoundBox.XMin) < 21]
+        self.assertEqual(len(lines), 4)
+        result = base.makeFillet(self.q, lines)
+        self.assertTrue(result.isValid())
+        self.assertEqual(len(result.Faces), len(base.Faces) + 8)
+        self.assertEqual(len(self.tori(result, self.q)), 4)
+        self.assertNotIn("Part::GeomBSplineSurface", [f.Surface.TypeId for f in result.Faces])
+        self.assertAlmostEqual(result.Volume, 92084.653786, delta=1e-5)
+
+    def testSpindleRange(self):
+        # ops#1024: r in (q, 2q), the torus of major r - q below its minor (RB10, ops#1024's table;
+        # RB27 at 1.55). Before: refused, and OCCT raised (N 4) or left B-spline corners
+        for n, r, volume in (
+            (4, 1.8, 10678.279938),
+            (4, 2.25, 10673.959633),
+            (4, 2.7, 10668.596363),
+            (6, 1.55, 9251.8897788),
+            (8, 1.55, 8851.0442842),
+        ):
+            with self.subTest(n=n, r=r):
+                prism = self.prism(self.polygon(n))
+                base = self.rimmed(prism)
+                t = math.pi - 2 * math.pi / n
+                result = base.makeFillet(r, self.chain(base))
+                self.assertRunOn(base, result, n, r, n * self.change(r, t))
+                self.assertAlmostEqual(result.Volume, volume, delta=1e-5)
+
+    def testBelowTheEarlierRadiusNotTaken(self):
+        # Onshape's corner below q is a free-form patch (RB27: r 1.45 and 1.0): not this rule
+        for n, r in ((6, 1.45), (4, 1.0)):
+            with self.subTest(n=n, r=r):
+                base = self.rimmed(self.prism(self.polygon(n)))
+                try:
+                    result = base.makeFillet(r, self.chain(base))
+                except Exception:
+                    continue
+                types = [f.Surface.TypeId for f in result.Faces]
+                self.assertNotIn("Part::GeomSphere", types)
+                self.assertNotIn("Part::GeomSurfaceOfRevolution", types)
 
     def testConcaveObtuseCornerNotTaken(self):
         # A hexagonal pocket: its floor rounds and its inside vertical corners (concave, 120 deg)

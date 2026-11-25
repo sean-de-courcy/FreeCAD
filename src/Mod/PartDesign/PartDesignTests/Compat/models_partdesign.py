@@ -1312,6 +1312,49 @@ def MitreRunOnHexagon(make):
     return {"volumes": {"CornerRunOn": base.Shape.Volume - 6 * T.change(radius, 2 * math.pi / 3)}}
 
 
+def MitreRunOnOctagonSphere(make):
+    """MitreRunOnHexagon's round on an octagon (the census corners' 135 degrees) with the round's
+    radius equal to the rim's, 1.5: Onshape's corner is a cylinder 1.5 with a sphere 1.5 at its
+    foot, the torus's major radius 0 (ops#1025, oracle RB27: V 8851.1147166).
+
+    Body: as BaseFeature, a regular octagon across flats 60 with a vertex on +x, 3 thick, its top
+    edges rounded 1.5 (Part's makeFillet); a Fillet of radius 1.5 on the eight vertical lines alone.
+    fork-1.0.8's OCCT fillet builds B-spline faces there, 1.3e-3 mm3 less material than Onshape's.
+    The volume from the base's own, less 8 corners' closed form (K = q^3 / 6 at r = q)."""
+    from parttests.FilletFallbackTest import MitreRunOnAngleTest as T
+
+    radius = T.q
+    doc = make("MitreRunOnOctagonSphere")
+    rad = T.flats / 2 / math.cos(math.pi / 8)
+    points = [V(rad * math.cos(math.pi * k / 4), rad * math.sin(math.pi * k / 4), 0) for k in range(8)]
+    prism = Part.Face(Part.makePolygon(points + points[:1])).extrude(V(0, 0, T.thick))
+    top = [e for e in prism.Edges if all(abs(v.Point.z - T.thick) < 1e-9 for v in e.Vertexes)]
+    named = prism.makeFillet(T.q, top)
+    shape = Part.Shape()
+    shape.importBrepFromString(named.exportBrepToString())
+    base = doc.addObject("Part::Feature", "RimmedOctagon")
+    base.Shape = shape
+    body = newBody(doc, "Body")
+    body.BaseFeature = base
+    doc.recompute()
+    lines = [
+        "Edge%d" % i
+        for i, e in enumerate(base.Shape.Edges, 1)
+        if e.Curve.TypeId == "Part::GeomLine" and abs(e.tangentAt(e.FirstParameter).z) > 0.999
+    ]
+    if len(lines) != 8:
+        raise AssertionError(f"the octagon has {len(lines)} vertical lines, expected 8")
+    fillet = body.newObject("PartDesign::Fillet", "CornerSphere")
+    fillet.Base = (body.BaseFeature, lines)
+    fillet.Radius = radius
+    body.Tip = fillet
+    doc.recompute()
+    spheres = [f for f in fillet.Shape.Faces if f.Surface.TypeId == "Part::GeomSphere"]
+    if len(spheres) != 8:
+        raise AssertionError(f"CornerSphere has {len(spheres)} sphere faces, not the run-on's 8")
+    return {"volumes": {"CornerSphere": base.Shape.Volume - 8 * T.change(radius, 0.75 * math.pi)}}
+
+
 MODELS = [
     RevolutionGroove,
     SidedVariants,
@@ -1335,4 +1378,5 @@ MODELS = [
 
     ChamferVaryingAngle,
     MitreRunOnHexagon,
+    MitreRunOnOctagonSphere,
 ]
