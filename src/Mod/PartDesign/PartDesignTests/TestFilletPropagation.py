@@ -790,6 +790,55 @@ class TestFilletPropagation(unittest.TestCase):
             shape.common(under).Volume - fillet.Shape.common(under).Volume, 0.242862, delta=1e-4
         )
 
+    def assertWholeRoundAndOtherUntouched(self, shape, result, other, xa, xb, r=2.0):
+        """Over the top line from xa to xb the round removes (1 - pi/4) r^2 (xb - xa) from the box under its
+        corner, and `other` loses nothing"""
+        box = Part.makeBox(xb - xa, r, r, V(xa, 5 - r, 10 - r))
+        removed = shape.common(box).Volume - result.common(box).Volume
+        self.assertAlmostEqual(removed, (1 - math.pi / 4) * r * r * (xb - xa), delta=1e-4)
+        self.assertAlmostEqual(shape.common(other).Volume - result.common(other).Volume, 0, delta=1e-4)
+
+    def testOffRunOnGrazingARoundPostKeepsTheRound(self):
+        """Review pr1028-r1, RunOnGrazesARoundPost: GB13's slot on a plate z -2..0 and a round post r 5 whose axis
+        is at (21, 0.01): the top line's run on pierces the post at a grazing angle at x 20.68, past the slot's
+        round end. The post's tangent plane there leans back over the whole picked edge: the run on stops past
+        the line's end vertex only, the round over the line is whole and the post loses nothing"""
+        post = Part.makeCylinder(5, 22, V(21, 0.01, -2))
+        plate = Part.makeBox(46, 20, 2, V(-16, -10, -2))
+        shape = self.deeShape(slotEnd=True).fuse([plate, post]).removeSplitter()
+        base = self.baseOf(shape)
+        fillet = self.fillet(base, [self.topLine(base.Shape)], TangentPropagation=False)
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+        self.assertWholeRoundAndOtherUntouched(shape, fillet.Shape, post, -10, 10)
+
+    def testOffRunOnPiercingARampKeepsTheRound(self):
+        """Review pr1028-r1, RunOnPiercesARamp: the dee with its convex corner at (-10, 5) rounded 1 (the run on
+        goes straight on, RB26) and a ramp block x -14..-10, y -2..14, whose top rises away from the dee at 30
+        degrees, z = 10 + (-10.5 - x) tan 30: the run on pierces it at x -10.5, and the ramp's plane, run back
+        over the dee, would cut the round off the line near its end. The round over the line is whole"""
+        dee = self.deeShape()
+        corner = [
+            edge
+            for edge in dee.Edges
+            if isinstance(edge.Curve, Part.Line)
+            and abs(edge.Length - 10) < 1e-6
+            and abs(edge.BoundBox.XMin + 10) < 1e-6
+            and abs(edge.BoundBox.XMax + 10) < 1e-6
+            and abs(edge.BoundBox.YMin - 5) < 1e-6
+        ]
+        self.assertEqual(len(corner), 1)
+        t = math.tan(math.radians(30))
+        z = lambda x: 10 + (-10.5 - x) * t
+        profile = Part.makePolygon(
+            [V(-14, -2, 0), V(-10, -2, 0), V(-10, -2, z(-10)), V(-14, -2, z(-14)), V(-14, -2, 0)]
+        )
+        ramp = Part.Face(profile).extrude(V(0, 16, 0))
+        shape = dee.makeFillet(1.0, corner).fuse(ramp).removeSplitter()
+        base = self.baseOf(shape)
+        fillet = self.fillet(base, [self.topLine(base.Shape)], TangentPropagation=False)
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+        self.assertWholeRoundAndOtherUntouched(shape, fillet.Shape, ramp, -9, 10)
+
 
 if __name__ == "__main__":
     unittest.main()

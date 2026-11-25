@@ -30,6 +30,7 @@
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepAlgoAPI_Common.hxx>
+#include <BRepAlgoAPI_Cut.hxx>
 #include <BRepBndLib.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
@@ -2045,7 +2046,29 @@ TopoDS_Shape runOutTool(const TopoDS_Shape& base, const TopoDS_Edge& edge, doubl
             wallOutward = outward;
         }
         if (std::isfinite(nearest)) {
-            keepSide(where, wallOutward);
+            // Only the run on is stopped: the tool loses what lies behind the wall's tangent plane
+            // and beyond the end vertex, never anything over the edge itself (review pr1028-r1:
+            // a round post grazed by the run on, a ramp it pierces, whose planes run back over
+            // the edge). Behind a curved or sloping face's tangent plane past the vertex there is
+            // none of that face's material in front of it
+            const gp_Pnt vertex = BRep_Tool::Pnt(ends[e]);
+            auto halfSpace = [&](const gp_Pnt& at, const gp_Dir& towards) {
+                const gp_Ax2 frame(at, towards);
+                const gp_Pnt origin = at.Translated(
+                    (gp_Vec(frame.XDirection()) + gp_Vec(frame.YDirection())) * (-size / 2)
+                );
+                return BRepPrimAPI_MakeBox(gp_Ax2(origin, towards, frame.XDirection()), size, size, size)
+                    .Shape();
+            };
+            BRepAlgoAPI_Common region(halfSpace(where, wallOutward.Reversed()), halfSpace(vertex, outOf));
+            if (!region.IsDone()) {
+                notStraightRunOut();
+            }
+            BRepAlgoAPI_Cut trimmed(tool, region.Shape());
+            if (!trimmed.IsDone()) {
+                notStraightRunOut();
+            }
+            tool = trimmed.Shape();
         }
     }
     // A point of the section near the edge at the edge's middle, and one in a run on
