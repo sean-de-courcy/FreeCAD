@@ -95,8 +95,8 @@ import FreeCAD as App
 import CompatRecord
 
 # Size budget of the committed corpus (3.1): raising it is the coordinator's call.
-GENERATION_BUDGET = 4 * 1024 * 1024  # 3 MB until gen5 (48 models, 3.8 MB; ops#855)
-CORPUS_BUDGET = 32 * 1024 * 1024  # 10 MB until gen2, 16 MB until gen4, 24 MB until gen5 (decision 292, ops#628; ops#640; ops#855)
+GENERATION_BUDGET = 5 * 1024 * 1024  # 3 MB until gen5 (48 models, 3.8 MB; ops#855), 4 MB until gen6 (54 models, 4.4 MB; ops#883)
+CORPUS_BUDGET = 40 * 1024 * 1024  # 10 MB until gen2, 16 MB until gen4, 24 MB until gen5, 32 MB until gen6 (decision 292, ops#628; ops#640; ops#855; ops#883)
 
 # Console lines that say a reference or a link was lost.
 BAD_LINES = (
@@ -914,7 +914,7 @@ class TestCompatCorpus(unittest.TestCase):
         self.assertEqual(found["gen0/A/ordered/recompute"], [])
 
     def testSizeBudget(self):
-        """A generation stays under 4 MB, the corpus under 32 MB (3.1, decision 292; gen4, gen5)."""
+        """A generation stays under 5 MB, the corpus under 40 MB (3.1, decision 292; gen4, gen5, gen6)."""
         total = 0
         for gen, folder in generations().items():
             size = sum(os.path.getsize(os.path.join(folder, f)) for f in os.listdir(folder))
