@@ -7152,9 +7152,15 @@ class FillPastANotchTest(unittest.TestCase):
             return 2 * (-1.6 * (t * math.sqrt(4 - t * t) + 4 * math.asin(t / 2)) / 2 + (4 - t * t) ** 1.5 / 3)
 
         window = chord(-1.6) - chord(-2)
-        self.assertAlmostEqual(result.Volume - body.Volume, 10 - window, delta=1e-6)
+        # The volume integral over B-spline faces is good to about 3e-5 here (the body alone)
+        self.assertAlmostEqual(result.Volume - body.Volume, 10 - window, delta=1e-5)
         front = Part.makeCylinder(2, 2, FreeCAD.Vector(0, 10, 2.6), FreeCAD.Vector(1, 0, 0))
         self.assertLess(result.common(front).Volume, 1e-9)
+        # The same solid as the analytic notch's
+        plainBody, plainFoot = self.body(0.6)
+        plain = plainBody.makeChamfer(1.0, plainFoot)
+        self.assertLess(result.cut(plain).Volume, 1e-6)
+        self.assertLess(plain.cut(result).Volume, 1e-6)
 
     # A closed window (ops#883 H): a hole r 0.5 through the wall about y = 10, z = 1, its rim 0.5
     # above the floor, inside the fill's strip (OCCT fails on it, fillet and chamfer)
