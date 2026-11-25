@@ -15496,6 +15496,17 @@ void Recorder::add(int edges, int corners, bool rolledOn, bool ranThrough)
     }
 }
 
+void Recorder::passOn() const
+{
+    if (outer) {
+        outer->rolled = outer->rolled || rolled;
+        outer->ran = outer->ran || ran;
+        outer->builds += builds;
+        outer->edges += edges;
+        outer->corners += corners;
+    }
+}
+
 std::string Recorder::report(const std::string& name) const
 {
     if (builds == 0) {
@@ -18664,6 +18675,10 @@ struct RunOnCorner
     gp_Dir into[2];       // in A and in B, normal to L, into the face
     double q {0};         // the earlier rounds' radius
     double height {0};    // from F to L's other end: |L| + q
+    // The wedge's angle t between into[0] and into[1] (ops#1020: 90 to 135 degrees)
+    double cosine {0};
+    double sine {1};
+    double setback {0};   // from the corner to the new round's tangent points: r cot(t / 2)
     bool convex {false};
     double change {0};    // the volume the corner adds (concave) or takes (convex), closed form
     double tools {0};     // the column's and the torus's volumes
@@ -18741,11 +18756,13 @@ TopoDS_Face otherFace(const TopTools_IndexedDataMapOfShapeListOfShape& edgeFaces
 
 /** The corner of a picked line L, between planes A and B, at its vertex V, where L runs into the
  * mitre E of two earlier rounds (notes/fillet-mitre-runon-918.md, the rule and its addendum).
- * Refuses unless every condition holds: A normal to B; at V exactly L, E, lA (A and CA) and lB (B
- * and CB); CA and CB cylinders of one radius q, r >= 2q, tangent to A and B along lA and lB, their
- * axes meeting at the point q from F, A and B on the kite's side; E picked, leaving V along L, to
- * W on F (3 edges, 3 faces there), F a plane normal to L at q from V whose material lies where L's
- * does; lA and lB longer than r; L's other end a free end on a plane normal to L.
+ * Refuses unless every condition holds: A and B at an angle t of 90 degrees, or of 90 to 135
+ * degrees for a convex corner (ops#1020, notes/fillet-mitre-angle-1020-design.md); at V exactly L,
+ * E, lA (A and CA) and lB (B and CB); CA and CB cylinders of one radius q, r >= 2q, tangent to A
+ * and B along lA and lB, their axes meeting at the point q from F, A and B on the kite's side; E
+ * picked, leaving V along L, to W on F (3 edges, 3 faces there), F a plane normal to L at q from V
+ * whose material lies where L's does; lA and lB longer than the setback r cot(t / 2); L's other
+ * end a free end on a plane normal to L.
  */
 RunOnCorner runOnCorner(
     const TopoDS_Edge& line,
@@ -18768,9 +18785,22 @@ RunOnCorner runOnCorner(
     corner.up = awayFrom(line, vertex);
     const gp_Pln planes[2] = {BRepAdaptor_Surface(faces[0], Standard_False).Plane(),
                               BRepAdaptor_Surface(faces[1], Standard_False).Plane()};
-    if (std::abs(planes[0].Axis().Direction().Dot(planes[1].Axis().Direction())) > square) {
-        refuse("the mitre corner's faces are not at a right angle");
+    const double middle = (BRepAdaptor_Curve(line).FirstParameter()
+                           + BRepAdaptor_Curve(line).LastParameter())
+        / 2;
+    for (int i = 0; i < 2; ++i) {
+        corner.into[i] = inwardIn(faces[i], line, middle);
     }
+    // The wedge's angle t, from the faces' inward directions (the planes' normals lose its sign):
+    // 90 degrees, or up to 135 for a convex corner (ops#1020: Onshape measured at 90, 120 and 135,
+    // oracle row RB8; the census corners sit at 135, so the bound does not cut them by rounding)
+    corner.cosine = corner.into[0].Dot(corner.into[1]);
+    corner.sine = gp_Vec(corner.into[0]).Crossed(gp_Vec(corner.into[1])).Magnitude();
+    if (corner.cosine > square || corner.cosine < -std::sqrt(0.5) - 1e-6 || corner.sine < 0.5) {
+        refuse("the mitre corner's faces are not at an angle of 90 to 135 degrees");
+    }
+    // cot(t / 2)
+    corner.setback = r * (1 + corner.cosine) / corner.sine;
     const auto at = edgesAt(vertexEdges, edgeFaces, vertex);
     if (at.size() != 4 || facesAt(vertexFaces, vertex).size() != 4) {
         refuse("the mitre corner is not a vertex of 4 edges and 4 faces");
@@ -18804,13 +18834,9 @@ RunOnCorner runOnCorner(
     if (awayFrom(corner.mitre, vertex).Dot(corner.up) > -1 + tangentTolerance) {
         refuse("the earlier rounds' mitre does not leave the corner along the line");
     }
-    const double middle = (BRepAdaptor_Curve(line).FirstParameter()
-                           + BRepAdaptor_Curve(line).LastParameter())
-        / 2;
     gp_Lin axes[2];
     for (int i = 0; i < 2; ++i) {
         corner.rounds[i] = otherFace(edgeFaces, feet[i], faces[i]);
-        corner.into[i] = inwardIn(faces[i], line, middle);
         BRepAdaptor_Curve foot(feet[i]);
         BRepAdaptor_Surface round(corner.rounds[i], Standard_False);
         if (foot.GetType() != GeomAbs_Line || round.GetType() != GeomAbs_Cylinder) {
@@ -18834,11 +18860,11 @@ RunOnCorner runOnCorner(
             || std::abs(axes[i].Distance(v) - corner.q) > tolerance) {
             refuse("an earlier round is not tangent to its face along its foot");
         }
-        // Room: the foot runs on past the new round's reach
+        // Room: the foot runs on past the new round's tangent point (r at 90 degrees)
         TopoDS_Vertex ends[2];
         TopExp::Vertices(feet[i], ends[0], ends[1]);
         const TopoDS_Vertex& beyond = ends[0].IsSame(vertex) ? ends[1] : ends[0];
-        if (BRep_Tool::Pnt(beyond).Distance(v) <= r + tolerance) {
+        if (BRep_Tool::Pnt(beyond).Distance(v) <= corner.setback + tolerance) {
             refuse("the earlier rounds end within the new round's reach");
         }
     }
@@ -18848,8 +18874,13 @@ RunOnCorner runOnCorner(
         refuse("the earlier rounds' radius above half the new one");
     }
     corner.convex = gp_Vec(corner.into[1]).Dot(gp_Vec(outwardNormal(faces[0], v))) < 0;
+    if (!corner.convex && corner.cosine < -square) {
+        // RB8's plates are convex; the concave corners measured are at 90 degrees (ops#1020)
+        refuse("a concave mitre corner whose faces are not at a right angle");
+    }
     corner.foot = v.Translated(gp_Vec(corner.up) * -q);
-    const gp_Vec kite = gp_Vec(corner.into[0]) + gp_Vec(corner.into[1]);
+    // At distance x from both faces, on the wedge's side: the foot plus kite x (ops#1020)
+    const gp_Vec kite = (gp_Vec(corner.into[0]) + gp_Vec(corner.into[1])) / corner.sine;
     // The axes meet at the point q from F, A and B, on the kite's side of both (skeptic 1)
     const gp_Pnt meet = corner.foot.Translated(kite * q + gp_Vec(corner.up) * q);
     if (axes[0].Distance(meet) > tolerance || axes[1].Distance(meet) > tolerance) {
@@ -18922,17 +18953,46 @@ RunOnCorner runOnCorner(
     return corner;
 }
 
-/// The column: the r-square at the corner less the disc about the new round's axis, from F to
-/// L's other end
+/// The new round's axis on F: r from both faces, on the wedge's side
+gp_Pnt runOnCentre(const RunOnCorner& corner, double r)
+{
+    return corner.foot.Translated(
+        (gp_Vec(corner.into[0]) + gp_Vec(corner.into[1])) * (r / corner.sine)
+    );
+}
+
+/// The unit directions from the new round's axis to its tangent points on A and on B
+std::pair<gp_Vec, gp_Vec> runOnTangents(const RunOnCorner& corner)
+{
+    const gp_Vec u0(corner.into[0]);
+    const gp_Vec u1(corner.into[1]);
+    return {(u1 - u0 * corner.cosine) * (-1 / corner.sine),
+            (u0 - u1 * corner.cosine) * (-1 / corner.sine)};
+}
+
+/// The new round's turn about its axis, pi - t
+double runOnTurn(const RunOnCorner& corner)
+{
+    return pi - std::atan2(corner.sine, corner.cosine);
+}
+
+/// The column's section area: the kite between the faces and the axis less the round's sector,
+/// r^2 (cot(t / 2) - (pi - t) / 2)
+double runOnColumnArea(const RunOnCorner& corner, double r)
+{
+    return r * corner.setback - r * r * runOnTurn(corner) / 2;
+}
+
+/// The column: the kite at the corner (the faces' tangent points and the axis) less the round's
+/// sector, from F to L's other end
 TopoDS_Shape runOnColumn(const RunOnCorner& corner, double r)
 {
-    const gp_Vec a = gp_Vec(corner.into[0]) * r;
-    const gp_Vec b = gp_Vec(corner.into[1]) * r;
+    const gp_Vec kite = gp_Vec(corner.into[0]) + gp_Vec(corner.into[1]);
     const gp_Pnt p0 = corner.foot;
-    const gp_Pnt p1 = p0.Translated(a);
-    const gp_Pnt p2 = p0.Translated(b);
-    const gp_Pnt centre = p0.Translated(a + b);
-    const gp_Pnt mid = centre.Translated((a + b) * (-1 / std::sqrt(2.0)));
+    const gp_Pnt p1 = p0.Translated(gp_Vec(corner.into[0]) * corner.setback);
+    const gp_Pnt p2 = p0.Translated(gp_Vec(corner.into[1]) * corner.setback);
+    const gp_Pnt centre = runOnCentre(corner, r);
+    const gp_Pnt mid = centre.Translated(kite * (-r / kite.Magnitude()));
     Handle(Geom_TrimmedCurve) arc = GC_MakeArcOfCircle(p1, mid, p2).Value();
     BRepBuilderAPI_MakeWire wire(
         BRepBuilderAPI_MakeEdge(p0, p1).Edge(),
@@ -18951,17 +19011,14 @@ TopoDS_Shape runOnColumn(const RunOnCorner& corner, double r)
 }
 
 /// The torus at the column's foot: the earlier round's section in the meridian plane (the q-square
-/// at the new round's surface on F, less the quarter disc), a quarter turn about the new round's
+/// at the new round's surface on F, less the quarter disc), turned pi - t about the new round's
 /// axis, from A's foot to B's
 TopoDS_Shape runOnTorus(const RunOnCorner& corner, double r)
 {
     const double q = corner.q;
-    const gp_Pnt centre = corner.foot.Translated(
-        (gp_Vec(corner.into[0]) + gp_Vec(corner.into[1])) * r
-    );
+    const gp_Pnt centre = runOnCentre(corner, r);
     // Toward A's foot (the point of A nearest the axis) and toward B's
-    const gp_Vec toA = gp_Vec(corner.into[1]) * -1;
-    const gp_Vec toB = gp_Vec(corner.into[0]) * -1;
+    const auto [toA, toB] = runOnTangents(corner);
     const gp_Vec up(corner.up);
     auto at = [&](double rho, double h) {
         return centre.Translated(toA * rho + up * h);
@@ -18978,7 +19035,7 @@ TopoDS_Shape runOnTorus(const RunOnCorner& corner, double r)
         refuse("the run-on torus's section failed");
     }
     BRepBuilderAPI_MakeFace face(wire.Wire(), Standard_True);
-    const double turn = up.Crossed(toA).Dot(toB) > 0 ? pi / 2 : -pi / 2;
+    const double turn = up.Crossed(toA).Dot(toB) > 0 ? runOnTurn(corner) : -runOnTurn(corner);
     BRepPrimAPI_MakeRevol revolution(face.Face(), gp_Ax1(centre, corner.up), turn);
     if (!revolution.IsDone()) {
         refuse("the run-on torus failed");
@@ -18986,23 +19043,26 @@ TopoDS_Shape runOnTorus(const RunOnCorner& corner, double r)
     return revolution.Shape();
 }
 
-/// The box about a corner's reach: the r-square at the corner and margin beyond each side, from
-/// margin below F to margin beyond L's other end
+/// The prism about a corner's reach: the kite at the corner (the corner, the tangent points and
+/// the axis) and margin beyond each side, from margin below F to margin beyond L's other end. Its
+/// sides are the faces moved out by margin and the planes normal to each face at margin past the
+/// tangent point, so they cross every face at an angle (ops#1020)
 TopoDS_Shape runOnReach(const RunOnCorner& corner, double r, double margin)
 {
     const gp_Vec a(corner.into[0]);
     const gp_Vec b(corner.into[1]);
     const gp_Vec up(corner.up);
-    const gp_Pnt p0 = corner.foot.Translated((a + b + up) * -margin);
-    const double side = r + 2 * margin;
-    BRepBuilderAPI_MakePolygon square(
-        p0,
-        p0.Translated(a * side),
-        p0.Translated((a + b) * side),
-        p0.Translated(b * side),
+    const auto [toA, toB] = runOnTangents(corner);
+    const gp_Pnt base = corner.foot.Translated(up * -margin);
+    const gp_Pnt centre = runOnCentre(corner, r).Translated(up * -margin);
+    BRepBuilderAPI_MakePolygon kite(
+        base.Translated((a + b) * (-margin / corner.sine)),
+        base.Translated(a * (corner.setback + margin) + toA * margin),
+        centre.Translated((a + b) * (margin / (1 + corner.cosine))),
+        base.Translated(b * (corner.setback + margin) + toB * margin),
         Standard_True
     );
-    BRepBuilderAPI_MakeFace face(square.Wire(), Standard_True);
+    BRepBuilderAPI_MakeFace face(kite.Wire(), Standard_True);
     BRepPrimAPI_MakePrism prism(face.Face(), up * (corner.height + 2 * margin));
     if (!prism.IsDone()) {
         refuse("a mitre corner's reach failed");
@@ -19104,10 +19164,12 @@ bool constructMitreRunOns(
             for (size_t j = 0; j < i; ++j) {
                 for (const auto& a : corners[i].rounds) {
                     for (const auto& b : corners[j].rounds) {
+                        // Their reaches, each the setback and q / 4 along the round (ops#1020)
                         if (a.IsSame(b)
                             && corners[i].foot.Distance(corners[j].foot)
-                                <= 2 * (r + corners[i].q / 4) + linearTolerance) {
-                            refuse("two mitre corners on one earlier round within twice the radius");
+                                <= corners[i].setback + corners[j].setback + corners[i].q / 2
+                                    + linearTolerance) {
+                            refuse("two mitre corners on one earlier round whose reaches meet");
                         }
                     }
                     if (corners[i].mitre.IsSame(corners[j].mitre)) {
@@ -19134,14 +19196,18 @@ bool constructMitreRunOns(
         double toolVolume = 0;
         for (auto& corner : corners) {
             const double q = corner.q;
-            const double area = r * r * s;
+            // Per corner with its own angle t (ops#1020): the column's section r^2 (c - (pi - t) /
+            // 2), c = cot(t / 2); the torus (pi - t) K; at 90 degrees r^2 s and pi / 2 K
+            const double area = runOnColumnArea(corner, r);
+            const double turn = runOnTurn(corner);
+            const double c = corner.setback / r;
             const double k = s * q * q * (r - q) + q * q * q / 6;
             const TopoDS_Shape column = runOnColumn(corner, r);
             const TopoDS_Shape torus = runOnTorus(corner, r);
             const double columnVolume = volumeOf(column);
             const double torusVolume = volumeOf(torus);
             if (std::abs(columnVolume - area * corner.height) > volumeTolerance * columnVolume
-                || std::abs(torusVolume - pi / 2 * k) > volumeTolerance * torusVolume) {
+                || std::abs(torusVolume - turn * k) > volumeTolerance * torusVolume) {
                 refuse("a mitre run-on tool's volume differs from its closed form");
             }
             const double volume = columnVolume + torusVolume;
@@ -19152,7 +19218,7 @@ bool constructMitreRunOns(
             // tangentially, and OCCT's common was 0.1-0.5 % off 2K at some sizes (review
             // fix918-r1, L2), while the box's faces cross every face at an angle
             reaches.push_back(runOnReach(corner, r, q / 4));
-            corner.change = area * corner.height + (pi / 2 - 2) * k;
+            corner.change = area * corner.height + (turn - 2 * c) * k;
             corner.tools = volume;
             expected += corner.change;
             toolVolume += volume;
