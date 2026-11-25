@@ -99,6 +99,8 @@
 #include <GProp_GProps.hxx>
 #include <IntCurvesFace_ShapeIntersector.hxx>
 #include <Precision.hxx>
+#include <ShapeAnalysis_Surface.hxx>
+#include <ShapeFix_Edge.hxx>
 #include <ShapeFix_Shell.hxx>
 #include <ShapeUpgrade_UnifySameDomain.hxx>
 #include <NCollection_Map.hxx>
@@ -19070,6 +19072,203 @@ TopoDS_Shape runOnReach(const RunOnCorner& corner, double r, double margin)
     return prism.Shape();
 }
 
+/// The torus meets each earlier round along its tangent end arc, and at some sizes the run-on's
+/// Boolean returns that arc as an approximated B-spline beside a sliver of the round (fx1020, the
+/// at-size sweep: N 6 r/q 4 at 10x-30x, tolerance ~7e-4 of the size): the solid is right, its
+/// volume integral ~4e-5 of the corner's change off. Each edge of a torus's image that is not
+/// analytic, whose vertices lie on one of the torus tool's own circles and whose faces' surfaces
+/// both hold that circle's arc between them, is replaced by the arc, with its curves on both faces
+/// made anew. Where the sliver stayed a face of its own (two edges: this one and the round's arc
+/// between the same vertices), it is dropped and the arc bounds the round too. Returns the
+/// replacements' history, or null when there were none; the caller keeps the result only if it
+/// stays one valid solid, and the result's checks follow
+Handle(BRepTools_History) runOnExactArcs(
+    TopoDS_Shape& shape,
+    const std::vector<TopoDS_Shape>& tori,
+    const TopTools_IndexedMapOfShape& torusImages
+)
+{
+    std::vector<gp_Circ> circles;
+    for (const auto& torus : tori) {
+        for (TopExp_Explorer it(torus, TopAbs_EDGE); it.More(); it.Next()) {
+            BRepAdaptor_Curve curve(TopoDS::Edge(it.Current()));
+            if (curve.GetType() == GeomAbs_Circle) {
+                circles.push_back(curve.Circle());
+            }
+        }
+    }
+    auto off = [](const gp_Circ& circle, const gp_Pnt& point) {
+        return point.Distance(ElCLib::Value(ElCLib::Parameter(circle, point), circle));
+    };
+    // The edge's curve on the face, in the period the old edge's curve there runs in (on the
+    // torus a curve a period off cost its face half its area: N 6 r/q 2 at 30x)
+    auto onFace = [](const TopoDS_Edge& exact,
+                     const TopoDS_Face& face,
+                     const TopoDS_Edge& old,
+                     const TopoDS_Vertex& start) {
+        ShapeFix_Edge().FixAddPCurve(exact, face, false, linearTolerance);
+        double from = 0;
+        double to = 0;
+        double oldFrom = 0;
+        double oldTo = 0;
+        Handle(Geom2d_Curve) made = BRep_Tool::CurveOnSurface(exact, face, from, to);
+        Handle(Geom2d_Curve) was = BRep_Tool::CurveOnSurface(old, face, oldFrom, oldTo);
+        if (made.IsNull() || was.IsNull()) {
+            return false;
+        }
+        const gp_Pnt2d want = was->Value(BRep_Tool::Parameter(start, old));
+        const gp_Pnt2d have = made->Value(BRep_Tool::Parameter(start, exact));
+        Handle(Geom_Surface) surface = BRep_Tool::Surface(face);
+        double du = 0;
+        double dv = 0;
+        if (surface->IsUPeriodic()) {
+            du = std::round((want.X() - have.X()) / surface->UPeriod()) * surface->UPeriod();
+        }
+        if (surface->IsVPeriodic()) {
+            dv = std::round((want.Y() - have.Y()) / surface->VPeriod()) * surface->VPeriod();
+        }
+        if (du != 0 || dv != 0) {
+            Handle(Geom2d_Curve) moved
+                = Handle(Geom2d_Curve)::DownCast(made->Translated(gp_Vec2d(du, dv)));
+            BRep_Builder().UpdateEdge(exact, moved, face, BRep_Tool::Tolerance(exact));
+        }
+        return true;
+    };
+    TopTools_IndexedDataMapOfShapeListOfShape edgeFaces;
+    TopExp::MapShapesAndUniqueAncestors(shape, TopAbs_EDGE, TopAbs_FACE, edgeFaces);
+    BRepTools_ReShape reshape;
+    Handle(BRepTools_History) history = new BRepTools_History;
+    TopTools_IndexedMapOfShape done;
+    for (int i = 1; i <= edgeFaces.Extent(); ++i) {
+        const TopoDS_Edge edge = TopoDS::Edge(edgeFaces.FindKey(i).Oriented(TopAbs_FORWARD));
+        const TopTools_ListOfShape& faces = edgeFaces(i);
+        if (faces.Extent() != 2 || BRep_Tool::Degenerated(edge) || done.Contains(edge)) {
+            continue;
+        }
+        const bool firstIsTorus = torusImages.Contains(faces.First());
+        if (!firstIsTorus && !torusImages.Contains(faces.Last())) {
+            continue;
+        }
+        const TopoDS_Face torusFace = TopoDS::Face(firstIsTorus ? faces.First() : faces.Last());
+        const TopoDS_Face other = TopoDS::Face(firstIsTorus ? faces.Last() : faces.First());
+        if (done.Contains(other)) {
+            continue;
+        }
+        BRepAdaptor_Curve curve(edge);
+        const GeomAbs_CurveType type = curve.GetType();
+        if (type == GeomAbs_Line || type == GeomAbs_Circle || type == GeomAbs_Ellipse) {
+            continue;
+        }
+        TopoDS_Vertex first;
+        TopoDS_Vertex last;
+        TopExp::Vertices(edge, first, last);
+        if (first.IsNull() || last.IsNull() || first.IsSame(last)) {
+            continue;
+        }
+        const gp_Pnt p1 = BRep_Tool::Pnt(first);
+        const gp_Pnt p2 = BRep_Tool::Pnt(last);
+        const double within = BRep_Tool::Tolerance(edge) + linearTolerance;
+        // A sliver: the other face has only this edge and an arc between the same vertices
+        TopoDS_Edge sliverArc;
+        TopoDS_Face round = other;
+        {
+            TopTools_IndexedMapOfShape otherEdges;
+            TopExp::MapShapes(other, TopAbs_EDGE, otherEdges);
+            if (otherEdges.Extent() == 2) {
+                const TopoDS_Edge arc = TopoDS::Edge(
+                    (otherEdges(1).IsSame(edge) ? otherEdges(2) : otherEdges(1))
+                        .Oriented(TopAbs_FORWARD)
+                );
+                TopoDS_Vertex a;
+                TopoDS_Vertex b;
+                TopExp::Vertices(arc, a, b);
+                const bool sameEnds = (a.IsSame(first) && b.IsSame(last))
+                    || (a.IsSame(last) && b.IsSame(first));
+                const int index = edgeFaces.FindIndex(arc);
+                if (sameEnds && BRepAdaptor_Curve(arc).GetType() == GeomAbs_Circle && index > 0
+                    && edgeFaces(index).Extent() == 2 && !done.Contains(arc)) {
+                    sliverArc = arc;
+                    round = TopoDS::Face(
+                        edgeFaces(index).First().IsSame(other) ? edgeFaces(index).Last()
+                                                               : edgeFaces(index).First()
+                    );
+                }
+            }
+        }
+        for (const auto& circle : circles) {
+            if (off(circle, p1) > BRep_Tool::Tolerance(first) + linearTolerance
+                || off(circle, p2) > BRep_Tool::Tolerance(last) + linearTolerance) {
+                continue;
+            }
+            // The arc from the first vertex to the last the short way: the circle reversed when
+            // that runs against its sense, so the edge keeps the old one's direction
+            Handle(Geom_Circle) arc = new Geom_Circle(circle);
+            double u1 = ElCLib::Parameter(circle, p1);
+            double turn = ElCLib::Parameter(circle, p2) - u1;
+            while (turn > M_PI) {
+                turn -= 2 * M_PI;
+            }
+            while (turn <= -M_PI) {
+                turn += 2 * M_PI;
+            }
+            if (turn < 0) {
+                arc = Handle(Geom_Circle)::DownCast(arc->Reversed());
+                u1 = ElCLib::Parameter(arc->Circ(), p1);
+                turn = -turn;
+            }
+            // The surfaces are tangent along the arc, so the approximated curve wanders off it
+            // (0.04 to 0.12 at q 15, against its tolerance of 3e-4 to 7e-3) while on both within
+            // its tolerance: what is asked is that the arc lies on the faces' surfaces within the
+            // old edge's tolerance, and that the old edge stays nearer it than its ends are apart
+            bool on = true;
+            for (int k = 1; k < 8 && on; ++k) {
+                const double u = curve.FirstParameter()
+                    + (curve.LastParameter() - curve.FirstParameter()) * k / 8;
+                on = off(circle, curve.Value(u)) <= p1.Distance(p2);
+            }
+            for (const TopoDS_Face& face : {torusFace, other, round}) {
+                Handle(ShapeAnalysis_Surface) surface
+                    = new ShapeAnalysis_Surface(BRep_Tool::Surface(face));
+                for (int k = 1; k < 8 && on; ++k) {
+                    surface->ValueOfUV(arc->Value(u1 + turn * k / 8), within);
+                    on = surface->Gap() <= within;
+                }
+            }
+            if (!on) {
+                continue;
+            }
+            BRepBuilderAPI_MakeEdge make(arc, first, last, u1, u1 + turn);
+            if (!make.IsDone()) {
+                break;
+            }
+            const TopoDS_Edge exact = make.Edge();
+            if (!onFace(exact, torusFace, edge, first)
+                || !onFace(exact, round, sliverArc.IsNull() ? edge : sliverArc, first)) {
+                break;
+            }
+            ShapeFix_Edge().FixSameParameter(exact);
+            reshape.Replace(edge, exact);
+            history->AddModified(edge, exact);
+            done.Add(edge);
+            if (!sliverArc.IsNull()) {
+                const bool sameSense = TopExp::FirstVertex(sliverArc).IsSame(first);
+                reshape.Replace(sliverArc, sameSense ? exact : TopoDS::Edge(exact.Reversed()));
+                history->AddModified(sliverArc, exact);
+                reshape.Remove(other);
+                history->Remove(other);
+                done.Add(sliverArc);
+                done.Add(other);
+            }
+            break;
+        }
+    }
+    if (done.IsEmpty()) {
+        return {};
+    }
+    shape = reshape.Apply(shape);
+    return history;
+}
+
 }  // namespace
 
 bool constructMitreRunOns(
@@ -19285,6 +19484,26 @@ bool constructMitreRunOns(
             unify.Build();
             shape = unify.Shape();
             stages.emplace_back(unify.History(), shape);
+        }
+        {
+            std::vector<TopoDS_Shape> tori;
+            TopTools_IndexedMapOfShape torusImages;
+            for (const auto& piece : pieces) {
+                if (piece.torus) {
+                    tori.push_back(piece.first);
+                    for (TopExp_Explorer it(piece.first, TopAbs_FACE); it.More(); it.Next()) {
+                        for (const auto& image : imagesThrough(stages, 0, it.Current())) {
+                            torusImages.Add(image);
+                        }
+                    }
+                }
+            }
+            TopoDS_Shape exact = shape;
+            Handle(BRepTools_History) history = runOnExactArcs(exact, tori, torusImages);
+            if (!history.IsNull() && countSolids(exact) == 1 && BRepCheck_Analyzer(exact).IsValid()) {
+                shape = exact;
+                stages.emplace_back(history, shape);
+            }
         }
         // The checks of the result
         if (countSolids(shape) != 1) {

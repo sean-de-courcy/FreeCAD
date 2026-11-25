@@ -9325,6 +9325,33 @@ class MitreRunOnAngleTest(unittest.TestCase):
                 self.assertAlmostEqual(result.Area, area, delta=1e-5)
                 self.assertSame(result, self.otherOrder(prism, r))
 
+    def testTenTimesTheSize(self):
+        # N 6 r / q 4 at 10x: the run-on's Boolean returned the torus's tangent end arc on a rim
+        # round as an approximated B-spline beside a sliver of the round; the solid was right, its
+        # volume integral 0.27 low over the six corners, so the volume check refused and OCCT's
+        # error stood. The run-on puts the exact arc back (fx1020's at-size sweep)
+        k, ratio, n = 10.0, 4.0, 6
+        q, thick = self.q * k, self.thick * k
+        rad = self.flats * k / 2 / math.cos(math.pi / n)
+        points = [
+            V(rad * math.cos(2 * math.pi * i / n), rad * math.sin(2 * math.pi * i / n), 0)
+            for i in range(n)
+        ]
+        prism = Part.Face(Part.makePolygon(points + [points[0]])).extrude(V(0, 0, thick))
+        top = [e for e in prism.Edges if all(abs(v.Point.z - thick) < 1e-9 * k for v in e.Vertexes)]
+        base = prism.makeFillet(q, top)
+        r = ratio * q
+        result = base.makeFillet(r, self.vertical(base))
+        self.assertTrue(result.isValid())
+        self.assertEqual(len(result.Faces), len(base.Faces) + 2 * n)
+        self.assertNotIn("Part::GeomBSplineSurface", [f.Surface.TypeId for f in result.Faces])
+        self.assertNotIn("Part::GeomBSplineCurve", [e.Curve.TypeId for e in result.Edges])
+        t = math.pi - 2 * math.pi / n
+        c = 1 / math.tan(t / 2)
+        kk = (1 - math.pi / 4) * q * q * (r - q) + q**3 / 6
+        change = n * (r * r * (c - (math.pi - t) / 2) * thick + (math.pi - t - 2 * c) * kk)
+        self.assertAlmostEqual(base.Volume - result.Volume, change, delta=2e-9 * base.Volume)
+
     def testTheLinesAloneTakeTheMitresByTangency(self):
         for n, r in ((6, 3.0), (8, 22.5)):
             with self.subTest(n=n, r=r):
