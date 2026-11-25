@@ -788,6 +788,36 @@ PartExport void noteNamingOrder(const std::string& warning);
 /// The note made on this thread since the last call (empty if none), which it clears
 PartExport std::string takeNamingOrder();
 
+/** ops#1022: a straight run-out tool (PartDesign's fillet or chamfer of an edge whose tangent
+ * chain goes on, with tangent propagation off) at an end where the chain does not go on, on a face
+ * that is neither of the edge's two and is tangent to the edge's direction there (a blend running
+ * out at the end of a floor): Onshape ends the round there as at any end on a face (oracle RB9),
+ * cut by that face's surface run on past the face, a rolling-ball blend by its continuation, as
+ * the exact construction's line tool ends on it (classify, trimBySurface).
+ *
+ * @param base The shape the dress-up is made on
+ * @param tool The run-out tool, run on past the end by a margin
+ * @param edge The picked edge, a face of `base`'s edge between two faces
+ * @param endFace The face at the end
+ * @param vertex The end
+ * @param size The tool's size across the edge (the radius, or the chamfer's distance)
+ * @param inside A point of the tool beside the edge, between its ends
+ * @param past A point of the tool's run on past the end
+ * @return The tool's piece that holds `inside`, its run on past the end cut off; null where the
+ * surface does not cut the run on off there, cuts the tool nearer the edge's middle, or can't be
+ * built
+ */
+PartExport TopoDS_Shape trimRunOutAtFace(
+    const TopoShape& base,
+    const TopoDS_Shape& tool,
+    const TopoDS_Edge& edge,
+    const TopoDS_Face& endFace,
+    const TopoDS_Vertex& vertex,
+    double size,
+    const gp_Pnt& inside,
+    const gp_Pnt& past
+);
+
 }  // namespace Part::FilletFallback
 
 #endif  // PART_FILLETFALLBACK_H

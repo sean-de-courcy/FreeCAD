@@ -554,5 +554,94 @@ class TestFilletPropagation(unittest.TestCase):
         self.assertIn("tangent", chamfer.getStatusString().lower())
 
 
+    # ops#1022, oracle RB9: a lip's short rim line on the outer wall x = 0 (designed: block 40 x 40 x 20,
+    # a sphere r 8 scaled 1.5 along z about (3, 3, 0) cut out above z 1, a cylinder r 7 about the same axis
+    # cut through z 0..1, the lip's two vertical edges rounded LR). The line runs from the lip corner's
+    # round (its tangent chain goes on there) to where the floor pinches out at the scoop. Onshape ends
+    # the round at the scoop as at any end on a face: one new cylinder, no groove along the wall.
+    def lipCorner(self, lr, blend=0.0):
+        block = Part.makeBox(40, 40, 20)
+        sphere = Part.makeSphere(8)
+        matrix = App.Matrix()
+        matrix.A33 = 1.5
+        scoop = sphere.transformGeometry(matrix)
+        scoop.translate(V(3, 3, 0))
+        upper = scoop.common(Part.makeBox(60, 60, 60, V(-30, -30, 1)))
+        shape = block.cut(upper).cut(Part.makeCylinder(7, 1, V(3, 3, 0))).removeSplitter()
+
+        def middle(edge):
+            return edge.valueAt((edge.FirstParameter + edge.LastParameter) / 2)
+
+        def isLine(edge):
+            try:
+                return isinstance(edge.Curve, Part.Line)
+            except TypeError:  # an edge on an offset or other curve Part has no type for
+                return False
+
+        if blend > 0:
+            blends = [
+                e
+                for e in shape.Edges
+                if not isLine(e)
+                and middle(e).z > 1 + 1e-3
+                and (abs(middle(e).x) < 1e-6 or abs(middle(e).y) < 1e-6)
+            ]
+            self.assertEqual(len(blends), 2)
+            shape = shape.makeFillet(blend, blends)
+        lips = [
+            e
+            for e in shape.Edges
+            if isLine(e)
+            and abs(e.Length - 1) < 1e-6
+            and abs(middle(e).z - 0.5) < 1e-6
+            and abs((V(middle(e).x, middle(e).y, 0) - V(3, 3, 0)).Length - 7) < 1e-6
+        ]
+        self.assertEqual(len(lips), 2)
+        shape = shape.makeFillet(lr, lips)
+        base = self.doc.addObject("Part::Feature", "LipCorner")
+        base.Shape = shape
+        self.body.BaseFeature = base
+        self.doc.recompute()
+        feature = self.body.Group[0]
+        line = self.edgeName(
+            feature.Shape,
+            lambda e: isLine(e)
+            and e.Length < 3
+            and abs(middle(e).x) < 1e-6
+            and all(abs(v.Point.z - 1) < 1e-6 for v in e.Vertexes),
+        )
+        return feature, line
+
+    def farWall(self, shape):
+        """The outer wall's material away from the line: a groove along the wall would take from it."""
+        return shape.common(Part.makeBox(2, 27, 1, V(0, 13, 0))).Volume
+
+    def testOffEndsAtTheScoopWhereTheFloorPinchesOut(self):
+        base, line = self.lipCorner(0.5)
+        before = base.Shape
+        fillet = self.fillet(base, [line], radius=1.0, TangentPropagation=False)
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+        shape = fillet.Shape
+        # RB9, RB 0 / LR 0.5, r 1.0: 12 faces, dV -0.163028 (default accuracy), dA -0.157533
+        self.assertEqual(len(shape.Faces), 12)
+        self.assertAlmostEqual(shape.Area - before.Area, -0.157533, delta=2e-5)
+        self.assertAlmostEqual(shape.Volume - before.Volume, -0.163028, delta=2e-4)
+        self.assertAlmostEqual(self.farWall(shape), 54, delta=1e-6)
+
+    def testOffAtABlendCutsNoGrooveAlongTheWall(self):
+        """With the scoop's blend at the pinch, Onshape builds one cylinder (RB9: r 1.0 dA -0.345891); the
+        fork refuses there (ops#1022 open). Either way nothing is cut along the wall."""
+        base, line = self.lipCorner(1.0, blend=0.8)
+        for radius in (0.5, 1.0):
+            fillet = self.fillet(base, [line], radius=radius, TangentPropagation=False)
+            if fillet.isValid():
+                self.assertAlmostEqual(self.farWall(fillet.Shape), 54, delta=1e-6)
+            else:
+                self.assertIn("tangent", fillet.getStatusString().lower())
+            self.body.removeObject(fillet)
+            self.doc.removeObject(fillet.Name)
+            self.doc.recompute()
+
+
 if __name__ == "__main__":
     unittest.main()

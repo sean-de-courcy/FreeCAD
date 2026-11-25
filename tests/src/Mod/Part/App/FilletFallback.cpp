@@ -4777,3 +4777,51 @@ TEST_F(FilletFallbackTest, chamferChainEndsOnCylindersAtTheWallsHeight)
     // Below the limit OCCT builds, as before
     EXPECT_FALSE(occtFails(base, edges, chamfer(1.9)));
 }
+
+TEST_F(FilletFallbackTest, roundPastAStripIsCutByTheWallsContinuation)
+{
+    // ops#898, oracle RB7: a section (0, 0), (20, 0), (20, 20), (W, 20), (1, 10), (0, 10) in the
+    // y-z plane, along x 30; the front top edge (y 0, z 10) rounded past the strip z = 10, 1 wide,
+    // into the wall rising from (1, 10). Onshape cuts the round off by the wall's own continuation,
+    // run on below the foot until it meets the round's circle: the vertical and overhanging walls
+    // as before; the wall leaning back 45 deg at r 1.5 keeps the piece past that meeting (-13.879918)
+    // and refuses where the continuation misses the circle (r 2, 3: FILLET_FAILED)
+    struct Case
+    {
+        double w;
+        double base;
+        double r;
+        double removed;  // 0: Onshape fails
+    };
+    for (const auto& c : {Case {1, 11700, 1.5, 14.061721},
+                          Case {1, 11700, 2, 23.148909},
+                          Case {1, 11700, 3, 43.537769},
+                          Case {11, 10200, 1.5, 13.879918},
+                          Case {11, 10200, 2, 0},
+                          Case {11, 10200, 3, 0},
+                          Case {-4, 12450, 1.5, 14.108818},
+                          Case {-4, 12450, 2, 23.571077},
+                          Case {-4, 12450, 3, 46.634575}}) {
+        TopoShape base(
+            profileAlongX({{0, 0}, {20, 0}, {20, 20}, {c.w, 20}, {1, 10}, {0, 10}}, 30),
+            1L
+        );
+        ASSERT_NEAR(volume(base.getShape()), c.base, 1e-6);
+        TopoShape front = edgeBetween(base, {0, 0, 10}, {30, 0, 10});
+        if (c.removed == 0) {
+            bool built = false;
+            try {
+                TopoShape result = dressUp(base, {front}, fillet(c.r));
+                built = !result.isNull() && volume(result.getShape()) > 0;
+            }
+            catch (...) {
+            }
+            EXPECT_FALSE(built) << c.w << " " << c.r;
+            continue;
+        }
+        TopoShape result = dressUp(base, {front}, fillet(c.r));
+        ASSERT_FALSE(result.isNull()) << c.w << " " << c.r;
+        EXPECT_NEAR(volume(result.getShape()), c.base - c.removed, 1e-5) << c.w << " " << c.r;
+        EXPECT_EQ(result.countSubElements("Face"), 8) << c.w << " " << c.r;
+    }
+}
