@@ -37,19 +37,32 @@ R, H = 10.0, 6.0
 Z0, HC, W = 2.0, 3.0, 2.0
 
 
+def outArea(r):
+    """The area of a disc of radius r centred on the wall, outside the circle of radius R."""
+    if r <= 0:
+        return 0.0
+    lens = (
+        r * r * math.acos(r / (2 * R))
+        + R * R * math.acos(1 - r * r / (2 * R * R))
+        - 0.5 * r * math.sqrt(4 * R * R - r * r)
+    )
+    return math.pi * r * r - lens
+
+
+def insideVolume(height, n=20000):
+    """The cone's part inside the cylinder from the apex up to `height` (Simpson over z)."""
+    h = height / n
+
+    def area(z):
+        r = W * z / HC
+        return math.pi * r * r - outArea(r)
+
+    weights = (1 if i in (0, n) else 4 if i % 2 else 2 for i in range(n + 1))
+    return h / 3 * sum(w * area(h * i) for i, w in enumerate(weights))
+
+
 def outsideVolume(n=20000):
     """V_out: the cone's part outside the cylinder (Simpson's rule over z)."""
-
-    def outArea(r):
-        if r <= 0:
-            return 0.0
-        lens = (
-            r * r * math.acos(r / (2 * R))
-            + R * R * math.acos(1 - r * r / (2 * R * R))
-            - 0.5 * r * math.sqrt(4 * R * R - r * r)
-        )
-        return math.pi * r * r - lens
-
     h = HC / n
     return (
         h
@@ -207,10 +220,47 @@ class TestRevolveApexSeam(unittest.TestCase):
             label = "cone groove delta %g" % delta
             self.assertEqual(self.checkResult(groove, base, expected, label), "right", label)
 
+    def discGrooveModel(self, delta, radius):
+        """Review r3: the cone's apex part under a disc of the given radius, grooved into a
+        cylinder of height Z0 + 1 (the profile from A: (0, 0), (0, 3), (radius, 3), (radius, 1.5),
+        (1, 1.5)): the tool is hundreds of times the change, the cone's part inside the wall up to
+        z = Z0 + 1."""
+        doc = self.newDoc()
+        base = Part.makeCylinder(R, Z0 + 1)
+        feature = doc.addObject("Part::Feature", "Base")
+        feature.Shape = base
+        body = doc.addObject("PartDesign::Body", "Body")
+        body.BaseFeature = feature
+        doc.recompute()
+        xa = math.sqrt(R * R - delta * delta)
+        tri = body.newObject("Sketcher::SketchObject", "Disc")
+        tri.Placement = App.Placement(V(0, delta, 0), App.Rotation(V(1, 0, 0), 90))
+        offsets = [(0, 0), (0, HC), (radius, HC), (radius, HC / 2), (W / 2, HC / 2)]
+        points = [V(xa + dx, Z0 + dz, 0) for dx, dz in offsets]
+        for i in range(len(points)):
+            tri.addGeometry(Part.LineSegment(points[i], points[(i + 1) % len(points)]))
+        doc.recompute()
+        groove = body.newObject("PartDesign::Groove", "Groove")
+        groove.Profile = tri
+        groove.ReferenceAxis = (tri, ["Edge1"])
+        groove.Angle = 360
+        doc.recompute()
+        return groove, base.Volume, -insideVolume(1.0)
+
+    def testGrooveUnderALargeToolBesideSeam(self):
+        """Review r3: a large tool's small miss is not kept as agreeing with the retry."""
+        for delta in (-1e-9, -1e-10):
+            for radius in (8.0, 20.0):
+                groove, base, expected = self.discGrooveModel(delta, radius)
+                label = "disc %g groove delta %g" % (radius, delta)
+                self.assertEqual(self.checkResult(groove, base, expected, label), "right", label)
+
     def testExpectedVolumes(self):
         """The geometric expectations themselves: V_out lies between 0 and the cone."""
         self.assertAlmostEqual(V_OUT, 6.483319, places=5)
         self.assertGreater(CONE - V_OUT, 0)
+        self.assertAlmostEqual(insideVolume(1.0), 0.230241, places=5)
+        self.assertAlmostEqual(insideVolume(HC), CONE - V_OUT, places=6)
 
     def testSketchRevolutionApexBesideSeam(self):
         """A sketch triangle's cone, apex in OCCT's window: adds V_out, not the whole cone."""

@@ -3209,7 +3209,8 @@ App::DocumentObjectExecReturn* Revolved::executeRevolved(Part::RevolMode revolMo
 
 double Revolved::keptTolerance() const
 {
-    return 1e-3 * refusedToolVolume + Precision::Confusion();
+    return 1e-3 * std::abs(retriedVolume - refusedBaseVolume) + 1e-9 * refusedBaseVolume
+        + Precision::Confusion();
 }
 
 App::DocumentObjectExecReturn* Revolved::executeRevolvedOnce(Part::RevolMode revolMode)
@@ -3843,7 +3844,7 @@ void Revolved::setResult(const TopoShape& base, const TopoShape& revolved, bool 
                 pointCheckRefused = !splineConeLines;
                 if (pointCheckRefused) {
                     refusedVolume = precise(result).value;
-                    refusedToolVolume = precise(tool).value;
+                    refusedBaseVolume = precise(base).value;
                     refusedValid = BRepCheck_Analyzer(result.getShape()).IsValid();
                     refusedSolids = result.countSubShapes(TopAbs_SOLID);
                 }
