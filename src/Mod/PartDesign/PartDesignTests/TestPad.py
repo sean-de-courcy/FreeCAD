@@ -6013,6 +6013,42 @@ class TestUpToACurvedFace(unittest.TestCase):
                 finally:
                     FreeCAD.closeDocument(doc.Name)
 
+    def testPadUpToACylinderFaceCentreThroughAWindowBehind(self):
+        # The pie slice's face with a window y -2..2, z 3..7; two rectangles y 4..6 and -6..-4,
+        # z 4..6, on the plane x = 0, padded along -x, away from the face: the line from the
+        # profile's centre passes through the window. Refused, saying so, never a prism ending off
+        # the face (review pr1039-r3: a retry ended it 1 mm short)
+        V = FreeCAD.Vector
+        solid, _ = curvedFaceWall("pie")
+        solid = solid.cut(Part.makeBox(30, 4, 4, V(0, -2, 3)))
+        names = [
+            "Face%d" % (i + 1)
+            for i, face in enumerate(solid.Faces)
+            if face.Surface.TypeId == "Part::GeomCylinder"
+        ]
+        self.assertEqual(len(names), 1)
+        wall = self.Doc.addObject("Part::Feature", "Wall")
+        wall.Shape = solid
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        pad = body.newObject("PartDesign::Pad", "Pad")
+        sketch = rectangleOnX(body, 0, 4, 6, 4, 6)
+        first = sketch.GeometryCount
+        corners = [V(-6, -6, 0), V(-4, -6, 0), V(-4, -4, 0), V(-6, -4, 0)]
+        for i in range(4):
+            sketch.addGeometry(Part.LineSegment(corners[i], corners[(i + 1) % 4]))
+        for i in range(4):
+            sketch.addConstraint(
+                Sketcher.Constraint("Coincident", first + i, 2, first + (i + 1) % 4, 1)
+            )
+        pad.Profile = sketch
+        pad.Type = "UpToFace"
+        pad.UpToFace = (wall, names)
+        pad.UseCustomVector = True
+        pad.AlongSketchNormal = False
+        pad.Direction = V(-1, 0, 0)
+        self.Doc.recompute()
+        self.refused(pad)
+
     def testPocketUpToACylinderFaceBeside(self):
         # The pie slice joined with the block x 0..30, y 8..18, z 0..10: the face now spans
         # y -10..8. The rectangle y 14..16, z 4..6 at x = 40, beside the face, cuts the block

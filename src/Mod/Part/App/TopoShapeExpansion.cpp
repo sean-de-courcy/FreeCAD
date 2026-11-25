@@ -91,6 +91,7 @@
 #include <BRepFill_Generator.hxx>
 #include <BOPTools_AlgoTools3D.hxx>
 #include <BRepAdaptor_Surface.hxx>
+#include <BRepIntCurveSurface_Inter.hxx>
 #include <BRepTopAdaptor_FClass2d.hxx>
 #include <BRepTools.hxx>
 #include <IntTools_Context.hxx>
@@ -12546,15 +12547,16 @@ TopoShape& TopoShape::makeElementPrismUntil(
         }
     }
 
+    // The caller's word, before the concave test below overrides it: false keeps the face as it is
+    // (the full turn below never runs)
+    const bool mayExtend = checkLimits;
+
     // FreeCAD-CH (ops#640, FSLC #49): up to a plane parallel to the profile, each face's prism is
     // the blind one of the plane's distance, made directly: no BRepFeat pass against the base per
     // face, none of the checks of what BRepFeat built (a blind prism neither passes the plane nor
     // fills behind the profile), and no boolean between prisms that are apart. The names are the
     // same mapper's (MapperPrism reads the result's shape alone). V2 only, and only where the
     // face's limits may be removed (`checkLimits`): with its limits kept, BRepFeat decides
-    // The caller's word, before the concave test below overrides it: false keeps the face as it is
-    // (the full turn below never runs)
-    const bool mayExtend = checkLimits;
     const std::optional<double> flatLength =
         checkLimits && historyAlgorithm == App::HistoryAlgorithm::V2
             ? flatUpToLength(profile, __uptoface, direction)
@@ -12562,10 +12564,24 @@ TopoShape& TopoShape::makeElementPrismUntil(
 
     // don't remove limits of concave face. The default centre of a long curved B-spline profile is
     // millimetres off, enough to take the wrong side of a curved face (ops#428)
-    if (checkLimits && __uptoface.shapeType(true) == TopAbs_FACE) {
+    // Up to one curved face that the line from the profile's centre along the direction misses
+    // (ops#1039): BRepFeat isn't asked (on fork-1.0.8 the concave test raised there, an empty
+    // message). Its retries could end the prism off the face, its base's side a unit short of it
+    // (review pr1039-r3: the centre line through a window of the face, the face behind), with no
+    // check catching it. The full turn on the face's side makes the prism, or it fails, saying so
+    bool centreMisses = false;
+    if (__uptoface.shapeType(true) == TopAbs_FACE) {
         gp_Pnt pCog;
         MassProperties::centreOfMass(profile.getShape(), pCog);
-        checkLimits = !Part::Tools::isConcave(TopoDS::Face(__uptoface.getShape()), pCog, direction);
+        const TopoDS_Face& face = TopoDS::Face(__uptoface.getShape());
+        if (BRepAdaptor_Surface(face).GetType() != GeomAbs_Plane) {
+            BRepIntCurveSurface_Inter section;
+            section.Init(face, gp_Lin(pCog, direction), Precision::Confusion());
+            centreMisses = !section.More();
+        }
+        if (checkLimits) {
+            checkLimits = !Part::Tools::isConcave(face, pCog, direction);
+        }
     }
 
     TopoShape _uptoface(__uptoface);
@@ -12751,12 +12767,24 @@ TopoShape& TopoShape::makeElementPrismUntil(
         }
     };
     bool fullTurn = false;
-    const bool bySplit = !flatLength
+    if (centreMisses) {
+        std::optional<TopoShape> made = byFullTurn();
+        if (!made) {
+            throw Base::RuntimeError(QT_TRANSLATE_NOOP(
+                "Exception",
+                "The line from the profile's centre misses the face, and the face's surface "
+                "can't be extended to meet the whole profile on the face's side"
+            ));
+        }
+        result = *made;
+        fullTurn = true;
+    }
+    const bool bySplit = !fullTurn && !flatLength
         && !brepFeatReaches(profile.getShape(), _uptoface.getShape(), direction);
     if (bySplit) {
         result = prismBySplit();
     }
-    while (!bySplit) {
+    while (!bySplit && !fullTurn) {
         try {
             // We do not rely on BRepFeat_MakePrism to perform fuse or cut for
             // us because of its poor support of shape history.
