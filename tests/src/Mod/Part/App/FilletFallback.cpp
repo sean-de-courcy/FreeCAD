@@ -58,6 +58,7 @@
 #include <StdFail_NotDone.hxx>
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
+#include <TopLoc_Location.hxx>
 #include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <TColgp_HArray1OfPnt.hxx>
@@ -70,6 +71,7 @@
 #include <gp_Lin.hxx>
 #include <gp_Mat.hxx>
 #include <gp_Pln.hxx>
+#include <gp_Trsf.hxx>
 #include <gp_XY.hxx>
 
 // NOLINTBEGIN(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)
@@ -4824,4 +4826,44 @@ TEST_F(FilletFallbackTest, roundPastAStripIsCutByTheWallsContinuation)
         EXPECT_NEAR(volume(result.getShape()), c.base - c.removed, 1e-5) << c.w << " " << c.r;
         EXPECT_EQ(result.countSubElements("Face"), 8) << c.w << " " << c.r;
     }
+}
+
+TEST_F(FilletFallbackTest, roundPastAStripUnderTwoWallsIsCutByTheLargerCut)
+{
+    // ops#1026, oracle RB22: RB7's section with the wall leaning back 45 deg (W 11) over x 0..15,
+    // fused with the wall leaning back 26.6 deg (W 6) over x 15..30, both rising from one foot line
+    // (y 1, z 10); the front top edge is one edge. Onshape builds W 6's own row over the whole edge:
+    // the W 11 half is cut by W 6's continuation too (its own would leave less, and misses the
+    // circle at r 2), 10 faces; r 3 fails as W 6 alone does. The chamfer 1.5 is W 6's as well
+    auto stretch = [](double w, double x0, double x1) {
+        TopoDS_Shape prism
+            = profileAlongX({{0, 0}, {20, 0}, {20, 20}, {w, 20}, {1, 10}, {0, 10}}, x1 - x0);
+        gp_Trsf move;
+        move.SetTranslation(gp_Vec(x0, 0, 0));
+        return prism.Moved(TopLoc_Location(move));
+    };
+    BRepAlgoAPI_Fuse fuse(stretch(11, 0, 15), stretch(6, 15, 30));
+    ShapeUpgrade_UnifySameDomain unify(fuse.Shape());
+    unify.Build();
+    TopoShape base(unify.Shape(), 1L);
+    ASSERT_NEAR(volume(base.getShape()), 10575, 1e-6);
+    ASSERT_EQ(base.countSubElements("Face"), 10);
+    TopoShape front = edgeBetween(base, {0, 0, 10}, {30, 0, 10});
+    for (auto [r, removed] : {std::pair {1.5, 13.994095}, std::pair {2.0, 22.362287}}) {
+        TopoShape result = dressUp(base, {front}, fillet(r));
+        ASSERT_FALSE(result.isNull()) << r;
+        EXPECT_NEAR(volume(result.getShape()), 10575 - removed, 1e-5) << r;
+        EXPECT_EQ(result.countSubElements("Face"), 10) << r;
+    }
+    TopoShape chamfered = dressUp(base, {front}, chamfer(1.5));
+    ASSERT_FALSE(chamfered.isNull());
+    EXPECT_NEAR(volume(chamfered.getShape()), 10575 - 26.25, 1e-5);
+    bool built = false;
+    try {
+        TopoShape result = dressUp(base, {front}, fillet(3));
+        built = !result.isNull() && volume(result.getShape()) > 0;
+    }
+    catch (...) {
+    }
+    EXPECT_FALSE(built);
 }

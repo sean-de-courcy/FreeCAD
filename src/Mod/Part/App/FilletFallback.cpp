@@ -10560,6 +10560,71 @@ void trimByWedge(Tool& tool, const TopoDS_Shape& wedge, const TopoDS_Shape& base
     tool.volume = volumeOf(kept);
 }
 
+/// Another wall of a tool that trimByWall meets, on another surface: its face and its foot
+struct OtherWall
+{
+    TopoDS_Face wall;
+    TopoDS_Edge foot;
+};
+
+/** Whether a piece of a tool lies wholly behind a planar wall's plane, run on past the wall: the
+ * plane does not cut it, and it lies on the side of the wall's material (opposite the wall face's
+ * outward normal). A wall of another surface type is never taken for one the piece lies behind
+ * (no oracle: ops#1026)
+ */
+bool behindPlanarWall(const TopoDS_Shape& piece, const OtherWall& other, double reach)
+{
+    BRepAdaptor_Surface adaptor(other.wall, Standard_False);
+    if (adaptor.GetType() != GeomAbs_Plane) {
+        return false;
+    }
+    BRepAdaptor_Curve foot(other.foot);
+    const gp_Pnt at = foot.Value((foot.FirstParameter() + foot.LastParameter()) / 2);
+    const gp_Dir out = outwardNormal(other.wall, at);
+    const gp_Pln plane = adaptor.Plane();
+    double u = 0.0;
+    double v = 0.0;
+    ElSLib::Parameters(plane, at, u, v);
+    const TopoDS_Face sheet
+        = BRepBuilderAPI_MakeFace(plane, u - reach, u + reach, v - reach, v + reach);
+    TopTools_ListOfShape arguments;
+    arguments.Append(piece);
+    TopTools_ListOfShape tools;
+    tools.Append(sheet);
+    BRepAlgoAPI_Splitter splitter;
+    splitter.SetArguments(arguments);
+    splitter.SetTools(tools);
+    splitter.SetRunParallel(Standard_False);
+    splitter.SetNonDestructive(Standard_True);
+    splitter.Build();
+    if (!splitter.IsDone() || splitter.HasErrors()) {
+        refuse("splitting a dress-up's piece by another wall's surface failed");
+    }
+    const double whole = volumeOf(piece);
+    int solids = 0;
+    for (TopExp_Explorer it(splitter.Shape(), TopAbs_SOLID); it.More(); it.Next()) {
+        if (volumeOf(it.Current()) > volumeTolerance * std::max(whole, 1.0)) {
+            ++solids;
+        }
+    }
+    if (solids != 1) {
+        return false;
+    }
+    // Its side: the vertex farthest from the plane, past what the piece's own tolerances leave
+    double farthest = 0.0;
+    for (TopExp_Explorer it(piece, TopAbs_VERTEX); it.More(); it.Next()) {
+        const TopoDS_Vertex& vertex = TopoDS::Vertex(it.Current());
+        const double side = gp_Vec(at, BRep_Tool::Pnt(vertex)).Dot(gp_Vec(out));
+        if (std::abs(side) > std::abs(farthest)) {
+            farthest = side;
+        }
+        if (side > 1000 * linearTolerance + BRep_Tool::Tolerance(vertex)) {
+            return false;  // a corner of it in front of the wall
+        }
+    }
+    return farthest < -1000 * linearTolerance;
+}
+
 /** A cut tool trimmed by a wall that does not run straight back from its strip's face (Case Base
  * #105: a round's strip on the underside runs off over a concave edge into #103's blend). Onshape
  * cuts the round off by the wall there, as by a wall straight back (Q-LEDGE): the wall's face
@@ -10571,7 +10636,14 @@ void trimByWedge(Tool& tool, const TopoDS_Shape& wedge, const TopoDS_Shape& base
  * Else it refuses. It also refuses (review r1) where a piece that goes holds part of the tool's
  * other strip (a steep wall that cuts the whole round or chamfer away and narrows the other face's
  * strip: no oracle says what Onshape builds), or runs along the foot of another wall on another
- * surface (otherFeet: the first wall's surface would cut the dress-up off in front of the second).
+ * surface (otherWalls: the first wall's surface would cut the dress-up off in front of the second)
+ * unless it lies behind that wall's plane too.
+ *
+ * Two walls on one foot line (oracle RB22, ops#1026): Onshape cuts the whole edge by the wall
+ * whose continuation leaves the larger cut, the piece behind it lying behind the other's plane as
+ * well. With deferred, where this wall's piece runs along another wall's foot and is not behind it,
+ * or holds the tool's other strip while the tool has other walls, nothing is changed and *deferred
+ * is set: the caller tries the other walls first.
  *
  * Onshape's wall cuts the round only by its own continuation, run on below the foot until it meets
  * the round's circle (oracle RB7, ops#898): a piece the surface cuts off further on, which holds
@@ -10593,9 +10665,13 @@ bool trimByWall(
     Tool& tool,
     const EdgeData& data,
     const SurfaceWall& at,
-    const std::vector<TopoDS_Edge>& otherFeet
+    const std::vector<OtherWall>& otherWalls,
+    bool* deferred
 )
 {
+    if (deferred) {
+        *deferred = false;
+    }
     const auto strip = std::find_if(tool.strips.begin(), tool.strips.end(), [&](const Strip& s) {
         return s.face.IsSame(at.face);
     });
@@ -10659,6 +10735,14 @@ bool trimByWall(
             }
         }
         return false;
+    };
+    // Whether this wall leans back from the face at its foot (its outward normal has a part along
+    // the face's): RB22's walls do. Where it stands straight up or overhangs, a piece behind it
+    // runs on under the other wall's foot, and no oracle says what Onshape builds (ops#1026)
+    auto leansBack = [&]() {
+        BRepAdaptor_Curve foot(at.foot);
+        const gp_Pnt middle = foot.Value((foot.FirstParameter() + foot.LastParameter()) / 2);
+        return outwardNormalAny(at.wall, middle).Dot(outwardNormalAny(at.face, middle)) > 1e-6;
     };
     Bnd_Box box;
     BRepBndLib::Add(tool.solid, box);
@@ -10752,15 +10836,28 @@ bool trimByWall(
                         for (const auto& image : stage.images(contact)) {
                             if (faces.Contains(image)
                                 && areaOf(image) > areaToleranceOf(image, other)) {
+                                // Another wall of the tool may cut less (RB22: W 11's continuation
+                                // misses the circle at r 2, W 6's meets it): it goes first
+                                if (deferred && !otherWalls.empty()) {
+                                    *deferred = true;
+                                    return false;
+                                }
                                 refuse("a wall's surface cuts a dress-up off on its other face");
                             }
                         }
                     }
                 }
             }
-            // Nor in front of another wall: its own surface cuts the dress-up off there
-            for (const auto& foot : otherFeet) {
-                if (alongFoot(piece, foot)) {
+            // Nor in front of another wall: its own surface cuts the dress-up off there. A piece
+            // that lies behind that wall's surface as well is material behind both walls, and goes
+            // (RB22: W 6's piece lies behind W 11's plane, both through one foot line)
+            for (const auto& other : otherWalls) {
+                if (alongFoot(piece, other.foot)
+                    && !(leansBack() && behindPlanarWall(piece, other, reach))) {
+                    if (deferred) {
+                        *deferred = true;
+                        return false;
+                    }
                     refuse("a wall's surface cuts a dress-up off in front of another wall");
                 }
             }
@@ -13128,48 +13225,69 @@ TopoDS_Shape constructShape(
         }
     }
     // Into a wall that does not run straight back from the face (it leans, or it is a blend: Case
-    // Base #105): each such tool is trimmed by the wall's own surface, run on behind the face
+    // Base #105): each such tool is trimmed by the wall's own surface, run on behind the face. A
+    // wall whose trim would cut in front of another of the tool's walls waits for the others (RB22,
+    // ops#1026); a pass that trims none refuses with the first wall's reason
+    std::vector<const SurfaceWall*> pendingWalls;
     for (const auto& at : surfaceWalls) {
-        const auto tool = std::find_if(tools.begin(), tools.end(), [&](const Tool& t) {
-            return &t == at.tool;
-        });
-        const auto edge = std::find_if(data.begin(), data.end(), [&](const EdgeData& d) {
-            return tool != tools.end() && d.edge.IsSame(tool->source);
-        });
-        if (tool == tools.end() || edge == data.end()) {
-            refuse("a corner piece's strip runs off its face into a wall");
-        }
-        // The same tool against walls straight back too (behindWalls cut it above): the two trims
-        // are not checked against each other
-        for (const auto& runs : wallsOf) {
-            if (std::any_of(runs.begin(), runs.end(), [&](const auto& run) {
-                    return run.first == at.tool;
-                })) {
-                refuse("a dress-up runs into a wall straight back from its face and into one that "
-                       "is not");
+        pendingWalls.push_back(&at);
+    }
+    bool mayDefer = true;
+    while (!pendingWalls.empty()) {
+        std::vector<const SurfaceWall*> waiting;
+        for (const SurfaceWall* wall : pendingWalls) {
+            const SurfaceWall& at = *wall;
+            const auto tool = std::find_if(tools.begin(), tools.end(), [&](const Tool& t) {
+                return &t == at.tool;
+            });
+            const auto edge = std::find_if(data.begin(), data.end(), [&](const EdgeData& d) {
+                return tool != tools.end() && d.edge.IsSame(tool->source);
+            });
+            if (tool == tools.end() || edge == data.end()) {
+                refuse("a corner piece's strip runs off its face into a wall");
             }
-        }
-        // The feet of this tool's other walls, on other surfaces
-        std::vector<TopoDS_Edge> otherFeet;
-        for (const auto& other : surfaceWalls) {
-            if (other.tool != at.tool || other.wall.IsSame(at.wall)
-                || sameDomain(other.wall, at.wall)) {
+            // The same tool against walls straight back too (behindWalls cut it above): the two trims
+            // are not checked against each other
+            for (const auto& runs : wallsOf) {
+                if (std::any_of(runs.begin(), runs.end(), [&](const auto& run) {
+                        return run.first == at.tool;
+                    })) {
+                    refuse("a dress-up runs into a wall straight back from its face and into one that "
+                           "is not");
+                }
+            }
+            // The feet of this tool's other walls, on other surfaces
+            std::vector<OtherWall> otherWalls;
+            for (const auto& other : surfaceWalls) {
+                if (other.tool != at.tool || other.wall.IsSame(at.wall)
+                    || sameDomain(other.wall, at.wall)) {
+                    continue;
+                }
+                TopLoc_Location mine;
+                TopLoc_Location theirs;
+                if (BRep_Tool::Surface(at.wall, mine) == BRep_Tool::Surface(other.wall, theirs)
+                    && mine.IsEqual(theirs)) {
+                    continue;
+                }
+                otherWalls.push_back({other.wall, other.foot});
+            }
+            bool deferred = false;
+            const bool merges
+                = trimByWall(ctx, *tool, *edge, at, otherWalls, mayDefer ? &deferred : nullptr);
+            if (deferred) {
+                waiting.push_back(wall);
                 continue;
             }
-            TopLoc_Location mine;
-            TopLoc_Location theirs;
-            if (BRep_Tool::Surface(at.wall, mine) == BRep_Tool::Surface(other.wall, theirs)
-                && mine.IsEqual(theirs)) {
-                continue;
+            if (merges
+                && std::none_of(wallFaces.begin(), wallFaces.end(), [&](const TopoDS_Face& face) {
+                       return face.IsSame(at.wall);
+                   })) {
+                wallFaces.push_back(at.wall);
             }
-            otherFeet.push_back(other.foot);
         }
-        if (trimByWall(ctx, *tool, *edge, at, otherFeet)
-            && std::none_of(wallFaces.begin(), wallFaces.end(), [&](const TopoDS_Face& wall) {
-                   return wall.IsSame(at.wall);
-               })) {
-            wallFaces.push_back(at.wall);
-        }
+        // No wall trimmed in this pass: the next refuses with each wall's own reason
+        mayDefer = waiting.size() < pendingWalls.size();
+        pendingWalls = std::move(waiting);
     }
     // Onshape, oracle 9e (ops#640, K1): CHAMFER/FILLET_OVERLAPS_EDGE_LOOP. Where two selected
     // edges meet at a corner convex in the material and the strips on both sides of it, on the
