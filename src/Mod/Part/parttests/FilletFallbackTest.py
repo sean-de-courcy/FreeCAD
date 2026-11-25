@@ -5044,7 +5044,9 @@ class TightWallArcTest(unittest.TestCase):
         self.assertEqual(len(rim), 12)
         try:
             result = plate.makeFillet(r, rim)
-        except Part.OCCError:
+        except (Part.OCCError, FreeCAD.Base.CADKernelError):
+            # ops#1027: the round overflows the strip to the hole (1.087) while its chain turns
+            # round the wall arcs rho 1 < r: refused by RB25's rule
             return
         self.assertTrue(result.isValid())
         self.assertLess(result.Volume, plate.Volume)

@@ -20422,7 +20422,29 @@ std::string overflowPastTightArc(
             const double probe = std::min(1e-3, 0.1 * circle.Radius());
             const gp_Pnt inward = middle.Translated(toCentre.Normalized() * probe);
             BRepClass_FaceClassifier inside(face, inward, Precision::Confusion());
-            if (inside.State() == TopAbs_IN) {
+            if (inside.State() != TopAbs_IN) {
+                continue;
+            }
+            // ... and the edge convex: the arc's other face looks away from the centre (a lip's
+            // wall). A pocket floor's corner arc has its floor on the centre side too, but its
+            // wall looks towards the centre: a concave round, not RB25's (review pr516-r3's
+            // PocketFloorSmallArcHole fails by its band across the hole, not by this rule)
+            bool convex = false;
+            for (const auto& otherShape : edgeFaces.FindFromKey(edge)) {
+                if (otherShape.IsSame(face)) {
+                    continue;
+                }
+                try {
+                    convex = gp_Vec(outwardNormalAny(TopoDS::Face(otherShape), middle))
+                                 .Dot(gp_Vec(circle.Location(), middle))
+                        > 0.0;
+                }
+                catch (const Refusal&) {
+                }
+                catch (const Standard_Failure&) {
+                }
+            }
+            if (convex) {
                 tightest = std::min(tightest, circle.Radius());
                 tight.Add(edge);
             }
