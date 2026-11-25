@@ -100,6 +100,7 @@ protected:
     void onDocumentRestored() override;
 
 private:
+    App::DocumentObjectExecReturn* executeRevolvedOnce(Part::RevolMode revolMode);
     App::DocumentObjectExecReturn* tryExecuteRevolved(Part::RevolMode revolMode);
     TopoShape tryGetBaseShape() const;
     // The face up to the first or last face of the base, or the chosen face (ToFace)
@@ -132,6 +133,11 @@ private:
     // A side's tool was built by constructFirstContact() in this recompute (ops#293 D2): its
     // volume checks integrate over knot spans (FirstContact::spanVolume())
     mutable bool constructedTool = false;
+    // ops#1048: setResult()'s point check refused the combined result (OCCT missed where the
+    // tool's cone meets the base), and this recompute's retry turns the profile's straight edges
+    // that end on the axis into degree-1 B-splines (freshAxisEdges()), which OCCT intersects
+    bool pointCheckRefused = false;
+    bool splineConeLines = false;
 
     double getStartReferenceAngle(
         const TopoShape& profileShape,

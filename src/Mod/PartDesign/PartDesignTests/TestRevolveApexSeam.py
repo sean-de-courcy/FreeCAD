@@ -54,9 +54,7 @@ def outsideVolume(n=20000):
     return (
         h
         / 3
-        * sum(
-            (1 if i in (0, n) else 4 if i % 2 else 2) * outArea(W * i / n) for i in range(n + 1)
-        )
+        * sum((1 if i in (0, n) else 4 if i % 2 else 2) * outArea(W * i / n) for i in range(n + 1))
     )
 
 
@@ -184,20 +182,22 @@ class TestRevolveApexSeam(unittest.TestCase):
         """A sketch triangle's cone, apex in OCCT's window: adds V_out, not the whole cone."""
         for delta in (-1e-9, -1e-10):
             rev, base, expected = self.sketchModel(delta)
-            self.assertIn(self.checkResult(rev, base, expected, "delta %g" % delta), ("right", "loud"))
+            self.assertEqual(self.checkResult(rev, base, expected, "delta %g" % delta), "right")
 
     def testSketchGrooveApexBesideSeam(self):
         """The same cone as a Groove removes its part inside the wall, not nothing."""
         for delta in (-1e-9, -1e-10):
             rev, base, expected = self.sketchModel(delta, groove=True)
-            self.assertIn(self.checkResult(rev, base, expected, "groove delta %g" % delta), ("right", "loud"))
+            self.assertEqual(
+                self.checkResult(rev, base, expected, "groove delta %g" % delta), "right"
+            )
 
     def testFinRevolutionApexBesideSeam(self):
         """A wedge's cap revolved, apex in OCCT's window (the real row's shape): adds V_out / 2."""
         for delta, bspline in ((-1e-9, False), (-1e-10, False), (-1e-10, True), (-1e-9, True)):
             rev, base, expected = self.finModel(delta, bspline)
             label = "fin %s delta %g" % ("bspline" if bspline else "line", delta)
-            self.assertIn(self.checkResult(rev, base, expected, label), ("right", "loud"))
+            self.assertEqual(self.checkResult(rev, base, expected, label), "right")
 
     def testControlsUnchanged(self):
         """Apex on the seam, outside OCCT's window, or a quarter turn away: right, as before."""
@@ -208,7 +208,9 @@ class TestRevolveApexSeam(unittest.TestCase):
             cases.append(("fin line delta %g" % delta, self.finModel, (delta, False), {}))
             cases.append(("fin bspline delta %g" % delta, self.finModel, (delta, True), {}))
         for delta in (0.0, -1e-9):
-            cases.append(("quarter delta %g" % delta, self.sketchModel, (delta,), {"quarter": True}))
+            cases.append(
+                ("quarter delta %g" % delta, self.sketchModel, (delta,), {"quarter": True})
+            )
             cases.append(
                 (
                     "quarter groove delta %g" % delta,

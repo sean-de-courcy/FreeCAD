@@ -60,6 +60,9 @@
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakeRevol.hxx>
 #include <BRepTools.hxx>
+#include <TColStd_Array1OfInteger.hxx>
+#include <TColStd_Array1OfReal.hxx>
+#include <TColgp_Array1OfPnt.hxx>
 #include <BRepTopAdaptor_FClass2d.hxx>
 #include <BOPTools_AlgoTools3D.hxx>
 #include <ElCLib.hxx>
@@ -2910,13 +2913,61 @@ Handle(Geom_Curve) analyticEdgeCurve(const TopoDS_Edge& edge, double& newFirst, 
 // new edges revolve right. A Groove then cut nothing and reported success. The face is rebuilt
 // on its surface from new edges and vertices made from the edges' located 3D curves; the edges,
 // vertices and face are named as modified from the old ones. Other faces are kept as they are.
-TopoShape freshAxisEdges(const TopoShape& profile, const gp_Ax1& axis)
+//
+// With `splineConeLines` (ops#1048, the retry of Revolved::executeRevolved()), a straight edge
+// with one end on the axis that is neither parallel nor perpendicular to it (it revolves into a
+// cone) is made a degree-1 B-spline, so it revolves into a revolution surface. OCCT found no
+// intersection of such a cone with a cylinder wall whose seam ran 1e-12 to 1e-7 beside the apex;
+// the revolution surface's intersection is found (notes\kernel-robustness.md section 35).
+TopoShape freshAxisEdges(const TopoShape& profile, const gp_Ax1& axis, bool splineConeLines)
 {
     const gp_Lin line(axis);
     auto onAxis = [&](const TopoDS_Vertex& vertex) {
         return !vertex.IsNull()
             && line.Distance(BRep_Tool::Pnt(vertex))
             <= std::max(BRep_Tool::Tolerance(vertex), Precision::Confusion());
+    };
+    // The degree-1 B-spline for an edge's curve between `first` and `last` when the edge would
+    // revolve into a cone with its apex on the axis; null otherwise
+    auto coneLineSpline = [&](const TopoDS_Edge& edge,
+                              const Handle(Geom_Curve) & curve,
+                              double first,
+                              double last) -> Handle(Geom_Curve) {
+        if (!splineConeLines || curve.IsNull()) {
+            return {};
+        }
+        Handle(Geom_Curve) basis = curve;
+        while (auto trimmed = Handle(Geom_TrimmedCurve)::DownCast(basis)) {
+            basis = trimmed->BasisCurve();
+        }
+        const auto straight = Handle(Geom_Line)::DownCast(basis);
+        TopoDS_Vertex v1;
+        TopoDS_Vertex v2;
+        TopExp::Vertices(edge, v1, v2);
+        if (straight.IsNull() || onAxis(v1) == onAxis(v2)) {
+            return {};
+        }
+        const gp_Dir direction = straight->Position().Direction();
+        if (direction.IsParallel(axis.Direction(), Precision::Angular())
+            || direction.IsNormal(axis.Direction(), Precision::Angular())) {
+            return {};
+        }
+        const gp_Pnt start = curve->Value(first);
+        const gp_Pnt end = curve->Value(last);
+        const double length = start.Distance(end);
+        if (length <= Precision::Confusion()) {
+            return {};
+        }
+        TColgp_Array1OfPnt poles(1, 2);
+        poles(1) = start;
+        poles(2) = end;
+        TColStd_Array1OfReal knots(1, 2);
+        knots(1) = 0.0;
+        knots(2) = length;
+        TColStd_Array1OfInteger multiplicities(1, 2);
+        multiplicities(1) = 2;
+        multiplicities(2) = 2;
+        return new Geom_BSplineCurve(poles, knots, multiplicities, 1);
     };
     auto needsFresh = [&](const TopoDS_Face& face) {
         TopLoc_Location location;
@@ -2935,6 +2986,14 @@ TopoShape freshAxisEdges(const TopoShape& profile, const gp_Ax1& axis)
             double analyticLast = 0.0;
             if (!analyticEdgeCurve(edge, analyticFirst, analyticLast).IsNull()) {
                 return true;
+            }
+            if (splineConeLines) {
+                double first3d = 0.0;
+                double last3d = 0.0;
+                const Handle(Geom_Curve) curve3d = BRep_Tool::Curve(edge, first3d, last3d);
+                if (!coneLineSpline(edge, curve3d, first3d, last3d).IsNull()) {
+                    return true;
+                }
             }
         }
         return false;
@@ -2971,6 +3030,12 @@ TopoShape freshAxisEdges(const TopoShape& profile, const gp_Ax1& axis)
             Handle(Geom_Curve) curve = analyticEdgeCurve(edge, first, last);
             if (curve.IsNull()) {
                 curve = BRep_Tool::Curve(edge, first, last);  // located
+            }
+            if (Handle(Geom_Curve) spline = coneLineSpline(edge, curve, first, last);
+                !spline.IsNull()) {
+                curve = spline;
+                first = spline->FirstParameter();
+                last = spline->LastParameter();
             }
             TopoDS_Vertex v1;
             TopoDS_Vertex v2;
@@ -3098,6 +3163,26 @@ void Revolved::onChanged(const App::Property* prop)
 }
 
 App::DocumentObjectExecReturn* Revolved::executeRevolved(Part::RevolMode revolMode)
+{
+    // ops#1048: a result the point check refuses is computed once more with the straight edges
+    // that end on the axis as degree-1 B-splines (revolution surfaces instead of cones); the same
+    // check then accepts it or refuses loudly
+    splineConeLines = false;
+    pointCheckRefused = false;
+    App::DocumentObjectExecReturn* first = executeRevolvedOnce(revolMode);
+    if (!pointCheckRefused) {
+        return first;
+    }
+    delete first;  // NOLINT: never StdReturn here (null), the refusal returned an error
+    splineConeLines = true;
+    pointCheckRefused = false;
+    App::DocumentObjectExecReturn* retried = executeRevolvedOnce(revolMode);
+    splineConeLines = false;
+    pointCheckRefused = false;
+    return retried;
+}
+
+App::DocumentObjectExecReturn* Revolved::executeRevolvedOnce(Part::RevolMode revolMode)
 {
     constructedTool = false;
     try {
@@ -3320,7 +3405,7 @@ App::DocumentObjectExecReturn* Revolved::tryExecuteRevolved(Part::RevolMode revo
     const bool profileTouchesAxis = !seatedProfile.getShape().IsSame(sketchshape.getShape());
     sketchshape = seatedProfile;
     // A free-form edge ending on the axis in a face taken from a solid: fresh edges (ops#640, #113)
-    sketchshape = freshAxisEdges(sketchshape, revolutionAxis);
+    sketchshape = freshAxisEdges(sketchshape, revolutionAxis, splineConeLines);
     // Such a profile turned both ways from its plane is built as two sides from the plane only
     // where the base meets the profile (below). Elsewhere the one primitive is right and keeps
     // the revolved face whole, as Onshape does: two halves split it, and a reference to it kept
@@ -3715,13 +3800,16 @@ void Revolved::setResult(const TopoShape& base, const TopoShape& revolved, bool 
                     "Could not combine the revolution with the base: the result's volume is wrong"
                 ));
             }
-            // OCCT missed where the tool's cone meets the base, inside the volume bounds (ops#1048)
+            // OCCT missed where the tool's cone meets the base, inside the volume bounds
+            // (ops#1048): refused here; the feature retries once with revolution surfaces
+            // (executeRevolved())
             if (!toolAgreesAtPoles(
                     base.getShape(),
                     tool.getShape(),
                     result.getShape(),
                     getAddSubType() == FeatureAddSub::Type::Additive && !intersects
                 )) {
+                pointCheckRefused = !splineConeLines;
                 throw Base::RuntimeError(QT_TRANSLATE_NOOP(
                     "Exception",
                     "Could not combine the revolution with the base: the result does not follow "
