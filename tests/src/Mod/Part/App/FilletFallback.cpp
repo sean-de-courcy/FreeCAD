@@ -4896,3 +4896,40 @@ TEST_F(FilletFallbackTest, roundPastAStripUnderTwoWallsIsCutByTheLargerCut)
     }
     EXPECT_FALSE(built);
 }
+
+TEST_F(FilletFallbackTest, roundPastTwoWallsOnOneFootLineAndAFrontWallIsNotCutAwayWhole)
+{
+    // ops#1026, review pr1026-r1b: RB22's two walls on the top strip (W 11 over x 0..15, then W 6
+    // or W 16 over x 15..30, one foot line) and a front strip 0.5 high ending at a wall falling 1
+    // over 10. The pair must not wait while the front wall trims first and then cut the whole
+    // round away (a notch with no round or chamfer face): it refuses, as before. No oracle covers
+    // walls on both faces
+    auto stretch = [](double w, double x0, double x1) {
+        TopoDS_Shape prism = profileAlongX(
+            {{20, -10}, {20, 20}, {w, 20}, {1, 10}, {0, 10}, {0, 9.5}, {-10, 8.5}, {-10, -10}},
+            x1 - x0
+        );
+        gp_Trsf move;
+        move.SetTranslation(gp_Vec(x0, 0, 0));
+        return prism.Moved(TopLoc_Location(move));
+    };
+    for (auto [second, size, round] :
+         {std::tuple {6.0, 3.0, true},
+          std::tuple {6.0, 2.5, true},
+          std::tuple {6.0, 3.0, false},
+          std::tuple {16.0, 2.0, true}}) {
+        BRepAlgoAPI_Fuse fuse(stretch(11, 0, 15), stretch(second, 15, 30));
+        ShapeUpgrade_UnifySameDomain unify(fuse.Shape());
+        unify.Build();
+        TopoShape base(unify.Shape(), 1L);
+        TopoShape front = edgeBetween(base, {0, 0, 10}, {30, 0, 10});
+        bool built = false;
+        try {
+            TopoShape result = dressUp(base, {front}, round ? fillet(size) : chamfer(size));
+            built = !result.isNull() && volume(result.getShape()) > 0;
+        }
+        catch (...) {
+        }
+        EXPECT_FALSE(built) << second << " " << size << " " << round;
+    }
+}

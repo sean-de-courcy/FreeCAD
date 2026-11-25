@@ -13303,6 +13303,18 @@ TopoDS_Shape constructShape(
                      other.face.IsSame(at.face) && onOneFootLine(at.foot, other.foot)}
                 );
             }
+            // Only a tool whose walls all stand on one foot line of one face (RB22) defers or takes
+            // a piece behind another wall; any other wall of the tool (on the dress-up's other
+            // face, or on another foot line) takes the old path for all of them (review pr1026-r1b:
+            // a wall on the other face trimmed first while the pair waited, and the round was cut
+            // away whole)
+            if (std::any_of(otherWalls.begin(), otherWalls.end(), [](const OtherWall& o) {
+                    return !o.oneFootLine;
+                })) {
+                for (auto& other : otherWalls) {
+                    other.oneFootLine = false;
+                }
+            }
             bool deferred = false;
             const bool merges
                 = trimByWall(ctx, *tool, *edge, at, otherWalls, mayDefer ? &deferred : nullptr);
