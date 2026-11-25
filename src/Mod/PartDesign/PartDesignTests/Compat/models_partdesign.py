@@ -1355,6 +1355,24 @@ def MitreRunOnOctagonSphere(make):
     return {"volumes": {"CornerSphere": base.Shape.Volume - 8 * T.change(radius, 0.75 * math.pi)}}
 
 
+def UpToCylinderBeside(make):
+    """ops#1039: a Pad up to a bounded cylinder face that doesn't cover its profile goes to the
+    face's cylinder, each point to its first crossing (fork-1.0.8: Invalid, an empty message).
+
+    A wall: a pie slice radius 20 from -30 to +30 degrees about +x, 10 tall, as a Part::Feature;
+    its curved face spans y -10..10. Body: a rectangle y 14..16, z 4..6 on the plane x = 40, padded
+    along -x up to that face (beside it in angle). The volume in closed form:
+    TestPad.cylinderReach(40, 14, 16, 4, 6) = 107.200907."""
+    from PartDesignTests.TestPad import cylinderReach, padUpToACurvedFace
+
+    doc = make("UpToCylinderBeside")
+    pad = padUpToACurvedFace(doc, "pie", 40, 14, 16, 4, 6)
+    if not pad.isValid():
+        raise AssertionError("UpToCylinderBeside: " + pad.getStatusString())
+    pad.getParentGeoFeatureGroup().Tip = pad
+    return {"volumes": {"Pad": cylinderReach(40, 14, 16, 4, 6)}}
+
+
 MODELS = [
     RevolutionGroove,
     SidedVariants,
@@ -1379,4 +1397,5 @@ MODELS = [
     ChamferVaryingAngle,
     MitreRunOnHexagon,
     MitreRunOnOctagonSphere,
+    UpToCylinderBeside,
 ]
