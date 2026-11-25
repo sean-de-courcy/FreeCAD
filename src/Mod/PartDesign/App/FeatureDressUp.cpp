@@ -360,27 +360,58 @@ PartDesignExport std::vector<TopoShape> pickedEdges(
 
 namespace
 {
-/// ops#1005: faces meeting within this of tangent along their edge meet tangent there (a round's
-/// or a Boolean's tangent line). Far below Onshape's smallest near-smooth edge measured, 0.01
-/// degrees (RB15), and above the noise of a normal on an approximated surface
-constexpr double tangentTurn = 1e-4;
-/// Onshape's limit for a smooth edge lies between 0.10 and 0.11 degrees (RB15)
+/// ops#1005: Onshape's limit for a smooth edge lies between 0.10 and 0.11 degrees (RB15), an
+/// angle whatever the size (RB28)
 constexpr double nearSmoothTurn = 0.105 * 3.14159265358979323846 / 180.0;
+/// Two planes meeting closer than this to tangent are one plane: Onshape merges them at 1e-6
+/// degrees and keeps a bent edge at 1e-5 degrees (1.7e-7 rad), which its chamfer never drops
+/// (RB28). A plane's normal is exact, so no measuring noise comes near it
+constexpr double planesTangentTurn = 1e-7;
 
-/// How far an edge's two faces turn from meeting tangent along it: the largest angle, at five
-/// points, between their directions into themselves and opposite ones; -1 where it can't be told
-/// (not two faces, a seam, a degenerate normal or tangent)
-double smoothTurn(const TopoShape& shape, const TopoDS_Edge& edge)
+/// A plane, cylinder, cone, sphere or torus
+bool analytic(const TopoDS_Face& face)
 {
+    switch (BRepAdaptor_Surface(face, Standard_False).GetType()) {
+        case GeomAbs_Plane:
+        case GeomAbs_Cylinder:
+        case GeomAbs_Cone:
+        case GeomAbs_Sphere:
+        case GeomAbs_Torus:
+            return true;
+        default:
+            return false;
+    }
+}
+
+/** How far an edge's two faces turn from meeting tangent along it: the largest angle, at nine
+ * points ends included, between their directions into themselves and opposite ones; -1 where it
+ * can't be told (not two faces, a seam, a degenerate normal or tangent) or isn't known along the
+ * whole edge. Samples bound the turn only where it can't change between them: a line or circle
+ * between analytic faces (their symmetry keeps the turn the same all along), or an edge stored as
+ * smooth (@a storedSmooth: its modeler made its faces tangent along it). Any other edge may turn
+ * between the samples (review pr1005-r1: a bend tangent at the samples and turning 20 degrees
+ * between them) and is an ordinary pick, as before. An edge tangent at single points only (two
+ * equal cylinders crossing) is no smooth edge either (RB28). @a planes: both faces are planes
+ */
+double smoothTurn(const TopoShape& shape, const TopoDS_Edge& edge, bool storedSmooth, bool& planes)
+{
+    planes = false;
     const auto faces = shape.findAncestorsShapes(edge, TopAbs_FACE);
     if (faces.size() != 2 || BRep_Tool::Degenerated(edge)) {
         return -1.0;
     }
+    planes = BRepAdaptor_Surface(TopoDS::Face(faces[0])).GetType() == GeomAbs_Plane
+        && BRepAdaptor_Surface(TopoDS::Face(faces[1])).GetType() == GeomAbs_Plane;
     BRepAdaptor_Curve curve(edge);
+    const bool constant = (curve.GetType() == GeomAbs_Line || curve.GetType() == GeomAbs_Circle)
+        && analytic(TopoDS::Face(faces[0])) && analytic(TopoDS::Face(faces[1]));
+    if (!constant && !storedSmooth) {
+        return -1.0;
+    }
     double worst = 0.0;
-    for (int k = 0; k < 5; ++k) {
+    for (int k = 0; k < 9; ++k) {
         const double t = curve.FirstParameter()
-            + (curve.LastParameter() - curve.FirstParameter()) * (k + 0.5) / 5;
+            + (curve.LastParameter() - curve.FirstParameter()) * k / 8;
         gp_Pnt point;
         gp_Vec tangent;
         curve.D1(t, point, tangent);
@@ -445,17 +476,17 @@ double smoothTurn(const TopoShape& shape, const TopoDS_Edge& edge)
 }  // namespace
 
 /** Onshape's rule for smooth picks in a fillet or chamfer (ops#1005; notes/onshape-facts.md SE1,
- * SE2, RB15). An edge is tangent where its faces meet tangent along it, near-smooth where they
- * meet within 0.105 degrees of it. A selection of such edges only is refused (FILLET_FAIL_SMOOTH,
- * CHAMFER_FAIL_SMOOTH); a chamfer holding a near-smooth edge and any other edge fails
- * (CHAMFER_FACE_RANGE_TOO_LARGE); otherwise a fillet's tangent and near-smooth edges and a
- * chamfer's tangent edges are taken out of @a edges. Onshape drops a tangent edge silently, and
- * rounds a near-smooth one with a sliver face of width r d and next to no volume (r^2 d^3 / 24
- * per length), which is left out here. Without them neither OCCT nor the exact construction sees
- * them: OCCT skips them itself, but the construction, asked when OCCT fails on another edge,
- * refused the whole selection for one smooth edge. @a notC0 are the picks pickedEdges skipped as
- * stored smooth (a prism's edges within 0.1 degrees of tangent are). Returns the error, or empty.
- * Declared where used.
+ * SE2, RB15, RB28). An edge is smooth where its faces meet within 0.105 degrees of tangent along
+ * it. A selection of smooth edges only is refused (FILLET_FAIL_SMOOTH, CHAMFER_FAIL_SMOOTH). A
+ * chamfer holding a bent edge between two planes (turning by 1.7e-7 rad and more) and any other
+ * edge fails (CHAMFER_FACE_RANGE_TOO_LARGE, RB15, RB28). Otherwise the smooth edges are taken out
+ * of @a edges: Onshape drops a tangent line, and a near-smooth edge beside a curved face, silently
+ * (SE2, RB28); its fillet rounds a near-smooth edge between planes with a sliver face of width
+ * r d and next to no volume (r^2 d^3 / 24 per length), left out here. Without them neither OCCT
+ * nor the exact construction sees them: OCCT skips them itself, but the construction, asked when
+ * OCCT fails on another edge, refused the whole selection for one smooth edge. @a notC0 are the
+ * picks pickedEdges skipped as stored smooth (a prism's edges within 0.1 degrees of tangent are).
+ * Returns the error, or empty. Declared where used.
  */
 PartDesignExport std::string smoothEdgeRule(
     const DressUp* step,
@@ -471,22 +502,24 @@ PartDesignExport std::string smoothEdgeRule(
     std::vector<double> turns;
     turns.reserve(edges.size());
     std::size_t smooth = 0;
-    std::size_t nearSmooth = 0;
-    auto count = [&](double turn) {
+    std::size_t bentPlanes = 0;
+    auto count = [&](double turn, bool planes) {
         if (turn >= 0.0 && turn <= nearSmoothTurn) {
             ++smooth;
-            if (turn > tangentTurn) {
-                ++nearSmooth;
+            if (planes && turn > planesTangentTurn) {
+                ++bentPlanes;
             }
         }
     };
     for (const auto& edge : edges) {
-        turns.push_back(smoothTurn(shape, TopoDS::Edge(edge.getShape())));
-        count(turns.back());
+        bool planes = false;
+        turns.push_back(smoothTurn(shape, TopoDS::Edge(edge.getShape()), false, planes));
+        count(turns.back(), planes);
     }
     for (const auto& edge : notC0) {
         // Stored as smooth: tangent where it can't be measured
-        count(std::max(0.0, smoothTurn(shape, TopoDS::Edge(edge.getShape()))));
+        bool planes = false;
+        count(std::max(0.0, smoothTurn(shape, TopoDS::Edge(edge.getShape()), true, planes)), planes);
     }
     const std::size_t total = edges.size() + notC0.size();
     const std::string what = chamfer ? "Chamfer" : "Fillet";
@@ -496,16 +529,15 @@ PartDesignExport std::string smoothEdgeRule(
               "or within 0.1 degree of it (as in Onshape). Pick an edge where the faces meet at "
               "an angle";
     }
-    if (chamfer && nearSmooth > 0) {
-        return "Chamfer not possible: a picked edge is nearly smooth, its two faces meeting within "
-               "0.1 degree of tangent, and Onshape fails a chamfer holding such an edge with "
+    if (chamfer && bentPlanes > 0) {
+        return "Chamfer not possible: a picked edge is nearly smooth, two planes meeting within "
+               "0.1 degree of each other, and Onshape fails a chamfer holding such an edge with "
                "others. Take that edge out of the selection";
     }
-    const double limit = chamfer ? tangentTurn : nearSmoothTurn;
     std::vector<TopoShape> kept;
     kept.reserve(edges.size());
     for (std::size_t i = 0; i < edges.size(); ++i) {
-        if (turns[i] >= 0.0 && turns[i] <= limit) {
+        if (turns[i] >= 0.0 && turns[i] <= nearSmoothTurn) {
             // A developer's line: log level (decision 100)
             FC_LOG(step->getFullName() << ": drop smooth edge, turn " << turns[i] << " rad");
             continue;
