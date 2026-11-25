@@ -10,6 +10,7 @@
 #include <functional>
 #include <limits>
 #include <numbers>
+#include <tuple>
 #include <set>
 #include <sstream>
 #include <gtest/gtest.h>
@@ -4825,6 +4826,34 @@ TEST_F(FilletFallbackTest, roundPastAStripIsCutByTheWallsContinuation)
         ASSERT_FALSE(result.isNull()) << c.w << " " << c.r;
         EXPECT_NEAR(volume(result.getShape()), c.base - c.removed, 1e-5) << c.w << " " << c.r;
         EXPECT_EQ(result.countSubElements("Face"), 8) << c.w << " " << c.r;
+    }
+}
+
+TEST_F(FilletFallbackTest, roundPastStripsOnBothFacesIsNotCutAwayWhole)
+{
+    // ops#1026, review pr1026-r1f: strips on both faces of the edge, each ending at a wall that
+    // leans back (the top one RB7's W 6 or W 11, the front one falling 1 over 10 from 0.5 below
+    // the edge). Where the top wall's continuation misses the round's circle, the front wall must
+    // not trim first and let the top wall cut the whole round away (a notch with no round or
+    // chamfer face): it refuses, as before. No oracle covers two walls on different faces
+    for (auto [rise, size, round] :
+         {std::tuple {5.0, 3.0, true}, std::tuple {5.0, 3.0, false}, std::tuple {10.0, 2.0, true}}) {
+        TopoShape base(
+            profileAlongX(
+                {{20, -10}, {20, 20}, {1 + rise, 20}, {1, 10}, {0, 10}, {0, 9.5}, {-10, 8.5}, {-10, -10}},
+                30
+            ),
+            1L
+        );
+        TopoShape front = edgeBetween(base, {0, 0, 10}, {30, 0, 10});
+        bool built = false;
+        try {
+            TopoShape result = dressUp(base, {front}, round ? fillet(size) : chamfer(size));
+            built = !result.isNull() && volume(result.getShape()) > 0;
+        }
+        catch (...) {
+        }
+        EXPECT_FALSE(built) << rise << " " << size << " " << round;
     }
 }
 

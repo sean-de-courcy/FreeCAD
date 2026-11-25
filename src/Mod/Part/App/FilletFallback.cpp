@@ -10565,7 +10565,29 @@ struct OtherWall
 {
     TopoDS_Face wall;
     TopoDS_Edge foot;
+    /// Its foot is on the same face as this wall's and on the same straight line (RB22's case,
+    /// the only one an oracle covers): only such a wall may cut first, or lie in front of a piece
+    bool oneFootLine = false;
 };
+
+/// Whether two feet are straight and on one line (to the feet's tolerances)
+bool onOneFootLine(const TopoDS_Edge& foot, const TopoDS_Edge& other)
+{
+    BRepAdaptor_Curve mine(foot);
+    BRepAdaptor_Curve theirs(other);
+    if (mine.GetType() != GeomAbs_Line || theirs.GetType() != GeomAbs_Line) {
+        return false;
+    }
+    const gp_Lin line = mine.Line();
+    const double tolerance
+        = std::max(BRep_Tool::Tolerance(foot), BRep_Tool::Tolerance(other)) + 1000 * linearTolerance;
+    for (TopExp_Explorer it(other, TopAbs_VERTEX); it.More(); it.Next()) {
+        if (line.Distance(BRep_Tool::Pnt(TopoDS::Vertex(it.Current()))) > tolerance) {
+            return false;
+        }
+    }
+    return true;
+}
 
 /** Whether a piece of a tool lies wholly behind a planar wall's plane, run on past the wall: the
  * plane does not cut it, and it lies on the side of the wall's material (opposite the wall face's
@@ -10838,7 +10860,12 @@ bool trimByWall(
                                 && areaOf(image) > areaToleranceOf(image, other)) {
                                 // Another wall of the tool may cut less (RB22: W 11's continuation
                                 // misses the circle at r 2, W 6's meets it): it goes first
-                                if (deferred && !otherWalls.empty()) {
+                                if (deferred
+                                    && std::any_of(
+                                        otherWalls.begin(),
+                                        otherWalls.end(),
+                                        [](const OtherWall& o) { return o.oneFootLine; }
+                                    )) {
                                     *deferred = true;
                                     return false;
                                 }
@@ -10853,8 +10880,9 @@ bool trimByWall(
             // (RB22: W 6's piece lies behind W 11's plane, both through one foot line)
             for (const auto& other : otherWalls) {
                 if (alongFoot(piece, other.foot)
-                    && !(leansBack() && behindPlanarWall(piece, other, reach))) {
-                    if (deferred) {
+                    && !(other.oneFootLine && leansBack()
+                         && behindPlanarWall(piece, other, reach))) {
+                    if (deferred && other.oneFootLine) {
                         *deferred = true;
                         return false;
                     }
@@ -13269,7 +13297,11 @@ TopoDS_Shape constructShape(
                     && mine.IsEqual(theirs)) {
                     continue;
                 }
-                otherWalls.push_back({other.wall, other.foot});
+                otherWalls.push_back(
+                    {other.wall,
+                     other.foot,
+                     other.face.IsSame(at.face) && onOneFootLine(at.foot, other.foot)}
+                );
             }
             bool deferred = false;
             const bool merges
