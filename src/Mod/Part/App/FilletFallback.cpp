@@ -2058,8 +2058,14 @@ bool edgeInPlane(const TopoDS_Edge& edge, const gp_Pln& plane)
 /// beyond the plane within the box's own enlargement
 bool whollyBeyond(const TopoDS_Face& face, const gp_Pnt& point, const gp_Dir& toward)
 {
+    // The box in the plane's own frame (z along toward, the point at the origin), so the bound
+    // does not loosen with the model's orientation (review pri1040 r1, T5: an axis-aligned box of
+    // a wall drawn at an angle reaches past the plane)
+    gp_Trsf frame;
+    frame.SetTransformation(gp_Ax3(point, toward));
+    const TopoDS_Face local = TopoDS::Face(face.Moved(TopLoc_Location(frame)));
     Bnd_Box box;
-    BRepBndLib::Add(face, box, Standard_False);
+    BRepBndLib::Add(local, box, Standard_False);
     if (box.IsVoid() || box.IsOpen()) {
         return false;
     }
@@ -2067,18 +2073,8 @@ bool whollyBeyond(const TopoDS_Face& face, const gp_Pnt& point, const gp_Dir& to
     double y[2];
     double z[2];
     box.Get(x[0], y[0], z[0], x[1], y[1], z[1]);
-    double slack = linearTolerance
-        + box.GetGap() * (std::abs(toward.X()) + std::abs(toward.Y()) + std::abs(toward.Z()));
-    for (double cx : x) {
-        for (double cy : y) {
-            for (double cz : z) {
-                if (gp_Vec(point, gp_Pnt(cx, cy, cz)).Dot(gp_Vec(toward)) > slack) {
-                    return false;
-                }
-            }
-        }
-    }
-    return true;
+    // Get() includes the box's gap
+    return z[1] <= linearTolerance + box.GetGap();
 }
 
 /// ops#640, the replica's #150 (a round at the end of a wall that stands flush on a chamfered
@@ -10229,6 +10225,31 @@ bool trimFusedToolOverFace(
         if (partnerWalls && std::any_of(partnerWalls->begin(), partnerWalls->end(), isBeyond)) {
             runOn.push_back(edge);
             continue;
+        }
+        // The prism's side is the face beyond's surface run on only where that surface is ruled
+        // along the face's normal: a plane, or a cylinder whose axis is the normal (review
+        // pri1040 r1: a ball's dimple is square to the face along its equator, and the prism there
+        // is a cylinder no face of the body lies on). Other analytic surfaces never are; a
+        // B-spline (a blend's face) keeps the sampled test below
+        {
+            BRepAdaptor_Surface beyondSurface(beyond, Standard_False);
+            switch (beyondSurface.GetType()) {
+                case GeomAbs_Plane:
+                    break;
+                case GeomAbs_Cylinder:
+                    if (!parallel(beyondSurface.Cylinder().Axis().Direction(), outward)) {
+                        refuse("a concave dress-up runs past its face over an edge where the face "
+                               "beyond is a cylinder not along the face's normal");
+                    }
+                    break;
+                case GeomAbs_Cone:
+                case GeomAbs_Sphere:
+                case GeomAbs_Torus:
+                    refuse("a concave dress-up runs past its face over an edge where the face "
+                           "beyond is not ruled along the face's normal");
+                default:
+                    break;
+            }
         }
         BRepAdaptor_Curve curve(edge);
         const double first = curve.FirstParameter();

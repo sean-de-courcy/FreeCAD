@@ -151,3 +151,51 @@ class TestFilletVertexEnds(unittest.TestCase):
                 rounded = longer.makeFillet(size, [e for e in longer.Edges if nose(e)])
                 expected = rounded.common(Part.makeBox(60, 40, 20, V(-10, 0, -5)))
                 self.assertSameBody(shape, expected)
+
+    def testFootThroughATiltedWallsHole(self):
+        """Case 1a turned 30 degrees about z: the same body, turned (the folds' bounds follow the planes)."""
+        turn = App.Placement(V(0, 0, 0), App.Rotation(V(0, 0, 1), 30))
+
+        def turned(shape):
+            shape = shape.copy()
+            shape.transformShape(turn.toMatrix())
+            return shape
+
+
+        def tilted_foot(edge):
+            q = turn.inverse().multVec(edge.CenterOfMass)
+            return abs(q.y - 5) < 1e-6 and abs(q.z - 4) < 1e-6 and all(
+                abs(turn.inverse().multVec(v.Point).y - 5) < 1e-6 for v in edge.Vertexes
+            )
+
+        for kind, size in (("Fillet", 0.8), ("Chamfer", 0.8)):
+            with self.subTest(kind=kind, size=size):
+                shape = self.dressUp(turned(wall_with_hole(7.0)), tilted_foot, size, kind)
+                expected = turned(self.plain(wall_with_hole(7.0, hole=False), foot, size, kind).cut(long_hole(7.0)))
+                self.assertSameBody(shape, expected)
+
+    def testFootThroughADimpleTouchingTheFloorRefuses(self):
+        """A ball's dimple (r 3, centred on the wall's face at z 7) touching the floor: its face is square to the wall
+        only along its equator, and the fill cut by the mouth's prism would be no surface of the body (review
+        pri1040 r1). Not known from Onshape: it stays refused."""
+        shape = wall_with_hole(7.0, hole=False).cut(Part.makeSphere(3, V(20, 5, 7)))
+        body = self.doc.addObject("PartDesign::Body", "Body")
+        base = self.doc.addObject("Part::Feature", "Base")
+        base.Shape = shape
+        body.BaseFeature = base
+        self.doc.recompute()
+        for kind in ("Fillet", "Chamfer"):
+            with self.subTest(kind=kind):
+                names = ["Edge%d" % (i + 1) for i, e in enumerate(shape.Edges) if foot(e)]
+                feature = body.newObject("PartDesign::" + kind, kind)
+                feature.Base = (body.Group[0], names)
+                feature.UseAllEdges = False
+                if kind == "Fillet":
+                    feature.Radius = 0.8
+                else:
+                    feature.Size = 0.8
+                self.doc.recompute()
+                self.assertFalse(feature.isValid())
+                body.removeObject(feature)
+                self.doc.removeObject(feature.Name)
+                self.doc.recompute()
