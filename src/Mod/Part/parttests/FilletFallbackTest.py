@@ -9546,6 +9546,48 @@ class MitreRunOnAngleTest(unittest.TestCase):
         self.assertNotIn("Part::GeomBSplineSurface", [f.Surface.TypeId for f in result.Faces])
         self.assertAlmostEqual(result.Volume, 92084.653786, delta=1e-5)
 
+    def atSize(self, n, k, q, thick):
+        """A regular N-gon across flats 60 k, `thick` high, its rim rounded q"""
+        rad = self.flats * k / 2 / math.cos(math.pi / n)
+        points = [
+            V(rad * math.cos(2 * math.pi * i / n), rad * math.sin(2 * math.pi * i / n), 0)
+            for i in range(n)
+        ]
+        prism = Part.Face(Part.makePolygon(points + [points[0]])).extrude(V(0, 0, thick))
+        top = [e for e in prism.Edges if all(abs(v.Point.z - thick) < 1e-9 * k for v in e.Vertexes)]
+        return prism.makeFillet(q, top)
+
+    def assertCleanSphereCorners(self, base, result, n, edges):
+        self.assertTrue(result.isValid())
+        self.assertEqual(len(result.Faces), len(base.Faces) + 2 * n)
+        self.assertEqual(len([f for f in result.Faces if f.Surface.TypeId == "Part::GeomSphere"]), n)
+        self.assertNotIn("Part::GeomBSplineSurface", [f.Surface.TypeId for f in result.Faces])
+        self.assertNotIn(
+            "Part::GeomBSplineCurve", [e.Curve.TypeId for e in result.Edges if not e.Degenerated]
+        )
+        self.assertEqual(len(result.Edges), edges)
+
+    def testSphereWithinToleranceOfQ(self):
+        # Review fx1025-r1f T2: r a rounding error off q (1e-11 at 10x, 1e-9 at 1x) put the sphere
+        # beside the earlier rounds' axes' meeting point, and the Boolean left up to 182 B-spline
+        # edges (N 4 at 10x: 317 edges for 40). The corner is built from q itself
+        for k, d in ((10.0, 1e-11), (1.0, 1e-9), (1.0, -1e-9)):
+            with self.subTest(k=k, d=d):
+                q = self.q * k
+                base = self.atSize(4, k, q, self.thick * k)
+                result = base.makeFillet(q + d, self.vertical(base))
+                self.assertCleanSphereCorners(base, result, 4, 40)
+
+    def testSphereAtSizeHasOneArcPerRimRound(self):
+        # Review fx1025-r1f T1: at flats 600 the Boolean returned the sphere's tangent arc on a rim
+        # round in two or three exact pieces at some corners (82 edges for 80), and a reference to
+        # the arc broke. The pieces of one tool circle are joined
+        for q, thick in ((15.0, 30.0), (12.0, 30.0), (20.0, 40.0)):
+            with self.subTest(q=q, thick=thick):
+                base = self.atSize(8, 10.0, q, thick)
+                result = base.makeFillet(q, self.vertical(base))
+                self.assertCleanSphereCorners(base, result, 8, 80)
+
     def testSpindleRange(self):
         # ops#1024: r in (q, 2q), the torus of major r - q below its minor (RB10, ops#1024's table;
         # RB27 at 1.55). Before: refused, and OCCT raised (N 4) or left B-spline corners

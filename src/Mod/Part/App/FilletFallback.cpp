@@ -18683,6 +18683,10 @@ struct RunOnCorner
     double setback {0};   // from the corner to the new round's tangent points: r cot(t / 2)
     bool convex {false};
     bool sphere {false};  // r = q: the torus's major radius is 0 (ops#1025)
+    // The radius the corner is built with: r, or q itself when r is q within the tolerance, so the
+    // sphere sits on the earlier rounds' axes' meeting point (review fx1025-r1f T2: r 1e-11 off q
+    // put it beside, and the Boolean left B-spline edges)
+    double radius {0};
     double change {0};    // the volume the corner adds (concave) or takes (convex), closed form
     double tools {0};     // the column's and the torus's volumes
 };
@@ -18880,6 +18884,8 @@ RunOnCorner runOnCorner(
     // From q to 2q the same torus, major r - q below its minor (oracle RB10-RB12, ops#1024); at
     // r = q its major is 0 and it is a sphere q about the axes' meeting point (RB15, RB27, ops#1025)
     corner.sphere = r <= q + tolerance;
+    corner.radius = corner.sphere ? q : r;
+    corner.setback = corner.radius * (1 + corner.cosine) / corner.sine;
     corner.convex = gp_Vec(corner.into[1]).Dot(gp_Vec(outwardNormal(faces[0], v))) < 0;
     if (!corner.convex && corner.cosine < -square) {
         // RB8's plates are convex; the concave corners measured are at 90 degrees (ops#1020)
@@ -19308,6 +19314,84 @@ Handle(BRepTools_History) runOnExactArcs(
     return history;
 }
 
+/// The Boolean can return a torus's (or the sphere's) tangent arc on an earlier round in two or
+/// three pieces, each exact once `runOnExactArcs` has run, with a vertex between them that nothing
+/// else meets (review fx1025-r1f T1: flats 600, N 8, r 15 = q and r 2q, 19 and 23 of 88 sizes): a
+/// reference to the arc then breaks. Pieces of one tool circle between the same two faces are
+/// joined into one edge; every other edge is kept as it is. Returns the shape with them joined and
+/// the joining's history, or a null history when nothing was joined
+Handle(BRepTools_History) runOnWholeArcs(TopoDS_Shape& shape, const std::vector<TopoDS_Shape>& tori)
+{
+    std::vector<gp_Circ> circles;
+    for (const auto& torus : tori) {
+        for (TopExp_Explorer it(torus, TopAbs_EDGE); it.More(); it.Next()) {
+            BRepAdaptor_Curve curve(TopoDS::Edge(it.Current()));
+            if (curve.GetType() == GeomAbs_Circle) {
+                circles.push_back(curve.Circle());
+            }
+        }
+    }
+    auto off = [](const gp_Circ& circle, const gp_Pnt& point) {
+        return point.Distance(ElCLib::Value(ElCLib::Parameter(circle, point), circle));
+    };
+    // An edge on a tool circle: a circle whose ends and middle lie on it
+    auto onToolCircle = [&](const TopoDS_Edge& edge) {
+        if (BRep_Tool::Degenerated(edge)) {
+            return false;
+        }
+        BRepAdaptor_Curve curve(edge);
+        if (curve.GetType() != GeomAbs_Circle) {
+            return false;
+        }
+        const double within = BRep_Tool::Tolerance(edge) + linearTolerance;
+        const double u0 = curve.FirstParameter();
+        const double u1 = curve.LastParameter();
+        for (const auto& circle : circles) {
+            if (std::abs(curve.Circle().Radius() - circle.Radius()) <= within
+                && off(circle, curve.Value(u0)) <= within
+                && off(circle, curve.Value((u0 + u1) / 2)) <= within
+                && off(circle, curve.Value(u1)) <= within) {
+                return true;
+            }
+        }
+        return false;
+    };
+    TopTools_IndexedMapOfShape edges;
+    TopExp::MapShapes(shape, TopAbs_EDGE, edges);
+    TopTools_IndexedDataMapOfShapeListOfShape vertexEdges;
+    TopExp::MapShapesAndUniqueAncestors(shape, TopAbs_VERTEX, TopAbs_EDGE, vertexEdges);
+    NCollection_Map<TopoDS_Shape, TopTools_ShapeMapHasher> keep;
+    TopTools_IndexedMapOfShape loose;
+    for (int i = 1; i <= edges.Extent(); ++i) {
+        const TopoDS_Edge& edge = TopoDS::Edge(edges(i));
+        if (onToolCircle(edge)) {
+            loose.Add(edge);
+        }
+        else {
+            keep.Add(edge);
+        }
+    }
+    // Only where two loose edges meet at a vertex of those two alone is there anything to join
+    bool joinable = false;
+    for (int i = 1; i <= vertexEdges.Extent() && !joinable; ++i) {
+        const TopTools_ListOfShape& at = vertexEdges(i);
+        joinable = at.Extent() == 2 && loose.Contains(at.First()) && loose.Contains(at.Last());
+    }
+    if (!joinable) {
+        return {};
+    }
+    ShapeUpgrade_UnifySameDomain unify(shape, true, false, false);
+    unify.KeepShapes(keep);
+    unify.Build();
+    TopTools_IndexedMapOfShape after;
+    TopExp::MapShapes(unify.Shape(), TopAbs_EDGE, after);
+    if (after.Extent() >= edges.Extent()) {
+        return {};
+    }
+    shape = unify.Shape();
+    return unify.History();
+}
+
 }  // namespace
 
 bool constructMitreRunOns(
@@ -19434,16 +19518,18 @@ bool constructMitreRunOns(
         double toolVolume = 0;
         for (auto& corner : corners) {
             const double q = corner.q;
+            // The corner's own radius: r, or q at the sphere (review fx1025-r1f T2)
+            const double rc = corner.radius;
             // Per corner with its own angle t (ops#1020): the column's section r^2 (c - (pi - t) /
             // 2), c = cot(t / 2); the torus (pi - t) K; at 90 degrees r^2 s and pi / 2 K
-            const double area = runOnColumnArea(corner, r);
+            const double area = runOnColumnArea(corner, rc);
             const double turn = runOnTurn(corner);
-            const double c = corner.setback / r;
+            const double c = corner.setback / rc;
             // K by Pappus: the section's area s q^2 about the axis at r - q, its quarter disc's
             // q^3 / 6 (at r = q only the latter: the sphere, ops#1025)
-            const double k = s * q * q * (corner.sphere ? 0.0 : r - q) + q * q * q / 6;
-            const TopoDS_Shape column = runOnColumn(corner, r);
-            const TopoDS_Shape torus = runOnTorus(corner, r);
+            const double k = s * q * q * (corner.sphere ? 0.0 : rc - q) + q * q * q / 6;
+            const TopoDS_Shape column = runOnColumn(corner, rc);
+            const TopoDS_Shape torus = runOnTorus(corner, rc);
             const double columnVolume = volumeOf(column);
             const double torusVolume = volumeOf(torus);
             if (std::abs(columnVolume - area * corner.height) > volumeTolerance * columnVolume
@@ -19457,7 +19543,7 @@ bool constructMitreRunOns(
             // Not as the tools' common with the base: the tools touch the earlier rounds
             // tangentially, and OCCT's common was 0.1-0.5 % off 2K at some sizes (review
             // fix918-r1, L2), while the box's faces cross every face at an angle
-            reaches.push_back(runOnReach(corner, r, q / 4));
+            reaches.push_back(runOnReach(corner, rc, q / 4));
             corner.change = area * corner.height + (turn - 2 * c) * k;
             corner.tools = volume;
             expected += corner.change;
@@ -19544,6 +19630,13 @@ bool constructMitreRunOns(
             if (!history.IsNull() && countSolids(exact) == 1 && BRepCheck_Analyzer(exact).IsValid()) {
                 shape = exact;
                 stages.emplace_back(history, shape);
+            }
+            // One edge per tangent arc (review fx1025-r1f T1)
+            TopoDS_Shape whole = shape;
+            Handle(BRepTools_History) joined = runOnWholeArcs(whole, tori);
+            if (!joined.IsNull() && countSolids(whole) == 1 && BRepCheck_Analyzer(whole).IsValid()) {
+                shape = whole;
+                stages.emplace_back(joined, shape);
             }
         }
         // The checks of the result
