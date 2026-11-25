@@ -518,8 +518,10 @@ PartDesignExport std::string smoothEdgeRule(
     }
     for (const auto& edge : notC0) {
         // Stored as smooth: tangent where it can't be measured
+        // Measured before planes is read: a call's arguments are evaluated in no set order
         bool planes = false;
-        count(std::max(0.0, smoothTurn(shape, TopoDS::Edge(edge.getShape()), true, planes)), planes);
+        const double turn = smoothTurn(shape, TopoDS::Edge(edge.getShape()), true, planes);
+        count(std::max(0.0, turn), planes);
     }
     const std::size_t total = edges.size() + notC0.size();
     const std::string what = chamfer ? "Chamfer" : "Fillet";
