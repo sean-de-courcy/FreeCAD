@@ -1939,10 +1939,10 @@ double largestTolerance(const TopoDS_Shape& shape)
 // nothing, or the whole cone as a second solid overlapping the base, and the cut removed nothing,
 // all inside the volume bounds (notes\kernel-robustness.md section 35). Each tool face with a
 // degenerated edge (a pole) whose vertex lies on the base's boundary is sampled on a 4 x 4 grid of
-// its parameters. A sample outside the base must be on the result's boundary after a fuse, and a
-// sample inside the base on its boundary after a cut or common (the other samples keep the state
-// OCCT's miss leaves, so they say nothing). No sample may be inside one of the result's solids
-// and in or on another (overlapping solids). Samples on the base's boundary say nothing.
+// its parameters. A sample outside the base must be on the result's boundary after a fuse and
+// outside it after a cut or common; a sample inside the base inside the result after a fuse and
+// on its boundary after a cut or common. No sample may be inside one of the result's solids and
+// in or on another (overlapping solids). Samples on the base's boundary say nothing.
 bool toolAgreesAtPoles(
     const TopoDS_Shape& base,
     const TopoDS_Shape& tool,
@@ -2014,11 +2014,12 @@ bool toolAgreesAtPoles(
                 if (in > 1 || (in == 1 && on > 0)) {
                     return false;  // overlapping solids
                 }
-                // only where the tool's face must become the result's boundary: elsewhere OCCT's
-                // miss leaves the state the result should have anyway, and near a tangent contact
-                // the classifier answers ON a few tenths of a millimetre off a wall (review r1)
-                const bool mustBeBoundary = (inBase == TopAbs_OUT) == fuse;
-                if (mustBeBoundary && on == 0) {
+                const TopAbs_State inResult = in > 0 ? TopAbs_IN
+                    : on > 0                         ? TopAbs_ON
+                                                     : TopAbs_OUT;
+                const TopAbs_State wanted = inBase == TopAbs_OUT ? (fuse ? TopAbs_ON : TopAbs_OUT)
+                                                                 : (fuse ? TopAbs_IN : TopAbs_ON);
+                if (inResult != wanted) {
                     return false;
                 }
             }
@@ -3168,6 +3169,9 @@ App::DocumentObjectExecReturn* Revolved::executeRevolved(Part::RevolMode revolMo
     // check then accepts it or refuses loudly
     splineConeLines = false;
     pointCheckRefused = false;
+    skipPointCheck = false;
+    refusedVolume = -1.0;
+    retriedVolume = -1.0;
     App::DocumentObjectExecReturn* first = executeRevolvedOnce(revolMode);
     if (!pointCheckRefused) {
         return first;
@@ -3178,12 +3182,25 @@ App::DocumentObjectExecReturn* Revolved::executeRevolved(Part::RevolMode revolMo
     App::DocumentObjectExecReturn* retried = executeRevolvedOnce(revolMode);
     splineConeLines = false;
     pointCheckRefused = false;
+    // the revolution surfaces give the first result's volume, which was valid: the point check
+    // refused a right result (near a tangent contact, review r1). It is kept, names and all
+    const bool firstRight = refusedValid && refusedVolume >= 0.0 && retriedVolume >= 0.0
+        && std::abs(retriedVolume - refusedVolume)
+            <= 1e-6 * refusedBaseVolume + Precision::Confusion();
+    if (firstRight) {
+        delete retried;  // NOLINT: StdReturn is null
+        skipPointCheck = true;
+        retried = executeRevolvedOnce(revolMode);
+        skipPointCheck = false;
+    }
     // one line per retry, so a sweep's logs show where this path acts
     Base::Console().warning(
         "%s: OCCT missed where the revolution's apex meets the base; rebuilt with revolution "
         "surfaces at the apex (%s)\n",
         getFullLabel().c_str(),
-        retried == App::DocumentObject::StdReturn ? "built" : "refused"
+        firstRight                                          ? "the first result agrees: kept"
+            : retried == App::DocumentObject::StdReturn     ? "built"
+                                                            : "refused"
     );
     return retried;
 }
@@ -3809,13 +3826,19 @@ void Revolved::setResult(const TopoShape& base, const TopoShape& revolved, bool 
             // OCCT missed where the tool's cone meets the base, inside the volume bounds
             // (ops#1048): refused here; the feature retries once with revolution surfaces
             // (executeRevolved())
-            if (!toolAgreesAtPoles(
+            if (!skipPointCheck
+                && !toolAgreesAtPoles(
                     base.getShape(),
                     tool.getShape(),
                     result.getShape(),
                     getAddSubType() == FeatureAddSub::Type::Additive && !intersects
                 )) {
                 pointCheckRefused = !splineConeLines;
+                if (pointCheckRefused) {
+                    refusedVolume = precise(result).value;
+                    refusedBaseVolume = precise(base).value;
+                    refusedValid = BRepCheck_Analyzer(result.getShape()).IsValid();
+                }
                 throw Base::RuntimeError(QT_TRANSLATE_NOOP(
                     "Exception",
                     "Could not combine the revolution with the base: the result does not follow "
@@ -3823,7 +3846,11 @@ void Revolved::setResult(const TopoShape& base, const TopoShape& revolved, bool 
                 ));
             }
             // the retry's B-spline tool can leave sliver faces where the first tool's result
-            // was right but refused (review r1): an invalid retried result is refused too
+            // was right but refused (review r1): its volume decides between the two
+            // (executeRevolved()), and an invalid retried result is refused
+            if (splineConeLines) {
+                retriedVolume = precise(result).value;
+            }
             if (splineConeLines && !BRepCheck_Analyzer(result.getShape()).IsValid()) {
                 throw Base::RuntimeError(QT_TRANSLATE_NOOP(
                     "Exception",

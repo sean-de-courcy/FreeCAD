@@ -138,6 +138,14 @@ private:
     // that end on the axis into degree-1 B-splines (freshAxisEdges()), which OCCT intersects
     bool pointCheckRefused = false;
     bool splineConeLines = false;
+    // review r1: the refused first result (its volume, the base's, valid or not) and the retry's
+    // volume once it passed the point check (-1: not reached); a retry that agrees with a valid
+    // first result keeps the first (the check refused a right result), computed with the check off
+    double refusedVolume = -1.0;
+    double refusedBaseVolume = 0.0;
+    bool refusedValid = false;
+    double retriedVolume = -1.0;
+    bool skipPointCheck = false;
 
     double getStartReferenceAngle(
         const TopoShape& profileShape,
