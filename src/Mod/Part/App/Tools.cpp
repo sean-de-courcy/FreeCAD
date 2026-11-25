@@ -37,6 +37,7 @@
 #include <Geom_Line.hxx>
 #include <Geom_Plane.hxx>
 #include <Geom_Point.hxx>
+#include <GeomAPI_IntCS.hxx>
 #include <GeomAPI_IntSS.hxx>
 #include <GeomAPI_ProjectPointOnSurf.hxx>
 #include <GeomAdaptor_Curve.hxx>
@@ -831,12 +832,29 @@ bool Part::Tools::isConcave(const TopoDS_Face& face, const gp_Pnt& pointOfVue, c
     BRepIntCurveSurface_Inter mkSection;
     mkSection.Init(face, line, Precision::Confusion());
 
-    result = mkSection.Transition() == IntCurveSurface_In;
+    // Where the line meets the face, or, when it misses the face, the face's surface without its
+    // limits. Read without asking, a miss raised StdFail_NotDone, whose message is empty: an
+    // extrusion up to a face beside the profile's centre failed saying nothing (ops#1039). A line
+    // that misses the surface too keeps the face's limits
+    double hitU = 0.0;
+    double hitV = 0.0;
+    if (mkSection.More()) {
+        hitU = mkSection.U();
+        hitV = mkSection.V();
+    }
+    else {
+        GeomAPI_IntCS unlimited(new Geom_Line(line), surf);
+        if (!unlimited.IsDone() || unlimited.NbPoints() < 1) {
+            return true;
+        }
+        double w = 0.0;
+        unlimited.Parameters(1, hitU, hitV, w);
+    }
 
     // compute normals at the intersection
     gp_Pnt iPnt;
     gp_Vec dU, dV;
-    surf->D1(mkSection.U(), mkSection.V(), iPnt, dU, dV);
+    surf->D1(hitU, hitV, iPnt, dU, dV);
 
     // check normals orientation
     gp_Dir dirdU(dU);
