@@ -57,6 +57,7 @@ from parttests.FilletFallbackTest import (
     InvalidResultWiderScopeTest,  # ops#989
     RuledChamferTest,  # ops#987
     MitreRunOnTest,  # ops#918
+    MitreRunOnAngleTest,  # ops#1020
     EndOnTangentWallTest,  # ops#999
     ShallowRidgeTest,  # ops#999
     SmoothEdgeTest,  # ops#999

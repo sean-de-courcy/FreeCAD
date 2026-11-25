@@ -708,6 +708,10 @@ public:
     /// Adds one construction's result to the innermost recorder, if there is one
     static void add(int edges, int corners, bool rolledOn = false, bool ranThrough = false);
 
+    /// Adds what this recorder collected to the one it nests in, if any: for a nested attempt whose
+    /// result stands (ops#1020: an attempt that falls back leaves the outer recorder as it was)
+    void passOn() const;
+
     /// Whether the construction built a result while this recorder collected
     bool built() const
     {

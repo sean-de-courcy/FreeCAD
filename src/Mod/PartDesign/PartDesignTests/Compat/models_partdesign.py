@@ -1267,6 +1267,51 @@ def ChamferVaryingAngle(make):
     return {"volumes": volumes}
 
 
+def MitreRunOnHexagon(make):
+    """A round along each vertical corner line of a hexagonal plate whose rim was rounded first,
+    tangent propagation adding the rims' mitre ellipses: Onshape's cylinder down to the rims' plane
+    with a torus at its foot at each corner (ops#1020, notes/fillet-mitre-angle-1020-design.md,
+    oracle RB8).
+
+    Body: as BaseFeature, a regular hexagon across flats 60 with a vertex on +x, 3 thick, its top
+    edges rounded 1.5 (Part's makeFillet); a Fillet of radius 3 on the six vertical lines alone.
+    fork-1.0.8's OCCT fillet builds B-spline faces there, 0.28 mm3 more material than Onshape's.
+    Per corner (t 120 deg, c = cot(t / 2), K = (1 - pi/4) q^2 (r - q) + q^3 / 6) the volume falls by
+    r^2 (c - (pi - t) / 2) h + (pi - t - 2c) K (`parttests.FilletFallbackTest.MitreRunOnAngleTest`),
+    from the base's own volume."""
+    from parttests.FilletFallbackTest import MitreRunOnAngleTest as T
+
+    radius = 3.0
+    doc = make("MitreRunOnHexagon")
+    rad = T.flats / 2 / math.cos(math.pi / 6)
+    points = [V(rad * math.cos(math.pi * k / 3), rad * math.sin(math.pi * k / 3), 0) for k in range(6)]
+    prism = Part.Face(Part.makePolygon(points + points[:1])).extrude(V(0, 0, T.thick))
+    top = [e for e in prism.Edges if all(abs(v.Point.z - T.thick) < 1e-9 for v in e.Vertexes)]
+    named = prism.makeFillet(T.q, top)
+    shape = Part.Shape()
+    shape.importBrepFromString(named.exportBrepToString())
+    base = doc.addObject("Part::Feature", "RimmedHexagon")
+    base.Shape = shape
+    body = newBody(doc, "Body")
+    body.BaseFeature = base
+    doc.recompute()
+    lines = [
+        "Edge%d" % i
+        for i, e in enumerate(base.Shape.Edges, 1)
+        if e.Curve.TypeId == "Part::GeomLine" and abs(e.tangentAt(e.FirstParameter).z) > 0.999
+    ]
+    if len(lines) != 6:
+        raise AssertionError(f"the hexagon has {len(lines)} vertical lines, expected 6")
+    fillet = body.newObject("PartDesign::Fillet", "CornerRunOn")
+    fillet.Base = (body.BaseFeature, lines)
+    fillet.Radius = radius
+    body.Tip = fillet
+    doc.recompute()
+    if any(f.Surface.TypeId == "Part::GeomBSplineSurface" for f in fillet.Shape.Faces):
+        raise AssertionError("CornerRunOn has B-spline faces, not the run-on's tori")
+    return {"volumes": {"CornerRunOn": base.Shape.Volume - 6 * T.change(radius, 2 * math.pi / 3)}}
+
+
 MODELS = [
     RevolutionGroove,
     SidedVariants,
@@ -1289,4 +1334,5 @@ MODELS = [
 
 
     ChamferVaryingAngle,
+    MitreRunOnHexagon,
 ]

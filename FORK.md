@@ -533,7 +533,8 @@ names it.
 | `fix/i978-literal-twin-count` | fix | ops#978 | - | integration | `e73fd31783` (fork PR 532), 2026-11-23 | never (fork fix): a twin place's duplicate count `<k>of<n>~<m>` stays literal when a file's names are read (ops#978) |
 | `infra/superseded-106-107` | infra | ops#978 | - | integration | `57eba05e3e` (fork PR 533), 2026-11-24 | never (fork infra): the release check treats fork-1.0.6 and fork-1.0.7 as superseded (no build of 1.0.6 exists to save its generation) |
 | `fix/i1005-mixed-smooth-edges` | fix | ops#1005 | - | integration | `fb899b363b` (fork PR 536), 2026-11-25 | never (fork fix): a fillet or chamfer drops a smooth (tangent) pick and refuses smooth-only selections as Onshape does; a chamfer holding a bent edge between two planes within 0.1 degree, together with other edges, fails (ops#1005) |
-| `fix/i898-trimbywall-runon` | fix | ops#898, ops#1022 | - | integration | (fork PR 534) | never (fork fix): a round past a narrow strip is cut by the wall's own continuation below the foot; with tangent propagation off a straight edge's run-out ends at a tangent end face instead of running on along the walls (ops#898, ops#1022) |
+| `fix/i898-trimbywall-runon` | fix | ops#898, ops#1022 | - | integration | `3971b66962` (fork PR 534), 2026-11-25 | never (fork fix): a round past a narrow strip is cut by the wall's own continuation below the foot; with tangent propagation off a straight edge's run-out ends at a tangent end face instead of running on along the walls (ops#898, ops#1022) |
+| `fix/i1020-mitre-angle` | fix | ops#1020 | - | `integration` `3971b66962` | (fork PR 535) | never (fork fix): the mitre run-on corner at wall angles of 90 to 135 degrees, asked before OCCT, as Onshape's (RB8) |
 
 ## Fork-only commits in carried topics
 

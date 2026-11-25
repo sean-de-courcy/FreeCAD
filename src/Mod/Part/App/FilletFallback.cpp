@@ -99,6 +99,8 @@
 #include <GProp_GProps.hxx>
 #include <IntCurvesFace_ShapeIntersector.hxx>
 #include <Precision.hxx>
+#include <ShapeAnalysis_Surface.hxx>
+#include <ShapeFix_Edge.hxx>
 #include <ShapeFix_Shell.hxx>
 #include <ShapeUpgrade_UnifySameDomain.hxx>
 #include <NCollection_Map.hxx>
@@ -15496,6 +15498,17 @@ void Recorder::add(int edges, int corners, bool rolledOn, bool ranThrough)
     }
 }
 
+void Recorder::passOn() const
+{
+    if (outer) {
+        outer->rolled = outer->rolled || rolled;
+        outer->ran = outer->ran || ran;
+        outer->builds += builds;
+        outer->edges += edges;
+        outer->corners += corners;
+    }
+}
+
 std::string Recorder::report(const std::string& name) const
 {
     if (builds == 0) {
@@ -18664,6 +18677,10 @@ struct RunOnCorner
     gp_Dir into[2];       // in A and in B, normal to L, into the face
     double q {0};         // the earlier rounds' radius
     double height {0};    // from F to L's other end: |L| + q
+    // The wedge's angle t between into[0] and into[1] (ops#1020: 90 to 135 degrees)
+    double cosine {0};
+    double sine {1};
+    double setback {0};   // from the corner to the new round's tangent points: r cot(t / 2)
     bool convex {false};
     double change {0};    // the volume the corner adds (concave) or takes (convex), closed form
     double tools {0};     // the column's and the torus's volumes
@@ -18741,11 +18758,13 @@ TopoDS_Face otherFace(const TopTools_IndexedDataMapOfShapeListOfShape& edgeFaces
 
 /** The corner of a picked line L, between planes A and B, at its vertex V, where L runs into the
  * mitre E of two earlier rounds (notes/fillet-mitre-runon-918.md, the rule and its addendum).
- * Refuses unless every condition holds: A normal to B; at V exactly L, E, lA (A and CA) and lB (B
- * and CB); CA and CB cylinders of one radius q, r >= 2q, tangent to A and B along lA and lB, their
- * axes meeting at the point q from F, A and B on the kite's side; E picked, leaving V along L, to
- * W on F (3 edges, 3 faces there), F a plane normal to L at q from V whose material lies where L's
- * does; lA and lB longer than r; L's other end a free end on a plane normal to L.
+ * Refuses unless every condition holds: A and B at an angle t of 90 degrees, or of 90 to 135
+ * degrees for a convex corner (ops#1020, notes/fillet-mitre-angle-1020-design.md); at V exactly L,
+ * E, lA (A and CA) and lB (B and CB); CA and CB cylinders of one radius q, r >= 2q, tangent to A
+ * and B along lA and lB, their axes meeting at the point q from F, A and B on the kite's side; E
+ * picked, leaving V along L, to W on F (3 edges, 3 faces there), F a plane normal to L at q from V
+ * whose material lies where L's does; lA and lB longer than the setback r cot(t / 2); L's other
+ * end a free end on a plane normal to L.
  */
 RunOnCorner runOnCorner(
     const TopoDS_Edge& line,
@@ -18768,9 +18787,22 @@ RunOnCorner runOnCorner(
     corner.up = awayFrom(line, vertex);
     const gp_Pln planes[2] = {BRepAdaptor_Surface(faces[0], Standard_False).Plane(),
                               BRepAdaptor_Surface(faces[1], Standard_False).Plane()};
-    if (std::abs(planes[0].Axis().Direction().Dot(planes[1].Axis().Direction())) > square) {
-        refuse("the mitre corner's faces are not at a right angle");
+    const double middle = (BRepAdaptor_Curve(line).FirstParameter()
+                           + BRepAdaptor_Curve(line).LastParameter())
+        / 2;
+    for (int i = 0; i < 2; ++i) {
+        corner.into[i] = inwardIn(faces[i], line, middle);
     }
+    // The wedge's angle t, from the faces' inward directions (the planes' normals lose its sign):
+    // 90 degrees, or up to 135 for a convex corner (ops#1020: Onshape measured at 90, 120 and 135,
+    // oracle row RB8; the census corners sit at 135, so the bound does not cut them by rounding)
+    corner.cosine = corner.into[0].Dot(corner.into[1]);
+    corner.sine = gp_Vec(corner.into[0]).Crossed(gp_Vec(corner.into[1])).Magnitude();
+    if (corner.cosine > square || corner.cosine < -std::sqrt(0.5) - 1e-6 || corner.sine < 0.5) {
+        refuse("the mitre corner's faces are not at an angle of 90 to 135 degrees");
+    }
+    // cot(t / 2)
+    corner.setback = r * (1 + corner.cosine) / corner.sine;
     const auto at = edgesAt(vertexEdges, edgeFaces, vertex);
     if (at.size() != 4 || facesAt(vertexFaces, vertex).size() != 4) {
         refuse("the mitre corner is not a vertex of 4 edges and 4 faces");
@@ -18804,13 +18836,9 @@ RunOnCorner runOnCorner(
     if (awayFrom(corner.mitre, vertex).Dot(corner.up) > -1 + tangentTolerance) {
         refuse("the earlier rounds' mitre does not leave the corner along the line");
     }
-    const double middle = (BRepAdaptor_Curve(line).FirstParameter()
-                           + BRepAdaptor_Curve(line).LastParameter())
-        / 2;
     gp_Lin axes[2];
     for (int i = 0; i < 2; ++i) {
         corner.rounds[i] = otherFace(edgeFaces, feet[i], faces[i]);
-        corner.into[i] = inwardIn(faces[i], line, middle);
         BRepAdaptor_Curve foot(feet[i]);
         BRepAdaptor_Surface round(corner.rounds[i], Standard_False);
         if (foot.GetType() != GeomAbs_Line || round.GetType() != GeomAbs_Cylinder) {
@@ -18834,11 +18862,11 @@ RunOnCorner runOnCorner(
             || std::abs(axes[i].Distance(v) - corner.q) > tolerance) {
             refuse("an earlier round is not tangent to its face along its foot");
         }
-        // Room: the foot runs on past the new round's reach
+        // Room: the foot runs on past the new round's tangent point (r at 90 degrees)
         TopoDS_Vertex ends[2];
         TopExp::Vertices(feet[i], ends[0], ends[1]);
         const TopoDS_Vertex& beyond = ends[0].IsSame(vertex) ? ends[1] : ends[0];
-        if (BRep_Tool::Pnt(beyond).Distance(v) <= r + tolerance) {
+        if (BRep_Tool::Pnt(beyond).Distance(v) <= corner.setback + tolerance) {
             refuse("the earlier rounds end within the new round's reach");
         }
     }
@@ -18848,8 +18876,13 @@ RunOnCorner runOnCorner(
         refuse("the earlier rounds' radius above half the new one");
     }
     corner.convex = gp_Vec(corner.into[1]).Dot(gp_Vec(outwardNormal(faces[0], v))) < 0;
+    if (!corner.convex && corner.cosine < -square) {
+        // RB8's plates are convex; the concave corners measured are at 90 degrees (ops#1020)
+        refuse("a concave mitre corner whose faces are not at a right angle");
+    }
     corner.foot = v.Translated(gp_Vec(corner.up) * -q);
-    const gp_Vec kite = gp_Vec(corner.into[0]) + gp_Vec(corner.into[1]);
+    // At distance x from both faces, on the wedge's side: the foot plus kite x (ops#1020)
+    const gp_Vec kite = (gp_Vec(corner.into[0]) + gp_Vec(corner.into[1])) / corner.sine;
     // The axes meet at the point q from F, A and B, on the kite's side of both (skeptic 1)
     const gp_Pnt meet = corner.foot.Translated(kite * q + gp_Vec(corner.up) * q);
     if (axes[0].Distance(meet) > tolerance || axes[1].Distance(meet) > tolerance) {
@@ -18922,17 +18955,46 @@ RunOnCorner runOnCorner(
     return corner;
 }
 
-/// The column: the r-square at the corner less the disc about the new round's axis, from F to
-/// L's other end
+/// The new round's axis on F: r from both faces, on the wedge's side
+gp_Pnt runOnCentre(const RunOnCorner& corner, double r)
+{
+    return corner.foot.Translated(
+        (gp_Vec(corner.into[0]) + gp_Vec(corner.into[1])) * (r / corner.sine)
+    );
+}
+
+/// The unit directions from the new round's axis to its tangent points on A and on B
+std::pair<gp_Vec, gp_Vec> runOnTangents(const RunOnCorner& corner)
+{
+    const gp_Vec u0(corner.into[0]);
+    const gp_Vec u1(corner.into[1]);
+    return {(u1 - u0 * corner.cosine) * (-1 / corner.sine),
+            (u0 - u1 * corner.cosine) * (-1 / corner.sine)};
+}
+
+/// The new round's turn about its axis, pi - t
+double runOnTurn(const RunOnCorner& corner)
+{
+    return pi - std::atan2(corner.sine, corner.cosine);
+}
+
+/// The column's section area: the kite between the faces and the axis less the round's sector,
+/// r^2 (cot(t / 2) - (pi - t) / 2)
+double runOnColumnArea(const RunOnCorner& corner, double r)
+{
+    return r * corner.setback - r * r * runOnTurn(corner) / 2;
+}
+
+/// The column: the kite at the corner (the faces' tangent points and the axis) less the round's
+/// sector, from F to L's other end
 TopoDS_Shape runOnColumn(const RunOnCorner& corner, double r)
 {
-    const gp_Vec a = gp_Vec(corner.into[0]) * r;
-    const gp_Vec b = gp_Vec(corner.into[1]) * r;
+    const gp_Vec kite = gp_Vec(corner.into[0]) + gp_Vec(corner.into[1]);
     const gp_Pnt p0 = corner.foot;
-    const gp_Pnt p1 = p0.Translated(a);
-    const gp_Pnt p2 = p0.Translated(b);
-    const gp_Pnt centre = p0.Translated(a + b);
-    const gp_Pnt mid = centre.Translated((a + b) * (-1 / std::sqrt(2.0)));
+    const gp_Pnt p1 = p0.Translated(gp_Vec(corner.into[0]) * corner.setback);
+    const gp_Pnt p2 = p0.Translated(gp_Vec(corner.into[1]) * corner.setback);
+    const gp_Pnt centre = runOnCentre(corner, r);
+    const gp_Pnt mid = centre.Translated(kite * (-r / kite.Magnitude()));
     Handle(Geom_TrimmedCurve) arc = GC_MakeArcOfCircle(p1, mid, p2).Value();
     BRepBuilderAPI_MakeWire wire(
         BRepBuilderAPI_MakeEdge(p0, p1).Edge(),
@@ -18951,17 +19013,14 @@ TopoDS_Shape runOnColumn(const RunOnCorner& corner, double r)
 }
 
 /// The torus at the column's foot: the earlier round's section in the meridian plane (the q-square
-/// at the new round's surface on F, less the quarter disc), a quarter turn about the new round's
+/// at the new round's surface on F, less the quarter disc), turned pi - t about the new round's
 /// axis, from A's foot to B's
 TopoDS_Shape runOnTorus(const RunOnCorner& corner, double r)
 {
     const double q = corner.q;
-    const gp_Pnt centre = corner.foot.Translated(
-        (gp_Vec(corner.into[0]) + gp_Vec(corner.into[1])) * r
-    );
+    const gp_Pnt centre = runOnCentre(corner, r);
     // Toward A's foot (the point of A nearest the axis) and toward B's
-    const gp_Vec toA = gp_Vec(corner.into[1]) * -1;
-    const gp_Vec toB = gp_Vec(corner.into[0]) * -1;
+    const auto [toA, toB] = runOnTangents(corner);
     const gp_Vec up(corner.up);
     auto at = [&](double rho, double h) {
         return centre.Translated(toA * rho + up * h);
@@ -18978,7 +19037,7 @@ TopoDS_Shape runOnTorus(const RunOnCorner& corner, double r)
         refuse("the run-on torus's section failed");
     }
     BRepBuilderAPI_MakeFace face(wire.Wire(), Standard_True);
-    const double turn = up.Crossed(toA).Dot(toB) > 0 ? pi / 2 : -pi / 2;
+    const double turn = up.Crossed(toA).Dot(toB) > 0 ? runOnTurn(corner) : -runOnTurn(corner);
     BRepPrimAPI_MakeRevol revolution(face.Face(), gp_Ax1(centre, corner.up), turn);
     if (!revolution.IsDone()) {
         refuse("the run-on torus failed");
@@ -18986,28 +19045,257 @@ TopoDS_Shape runOnTorus(const RunOnCorner& corner, double r)
     return revolution.Shape();
 }
 
-/// The box about a corner's reach: the r-square at the corner and margin beyond each side, from
-/// margin below F to margin beyond L's other end
+/// The prism about a corner's reach: the kite at the corner (the corner, the tangent points and
+/// the axis) and margin beyond each side, from margin below F to margin beyond L's other end. Its
+/// sides are the faces moved out by margin and the planes normal to each face at margin past the
+/// tangent point, so they cross every face at an angle (ops#1020)
 TopoDS_Shape runOnReach(const RunOnCorner& corner, double r, double margin)
 {
     const gp_Vec a(corner.into[0]);
     const gp_Vec b(corner.into[1]);
     const gp_Vec up(corner.up);
-    const gp_Pnt p0 = corner.foot.Translated((a + b + up) * -margin);
-    const double side = r + 2 * margin;
-    BRepBuilderAPI_MakePolygon square(
-        p0,
-        p0.Translated(a * side),
-        p0.Translated((a + b) * side),
-        p0.Translated(b * side),
+    const auto [toA, toB] = runOnTangents(corner);
+    const gp_Pnt base = corner.foot.Translated(up * -margin);
+    const gp_Pnt centre = runOnCentre(corner, r).Translated(up * -margin);
+    BRepBuilderAPI_MakePolygon kite(
+        base.Translated((a + b) * (-margin / corner.sine)),
+        base.Translated(a * (corner.setback + margin) + toA * margin),
+        centre.Translated((a + b) * (margin / (1 + corner.cosine))),
+        base.Translated(b * (corner.setback + margin) + toB * margin),
         Standard_True
     );
-    BRepBuilderAPI_MakeFace face(square.Wire(), Standard_True);
+    BRepBuilderAPI_MakeFace face(kite.Wire(), Standard_True);
     BRepPrimAPI_MakePrism prism(face.Face(), up * (corner.height + 2 * margin));
     if (!prism.IsDone()) {
         refuse("a mitre corner's reach failed");
     }
     return prism.Shape();
+}
+
+/// The torus meets each earlier round along its tangent end arc, and at some sizes the run-on's
+/// Boolean returns that arc as an approximated B-spline beside a sliver of the round (fx1020, the
+/// at-size sweep: N 6 r/q 4 at 10x-30x, tolerance ~7e-4 of the size): the solid is right, its
+/// volume integral ~4e-5 of the corner's change off. Each edge of a torus's image that is not
+/// analytic, whose vertices lie on one of the torus tool's own circles and whose faces' surfaces
+/// both hold that circle's arc between them, is replaced by the arc, with its curves on both faces
+/// made anew. Where the sliver stayed a face of its own (two edges: this one and the round's arc
+/// between the same vertices), it is dropped and the arc bounds the round too. Returns the
+/// replacements' history, or null when there were none; the caller keeps the result only if it
+/// stays one valid solid, and the result's checks follow
+Handle(BRepTools_History) runOnExactArcs(
+    TopoDS_Shape& shape,
+    const std::vector<TopoDS_Shape>& tori,
+    const TopTools_IndexedMapOfShape& torusImages
+)
+{
+    std::vector<gp_Circ> circles;
+    for (const auto& torus : tori) {
+        for (TopExp_Explorer it(torus, TopAbs_EDGE); it.More(); it.Next()) {
+            BRepAdaptor_Curve curve(TopoDS::Edge(it.Current()));
+            if (curve.GetType() == GeomAbs_Circle) {
+                circles.push_back(curve.Circle());
+            }
+        }
+    }
+    auto off = [](const gp_Circ& circle, const gp_Pnt& point) {
+        return point.Distance(ElCLib::Value(ElCLib::Parameter(circle, point), circle));
+    };
+    // The edge's curve on the face, in the period the old edge's curve there runs in (on the
+    // torus a curve a period off cost its face half its area: N 6 r/q 2 at 30x)
+    auto onFace = [](const TopoDS_Edge& exact,
+                     const TopoDS_Face& face,
+                     const TopoDS_Edge& old,
+                     const TopoDS_Vertex& start) {
+        ShapeFix_Edge().FixAddPCurve(exact, face, false, linearTolerance);
+        double from = 0;
+        double to = 0;
+        double oldFrom = 0;
+        double oldTo = 0;
+        Handle(Geom2d_Curve) made = BRep_Tool::CurveOnSurface(exact, face, from, to);
+        Handle(Geom2d_Curve) was = BRep_Tool::CurveOnSurface(old, face, oldFrom, oldTo);
+        if (made.IsNull() || was.IsNull()) {
+            return false;
+        }
+        const gp_Pnt2d want = was->Value(BRep_Tool::Parameter(start, old));
+        const gp_Pnt2d have = made->Value(BRep_Tool::Parameter(start, exact));
+        Handle(Geom_Surface) surface = BRep_Tool::Surface(face);
+        double du = 0;
+        double dv = 0;
+        if (surface->IsUPeriodic()) {
+            du = std::round((want.X() - have.X()) / surface->UPeriod()) * surface->UPeriod();
+        }
+        if (surface->IsVPeriodic()) {
+            dv = std::round((want.Y() - have.Y()) / surface->VPeriod()) * surface->VPeriod();
+        }
+        if (du != 0 || dv != 0) {
+            Handle(Geom2d_Curve) moved
+                = Handle(Geom2d_Curve)::DownCast(made->Translated(gp_Vec2d(du, dv)));
+            BRep_Builder().UpdateEdge(exact, moved, face, BRep_Tool::Tolerance(exact));
+        }
+        return true;
+    };
+    TopTools_IndexedDataMapOfShapeListOfShape edgeFaces;
+    TopExp::MapShapesAndUniqueAncestors(shape, TopAbs_EDGE, TopAbs_FACE, edgeFaces);
+    BRepTools_ReShape reshape;
+    Handle(BRepTools_History) history = new BRepTools_History;
+    TopTools_IndexedMapOfShape done;
+    for (int i = 1; i <= edgeFaces.Extent(); ++i) {
+        const TopoDS_Edge edge = TopoDS::Edge(edgeFaces.FindKey(i).Oriented(TopAbs_FORWARD));
+        const TopTools_ListOfShape& faces = edgeFaces(i);
+        if (faces.Extent() != 2 || BRep_Tool::Degenerated(edge) || done.Contains(edge)) {
+            continue;
+        }
+        const bool firstIsTorus = torusImages.Contains(faces.First());
+        if (!firstIsTorus && !torusImages.Contains(faces.Last())) {
+            continue;
+        }
+        const TopoDS_Face torusFace = TopoDS::Face(firstIsTorus ? faces.First() : faces.Last());
+        const TopoDS_Face other = TopoDS::Face(firstIsTorus ? faces.Last() : faces.First());
+        if (done.Contains(other)) {
+            continue;
+        }
+        BRepAdaptor_Curve curve(edge);
+        const GeomAbs_CurveType type = curve.GetType();
+        if (type == GeomAbs_Line || type == GeomAbs_Circle || type == GeomAbs_Ellipse) {
+            continue;
+        }
+        TopoDS_Vertex first;
+        TopoDS_Vertex last;
+        TopExp::Vertices(edge, first, last);
+        if (first.IsNull() || last.IsNull() || first.IsSame(last)) {
+            continue;
+        }
+        const gp_Pnt p1 = BRep_Tool::Pnt(first);
+        const gp_Pnt p2 = BRep_Tool::Pnt(last);
+        const double within = BRep_Tool::Tolerance(edge) + linearTolerance;
+        // A sliver: the other face has only this edge and an arc between the same vertices
+        TopoDS_Edge sliverArc;
+        TopoDS_Face round = other;
+        {
+            TopTools_IndexedMapOfShape otherEdges;
+            TopExp::MapShapes(other, TopAbs_EDGE, otherEdges);
+            if (otherEdges.Extent() == 2) {
+                const TopoDS_Edge arc = TopoDS::Edge(
+                    (otherEdges(1).IsSame(edge) ? otherEdges(2) : otherEdges(1))
+                        .Oriented(TopAbs_FORWARD)
+                );
+                TopoDS_Vertex a;
+                TopoDS_Vertex b;
+                TopExp::Vertices(arc, a, b);
+                const bool sameEnds = (a.IsSame(first) && b.IsSame(last))
+                    || (a.IsSame(last) && b.IsSame(first));
+                const int index = edgeFaces.FindIndex(arc);
+                if (sameEnds && BRepAdaptor_Curve(arc).GetType() == GeomAbs_Circle && index > 0
+                    && edgeFaces(index).Extent() == 2 && !done.Contains(arc)) {
+                    sliverArc = arc;
+                    round = TopoDS::Face(
+                        edgeFaces(index).First().IsSame(other) ? edgeFaces(index).Last()
+                                                               : edgeFaces(index).First()
+                    );
+                }
+            }
+        }
+        for (const auto& circle : circles) {
+            if (off(circle, p1) > BRep_Tool::Tolerance(first) + linearTolerance
+                || off(circle, p2) > BRep_Tool::Tolerance(last) + linearTolerance) {
+                continue;
+            }
+            // The arc from the first vertex to the last the short way: the circle reversed when
+            // that runs against its sense, so the edge keeps the old one's direction
+            Handle(Geom_Circle) arc = new Geom_Circle(circle);
+            double u1 = ElCLib::Parameter(circle, p1);
+            double turn = ElCLib::Parameter(circle, p2) - u1;
+            while (turn > M_PI) {
+                turn -= 2 * M_PI;
+            }
+            while (turn <= -M_PI) {
+                turn += 2 * M_PI;
+            }
+            if (turn < 0) {
+                arc = Handle(Geom_Circle)::DownCast(arc->Reversed());
+                u1 = ElCLib::Parameter(arc->Circ(), p1);
+                turn = -turn;
+            }
+            // The surfaces are tangent along the arc, so the approximated curve wanders off it
+            // (0.04 to 0.12 at q 15, against its tolerance of 3e-4 to 7e-3) while on both within
+            // its tolerance: what is asked is that the arc lies on the faces' surfaces within the
+            // old edge's tolerance, and that the old edge stays nearer it than its ends are apart
+            bool on = true;
+            for (int k = 1; k < 8 && on; ++k) {
+                const double u = curve.FirstParameter()
+                    + (curve.LastParameter() - curve.FirstParameter()) * k / 8;
+                on = off(circle, curve.Value(u)) <= p1.Distance(p2);
+            }
+            for (const TopoDS_Face& face : {torusFace, other, round}) {
+                Handle(ShapeAnalysis_Surface) surface
+                    = new ShapeAnalysis_Surface(BRep_Tool::Surface(face));
+                for (int k = 1; k < 8 && on; ++k) {
+                    surface->ValueOfUV(arc->Value(u1 + turn * k / 8), within);
+                    on = surface->Gap() <= within;
+                }
+            }
+            if (!on) {
+                continue;
+            }
+            BRepBuilderAPI_MakeEdge make(arc, first, last, u1, u1 + turn);
+            if (!make.IsDone()) {
+                break;
+            }
+            const TopoDS_Edge exact = make.Edge();
+            if (!onFace(exact, torusFace, edge, first)
+                || !onFace(exact, round, sliverArc.IsNull() ? edge : sliverArc, first)) {
+                break;
+            }
+            ShapeFix_Edge().FixSameParameter(exact);
+            reshape.Replace(edge, exact);
+            history->AddModified(edge, exact);
+            done.Add(edge);
+            if (!sliverArc.IsNull()) {
+                const bool sameSense = TopExp::FirstVertex(sliverArc).IsSame(first);
+                reshape.Replace(sliverArc, sameSense ? exact : TopoDS::Edge(exact.Reversed()));
+                history->AddModified(sliverArc, exact);
+                reshape.Remove(other);
+                history->Remove(other);
+                done.Add(sliverArc);
+                done.Add(other);
+            }
+            break;
+        }
+    }
+    // The same Boolean can leave, inside a torus's face, a wire of internal edges only (an
+    // approximated piece of the same tangent arc, 0.6-1.5 long at 10x-30x: review fx1020-r1): no
+    // boundary of anything, it is dropped
+    for (int i = 1; i <= torusImages.Extent(); ++i) {
+        if (torusImages(i).ShapeType() != TopAbs_FACE) {
+            continue;
+        }
+        for (TopoDS_Iterator wires(torusImages(i)); wires.More(); wires.Next()) {
+            const TopoDS_Shape& wire = wires.Value();
+            if (wire.ShapeType() != TopAbs_WIRE) {
+                continue;
+            }
+            bool inner = true;
+            bool empty = true;
+            for (TopoDS_Iterator it(wire); it.More() && inner; it.Next()) {
+                empty = false;
+                const int index = edgeFaces.FindIndex(it.Value());
+                inner = it.Value().Orientation() == TopAbs_INTERNAL && index > 0
+                    && edgeFaces(index).Extent() == 1;
+            }
+            if (inner && !empty) {
+                reshape.Remove(wire);
+                for (TopoDS_Iterator it(wire); it.More(); it.Next()) {
+                    history->Remove(it.Value());
+                    done.Add(it.Value());
+                }
+            }
+        }
+    }
+    if (done.IsEmpty()) {
+        return {};
+    }
+    shape = reshape.Apply(shape);
+    return history;
 }
 
 }  // namespace
@@ -19104,10 +19392,12 @@ bool constructMitreRunOns(
             for (size_t j = 0; j < i; ++j) {
                 for (const auto& a : corners[i].rounds) {
                     for (const auto& b : corners[j].rounds) {
+                        // Their reaches, each the setback and q / 4 along the round (ops#1020)
                         if (a.IsSame(b)
                             && corners[i].foot.Distance(corners[j].foot)
-                                <= 2 * (r + corners[i].q / 4) + linearTolerance) {
-                            refuse("two mitre corners on one earlier round within twice the radius");
+                                <= corners[i].setback + corners[j].setback + corners[i].q / 2
+                                    + linearTolerance) {
+                            refuse("two mitre corners on one earlier round whose reaches meet");
                         }
                     }
                     if (corners[i].mitre.IsSame(corners[j].mitre)) {
@@ -19134,14 +19424,18 @@ bool constructMitreRunOns(
         double toolVolume = 0;
         for (auto& corner : corners) {
             const double q = corner.q;
-            const double area = r * r * s;
+            // Per corner with its own angle t (ops#1020): the column's section r^2 (c - (pi - t) /
+            // 2), c = cot(t / 2); the torus (pi - t) K; at 90 degrees r^2 s and pi / 2 K
+            const double area = runOnColumnArea(corner, r);
+            const double turn = runOnTurn(corner);
+            const double c = corner.setback / r;
             const double k = s * q * q * (r - q) + q * q * q / 6;
             const TopoDS_Shape column = runOnColumn(corner, r);
             const TopoDS_Shape torus = runOnTorus(corner, r);
             const double columnVolume = volumeOf(column);
             const double torusVolume = volumeOf(torus);
             if (std::abs(columnVolume - area * corner.height) > volumeTolerance * columnVolume
-                || std::abs(torusVolume - pi / 2 * k) > volumeTolerance * torusVolume) {
+                || std::abs(torusVolume - turn * k) > volumeTolerance * torusVolume) {
                 refuse("a mitre run-on tool's volume differs from its closed form");
             }
             const double volume = columnVolume + torusVolume;
@@ -19152,7 +19446,7 @@ bool constructMitreRunOns(
             // tangentially, and OCCT's common was 0.1-0.5 % off 2K at some sizes (review
             // fix918-r1, L2), while the box's faces cross every face at an angle
             reaches.push_back(runOnReach(corner, r, q / 4));
-            corner.change = area * corner.height + (pi / 2 - 2) * k;
+            corner.change = area * corner.height + (turn - 2 * c) * k;
             corner.tools = volume;
             expected += corner.change;
             toolVolume += volume;
@@ -19219,6 +19513,26 @@ bool constructMitreRunOns(
             unify.Build();
             shape = unify.Shape();
             stages.emplace_back(unify.History(), shape);
+        }
+        {
+            std::vector<TopoDS_Shape> tori;
+            TopTools_IndexedMapOfShape torusImages;
+            for (const auto& piece : pieces) {
+                if (piece.torus) {
+                    tori.push_back(piece.first);
+                    for (TopExp_Explorer it(piece.first, TopAbs_FACE); it.More(); it.Next()) {
+                        for (const auto& image : imagesThrough(stages, 0, it.Current())) {
+                            torusImages.Add(image);
+                        }
+                    }
+                }
+            }
+            TopoDS_Shape exact = shape;
+            Handle(BRepTools_History) history = runOnExactArcs(exact, tori, torusImages);
+            if (!history.IsNull() && countSolids(exact) == 1 && BRepCheck_Analyzer(exact).IsValid()) {
+                shape = exact;
+                stages.emplace_back(history, shape);
+            }
         }
         // The checks of the result
         if (countSolids(shape) != 1) {

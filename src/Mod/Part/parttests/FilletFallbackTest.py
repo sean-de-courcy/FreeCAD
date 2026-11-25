@@ -9184,6 +9184,299 @@ class MitreRunOnTest(unittest.TestCase):
         self.assertBuilt(rimmed, result, expected, -self.change(self.r, self.q, 8.0), (0, 0))
 
 
+class MitreRunOnAngleTest(unittest.TestCase):
+    """ops#1020: the mitre run-on corner of MitreRunOnTest (ops#918) at wall angles other than 90
+    degrees. A plate whose rim is rounded first with q leaves a mitre ellipse at each corner; then
+    each vertical line is rounded with r, tangent propagation adding its ellipse. Onshape builds, at
+    every N 4, 6, 8 and r / q 2 to 15, a cylinder r along the line down to the rim's plane with a
+    torus at its foot (major r - q, minor q): the solid of the other order (oracle RB8). Per convex
+    corner of angle t the volume falls by A h + (pi - t - 2c) K, c = cot(t / 2), A = r^2 (c -
+    (pi - t) / 2), K = (1 - pi/4) q^2 (r - q) + q^3 / 6 (notes/fillet-mitre-angle-1020-design.md).
+    Designed: a regular N-gon across flats 60, a vertex on +x, 3 thick, q 1.5, so h 3"""
+
+    q, thick, flats = 1.5, 3.0, 60.0
+
+    @classmethod
+    def change(cls, r, t, h=None):
+        """The volume a convex corner of angle t takes"""
+        h = cls.thick if h is None else h
+        q = cls.q
+        c = 1 / math.tan(t / 2)
+        k = (1 - math.pi / 4) * q * q * (r - q) + q**3 / 6
+        return r * r * (c - (math.pi - t) / 2) * h + (math.pi - t - 2 * c) * k
+
+    def prism(self, points):
+        return Part.Face(Part.makePolygon(points + [points[0]])).extrude(V(0, 0, self.thick))
+
+    def polygon(self, n):
+        rad = self.flats / 2 / math.cos(math.pi / n)
+        return [
+            V(rad * math.cos(2 * math.pi * k / n), rad * math.sin(2 * math.pi * k / n), 0)
+            for k in range(n)
+        ]
+
+    def top(self, shape):
+        return [
+            e for e in shape.Edges if all(abs(v.Point.z - self.thick) < 1e-9 for v in e.Vertexes)
+        ]
+
+    def rimmed(self, prism):
+        return prism.makeFillet(self.q, self.top(prism))
+
+    @staticmethod
+    def vertical(shape):
+        return [
+            e
+            for e in shape.Edges
+            if e.Curve.TypeId == "Part::GeomLine"
+            and abs(e.tangentAt(e.FirstParameter).z) > 0.999
+        ]
+
+    @staticmethod
+    def at(edges, point, tol=1e-6):
+        """The edges whose bound box holds the point in x and y"""
+        return [
+            e
+            for e in edges
+            if e.BoundBox.XMin - tol < point.x < e.BoundBox.XMax + tol
+            and e.BoundBox.YMin - tol < point.y < e.BoundBox.YMax + tol
+        ]
+
+    def chain(self, base, corners=None):
+        """The vertical lines (at the corners given, else all) and their mitre ellipses"""
+        lines = self.vertical(base)
+        if corners is not None:
+            lines = [e for c in corners for e in self.at(lines, c)]
+        mitres = [
+            e
+            for e in base.Edges
+            if e.Curve.TypeId == "Part::GeomEllipse"
+            and any(v.isSame(w) for line in lines for v in e.Vertexes for w in line.Vertexes)
+        ]
+        self.assertEqual(len(mitres), len(lines))
+        return lines + mitres
+
+    def tori(self, result, r):
+        """The run-on's tori (at r = 2q OCCT's revolution may be a surface of revolution)"""
+        return [
+            f
+            for f in result.Faces
+            if (
+                f.Surface.TypeId == "Part::GeomToroid"
+                and abs(f.Surface.MinorRadius - self.q) < 1e-6
+                and abs(f.Surface.MajorRadius - (r - self.q)) < 1e-6
+            )
+            or f.Surface.TypeId == "Part::GeomSurfaceOfRevolution"
+        ]
+
+    def assertRunOn(self, base, result, corners, r, change):
+        self.assertTrue(result.isValid())
+        self.assertEqual(len(result.Solids), 1)
+        self.assertEqual(len(result.Faces), len(base.Faces) + 2 * corners)
+        types = [f.Surface.TypeId for f in result.Faces]
+        self.assertNotIn("Part::GeomBSplineSurface", types)
+        cylinders = [
+            f
+            for f in result.Faces
+            if f.Surface.TypeId == "Part::GeomCylinder" and abs(f.Surface.Radius - r) < 1e-6
+        ]
+        self.assertEqual(len(cylinders), corners)
+        self.assertEqual(len(self.tori(result, r)), corners)
+        # OCCT's volume of the rim-first plate is about 2e-9 of it off the closed form (1.5e-5 at
+        # N 4, the same at every r)
+        self.assertAlmostEqual(
+            base.Volume - result.Volume, change, delta=2e-9 * base.Volume + 1e-6
+        )
+
+    def otherOrder(self, prism, r, corners=None):
+        lines = self.vertical(prism)
+        if corners is not None:
+            lines = [e for c in corners for e in self.at(lines, c)]
+        first = prism.makeFillet(r, lines)
+        return first.makeFillet(self.q, self.top(first))
+
+    def assertSame(self, a, b):
+        self.assertLess(a.cut(b).Volume + b.cut(a).Volume, 1e-6)
+
+    # Oracle RB8 (notes/onshape-facts.md): N, r, volume, area, faces
+    rows = (
+        (6, 3.0, 9245.958122, 6713.743352, 26),
+        (6, 4.5, 9235.540619, 6704.207219, 26),
+        (6, 22.5, 8770.928645, 6363.372330, 26),
+        (8, 3.0, 8847.878691, 6426.607625, 34),
+        (8, 6.0, 8834.435949, 6414.880139, 34),
+        (8, 22.5, 8594.366046, 6239.622419, 34),
+        (4, 3.0, 10664.441424, 7736.899038, 18),
+        (4, 22.5, 9400.077201, 6804.332520, 18),
+    )
+
+    def testOracleRows(self):
+        # Before ops#1020: N 6 r 4.5 and 22.5, N 8 r 22.5 raised; N 6 r 3 and N 8 r 3 and 6 had
+        # OCCT's B-spline faces at the corners
+        for n, r, volume, area, faces in self.rows:
+            with self.subTest(n=n, r=r):
+                prism = self.prism(self.polygon(n))
+                base = self.rimmed(prism)
+                t = math.pi - 2 * math.pi / n
+                result = base.makeFillet(r, self.chain(base))
+                self.assertRunOn(base, result, n, r, n * self.change(r, t))
+                self.assertEqual(len(result.Faces), faces)
+                self.assertAlmostEqual(result.Volume, volume, delta=1e-5)
+                self.assertAlmostEqual(result.Area, area, delta=1e-5)
+                self.assertSame(result, self.otherOrder(prism, r))
+
+    def testTenTimesTheSize(self):
+        # N 6 r / q 4 at 10x: the run-on's Boolean returned the torus's tangent end arc on a rim
+        # round as an approximated B-spline beside a sliver of the round; the solid was right, its
+        # volume integral 0.27 low over the six corners, so the volume check refused and OCCT's
+        # error stood. The run-on puts the exact arc back (fx1020's at-size sweep)
+        k, ratio, n = 10.0, 4.0, 6
+        q, thick = self.q * k, self.thick * k
+        rad = self.flats * k / 2 / math.cos(math.pi / n)
+        points = [
+            V(rad * math.cos(2 * math.pi * i / n), rad * math.sin(2 * math.pi * i / n), 0)
+            for i in range(n)
+        ]
+        prism = Part.Face(Part.makePolygon(points + [points[0]])).extrude(V(0, 0, thick))
+        top = [e for e in prism.Edges if all(abs(v.Point.z - thick) < 1e-9 * k for v in e.Vertexes)]
+        base = prism.makeFillet(q, top)
+        r = ratio * q
+        result = base.makeFillet(r, self.vertical(base))
+        self.assertTrue(result.isValid())
+        self.assertEqual(len(result.Faces), len(base.Faces) + 2 * n)
+        self.assertNotIn("Part::GeomBSplineSurface", [f.Surface.TypeId for f in result.Faces])
+        self.assertNotIn("Part::GeomBSplineCurve", [e.Curve.TypeId for e in result.Edges])
+        t = math.pi - 2 * math.pi / n
+        c = 1 / math.tan(t / 2)
+        kk = (1 - math.pi / 4) * q * q * (r - q) + q**3 / 6
+        change = n * (r * r * (c - (math.pi - t) / 2) * thick + (math.pi - t - 2 * c) * kk)
+        self.assertAlmostEqual(base.Volume - result.Volume, change, delta=2e-9 * base.Volume)
+
+    def testTheLinesAloneTakeTheMitresByTangency(self):
+        for n, r in ((6, 3.0), (8, 22.5)):
+            with self.subTest(n=n, r=r):
+                base = self.rimmed(self.prism(self.polygon(n)))
+                t = math.pi - 2 * math.pi / n
+                result = base.makeFillet(r, self.vertical(base))
+                self.assertRunOn(base, result, n, r, n * self.change(r, t))
+
+    def testOneCornerAlone(self):
+        points = self.polygon(8)
+        prism = self.prism(points)
+        base = self.rimmed(prism)
+        result = base.makeFillet(22.5, self.chain(base, [points[0]]))
+        self.assertAlmostEqual(self.change(22.5, 0.75 * math.pi), 32.214603, delta=1e-6)
+        self.assertRunOn(base, result, 1, 22.5, self.change(22.5, 0.75 * math.pi))
+        self.assertSame(result, self.otherOrder(prism, 22.5, [points[0]]))
+
+    @staticmethod
+    def cutCorner(legs):
+        """A plate 60 x 60 with the corner at (60, 60) cut off at 45 degrees, its legs given: three
+        corners at 90 degrees, two at 135"""
+        return [V(0, 0, 0), V(60, 0, 0), V(60, 60 - legs, 0), V(60 - legs, 60, 0), V(0, 60, 0)]
+
+    def testMixedAnglesInOneSelection(self):
+        prism = self.prism(self.cutCorner(20))
+        base = self.rimmed(prism)
+        result = base.makeFillet(6.0, self.chain(base))
+        self.assertAlmostEqual(self.change(6.0, math.pi / 2), 22.002979, delta=1e-6)
+        change = 3 * self.change(6.0, math.pi / 2) + 2 * self.change(6.0, 0.75 * math.pi)
+        self.assertRunOn(base, result, 5, 6.0, change)
+        self.assertSame(result, self.otherOrder(prism, 6.0))
+
+    def testShortWallBetweenObtuseCorners(self):
+        # Sites 4 and 9: the cut edge 14.142, the setback 6.213 at r 15, 2 d + q / 2 = 13.18: both
+        # corners build, where bounds of r would refuse
+        points = self.cutCorner(10)
+        base = self.rimmed(self.prism(points))
+        result = base.makeFillet(15.0, self.chain(base, points[2:4]))
+        self.assertRunOn(base, result, 2, 15.0, 2 * self.change(15.0, 0.75 * math.pi))
+
+    def assertNotTaken(self, base, picks, r):
+        """Not built by the run-on: an error, or (where OCCT builds it) no torus of the run-on's"""
+        try:
+            result = base.makeFillet(r, picks)
+        except Exception:
+            return
+        tori = [
+            f
+            for f in result.Faces
+            if f.Surface.TypeId == "Part::GeomToroid"
+            and abs(f.Surface.MinorRadius - self.q) < 1e-6
+            and abs(f.Surface.MajorRadius - (r - self.q)) < 1e-6
+        ]
+        self.assertEqual(tori, [])
+
+    def bumped(self, points, distance):
+        """The rimmed plate with a 0.6 cube on its wall from points[0] toward points[1], centred
+        that far from the corner, 0.3 to 0.9 above the bottom"""
+        corner = points[0]
+        along = points[1] - points[0]
+        along.normalize()
+        out = V(along.y, -along.x, 0)
+        if out.dot(corner) < 0:
+            out = out * -1
+        centre = corner + along * distance
+        square = [
+            centre + along * a + out * b + V(0, 0, 0.3)
+            for a, b in ((-0.3, -0.3), (0.3, -0.3), (0.3, 0.3), (-0.3, 0.3))
+        ]
+        bump = Part.Face(Part.makePolygon(square + [square[0]])).extrude(V(0, 0, 0.6))
+        return self.rimmed(self.prism(points).fuse(bump).removeSplitter())
+
+    def testSomethingInTheReach(self):
+        # Site 7, on the octagon at r 22.5 (setback 9.320, margin 0.375): a bump on a wall within
+        # the setback is refused; one past the reach along the wall, within r of the corner, builds
+        points = self.polygon(8)
+        base = self.bumped(points, 4.0)
+        self.assertNotTaken(base, self.chain(base, [points[0]]), 22.5)
+        base = self.bumped(points, 9.32 + 0.375 + 3.0)
+        result = base.makeFillet(22.5, self.chain(base, [points[0]]))
+        self.assertRunOn(base, result, 1, 22.5, self.change(22.5, 0.75 * math.pi))
+
+    def testReachesThatMeetNotTaken(self):
+        # Site 9: N 8 at r 30, 2 d = 24.853, the wall's length
+        base = self.rimmed(self.prism(self.polygon(8)))
+        self.assertNotTaken(base, self.chain(base), 30.0)
+
+    def testOutsideTheMeasuredRangeNotTaken(self):
+        # 60 and 150 degrees; r below 2 q
+        for n, r in ((3, 6.0), (12, 6.0), (6, 2.5)):
+            with self.subTest(n=n, r=r):
+                base = self.rimmed(self.prism(self.polygon(n)))
+                self.assertNotTaken(base, self.chain(base), r)
+
+    def testConcaveObtuseCornerNotTaken(self):
+        # A hexagonal pocket: its floor rounds and its inside vertical corners (concave, 120 deg)
+        hexagon = [V(40 + p.x / 3, 40 + p.y / 3, 10) for p in self.polygon(6)]
+        pocket = Part.Face(Part.makePolygon(hexagon + [hexagon[0]])).extrude(V(0, 0, 10))
+        block = Part.makeBox(80, 80, 20).cut(pocket)
+        floor = [
+            e
+            for e in block.Edges
+            if abs(e.BoundBox.ZMax - 10) < 1e-9 and abs(e.BoundBox.ZMin - 10) < 1e-9
+        ]
+        self.assertEqual(len(floor), 6)
+        base = block.makeFillet(self.q, floor)
+        lines = [
+            e
+            for e in self.vertical(base)
+            if e.BoundBox.ZMin > 10 - 1e-9 and 20 < e.BoundBox.XMin < 60 and 20 < e.BoundBox.YMin < 60
+        ]
+        self.assertEqual(len(lines), 6)
+        self.assertNotTaken(base, lines, 6.0)
+
+    def testARestEdgeThatFailsOnTheStage(self):
+        # Site 10's fallback: the corner passes and the rest (a bottom edge, r over the plate's
+        # thickness) fails on the stage: the outcome is OCCT's on the whole selection, as before
+        points = self.polygon(8)
+        base = self.rimmed(self.prism(points))
+        bottom = [e for e in base.Edges if e.BoundBox.ZMax < 1e-9 and e.BoundBox.XMax < -20 and e.BoundBox.YMin > -1e-9]
+        self.assertEqual(len(bottom), 1)
+        with self.assertRaises(Exception):
+            base.makeFillet(6.0, self.chain(base, [points[0]]) + bottom)
+
+
 class EndOnTangentWallTest(unittest.TestCase):
     """ops#999 (Vial Well Mini Labyrinth #17): a round on a straight edge between two planes that ends
     where the next wall is a cylinder tangent to the round's end plane along the edge's end line,

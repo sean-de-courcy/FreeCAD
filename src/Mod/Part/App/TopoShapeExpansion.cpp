@@ -10004,18 +10004,30 @@ bool roundCoveredFirst(
  * once everything else has failed. The corners are built on a fresh copy of the shape, named, and
  * the rest of the picks is rounded on that stage, as the rim split does. Any failure leaves the
  * feature's error as it was: false
+ *
+ * ops#1020: also asked early, before OCCT (\a early), where a corner may be at a wall angle other
+ * than 90 degrees and OCCT would build B-spline faces there that are not Onshape's (oracle RB8).
+ * Then the construction runs under its own time limit within the feature's (a fillet that builds
+ * today never fails on time for it), a failure of the rest on the stage is not raised, and what
+ * the attempt recorded stands only where its result does: false leaves everything as it was
  */
 bool roundMitreRunOns(
     TopoShape& result,
     const TopoShape& shape,
     const std::vector<TopoShape>& edges,
     double radius,
-    const char* op
+    const char* op,
+    bool early = false,
+    bool* refused = nullptr
 )
 {
     if (inRimSplitRest || KernelBudget::pastDeadline()) {
         return false;
     }
+    // What the attempt builds is recorded here, and passed on to the feature's recorder only with
+    // a result (skeptic 2 of the ops#1020 design: a fallback after finish() recorded the stage
+    // would skip the feature's lost-material check)
+    FilletFallback::Recorder attempt;
     // A fresh copy: OCCT's failed walk raised the tolerances of the maker's (skeptic 6)
     std::vector<TopoShape> copyEdges = edges;
     TopoShape copy = FilletFallback::makerInput(shape, copyEdges);
@@ -10036,21 +10048,38 @@ bool roundMitreRunOns(
         bool built = false;
     };
     auto split = std::make_shared<Split>();
-    KernelBudget::run(
-        "The fillet",
-        [base = copy.getShape(), plain, request, split](const Message_ProgressRange& /*range*/) {
-            split->built = FilletFallback::constructMitreRunOns(
-                base,
-                plain,
-                request,
-                split->construction,
-                split->rest,
-                &split->reason
-            );
+    auto work = [base = copy.getShape(), plain, request, split](const Message_ProgressRange& /*range*/) {
+        split->built = FilletFallback::constructMitreRunOns(
+            base,
+            plain,
+            request,
+            split->construction,
+            split->rest,
+            &split->reason
+        );
+    };
+    if (early) {
+        if (!KernelBudget::runOptional("The fillet's mitre run-ons", work, KernelBudget::optionalLimit())) {
+            FC_LOG("fillet by mitre run-ons, before OCCT: not within its time");
+            return false;
         }
-    );
+    }
+    else {
+        KernelBudget::run("The fillet", work);
+    }
     if (!split->built) {
         FC_LOG("fillet by mitre run-ons: " << split->reason);
+        if (refused) {
+            *refused = true;
+        }
+        return false;
+    }
+    // Before OCCT only a selection the run-ons round whole: the rest's fillet on the stage is the
+    // whole fillet chain on the feature's own time, which a fillet that builds today must not
+    // spend before OCCT is asked (review fx1020-r1 T1). Such a selection goes on as without the
+    // attempt; where OCCT then fails, the late call rounds the rest on the stage
+    if (early && !split->rest.empty()) {
+        FC_LOG("fillet by mitre run-ons, before OCCT: the selection has other edges, left to OCCT");
         return false;
     }
     // A stage's merged-face note goes with it where the stage is thrown away (as the rim split's)
@@ -10080,6 +10109,7 @@ bool roundMitreRunOns(
     }
     if (split->rest.empty()) {
         result = stage;
+        attempt.passOn();
         return true;
     }
     std::vector<TopoShape> rest;
@@ -10097,13 +10127,15 @@ bool roundMitreRunOns(
         built.makeElementFillet(stage, rest, radius, radius, op);
         if (FilletFallback::takeInvalidResult().empty()) {
             result = built;
+            attempt.passOn();
             return true;
         }
         FC_LOG("fillet by mitre run-ons: the rest's result on the stage is invalid");
     }
     catch (const Base::CADKernelError& e) {
         FC_LOG("fillet by mitre run-ons: the rest failed on the stage: " << e.what());
-        if (KernelBudget::pastDeadline()) {
+        // Before OCCT the feature goes on as without the attempt, which meets its own limit
+        if (!early && KernelBudget::pastDeadline()) {
             dropStageNote();
             throw;
         }
@@ -10112,7 +10144,50 @@ bool roundMitreRunOns(
         FC_LOG("fillet by mitre run-ons: the rest failed on the stage (OCCT): "
                << e.GetMessageString());
     }
+    catch (const Base::Exception& e) {
+        if (!early) {
+            throw;
+        }
+        FC_LOG("fillet by mitre run-ons: the rest failed on the stage: " << e.what());
+    }
     dropStageNote();
+    return false;
+}
+
+/** ops#1020: whether the selection may hold a mitre run-on corner (constructMitreRunOns'
+ * candidates): a picked line with, at an end, a curved edge of OCCT's contours that is neither a
+ * line nor a circle (picked, or carried on along the line's tangent chain). On the picks and the
+ * contours only: no map of the whole shape, so a fillet without such a line pays nothing
+ */
+bool mitreRunOnCandidate(
+    const std::vector<TopoDS_Shape>& picked,
+    const std::vector<TopoDS_Shape>& contours
+)
+{
+    TopTools_IndexedMapOfShape curvedEnds;
+    for (const auto& shape : contours) {
+        if (shape.ShapeType() != TopAbs_EDGE || BRep_Tool::Degenerated(TopoDS::Edge(shape))) {
+            continue;
+        }
+        const GeomAbs_CurveType type = BRepAdaptor_Curve(TopoDS::Edge(shape)).GetType();
+        if (type != GeomAbs_Line && type != GeomAbs_Circle) {
+            TopExp::MapShapes(shape, TopAbs_VERTEX, curvedEnds);
+        }
+    }
+    if (curvedEnds.IsEmpty()) {
+        return false;
+    }
+    for (const auto& shape : picked) {
+        if (shape.ShapeType() != TopAbs_EDGE
+            || BRepAdaptor_Curve(TopoDS::Edge(shape)).GetType() != GeomAbs_Line) {
+            continue;
+        }
+        TopoDS_Vertex ends[2];
+        TopExp::Vertices(TopoDS::Edge(shape), ends[0], ends[1]);
+        if (curvedEnds.Contains(ends[0]) || curvedEnds.Contains(ends[1])) {
+            return true;
+        }
+    }
     return false;
 }
 }  // namespace
@@ -10253,6 +10328,17 @@ TopoShape& TopoShape::makeElementFillet(
                 << notchAt
                 << "), where OCCT's fillet crashes; its exact construction refused: " << alone->reason
         );
+    }
+    // FreeCAD-CH (ops#1020): a line running into the mitre of two earlier rounds, at a wall angle
+    // of 90 to 135 degrees: Onshape builds a cylinder with a torus at its foot (oracle RB8), where
+    // OCCT builds B-spline faces or fails. Asked before OCCT; refused, everything goes on as without
+    // it, and where its construction refused, the call after OCCT's failure below is not asked
+    // again (it would refuse the same way)
+    bool mitreRunOnsRefused = false;
+    if (radius1 == radius2 && mitreRunOnCandidate(edgeShapes, contourEdges)) {
+        if (roundMitreRunOns(*this, shape, edges, radius1, op, true, &mitreRunOnsRefused)) {
+            return *this;
+        }
     }
     if (reflex && !prefer && radius1 == radius2) {
         // The whole rim loops in the direct builder's scope are built by it, and the rest of the
@@ -10444,7 +10530,7 @@ TopoShape& TopoShape::makeElementFillet(
         if (finishConstruction(*this, *outcome, input, op)) {
             return *this;
         }
-        if (outcome->failed && radius1 == radius2
+        if (outcome->failed && radius1 == radius2 && !mitreRunOnsRefused
             && roundMitreRunOns(*this, shape, edges, radius1, op)) {
             return *this;
         }
