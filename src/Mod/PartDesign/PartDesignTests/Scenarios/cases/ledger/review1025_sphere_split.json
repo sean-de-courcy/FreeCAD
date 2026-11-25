@@ -1,0 +1,10 @@
+{
+"entries": {
+"MitreSphereContactArcSmaller|arc_at_x|V2s": {"axes": ["M1", "E1", "X4:600"], "classes": ["none"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr1025-r1", "issue": "ops#1025", "tier": "F"},
+"MitreSphereContactArcSmaller|arc_at_y|V2s": {"axes": ["M1", "E1", "X4:600"], "classes": ["none"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr1025-r1", "issue": "ops#1025", "tier": "F"},
+"MitreSphereContactArcThicker|arc_at_x|V2s": {"axes": ["M1", "E1", "X4:600"], "classes": ["none"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr1025-r1", "issue": "ops#1025", "tier": "F"},
+"MitreSphereContactArcThicker|arc_at_y|V2s": {"axes": ["M1", "E1", "X4:600"], "classes": ["none"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr1025-r1", "issue": "ops#1025", "tier": "F"},
+"MitreSphereContactArc|arc_at_x|V2s": {"axes": ["M1", "E1", "X4:600"], "classes": ["none"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr1025-r1", "issue": "ops#1025", "tier": "F"},
+"MitreSphereContactArc|arc_at_y|V2s": {"axes": ["M1", "E1", "X4:600"], "classes": ["none"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr1025-r1", "issue": "ops#1025", "tier": "F"}
+}
+}
