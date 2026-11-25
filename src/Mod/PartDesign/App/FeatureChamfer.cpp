@@ -59,6 +59,15 @@ namespace PartDesign
 // FeatureDressUp.cpp (ops#640 F2, Onshape's failure text; declared where used)
 PartDesignExport std::string dressUpFailure(const char* verb, const std::string& what);
 PartDesignExport bool isDressUpFailure(const std::string& what);
+// ops#1005 (FeatureDressUp.cpp): the picks, the smooth ones apart, and Onshape's rule for them
+PartDesignExport std::vector<Part::TopoShape> pickedEdges(DressUp& step,
+                                                          const Part::TopoShape& shape,
+                                                          std::vector<Part::TopoShape>* notC0);
+PartDesignExport std::string smoothEdgeRule(const DressUp* step,
+                                            const Part::TopoShape& shape,
+                                            std::vector<Part::TopoShape>& edges,
+                                            const std::vector<Part::TopoShape>& notC0,
+                                            bool chamfer);
 // FeatureDressUp.cpp (FreeCAD-CH ops#654 T3; declared where used)
 PartDesignExport bool dressUpReapplying(Part::TopoShape& base, std::vector<Part::TopoShape>& edges);
 // ops#942 (FeatureDressUp.cpp): a pattern instance's move from the seed's base
@@ -232,9 +241,17 @@ App::DocumentObjectExecReturn* Chamfer::build()
 
     TopShape.locate(TopLoc_Location());
 
+    std::vector<Part::TopoShape> notC0;
     auto edges = reapplying            ? reapplyEdges
         : UseAllEdges.getValue() ? TopShape.getSubTopoShapes(TopAbs_EDGE)
-                                 : getContinuousEdges(TopShape);
+                                 : pickedEdges(*this, TopShape, &notC0);
+    // ops#1005: Onshape's rule for smooth picks (SE1, SE2, RB15)
+    if (!UseAllEdges.getValue()) {
+        const std::string smooth = smoothEdgeRule(this, TopShape, edges, notC0, true);
+        if (!smooth.empty()) {
+            return new App::DocumentObjectExecReturn(smooth);
+        }
+    }
 
     if (edges.empty()) {
         return new App::DocumentObjectExecReturn(QT_TRANSLATE_NOOP("Exception", "No edges specified"));

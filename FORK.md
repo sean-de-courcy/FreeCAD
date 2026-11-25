@@ -531,7 +531,8 @@ names it.
 | `fix/i993-rim-countersink` | fix | ops#993 | - | integration | `18abf496bc` (fork PR 524), 2026-11-23 | never (fork fix): a round whose band crosses an opening in its face (countersink, hole, slot) is the plain round cut by the opening, built by the exact construction where OCCT's result bridges it or can't be made exact (ops#993) |
 | `fix/i1009-chamfer-curved-end` | fix | ops#1009 | - | integration | `3b63554c5f` (fork PR 531), 2026-11-23 | never (fork fix): a straight chamfer between two planes that ends on a non-plane end face is built with the round's end form in a second pass after the ops#936 wedge, kept only where the run-on wedge past each end holds nothing of the part (ops#1009) |
 | `fix/i978-literal-twin-count` | fix | ops#978 | - | integration | `e73fd31783` (fork PR 532), 2026-11-23 | never (fork fix): a twin place's duplicate count `<k>of<n>~<m>` stays literal when a file's names are read (ops#978) |
-| `infra/superseded-106-107` | infra | ops#978 | - | integration | (fork PR 533) | never (fork infra): the release check treats fork-1.0.6 and fork-1.0.7 as superseded (no build of 1.0.6 exists to save its generation) |
+| `infra/superseded-106-107` | infra | ops#978 | - | integration | `57eba05e3e` (fork PR 533), 2026-11-24 | never (fork infra): the release check treats fork-1.0.6 and fork-1.0.7 as superseded (no build of 1.0.6 exists to save its generation) |
+| `fix/i1005-mixed-smooth-edges` | fix | ops#1005 | - | integration | (fork PR 536) | never (fork fix): a fillet or chamfer drops a smooth (tangent) pick and refuses smooth-only selections as Onshape does; a chamfer holding a bent edge between two planes within 0.1 degree, together with other edges, fails (ops#1005) |
 
 ## Fork-only commits in carried topics
 
