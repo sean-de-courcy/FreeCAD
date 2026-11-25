@@ -7162,6 +7162,50 @@ class FillPastANotchTest(unittest.TestCase):
         self.assertLess(result.cut(plain).Volume, 1e-6)
         self.assertLess(plain.cut(result).Volume, 1e-6)
 
+    def testRevolvedBSplineLineNotch(self):
+        """The notch's round bottom a revolution about its axis of a straight degree-1 B-spline
+        curve parallel to it (an imported face's form; review pri1040 r4): exactly the cylinder,
+        ruled along the wall's normal, so the same fill as the analytic notch's"""
+        V = FreeCAD.Vector
+        c = 2.6
+        a, b = V(-3, 12, c), V(2, 12, c)
+        line = Part.BSplineCurve()
+        line.buildFromPolesMultsKnots([a, b], [2, 2], [0, 1], False, 1)
+        pa, pb = V(-3, 10, c), V(2, 10, c)
+        strip = Part.Face(
+            Part.Wire(
+                [
+                    Part.LineSegment(pa, a).toShape(),
+                    line.toShape(),
+                    Part.LineSegment(b, pb).toShape(),
+                    Part.LineSegment(pb, pa).toShape(),
+                ]
+            )
+        )
+        half = strip.revolve(V(0, 10, c), V(1, 0, 0), -180)
+        if half.ShapeType != "Solid":
+            half = Part.Solid(Part.Shell(half.Faces))
+        notch = half.fuse(Part.makeBox(5, 4, 5, V(-3, 8, c))).removeSplitter()
+        plate = Part.makeBox(12, 20, 2, V(-2, 0, -2))
+        wall = Part.makeBox(2, 20, 5, V(-2, 0, 0))
+        body = plate.fuse(wall).removeSplitter().cut(notch)
+        self.assertTrue(any(f.Surface.TypeId == "Part::GeomSurfaceOfRevolution" for f in body.Faces))
+        foot = [
+            e
+            for e in body.Edges
+            if e.Curve.TypeId == "Part::GeomLine"
+            and all(abs(v.Point.x) < 1e-9 and abs(v.Point.z) < 1e-9 for v in e.Vertexes)
+        ]
+        self.assertEqual(len(foot), 1)
+        result = body.makeChamfer(1.0, foot)
+        self.assertTrue(result.isValid())
+        self.assertEqual(len(result.Solids), 1)
+        plainBody, plainFoot = self.body(0.6)
+        plain = plainBody.makeChamfer(1.0, plainFoot)
+        self.assertLess(result.cut(plain).Volume, 1e-6)
+        self.assertLess(plain.cut(result).Volume, 1e-6)
+        self.assertAlmostEqual(result.Volume - body.Volume, plain.Volume - plainBody.Volume, delta=1e-5)
+
     # A closed window (ops#883 H): a hole r 0.5 through the wall about y = 10, z = 1, its rim 0.5
     # above the floor, inside the fill's strip (OCCT fails on it, fillet and chamfer)
     WINDOW = (0.5, 1.0)

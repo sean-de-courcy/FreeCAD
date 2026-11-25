@@ -84,6 +84,7 @@
 #include <gp_Dir2d.hxx>
 #include <gp_Vec2d.hxx>
 #include <Geom_BSplineCurve.hxx>
+#include <Geom_BezierCurve.hxx>
 #include <Geom_BSplineSurface.hxx>
 #include <Geom_BezierSurface.hxx>
 #include <Geom_SurfaceOfRevolution.hxx>
@@ -10145,13 +10146,74 @@ bool polesRuledAlong(const Surface& surface, const gp_Dir& along)
         }
         return moves;
     };
-    return rowsRuled(true) || rowsRuled(false);
+    if (rowsRuled(true) || rowsRuled(false)) {
+        return true;
+    }
+    // Or every pole in one plane that holds the direction (to Precision::Confusion()): the
+    // surface lies in that plane (convex hull, the weights positive), a plane whatever its pole
+    // grid (review pri1040 r4: a flat face stored with a skewed grid)
+    const gp_Pnt origin = surface->Pole(1, 1);
+    gp_Vec normal;
+    for (int i = 1; i <= nu && normal.Magnitude() <= Precision::Confusion(); ++i) {
+        for (int j = 1; j <= nv; ++j) {
+            const gp_Vec across = gp_Vec(along).Crossed(gp_Vec(origin, surface->Pole(i, j)));
+            if (across.Magnitude() > 1000 * Precision::Confusion()) {
+                normal = across.Normalized();
+                break;
+            }
+        }
+    }
+    if (normal.Magnitude() <= Precision::Confusion()) {
+        return false;
+    }
+    for (int i = 1; i <= nu; ++i) {
+        for (int j = 1; j <= nv; ++j) {
+            if (std::abs(gp_Vec(origin, surface->Pole(i, j)).Dot(normal)) > Precision::Confusion()) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+/// Whether a curve is straight along a direction: a line along it, or a B-spline or Bezier curve
+/// whose poles all lie on one line along it (to Precision::Confusion(); convex hull), trimmed or not
+bool straightAlong(Handle(Geom_Curve) curve, const gp_Dir& along)
+{
+    while (auto trimmed = Handle(Geom_TrimmedCurve)::DownCast(curve)) {
+        curve = trimmed->BasisCurve();
+    }
+    if (auto line = Handle(Geom_Line)::DownCast(curve)) {
+        return parallel(line->Position().Direction(), along);
+    }
+    auto onLine = [&](const auto& poles) {
+        const int n = poles->NbPoles();
+        if (n < 2) {
+            return false;
+        }
+        const gp_Pnt origin = poles->Pole(1);
+        for (int k = 2; k <= n; ++k) {
+            if (gp_Vec(origin, poles->Pole(k)).Crossed(gp_Vec(along)).Magnitude()
+                > Precision::Confusion()) {
+                return false;
+            }
+        }
+        return true;
+    };
+    if (auto bspline = Handle(Geom_BSplineCurve)::DownCast(curve)) {
+        return onLine(bspline);
+    }
+    if (auto bezier = Handle(Geom_BezierCurve)::DownCast(curve)) {
+        return onLine(bezier);
+    }
+    return false;
 }
 
 /// Whether a surface is ruled along a direction (every point of it on a line of it along the
 /// direction, so its normal square to the direction everywhere): a plane, a cylinder about it, an
-/// extrusion along it, a revolution of a line parallel to its axis about it, a B-spline or Bezier
-/// surface whose poles run straight along it, an offset or trimmed copy of one of these. Exact,
+/// extrusion along it, a revolution about it of a curve straight along it (straightAlong), a
+/// B-spline or Bezier surface whose poles run straight along it or lie in a plane holding it, an
+/// offset or trimmed copy of one of these. Exact,
 /// by type and poles, never by samples (review pri1040 r3: a blend's B-spline face beyond, ruled
 /// along the normal, as FGC-NS44 #113's, refused under a check by type alone)
 bool ruledAlong(const Handle(Geom_Surface)& surface, const gp_Dir& along, int depth = 0)
@@ -10178,13 +10240,8 @@ bool ruledAlong(const Handle(Geom_Surface)& surface, const gp_Dir& along, int de
         return parallel(extrusion->Direction(), along);
     }
     if (auto revolution = Handle(Geom_SurfaceOfRevolution)::DownCast(surface)) {
-        Handle(Geom_Curve) basis = revolution->BasisCurve();
-        while (auto trimmedCurve = Handle(Geom_TrimmedCurve)::DownCast(basis)) {
-            basis = trimmedCurve->BasisCurve();
-        }
-        auto line = Handle(Geom_Line)::DownCast(basis);
-        return !line.IsNull() && parallel(revolution->Axis().Direction(), along)
-            && parallel(line->Position().Direction(), along);
+        return parallel(revolution->Axis().Direction(), along)
+            && straightAlong(revolution->BasisCurve(), along);
     }
     if (auto bspline = Handle(Geom_BSplineSurface)::DownCast(surface)) {
         return polesRuledAlong(bspline, along);
