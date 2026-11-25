@@ -23,6 +23,7 @@
 
 from __future__ import division
 from math import pi
+import math
 import unittest
 
 import FreeCAD
@@ -1393,3 +1394,183 @@ class TestFillet(unittest.TestCase):
         # closing doc
         FreeCAD.closeDocument("PartDesignTestFillet")
         # print ("omit closing document for debugging")
+
+
+class TestSmoothEdgePicks(unittest.TestCase):
+    """ops#1005, Onshape's rule for smooth picks in a fillet or chamfer (notes/onshape-facts.md SE1,
+    SE2, RB15). Designed geometry, Onshape's figures:
+    - the bend: a section in the y-z plane (0, 0), (40, 0), (40, 10 - 20 tan d), (20, 10), (0, 10)
+      extruded 30 along x, its top turning down by d at the edge (y 20, z 10). Up to 0.1 degree the
+      bend is near-smooth: alone it is refused; a fillet with another edge rounds the other edge
+      (dV -25.7522204 at r 2; Onshape's sliver face on the bend, of width r d, is left out); a
+      chamfer with another edge fails (CHAMFER_FACE_RANGE_TOO_LARGE).
+    - SE1's box: 30 x 20 x 10, its vertical edge at the origin rounded r 3; the tangent lines at
+      (3, 0) and (0, 3) are smooth: alone they are refused, with other edges they are dropped. The
+      same box built by a Boolean (two boxes and a cylinder) has the same tangent lines, stored C0.
+    - A tangent line next to an edge only the exact construction builds (a ridge turning by 4
+      degrees, at its limit radius): the line no longer makes the construction refuse the whole
+      fillet (the census stops' path)."""
+
+    SMOOTH = "every picked edge is smooth"
+    NEARLY = "a picked edge is nearly smooth"
+
+    def setUp(self):
+        self.doc = FreeCAD.newDocument("PartDesignTestSmoothEdgePicks")
+
+    def tearDown(self):
+        FreeCAD.closeDocument(self.doc.Name)
+
+    @staticmethod
+    def bend(d_deg):
+        t = math.tan(math.radians(d_deg))
+        V = FreeCAD.Vector
+        points = [V(0, 0, 0), V(0, 40, 0), V(0, 40, 10 - 20 * t), V(0, 20, 10), V(0, 0, 10), V(0, 0, 0)]
+        return Part.Face(Part.makePolygon(points)).extrude(V(30, 0, 0))
+
+    @staticmethod
+    def boss():
+        box = Part.makeBox(30, 20, 10)
+        corner = [e for e in box.Edges if all(abs(v.X) < 1e-9 and abs(v.Y) < 1e-9 for v in e.Vertexes)]
+        return box.makeFillet(3, corner)
+
+    @staticmethod
+    def booleanBoss():
+        V = FreeCAD.Vector
+        boxes = Part.makeBox(27, 20, 10, V(3, 0, 0)).fuse(Part.makeBox(30, 17, 10, V(0, 3, 0)))
+        return boxes.fuse(Part.makeCylinder(3, 10, V(3, 3, 0))).removeSplitter()
+
+    def edge(self, shape, test):
+        found = [e for e in shape.Edges if len(e.Vertexes) == 2 and test(e)]
+        self.assertEqual(len(found), 1)
+        return found[0]
+
+    def line(self, shape, y, z):
+        return self.edge(shape, lambda e: all(abs(v.Y - y) < 1e-7 and abs(v.Z - z) < 1e-7 for v in e.Vertexes))
+
+    def vertical(self, shape, x, y):
+        return self.edge(shape, lambda e: all(abs(v.X - x) < 1e-7 and abs(v.Y - y) < 1e-7 for v in e.Vertexes))
+
+    def top(self, shape, x=None, y=None):
+        return self.edge(
+            shape,
+            lambda e: all(
+                abs(v.Z - 10) < 1e-7 and (x is None or abs(v.X - x) < 1e-7) and (y is None or abs(v.Y - y) < 1e-7)
+                for v in e.Vertexes
+            ),
+        )
+
+    def dressUp(self, kind, shape, edges, size):
+        body = self.doc.addObject("PartDesign::Body", "Body")
+        base = self.doc.addObject("Part::Feature", "Base")
+        base.Shape = shape
+        body.BaseFeature = base
+        self.doc.recompute()
+        names = ["Edge%d" % next(i for i, e in enumerate(shape.Edges, 1) if e.isSame(edge)) for edge in edges]
+        feature = self.doc.addObject("PartDesign::" + kind, kind)
+        body.addObject(feature)
+        feature.Base = (body.BaseFeature, names)
+        if kind == "Fillet":
+            feature.Radius = size
+        else:
+            feature.Size = size
+        self.doc.recompute()
+        return feature
+
+    def assertBuilds(self, feature, shape, removed, delta=1e-6):
+        self.assertTrue(feature.isValid(), feature.getStatusString())
+        self.assertTrue(feature.Shape.isValid())
+        self.assertAlmostEqual(shape.Volume - feature.Shape.Volume, removed, delta=delta)
+
+    def assertRefused(self, feature, text):
+        self.assertFalse(feature.isValid())
+        self.assertIn(text, feature.getStatusString())
+
+    # RB15: near-smooth edges
+
+    def testNearSmoothEdgeAloneIsRefused(self):
+        for d in (0.01, 0.05, 0.1):
+            shape = self.bend(d)
+            bend = self.line(shape, 20, 10)
+            self.assertRefused(self.dressUp("Fillet", shape, [bend], 2.0), self.SMOOTH)
+            self.assertRefused(self.dressUp("Chamfer", shape, [bend], 1.0), self.SMOOTH)
+
+    def testFilletRoundsTheOtherEdgeOfANearSmoothPick(self):
+        # Onshape: OK, dV -25.7522204 (the front top edge's plain round, 30 (4 - pi)), at 0.01, 0.05
+        # and 0.1 degrees; the same with the bottom front edge
+        for d in (0.01, 0.05, 0.1):
+            shape = self.bend(d)
+            for other in (self.line(shape, 0, 10), self.line(shape, 0, 0)):
+                fillet = self.dressUp("Fillet", shape, [self.line(shape, 20, 10), other], 2.0)
+                self.assertBuilds(fillet, shape, 25.7522204)
+
+    def testChamferWithANearSmoothPickFails(self):
+        # Onshape: CHAMFER_FACE_RANGE_TOO_LARGE with the front top, bottom front or left end edge,
+        # widths 1 and 0.5; each partner chamfered alone builds (dV -15 at width 1)
+        for d in (0.01, 0.05, 0.1):
+            shape = self.bend(d)
+            for other in (self.line(shape, 0, 10), self.line(shape, 0, 0)):
+                for width in (1.0, 0.5):
+                    chamfer = self.dressUp("Chamfer", shape, [self.line(shape, 20, 10), other], width)
+                    self.assertRefused(chamfer, self.NEARLY)
+            self.assertBuilds(self.dressUp("Chamfer", shape, [self.line(shape, 0, 10)], 1.0), shape, 15.0)
+
+    def testBendPastTheLimitIsAnOrdinaryPick(self):
+        # 0.12 degrees is an ordinary edge in Onshape: every selection with it builds. Its own chamfer
+        # face (dV 0.0314159 at width 1) is not built here: OCCT skips an edge turning by less than
+        # 0.1 rad in a mixed selection, as on integration (filed as debt on ops#1005); the volume
+        # is the front edge's within that
+        shape = self.bend(0.12)
+        picks = [self.line(shape, 20, 10), self.line(shape, 0, 10)]
+        self.assertBuilds(self.dressUp("Fillet", shape, picks, 2.0), shape, 25.7522204, delta=1e-5)
+        self.assertBuilds(self.dressUp("Chamfer", shape, picks, 1.0), shape, 15.0314159, delta=0.04)
+
+    # SE1, SE2: tangent edges
+
+    def testTangentLineAloneIsRefused(self):
+        for shape in (self.boss(), self.booleanBoss()):
+            for line in (self.vertical(shape, 3, 0), self.vertical(shape, 0, 3)):
+                for radius in (2.0, 3.5, 5.0):
+                    self.assertRefused(self.dressUp("Fillet", shape, [line], radius), self.SMOOTH)
+                self.assertRefused(self.dressUp("Chamfer", shape, [line], 1.0), self.SMOOTH)
+
+    def testTangentLineWithAnOrdinaryEdgeIsDropped(self):
+        # Onshape: a tangent line plus the top right edge, fillet r 1 dV -4.292037 (20 (1 - pi/4)),
+        # chamfer 1 dV -10
+        for shape in (self.boss(), self.booleanBoss()):
+            picks = [self.vertical(shape, 3, 0), self.top(shape, x=30)]
+            self.assertBuilds(self.dressUp("Fillet", shape, picks, 1.0), shape, 20 * (1 - pi / 4))
+            self.assertBuilds(self.dressUp("Chamfer", shape, picks, 1.0), shape, 10.0)
+
+    def testBothTangentLinesWithTwoTopEdgesAtACorner(self):
+        # Onshape: both tangent lines plus two top edges meeting at a corner build (fillet r 1, 9
+        # faces). The lines are dropped: the result is the two edges' rounds at (30, 20) alone, whose
+        # mitred corner removes (1 - pi/4) 50 - (2 - pi/2 - 1/3) = 10.634221. Onshape's figure,
+        # dV -10.617255, differs by 0.017 with no edge pair named: asked of the oracle on ops#1005
+        shape = self.boss()
+        corner = [self.top(shape, x=30), self.top(shape, y=20)]
+        picks = [self.vertical(shape, 3, 0), self.vertical(shape, 0, 3)] + corner
+        mitred = (1 - pi / 4) * 50 - (2 - pi / 2 - 1 / 3)
+        self.assertBuilds(self.dressUp("Fillet", shape, picks, 1.0), shape, mitred, delta=1e-5)
+        self.assertBuilds(self.dressUp("Fillet", shape, corner, 1.0), shape, mitred, delta=1e-5)
+
+    def testTangentLineDoesNotStopTheExactConstruction(self):
+        # A ridge turning by 4 degrees at its limit radius, which OCCT refuses and the exact
+        # construction builds (parttests.FilletFallbackTest.ShallowRidgeTest), with a tangent line of
+        # a notch cut from the bottom by a Boolean picked too: the construction refused the whole
+        # selection for the line; Onshape drops the line. Removed: R^2 (tan(phi/2) - phi/2) 30
+        V = FreeCAD.Vector
+        phi = math.radians(4.0)
+        t = math.tan(phi / 2)
+        points = [V(-20, 0, 0), V(12, 0, 0), V(12, 0, 10 - 12 * t), V(0, 0, 10), V(-20, 0, 10 - 20 * t), V(-20, 0, 0)]
+        roof = Part.Face(Part.makePolygon(points)).extrude(V(0, 30, 0))
+        notch = Part.makeBox(30, 20, 4, V(-12, 10, -1)).fuse(Part.makeBox(27, 17, 4, V(-15, 13, -1)))
+        notch = notch.fuse(Part.makeCylinder(3, 4, V(-12, 13, -1))).removeSplitter()
+        shape = roof.cut(notch).removeSplitter()
+        self.assertTrue(shape.isValid())
+        ridge = self.edge(shape, lambda e: all(abs(v.X) < 1e-9 and abs(v.Z - 10) < 1e-9 for v in e.Vertexes))
+        line = self.vertical(shape, -12, 10)
+        radius = 12.0 / math.cos(phi / 2) / t
+        removed = radius**2 * (t - phi / 2) * 30
+        with self.assertRaises(Exception):
+            shape.makeFillet(radius, [ridge, line])  # the maker alone, without the rule
+        self.assertBuilds(self.dressUp("Fillet", shape, [ridge, line], radius), shape, removed, delta=1e-5)
