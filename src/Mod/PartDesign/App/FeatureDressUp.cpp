@@ -25,10 +25,12 @@
 #include <ChFi3d.hxx>
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepAlgoAPI_Common.hxx>
+#include <BRepAlgoAPI_Cut.hxx>
 #include <BRepBndLib.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
@@ -36,6 +38,7 @@
 #include <BRepClass_FaceClassifier.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
 #include <BRepFilletAPI_MakeFillet.hxx>
+#include <BRepLProp_CLProps.hxx>
 #include <BRepLProp_SLProps.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
@@ -45,6 +48,7 @@
 #include <GProp_GProps.hxx>
 #include <GeomAPI_ProjectPointOnSurf.hxx>
 #include <Geom2d_Curve.hxx>
+#include <IntCurvesFace_ShapeIntersector.hxx>
 #include <gp_Circ.hxx>
 #include <gp_Cylinder.hxx>
 #include <gp_Lin.hxx>
@@ -1644,6 +1648,34 @@ namespace
     ));
 }
 
+[[noreturn]] void turnsIntoThePart(bool arc)
+{
+    if (arc) {
+        throw Base::CADKernelError(QT_TRANSLATE_NOOP(
+            "Exception",
+            "Tangent propagation off: a picked edge runs on tangentially into an edge that turns into "
+            "the part (a concave corner of the outline), where the round has no end: Onshape's fillet "
+            "fails there too. Turn tangent propagation on to round the corner as well."
+        ));
+    }
+    throw Base::CADKernelError(QT_TRANSLATE_NOOP(
+        "Exception",
+        "Tangent propagation off: a picked edge runs on tangentially into an edge that turns into "
+        "the part (a concave corner of the outline). The chamfer's straight run on through that "
+        "corner is not built. Pick the whole tangent chain, or turn tangent propagation on."
+    ));
+}
+
+[[noreturn]] void runOnMeetsASlantedFace()
+{
+    throw Base::CADKernelError(QT_TRANSLATE_NOOP(
+        "Exception",
+        "Tangent propagation off: a picked edge's straight run on, where its tangent chain goes "
+        "on, meets a face that is not a flat wall square to it (a curved or slanted face), where "
+        "the run on's end is not known. Pick the whole tangent chain, or turn tangent propagation on."
+    ));
+}
+
 [[noreturn]] void endOnTangentFaces()
 {
     throw Base::CADKernelError(QT_TRANSLATE_NOOP(
@@ -1740,6 +1772,25 @@ TopoDS_Shape runOutTool(const TopoDS_Shape& base, const TopoDS_Edge& edge, doubl
         }
         return outward.Dot(normal[0]) > 1 - 1e-9 || outward.Dot(normal[1]) > 1 - 1e-9;
     };
+    // The index of the edge's face that a face is (onEdgesFace), or -1
+    auto edgeFaceIndex = [&](const TopoDS_Shape& shape) {
+        if (faces.Contains(shape)) {
+            return faces.FindIndex(shape) - 1;
+        }
+        if (!onEdgesFace(shape)) {
+            return -1;
+        }
+        const TopoDS_Face& face = TopoDS::Face(shape);
+        gp_Dir outward = BRepAdaptor_Surface(face).Plane().Axis().Direction();
+        if (face.Orientation() == TopAbs_REVERSED) {
+            outward.Reverse();
+        }
+        return outward.Dot(normal[0]) > 1 - 1e-9 ? 0 : 1;
+    };
+    // ops#1028: where the chain goes on, whether the next edge curves, on the face it shares with
+    // the edge, towards that face's material: a concave corner of the outline (a wall's corner
+    // rounded, RB23, RB26). Onshape's fillet fails there; a slot's end turns away from it (GB13)
+    bool turnsIn[2] = {false, false};
     auto chainGoesOn = [&](int e) {
         if (!vertexEdges.Contains(ends[e])) {
             return false;
@@ -1783,6 +1834,22 @@ TopoDS_Shape runOutTool(const TopoDS_Shape& base, const TopoDS_Edge& edge, doubl
                     Standard_False
                 )
                 == ChFiDS_Convex) {
+                BRepLProp_CLProps props(
+                    curve,
+                    atFirst ? curve.FirstParameter() : curve.LastParameter(),
+                    2,
+                    Precision::Confusion()
+                );
+                if (props.Curvature() > Precision::Confusion()) {
+                    gp_Dir towardsCentre;
+                    props.Normal(towardsCentre);
+                    for (int i = 1; i <= 2; ++i) {
+                        const int k = edgeFaceIndex(otherFaces(i));
+                        if (k >= 0 && towardsCentre.Dot(into[k]) < -1e-6) {
+                            turnsIn[e] = true;
+                        }
+                    }
+                }
                 return true;
             }
         }
@@ -1812,8 +1879,16 @@ TopoDS_Shape runOutTool(const TopoDS_Shape& base, const TopoDS_Edge& edge, doubl
     // no blend: the scoop itself; its tangent plane cut too much). A chamfer has no Onshape fact
     // at a tangent face: it refuses there, and keeps the tangent plane at a curved one
     TopoDS_Face endFace[2];
+    bool goesOn[2] = {false, false};
     for (int e = 0; e < 2; ++e) {
-        if (!vertexFaces.Contains(ends[e]) || chainGoesOn(e)) {
+        if (!vertexFaces.Contains(ends[e])) {
+            continue;
+        }
+        goesOn[e] = chainGoesOn(e);
+        if (turnsIn[e]) {
+            turnsIntoThePart(arc);
+        }
+        if (goesOn[e]) {
             continue;
         }
         const gp_Dir intoEdge = e == 0 ? along : along.Reversed();
@@ -1885,6 +1960,22 @@ TopoDS_Shape runOutTool(const TopoDS_Shape& base, const TopoDS_Edge& edge, doubl
     // edge's side of the wall's plane (integrator 13, FilletRunOutPastWall). The face the body ends
     // at, or a face going on tangentially, looks away from or across the edge: the tool runs on.
     const double size = 2 * (start.Distance(end) + 2 * past + radius);
+    // The tool keeps the side of the plane through `at` that `outward` looks to: a box larger than
+    // the tool
+    auto keepSide = [&](const gp_Pnt& at, const gp_Dir& outward) {
+        const gp_Ax2 frame(at, outward);
+        const gp_Pnt origin = at.Translated(
+            (gp_Vec(frame.XDirection()) + gp_Vec(frame.YDirection())) * (-size / 2)
+        );
+        const TopoDS_Shape keep
+            = BRepPrimAPI_MakeBox(gp_Ax2(origin, outward, frame.XDirection()), size, size, size)
+                  .Shape();
+        BRepAlgoAPI_Common trimmed(tool, keep);
+        if (!trimmed.IsDone()) {
+            notStraightRunOut();
+        }
+        tool = trimmed.Shape();
+    };
     for (int e = 0; e < 2; ++e) {
         if (!vertexFaces.Contains(ends[e])) {
             continue;
@@ -1917,15 +2008,80 @@ TopoDS_Shape runOutTool(const TopoDS_Shape& base, const TopoDS_Edge& edge, doubl
             if (outward.Dot(intoEdge) < 1e-6) {
                 continue;
             }
-            // a box on the edge's side of the wall's tangent plane, larger than the tool
-            const gp_Ax2 frame(at, outward);
-            const gp_Pnt origin = at.Translated(
-                (gp_Vec(frame.XDirection()) + gp_Vec(frame.YDirection())) * (-size / 2)
+            // the edge's side of the wall's tangent plane
+            keepSide(at, outward);
+        }
+    }
+    // ops#1028 (RB26): where the chain goes on, the run on stops at the first face that the edge's
+    // line, run on, pierces facing back along it: a wall standing across the run on (a slot's end
+    // against a wall). A face the line only touches on its boundary is passed under (a boss
+    // standing on the face over the run on: RB24 undercuts it)
+    for (int e = 0; e < 2; ++e) {
+        if (!goesOn[e]) {
+            continue;
+        }
+        const gp_Dir outOf = e == 0 ? along.Reversed() : along;
+        IntCurvesFace_ShapeIntersector hits;
+        hits.Load(base, Precision::Confusion());
+        hits.Perform(gp_Lin(BRep_Tool::Pnt(ends[e]), outOf), Precision::Confusion(), past);
+        double nearest = std::numeric_limits<double>::infinity();
+        gp_Pnt where;
+        gp_Dir wallOutward;
+        TopoDS_Face nearestFace;
+        for (int i = 1; i <= hits.NbPnt(); ++i) {
+            const double w = hits.WParameter(i);
+            if (hits.State(i) != TopAbs_IN || w < 1e-6 || w >= nearest) {
+                continue;
+            }
+            const TopoDS_Face& face = hits.Face(i);
+            BRepAdaptor_Surface surface(face);
+            BRepLProp_SLProps props(
+                surface,
+                hits.UParameter(i),
+                hits.VParameter(i),
+                1,
+                Precision::Confusion()
             );
-            const TopoDS_Shape keep
-                = BRepPrimAPI_MakeBox(gp_Ax2(origin, outward, frame.XDirection()), size, size, size)
-                      .Shape();
-            BRepAlgoAPI_Common trimmed(tool, keep);
+            if (!props.IsNormalDefined()) {
+                continue;
+            }
+            gp_Dir outward = props.Normal();
+            if (face.Orientation() == TopAbs_REVERSED) {
+                outward.Reverse();
+            }
+            if (outward.Dot(outOf) > -1e-6) {
+                continue;
+            }
+            nearest = w;
+            where = hits.Pnt(i);
+            wallOutward = outward;
+            nearestFace = face;
+        }
+        if (std::isfinite(nearest)) {
+            // The stop is built only at a flat wall square to the run on (RB26 3), where the
+            // wall's plane lies wholly past the end vertex across the tool. A curved or slanted
+            // face's tangent plane runs back over the run on and cuts the body's own material
+            // between the vertex and the face (reviews pr1028-r1 and r2: a grazed round post, a
+            // ramp), and Onshape's stop there is not known: the dress-up refuses (the design's
+            // literal rule after a second silent find in this path)
+            if (BRepAdaptor_Surface(nearestFace).GetType() != GeomAbs_Plane
+                || !wallOutward.IsOpposite(outOf, 1e-9)) {
+                runOnMeetsASlantedFace();
+            }
+            const gp_Pnt vertex = BRep_Tool::Pnt(ends[e]);
+            auto halfSpace = [&](const gp_Pnt& at, const gp_Dir& towards) {
+                const gp_Ax2 frame(at, towards);
+                const gp_Pnt origin = at.Translated(
+                    (gp_Vec(frame.XDirection()) + gp_Vec(frame.YDirection())) * (-size / 2)
+                );
+                return BRepPrimAPI_MakeBox(gp_Ax2(origin, towards, frame.XDirection()), size, size, size)
+                    .Shape();
+            };
+            BRepAlgoAPI_Common region(halfSpace(where, wallOutward.Reversed()), halfSpace(vertex, outOf));
+            if (!region.IsDone()) {
+                notStraightRunOut();
+            }
+            BRepAlgoAPI_Cut trimmed(tool, region.Shape());
             if (!trimmed.IsDone()) {
                 notStraightRunOut();
             }

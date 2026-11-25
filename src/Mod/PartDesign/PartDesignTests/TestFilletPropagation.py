@@ -676,6 +676,165 @@ class TestFilletPropagation(unittest.TestCase):
         self.assertTrue(chamfer.isValid(), chamfer.getStatusString())
         self.assertAlmostEqual(chamfer.Shape.Volume - before, -60, delta=1e-4)
 
+    # ops#1028: a run-out at a concave corner of the outline, and a slot's run on into a wall (oracle RB23, RB24,
+    # RB26). The dee (the slot's right half, flat end at x -10) or the slot, 10 high, built as a Part shape
+    WALL = (4, 16, 20, V(-14, -8, 0))
+
+    def baseOf(self, shape):
+        base = self.doc.addObject("Part::Feature", "Base")
+        base.Shape = shape
+        self.body.BaseFeature = base
+        self.doc.recompute()
+        return self.body.Group[0]
+
+    def deeShape(self, slotEnd=False):
+        edges = slot()
+        if not slotEnd:
+            edges[3] = Part.LineSegment(V(-10, -5, 0), V(-10, 5, 0))
+        wire = Part.Wire(Part.__sortEdges__([edge.toShape() for edge in edges]))
+        return Part.Face(wire).extrude(V(0, 0, 10))
+
+    def cornerRounded(self, wallHeight, rc):
+        """The dee fused with a wall block x -14..-10, y -8..8, z 0..wallHeight, the concave vertical corner at
+        (-10, 5) rounded rc: the top line y 5 runs tangentially into the corner round's top arc, which turns
+        into the part."""
+        shape = self.deeShape().fuse(Part.makeBox(4, 16, wallHeight, V(-14, -8, 0))).removeSplitter()
+        corner = [
+            edge
+            for edge in shape.Edges
+            if isinstance(edge.Curve, Part.Line)
+            and abs(edge.Length - 10) < 1e-6
+            and abs(edge.BoundBox.XMin + 10) < 1e-6
+            and abs(edge.BoundBox.XMax + 10) < 1e-6
+            and abs(edge.BoundBox.YMin - 5) < 1e-6
+            and abs(edge.BoundBox.YMax - 5) < 1e-6
+        ]
+        self.assertEqual(len(corner), 1)
+        return shape.makeFillet(rc, corner)
+
+    def testOffIntoAConcaveCornerRoundFails(self):
+        """RB23, RB26 6: the top line alone into the wall corner's round (rc 1, 3), propagation off: Onshape's
+        fillet fails (FILLET_ADJOINING_EDGE_NOT_FILLETED), at r 2 and at r 0.5. The fork ran the round on through
+        the corner into the wall (3.433629 taken from it). The chamfer refuses too, where Onshape runs it straight
+        on through the corner's fill and stops at the wall's plane (-45.036909, -49.716848: debt)."""
+        for rc, radii in ((1.0, (2.0,)), (3.0, (2.0, 0.5))):
+            base = self.baseOf(self.cornerRounded(20, rc))
+            line = self.topLine(base.Shape)
+            for radius in radii:
+                fillet = self.fillet(base, [line], radius, TangentPropagation=False)
+                self.assertFalse(fillet.isValid(), "rc %s r %s built" % (rc, radius))
+                self.assertIn("turns into the part", fillet.getStatusString())
+                self.body.removeObject(fillet)
+                self.doc.removeObject(fillet.Name)
+            chamfer = self.chamfer(base, [line], TangentPropagation=False)
+            self.assertFalse(chamfer.isValid(), "rc %s chamfer built" % rc)
+            self.assertIn("turns into the part", chamfer.getStatusString())
+            self.body.removeObject(chamfer)
+            self.doc.removeObject(chamfer.Name)
+            self.body.BaseFeature = None
+            self.doc.recompute()
+
+    def testOffIntoAConcaveCornerRoundWithoutAWallFails(self):
+        """RB26 1: the same corner on an L-shaped plate (the block only 10 high, no wall above): the fillet still
+        fails, so the concave outline decides, not a wall."""
+        for rc in (1.0, 3.0):
+            base = self.baseOf(self.cornerRounded(10, rc))
+            fillet = self.fillet(base, [self.topLine(base.Shape)], TangentPropagation=False)
+            self.assertFalse(fillet.isValid(), "rc %s built" % rc)
+            self.assertIn("turns into the part", fillet.getStatusString())
+            self.body.removeObject(fillet)
+            self.doc.removeObject(fillet.Name)
+            self.body.BaseFeature = None
+            self.doc.recompute()
+
+    def testOnRoundsTheConcaveCornerToo(self):
+        """RB26 2: propagation on picks the corner round's top arc with the line (and the dee's end): Onshape builds,
+        dV -46.751481 (rc 1), and the wall keeps 1280."""
+        base = self.baseOf(self.cornerRounded(20, 1.0))
+        before = base.Shape.Volume
+        fillet = self.fillet(base, [self.topLine(base.Shape)], TangentPropagation=True)
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+        self.assertAlmostEqual(fillet.Shape.Volume - before, -46.751481, delta=2e-4)
+        self.assertAlmostEqual(fillet.Shape.common(Part.makeBox(*self.WALL)).Volume, 1280, delta=1e-6)
+
+    def testOffAtASlotEndStopsAtAWall(self):
+        """RB26 3: the slot fused with a wall x 12..16, y -8..8, z 0..20 across its round end. The top line's run on
+        goes on through the round end and stops at the wall's plane x = 12: fillet dV -20.095176, chamfer
+        -48.046821, the wall keeps 1280 (the fork ran it on to x 14 inside the wall)."""
+        wall = Part.makeBox(4, 16, 20, V(12, -8, 0))
+        base = self.baseOf(self.deeShape(slotEnd=True).fuse(wall).removeSplitter())
+        before = base.Shape.Volume
+        line = self.topLine(base.Shape)
+        fillet = self.fillet(base, [line], TangentPropagation=False)
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+        self.assertAlmostEqual(fillet.Shape.Volume - before, -20.095176, delta=2e-4)
+        self.assertAlmostEqual(fillet.Shape.common(wall).Volume, 1280, delta=1e-6)
+        self.body.removeObject(fillet)
+        self.doc.removeObject(fillet.Name)
+        self.doc.recompute()
+        chamfer = self.chamfer(base, [line], TangentPropagation=False)
+        self.assertTrue(chamfer.isValid(), chamfer.getStatusString())
+        self.assertAlmostEqual(chamfer.Shape.Volume - before, -48.046821, delta=2e-4)
+        self.assertAlmostEqual(chamfer.Shape.common(wall).Volume, 1280, delta=1e-6)
+
+    def testOffPassesUnderABossOverTheRunOn(self):
+        """RB24: a boss x 12..16, y -8..8, z 10..20 standing on the slot's top over its round end. The run on goes
+        on under the boss's foot (the line only touches the boss's face on its edge) and undercuts the slot there
+        by 0.242862."""
+        under = Part.makeBox(10, 20, 10, V(12, -10, 0))
+        shape = self.deeShape(slotEnd=True).fuse(Part.makeBox(4, 16, 10, V(12, -8, 10))).removeSplitter()
+        base = self.baseOf(shape)
+        fillet = self.fillet(base, [self.topLine(base.Shape)], TangentPropagation=False)
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+        self.assertAlmostEqual(
+            shape.common(under).Volume - fillet.Shape.common(under).Volume, 0.242862, delta=1e-4
+        )
+
+    def assertRunOnRefuses(self, base):
+        """The fillet and the chamfer of the top line, propagation off, both stop with the slanted-face error"""
+        for make in (self.fillet, self.chamfer):
+            feature = make(base, [self.topLine(base.Shape)], TangentPropagation=False)
+            self.assertFalse(feature.isValid(), "expected a stop")
+            self.assertIn("not a flat wall square to it", feature.getStatusString())
+            self.body.removeObject(feature)
+            self.doc.removeObject(feature.Name)
+            self.doc.recompute()
+
+    def testOffRunOnGrazingARoundPostRefuses(self):
+        """Reviews pr1028-r1 and r2 (RunOnGrazesARoundPost, RunOnStopsShortOfAGrazedPost): GB13's slot on a plate
+        z -2..0 and a round post r 5 whose axis is at (21, 0.01): the top line's run on pierces the post at a
+        grazing angle at x 20.68, past the slot's round end. A stop by the post's tangent plane cuts the round
+        off the line (r1) or the slot's round end short (r2), where Onshape cuts GB13's -20.338042: a run on
+        meeting a curved face refuses"""
+        post = Part.makeCylinder(5, 22, V(21, 0.01, -2))
+        plate = Part.makeBox(46, 20, 2, V(-16, -10, -2))
+        self.assertRunOnRefuses(self.baseOf(self.deeShape(slotEnd=True).fuse([plate, post]).removeSplitter()))
+
+    def testOffRunOnPiercingARampRefuses(self):
+        """Reviews pr1028-r1 and r2 (RunOnPiercesARamp, RunOnStopsShortOfARamp): the dee with its convex corner at
+        (-10, 5) rounded 1 (the run on goes straight on, RB26) and a ramp block x -14..-10, y -2..14, whose top
+        rises away from the dee at 30 degrees, z = 10 + (-10.5 - x) tan 30: the run on pierces it at x -10.5, and
+        the ramp's plane, run back over the dee, cuts the round off the line (r1) or the corner's cut short (r2).
+        Onshape's stop at a slanted face is not known: a run on meeting a slanted plane refuses"""
+        dee = self.deeShape()
+        corner = [
+            edge
+            for edge in dee.Edges
+            if isinstance(edge.Curve, Part.Line)
+            and abs(edge.Length - 10) < 1e-6
+            and abs(edge.BoundBox.XMin + 10) < 1e-6
+            and abs(edge.BoundBox.XMax + 10) < 1e-6
+            and abs(edge.BoundBox.YMin - 5) < 1e-6
+        ]
+        self.assertEqual(len(corner), 1)
+        t = math.tan(math.radians(30))
+        z = lambda x: 10 + (-10.5 - x) * t
+        profile = Part.makePolygon(
+            [V(-14, -2, 0), V(-10, -2, 0), V(-10, -2, z(-10)), V(-14, -2, z(-14)), V(-14, -2, 0)]
+        )
+        ramp = Part.Face(profile).extrude(V(0, 16, 0))
+        self.assertRunOnRefuses(self.baseOf(dee.makeFillet(1.0, corner).fuse(ramp).removeSplitter()))
+
 
 if __name__ == "__main__":
     unittest.main()
