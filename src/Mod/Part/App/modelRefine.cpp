@@ -49,6 +49,7 @@
 #include <BRepBuilderAPI_Sewing.hxx>
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepGProp.hxx>
+#include <GCPnts_AbscissaPoint.hxx>
 #include <Geom2d_BSplineCurve.hxx>
 #include <Geom2d_Curve.hxx>
 #include <Geom2d_TrimmedCurve.hxx>
@@ -81,6 +82,7 @@
 #include <TColgp_Array2OfPnt.hxx>
 #include <TColgp_SequenceOfPnt.hxx>
 #include <TColStd_Array1OfReal.hxx>
+#include <TColStd_Array2OfReal.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Compound.hxx>
 #include <TopoDS_Iterator.hxx>
@@ -950,6 +952,18 @@ FaceTypedCylinder& ModelRefine::getCylinderObject()
 // direction: two rounds of one full round sweep the same torus about opposite axes), and the merged
 // face is built on a copy of the first face's surface from the group's boundary, as the cylinder's.
 // A group is left as it is unless the merged face is valid and has the group's area.
+static double curveOnSurfaceGap(
+    const Handle(Geom_Curve) & curve,
+    const TopLoc_Location& location,
+    double first,
+    double last,
+    const Handle(Geom2d_Curve) & curve2d,
+    const Handle(Geom_Surface) & surface,
+    const TopLoc_Location& where,
+    double first2d,
+    double last2d
+);
+
 namespace
 {
 
@@ -1036,6 +1050,85 @@ double faceArea(const TopoDS_Shape& shape)
     GProp_GProps props;
     BRepGProp::SurfaceProperties(shape, props);
     return props.Mass();
+}
+
+// The slack of a face's boundary in an area comparison (ops#1044): the sum over its edges (those
+// in `only`, if given) of the gap between the edge's curve on this face and its 3D curve, times the
+// edge's length. A face's area is integrated inside its curves on the surface. An approximated edge
+// (a fillet's, an intersection's) has its curve there a little off its 3D curve, well inside its
+// tolerance, and a merged face built on a copy of the surface gets its curves projected again, so
+// the areas of a right merge differ by about this much. The curve is the one on this very face,
+// with its location: such edges carry older curves on other copies of the surface. Negative where
+// a gap cannot be read or exceeds the edge's tolerance
+double boundarySlack(const TopoDS_Face& face, const TopTools_IndexedMapOfShape* only)
+{
+    TopLoc_Location where;
+    const Handle(Geom_Surface) surface = BRep_Tool::Surface(face, where);
+    if (surface.IsNull()) {
+        return -1.0;
+    }
+    double slack = 0.0;
+    for (TopExp_Explorer it(face, TopAbs_EDGE); it.More(); it.Next()) {
+        const TopoDS_Edge& edge = TopoDS::Edge(it.Current());
+        if (BRep_Tool::Degenerated(edge) || (only && !only->Contains(edge))) {
+            continue;
+        }
+        TopLoc_Location location;
+        double first = 0.0, last = 0.0;
+        const Handle(Geom_Curve) curve = BRep_Tool::Curve(edge, location, first, last);
+        double first2d = 0.0, last2d = 0.0;
+        const Handle(Geom2d_Curve) curve2d = BRep_Tool::CurveOnSurface(edge, face, first2d, last2d);
+        if (curve.IsNull() || curve2d.IsNull()) {
+            return -1.0;
+        }
+        const double gap = curveOnSurfaceGap(
+            curve, location, first, last, curve2d, surface, where, first2d, last2d
+        );
+        if (gap > BRep_Tool::Tolerance(edge)) {
+            return -1.0;  // unreadable (1e100) or loose: no allowance for it
+        }
+        if (gap > 0.0) {
+            slack += gap * GCPnts_AbscissaPoint::Length(BRepAdaptor_Curve(edge));
+        }
+    }
+    return slack;
+}
+
+// The merged face covers the group: the same area, within 1e-7 of it plus the slack of the
+// group's boundary edges on their own faces and on the merged face (ops#1044). Exact edges add
+// nothing. The slack is capped at 1e-4 of the area, so a face built on the complement of a
+// periodic surface is still caught. On the merged face the tolerance test of boundarySlack()
+// cannot refuse (the face fix has already raised its edges' tolerances to cover their curves):
+// there the cap is the guard
+bool coversGroup(const FaceVectorType& faces, const TopoDS_Face& face)
+{
+    double area = 0.0;
+    for (const auto& f : faces) {
+        area += faceArea(f);
+    }
+    const double difference = std::fabs(faceArea(face) - area);
+    const double allowed = 1e-7 * area + Precision::Confusion();
+    if (difference <= allowed) {
+        return true;
+    }
+    EdgeVectorType edges;
+    ModelRefine::boundaryEdges(faces, edges);
+    TopTools_IndexedMapOfShape boundary;
+    for (const auto& edge : edges) {
+        boundary.Add(edge);
+    }
+    double slack = boundarySlack(face, nullptr);
+    if (slack < 0.0) {
+        return false;
+    }
+    for (const auto& f : faces) {
+        const double own = boundarySlack(f, &boundary);
+        if (own < 0.0) {
+            return false;
+        }
+        slack += own;
+    }
+    return difference <= allowed + std::min(slack, 1e-4 * area);
 }
 
 enum class Revolved
@@ -1251,12 +1344,7 @@ TopoDS_Face buildRevolvedFace(Revolved kind, const FaceVectorType& faces, const 
     if (face.IsNull() || !withinPeriods(face, kind) || !BRepCheck_Analyzer(face).IsValid()) {
         return {};
     }
-    // The merged face covers the group: the same area
-    double area = 0.0;
-    for (const auto& f : faces) {
-        area += faceArea(f);
-    }
-    if (std::fabs(faceArea(face) - area) > 1e-7 * area + Precision::Confusion()) {
+    if (!coversGroup(faces, face)) {
         return {};
     }
     return face;
@@ -1690,6 +1778,230 @@ FaceTypedBSpline::FaceTypedBSpline()
     : FaceTypedBase(GeomAbs_BSplineSurface)
 {}
 
+// B-spline surfaces of one kind: rationality, periodicity, closure and degrees
+static bool bsplinesAlike(
+    const Handle(Geom_BSplineSurface) & one,
+    const Handle(Geom_BSplineSurface) & two
+)
+{
+    if (one->IsURational() != two->IsURational()) {
+        return false;
+    }
+    if (one->IsVRational() != two->IsVRational()) {
+        return false;
+    }
+    if (one->IsUPeriodic() != two->IsUPeriodic()) {
+        return false;
+    }
+    if (one->IsVPeriodic() != two->IsVPeriodic()) {
+        return false;
+    }
+    if (one->IsUClosed() != two->IsUClosed()) {
+        return false;
+    }
+    if (one->IsVClosed() != two->IsVClosed()) {
+        return false;
+    }
+    if (one->UDegree() != two->UDegree()) {
+        return false;
+    }
+    if (one->VDegree() != two->VDegree()) {
+        return false;
+    }
+
+    return one->NbUPoles() == two->NbUPoles() && one->NbVPoles() == two->NbVPoles()
+        && one->NbUKnots() == two->NbUKnots() && one->NbVKnots() == two->NbVKnots();
+}
+
+// The same surface: pole for pole, weight for weight, knot for knot. Knots are compared exactly,
+// or within PConfusion of the knot range where `tolerant`
+static bool bsplinesSame(
+    const Handle(Geom_BSplineSurface) & one,
+    const Handle(Geom_BSplineSurface) & two,
+    bool tolerant
+)
+{
+    if (!bsplinesAlike(one, two)) {
+        return false;
+    }
+
+    // pole test
+    int uPoleCountOne(one->NbUPoles());
+    int vPoleCountOne(one->NbVPoles());
+    int uPoleCountTwo(two->NbUPoles());
+    int vPoleCountTwo(two->NbVPoles());
+
+    if (uPoleCountOne != uPoleCountTwo || vPoleCountOne != vPoleCountTwo) {
+        return false;
+    }
+
+    TColgp_Array2OfPnt polesOne(1, uPoleCountOne, 1, vPoleCountOne);
+    TColgp_Array2OfPnt polesTwo(1, uPoleCountTwo, 1, vPoleCountTwo);
+    one->Poles(polesOne);
+    two->Poles(polesTwo);
+
+    for (int indexU = 1; indexU <= uPoleCountOne; ++indexU) {
+        for (int indexV = 1; indexV <= vPoleCountOne; ++indexV) {
+            if (!(polesOne.Value(indexU, indexV)
+                      .IsEqual(polesTwo.Value(indexU, indexV), Precision::Confusion()))) {
+                return false;
+            }
+        }
+    }
+
+    // weight test: two rational surfaces on the same poles and knots with other weights are
+    // other surfaces (ops#1044)
+    if (one->IsURational() || one->IsVRational()) {
+        TColStd_Array2OfReal weightsOne(1, uPoleCountOne, 1, vPoleCountOne);
+        TColStd_Array2OfReal weightsTwo(1, uPoleCountTwo, 1, vPoleCountTwo);
+        one->Weights(weightsOne);
+        two->Weights(weightsTwo);
+        for (int indexU = 1; indexU <= uPoleCountOne; ++indexU) {
+            for (int indexV = 1; indexV <= vPoleCountOne; ++indexV) {
+                const double w1 = weightsOne.Value(indexU, indexV);
+                const double w2 = weightsTwo.Value(indexU, indexV);
+                if (std::fabs(w1 - w2) > Precision::PConfusion() * std::max(1.0, std::fabs(w1))) {
+                    return false;
+                }
+            }
+        }
+    }
+
+    // knot test
+    int uKnotCountOne(one->NbUKnots());
+    int vKnotCountOne(one->NbVKnots());
+    int uKnotCountTwo(two->NbUKnots());
+    int vKnotCountTwo(two->NbVKnots());
+    if (uKnotCountOne != uKnotCountTwo || vKnotCountOne != vKnotCountTwo) {
+        return false;
+    }
+    TColStd_Array1OfReal uKnotsOne(1, uKnotCountOne);
+    TColStd_Array1OfReal vKnotsOne(1, vKnotCountOne);
+    TColStd_Array1OfReal uKnotsTwo(1, uKnotCountTwo);
+    TColStd_Array1OfReal vKnotsTwo(1, vKnotCountTwo);
+    one->UKnots(uKnotsOne);
+    one->VKnots(vKnotsOne);
+    two->UKnots(uKnotsTwo);
+    two->VKnots(vKnotsTwo);
+    // exact, or within PConfusion of the knot range for a reversed copy, whose knots are computed
+    const double uTolerance = tolerant
+        ? Precision::PConfusion() * (uKnotsOne.Value(uKnotCountOne) - uKnotsOne.Value(1))
+        : 0.0;
+    const double vTolerance = tolerant
+        ? Precision::PConfusion() * (vKnotsOne.Value(vKnotCountOne) - vKnotsOne.Value(1))
+        : 0.0;
+    auto differ = [](double a, double b, double tolerance) {
+        return tolerance > 0.0 ? std::fabs(a - b) > tolerance : a != b;
+    };
+    for (int indexU = 1; indexU <= uKnotCountOne; ++indexU) {
+        if (differ(uKnotsOne.Value(indexU), uKnotsTwo.Value(indexU), uTolerance)) {
+            return false;
+        }
+    }
+    for (int indexV = 1; indexV <= vKnotCountOne; ++indexV) {
+        if (differ(vKnotsOne.Value(indexV), vKnotsTwo.Value(indexV), vTolerance)) {
+            return false;
+        }
+    }
+
+    // Formulas:
+    // Periodic:     knots=poles+2*degree-mult(1)+2
+    // Non-periodic: knots=poles+degree+1
+    auto getUKnotSequenceSize = [](Handle(Geom_BSplineSurface) surface) {
+        int uPoleCount(surface->NbUPoles());
+        int uDegree(surface->UDegree());
+        if (surface->IsUPeriodic()) {
+            int uMult1(surface->UMultiplicity(1));
+            int size = uPoleCount + 2 * uDegree - uMult1 + 2;
+            return size;
+        }
+        else {
+            int size = uPoleCount + uDegree + 1;
+            return size;
+        }
+    };
+    auto getVKnotSequenceSize = [](Handle(Geom_BSplineSurface) surface) {
+        int vPoleCount(surface->NbVPoles());
+        int vDegree(surface->VDegree());
+        if (surface->IsVPeriodic()) {
+            int vMult1(surface->VMultiplicity(1));
+            int size = vPoleCount + 2 * vDegree - vMult1 + 2;
+            return size;
+        }
+        else {
+            int size = vPoleCount + vDegree + 1;
+            return size;
+        }
+    };
+
+    // knot sequence.
+    int uKnotSequenceOneCount(getUKnotSequenceSize(one));
+    int vKnotSequenceOneCount(getVKnotSequenceSize(one));
+    int uKnotSequenceTwoCount(getUKnotSequenceSize(two));
+    int vKnotSequenceTwoCount(getVKnotSequenceSize(two));
+    if (uKnotSequenceOneCount != uKnotSequenceTwoCount
+        || vKnotSequenceOneCount != vKnotSequenceTwoCount) {
+        return false;
+    }
+    TColStd_Array1OfReal uKnotSequenceOne(1, uKnotSequenceOneCount);
+    TColStd_Array1OfReal vKnotSequenceOne(1, vKnotSequenceOneCount);
+    TColStd_Array1OfReal uKnotSequenceTwo(1, uKnotSequenceTwoCount);
+    TColStd_Array1OfReal vKnotSequenceTwo(1, vKnotSequenceTwoCount);
+    one->UKnotSequence(uKnotSequenceOne);
+    one->VKnotSequence(vKnotSequenceOne);
+    two->UKnotSequence(uKnotSequenceTwo);
+    two->VKnotSequence(vKnotSequenceTwo);
+    for (int indexU = 1; indexU <= uKnotSequenceOneCount; ++indexU) {
+        if (differ(uKnotSequenceOne.Value(indexU), uKnotSequenceTwo.Value(indexU), uTolerance)) {
+            return false;
+        }
+    }
+    for (int indexV = 1; indexV <= vKnotSequenceOneCount; ++indexV) {
+        if (differ(vKnotSequenceOne.Value(indexV), vKnotSequenceTwo.Value(indexV), vTolerance)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Which reversal of `two` is `one` (ops#1044): 1 in u, 2 in v, 3 both, 0 none. A wall symmetric
+// about a mirror plane (a loft of symmetric sections) is its own mirror image run backwards, so a
+// mirror fuse of its halves gives two faces on one surface whose poles are each other's reversed.
+// OCCT's own reversal carries weights and multiplicities and shifts a periodic surface's poles
+static int bsplineReversal(
+    const Handle(Geom_BSplineSurface) & one,
+    const Handle(Geom_BSplineSurface) & two
+)
+{
+    if (!bsplinesAlike(one, two)) {
+        return 0;
+    }
+    const bool periodic = one->IsUPeriodic() || one->IsVPeriodic();
+    for (int flip = 1; flip <= 3; ++flip) {
+        const bool inU = (flip & 1) != 0;
+        const bool inV = (flip & 2) != 0;
+        // a screen without a copy: a reversal takes a non-periodic surface's first pole to a corner
+        if (!periodic
+            && !one->Pole(1, 1).IsEqual(
+                two->Pole(inU ? two->NbUPoles() : 1, inV ? two->NbVPoles() : 1),
+                Precision::Confusion()
+            )) {
+            continue;
+        }
+        Handle(Geom_BSplineSurface) reversed = Handle(Geom_BSplineSurface)::DownCast(two->Copy());
+        if (inU) {
+            reversed->UReverse();
+        }
+        if (inV) {
+            reversed->VReverse();
+        }
+        if (bsplinesSame(one, reversed, true)) {
+            return flip;
+        }
+    }
+    return 0;
+}
+
 bool FaceTypedBSpline::isEqual(const TopoDS_Face& faceOne, const TopoDS_Face& faceTwo) const
 {
     try {
@@ -1701,141 +2013,8 @@ bool FaceTypedBSpline::isEqual(const TopoDS_Face& faceOne, const TopoDS_Face& fa
         if (surfaceOne.IsNull() || surfaceTwo.IsNull()) {
             return false;
         }
-
-        if (surfaceOne->IsURational() != surfaceTwo->IsURational()) {
-            return false;
-        }
-        if (surfaceOne->IsVRational() != surfaceTwo->IsVRational()) {
-            return false;
-        }
-        if (surfaceOne->IsUPeriodic() != surfaceTwo->IsUPeriodic()) {
-            return false;
-        }
-        if (surfaceOne->IsVPeriodic() != surfaceTwo->IsVPeriodic()) {
-            return false;
-        }
-        if (surfaceOne->IsUClosed() != surfaceTwo->IsUClosed()) {
-            return false;
-        }
-        if (surfaceOne->IsVClosed() != surfaceTwo->IsVClosed()) {
-            return false;
-        }
-        if (surfaceOne->UDegree() != surfaceTwo->UDegree()) {
-            return false;
-        }
-        if (surfaceOne->VDegree() != surfaceTwo->VDegree()) {
-            return false;
-        }
-
-        // pole test
-        int uPoleCountOne(surfaceOne->NbUPoles());
-        int vPoleCountOne(surfaceOne->NbVPoles());
-        int uPoleCountTwo(surfaceTwo->NbUPoles());
-        int vPoleCountTwo(surfaceTwo->NbVPoles());
-
-        if (uPoleCountOne != uPoleCountTwo || vPoleCountOne != vPoleCountTwo) {
-            return false;
-        }
-
-        TColgp_Array2OfPnt polesOne(1, uPoleCountOne, 1, vPoleCountOne);
-        TColgp_Array2OfPnt polesTwo(1, uPoleCountTwo, 1, vPoleCountTwo);
-        surfaceOne->Poles(polesOne);
-        surfaceTwo->Poles(polesTwo);
-
-        for (int indexU = 1; indexU <= uPoleCountOne; ++indexU) {
-            for (int indexV = 1; indexV <= vPoleCountOne; ++indexV) {
-                if (!(polesOne.Value(indexU, indexV)
-                          .IsEqual(polesTwo.Value(indexU, indexV), Precision::Confusion()))) {
-                    return false;
-                }
-            }
-        }
-
-        // knot test
-        int uKnotCountOne(surfaceOne->NbUKnots());
-        int vKnotCountOne(surfaceOne->NbVKnots());
-        int uKnotCountTwo(surfaceTwo->NbUKnots());
-        int vKnotCountTwo(surfaceTwo->NbVKnots());
-        if (uKnotCountOne != uKnotCountTwo || vKnotCountOne != vKnotCountTwo) {
-            return false;
-        }
-        TColStd_Array1OfReal uKnotsOne(1, uKnotCountOne);
-        TColStd_Array1OfReal vKnotsOne(1, vKnotCountOne);
-        TColStd_Array1OfReal uKnotsTwo(1, uKnotCountTwo);
-        TColStd_Array1OfReal vKnotsTwo(1, vKnotCountTwo);
-        surfaceOne->UKnots(uKnotsOne);
-        surfaceOne->VKnots(vKnotsOne);
-        surfaceTwo->UKnots(uKnotsTwo);
-        surfaceTwo->VKnots(vKnotsTwo);
-        for (int indexU = 1; indexU <= uKnotCountOne; ++indexU) {
-            if (uKnotsOne.Value(indexU) != uKnotsTwo.Value(indexU)) {
-                return false;
-            }
-        }
-        for (int indexV = 1; indexV <= vKnotCountOne; ++indexV) {
-            if (vKnotsOne.Value(indexV) != vKnotsTwo.Value(indexV)) {
-                return false;
-            }
-        }
-
-        // Formulas:
-        // Periodic:     knots=poles+2*degree-mult(1)+2
-        // Non-periodic: knots=poles+degree+1
-        auto getUKnotSequenceSize = [](Handle(Geom_BSplineSurface) surface) {
-            int uPoleCount(surface->NbUPoles());
-            int uDegree(surface->UDegree());
-            if (surface->IsUPeriodic()) {
-                int uMult1(surface->UMultiplicity(1));
-                int size = uPoleCount + 2 * uDegree - uMult1 + 2;
-                return size;
-            }
-            else {
-                int size = uPoleCount + uDegree + 1;
-                return size;
-            }
-        };
-        auto getVKnotSequenceSize = [](Handle(Geom_BSplineSurface) surface) {
-            int vPoleCount(surface->NbVPoles());
-            int vDegree(surface->VDegree());
-            if (surface->IsVPeriodic()) {
-                int vMult1(surface->VMultiplicity(1));
-                int size = vPoleCount + 2 * vDegree - vMult1 + 2;
-                return size;
-            }
-            else {
-                int size = vPoleCount + vDegree + 1;
-                return size;
-            }
-        };
-
-        // knot sequence.
-        int uKnotSequenceOneCount(getUKnotSequenceSize(surfaceOne));
-        int vKnotSequenceOneCount(getVKnotSequenceSize(surfaceOne));
-        int uKnotSequenceTwoCount(getUKnotSequenceSize(surfaceTwo));
-        int vKnotSequenceTwoCount(getVKnotSequenceSize(surfaceTwo));
-        if (uKnotSequenceOneCount != uKnotSequenceTwoCount
-            || vKnotSequenceOneCount != vKnotSequenceTwoCount) {
-            return false;
-        }
-        TColStd_Array1OfReal uKnotSequenceOne(1, uKnotSequenceOneCount);
-        TColStd_Array1OfReal vKnotSequenceOne(1, vKnotSequenceOneCount);
-        TColStd_Array1OfReal uKnotSequenceTwo(1, uKnotSequenceTwoCount);
-        TColStd_Array1OfReal vKnotSequenceTwo(1, vKnotSequenceTwoCount);
-        surfaceOne->UKnotSequence(uKnotSequenceOne);
-        surfaceOne->VKnotSequence(vKnotSequenceOne);
-        surfaceTwo->UKnotSequence(uKnotSequenceTwo);
-        surfaceTwo->VKnotSequence(vKnotSequenceTwo);
-        for (int indexU = 1; indexU <= uKnotSequenceOneCount; ++indexU) {
-            if (uKnotSequenceOne.Value(indexU) != uKnotSequenceTwo.Value(indexU)) {
-                return false;
-            }
-        }
-        for (int indexV = 1; indexV <= vKnotSequenceOneCount; ++indexV) {
-            if (vKnotSequenceOne.Value(indexV) != vKnotSequenceTwo.Value(indexV)) {
-                return false;
-            }
-        }
-        return true;
+        return bsplinesSame(surfaceOne, surfaceTwo, false)
+            || bsplineReversal(surfaceOne, surfaceTwo) != 0;
     }
     catch (Standard_Failure& e) {
         std::ostringstream stream;
@@ -1863,6 +2042,85 @@ GeomAbs_SurfaceType FaceTypedBSpline::getType() const
 
 TopoDS_Face FaceTypedBSpline::buildFace(const FaceVectorType& faces) const
 {
+    // A group with a member on the first one's surface run backwards (ops#1044) is built with the
+    // guards of buildRevolvedFace(); a group of index-equal faces is built as it always was
+    bool reversed = false;
+    {
+        Handle(Geom_BSplineSurface)
+            first = Handle(Geom_BSplineSurface)::DownCast(BRep_Tool::Surface(faces.at(0)));
+        for (std::size_t index = 1; !first.IsNull() && index < faces.size(); ++index) {
+            Handle(Geom_BSplineSurface)
+                other = Handle(Geom_BSplineSurface)::DownCast(BRep_Tool::Surface(faces[index]));
+            if (!other.IsNull() && !bsplinesSame(first, other, false)) {
+                reversed = true;
+                break;
+            }
+        }
+    }
+    if (reversed) {
+        try {
+            std::vector<EdgeVectorType> boundaries;
+            boundarySplit(faces, boundaries);
+            // every boundary edge in a closed boundary, else the group is left as it is
+            EdgeVectorType edges;
+            ModelRefine::boundaryEdges(faces, edges);
+            std::size_t inBoundaries = 0;
+            for (const auto& boundary : boundaries) {
+                inBoundaries += boundary.size();
+            }
+            if (boundaries.empty() || inBoundaries != edges.size()) {
+                return {};
+            }
+            std::vector<TopoDS_Wire> wires;
+            for (const auto& boundary : boundaries) {
+                BRepLib_MakeWire wireMaker;
+                for (const auto& edge : boundary) {
+                    wireMaker.Add(edge);
+                }
+                if (wireMaker.Error() != BRepLib_WireDone) {
+                    return {};
+                }
+                wires.push_back(wireMaker.Wire());
+            }
+            std::sort(wires.begin(), wires.end(), ModelRefine::WireSort());
+            Handle(Geom_BSplineSurface) surface = copyOfSurface(
+                Handle(Geom_BSplineSurface)::DownCast(BRep_Tool::Surface(faces.at(0)))
+            );
+            if (surface.IsNull()) {
+                return {};
+            }
+            BRepBuilderAPI_MakeFace faceMaker(surface, wires.front());
+            if (!faceMaker.IsDone()) {
+                return {};
+            }
+            for (std::size_t index = 1; index < wires.size(); ++index) {
+                faceMaker.Add(wires[index]);
+                if (!faceMaker.IsDone()) {
+                    return {};
+                }
+            }
+            ShapeFix_Face faceFixer(faceMaker.Face());
+            faceFixer.SetContext(new ShapeBuild_ReShape());
+            faceFixer.Perform();
+            if (faceFixer.Status(ShapeExtend_FAIL)) {
+                return {};
+            }
+            faceFixer.FixOrientation();
+            faceFixer.Perform();
+            if (faceFixer.Status(ShapeExtend_FAIL)) {
+                return {};
+            }
+            const TopoDS_Face face = faceFixer.Face();
+            if (face.IsNull() || !BRepCheck_Analyzer(face).IsValid() || !coversGroup(faces, face)) {
+                return {};
+            }
+            return face;
+        }
+        catch (Standard_Failure&) {
+            return {};
+        }
+    }
+
     std::vector<TopoDS_Wire> wires;
 
     std::vector<EdgeVectorType> splitEdges;
