@@ -125,8 +125,11 @@ HALVES = {"": "win32", "-macos": "darwin"}
 # volume and centre, and the optimal box's 1e-7 face-tolerance gap of ops#785). From gen5 on, the
 # recompute, round trip, rehearsal and roll-forward passes over that half compare at this
 # tolerance; the open pass, the platform's own half, and gen1 to gen4 (whose other halves never
-# drifted past 3.6e-12) keep CompatRecord.TOLERANCE.
-CROSS_PLATFORM_TOLERANCE = (1e-8, 1e-6)
+# drifted past 3.6e-12) keep CompatRecord.TOLERANCE. The absolute floor is 1e-5 mm since gen6
+# (ops#883, coordinator c813, D2): a varying-angle chamfer's approximated surfaces leave a centre
+# residue near 0 that differs by platform (gen6 ChamferVaryingAngle: 1.3e-6 mm on a 40 mm body),
+# which no relative bound can pass; 1e-5 mm is far below any modelling meaning.
+CROSS_PLATFORM_TOLERANCE = (1e-8, 1e-5)
 CROSS_PLATFORM_FROM = 5
 GENERATION_FOLDER = re.compile(r"gen(\d+)(-macos)?")
 
