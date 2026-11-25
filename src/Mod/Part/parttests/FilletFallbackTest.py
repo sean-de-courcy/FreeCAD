@@ -10070,3 +10070,109 @@ class LipCornerOverflowTest(unittest.TestCase):
             self.assertNotIn("convex arc", str(error))
         else:
             self.assertTrue(result.isValid())
+
+
+class LoneRoundCylinderTest(unittest.TestCase):
+    """ops#1051, mechanism A (FGC Triptych, Labyrinth, Case Base Vial Well): a round along a straight
+    edge whose wall is shorter than the radius rolls past the wall onto the arc below it. OCCT
+    extends its cylinder to that arc and hands it back as a rational B-spline that is the cylinder
+    exactly; a later concave fill in front of the wall the round cut away was then trimmed by the
+    prism over the B-spline edge, a SurfaceOfExtrusion refine never merges (one face too many).
+    Onshape: the round is one Cylinder, and it grows over the fill.
+
+    Designed: a tray 60 x 60 x 20 (walls 5), a U slot through its wall x 55..60 (arc centre
+    (y 30, z 12), radius 4; slot walls y 26 and 34 down to z 12), the slot's top edge y 34, z 20
+    rounded. With r 10 the ball touches the top face and the slot's arc (the wall is 8 tall), so the
+    round is the cylinder of radius 10 along x through y = 30 + sqrt(14^2 - 2^2), z 10. The
+    pocket's corner x 55, y 45 then filleted r 2.5: one new face (its cylinder); the round's
+    cylinder stays one face. Control: r 3 rounds against the wall itself (a Cylinder from OCCT)"""
+
+    RF = 2.5
+
+    def tray(self, yb):
+        s = Part.makeBox(60, 60, 20).cut(Part.makeBox(50, yb - 5, 15, V(5, 5, 5)))
+        arc = Part.Arc(V(55, 26, 12), V(55, 30, 8), V(55, 34, 12)).toShape()
+        w = Part.Wire(
+            [
+                arc,
+                Part.makeLine(V(55, 34, 12), V(55, 34, 30)),
+                Part.makeLine(V(55, 34, 30), V(55, 26, 30)),
+                Part.makeLine(V(55, 26, 30), V(55, 26, 12)),
+            ]
+        )
+        return s.cut(Part.Face(w).extrude(V(10, 0, 0)).translate(V(-2, 0, 0)))
+
+    @staticmethod
+    def mid(e):
+        a, b = e.ParameterRange
+        return e.valueAt((a + b) / 2)
+
+    def rounded(self, rr, yb):
+        s = self.tray(yb)
+        top = [
+            e
+            for e in s.Edges
+            if e.Curve.TypeId == "Part::GeomLine"
+            and abs(self.mid(e).y - 34) < 1e-6
+            and abs(self.mid(e).z - 20) < 1e-6
+        ]
+        self.assertEqual(len(top), 1)
+        out = s.makeFillet(rr, top).removeSplitter()
+        self.assertTrue(out.isValid())
+        return out
+
+    def corner(self, shape, yb):
+        found = [
+            e
+            for e in shape.Edges
+            if e.Curve.TypeId == "Part::GeomLine"
+            and abs(self.mid(e).x - 55) < 1e-6
+            and abs(self.mid(e).y - yb) < 1e-6
+            and abs(e.Length - 15) < 1e-6
+        ]
+        self.assertEqual(len(found), 1)
+        return found
+
+    def onCylinder(self, face, radius, y, z):
+        """Whether the face is a Cylinder of the radius along x through (y, z)"""
+        s = face.Surface
+        if s.TypeId != "Part::GeomCylinder" or abs(s.Radius - radius) > 1e-7:
+            return False
+        if abs(abs(s.Axis.normalize().x) - 1) > 1e-9:
+            return False
+        c = s.Center
+        return math.hypot(c.y - y, c.z - z) < 1e-6
+
+    def testRollingRoundIsItsCylinder(self):
+        out = self.rounded(10.0, 45.0)
+        kinds = [f.Surface.TypeId for f in out.Faces]
+        self.assertNotIn("Part::GeomBSplineSurface", kinds)
+        y = 30 + math.sqrt(14**2 - 2**2)
+        rounds = [f for f in out.Faces if self.onCylinder(f, 10.0, y, 10.0)]
+        self.assertEqual(len(rounds), 1)
+        # Its edges are lines and circles, on the cylinder
+        for e in rounds[0].Edges:
+            self.assertIn(e.Curve.TypeId, ("Part::GeomLine", "Part::GeomCircle"))
+            for k in range(5):
+                a, b = e.ParameterRange
+                p = e.valueAt(a + (b - a) * k / 4)
+                self.assertAlmostEqual(math.hypot(p.y - y, p.z - 10.0), 10.0, delta=1e-7)
+
+    def testFillOnTheRollingRoundGrowsIt(self):
+        rounded = self.rounded(10.0, 45.0)
+        got = rounded.makeFillet(self.RF, self.corner(rounded, 45.0))
+        self.assertTrue(got.isValid())
+        ref = got.removeSplitter()
+        self.assertTrue(ref.isValid())
+        self.assertEqual(len(ref.Faces), len(rounded.Faces) + 1)
+        self.assertNotIn("Part::GeomSurfaceOfExtrusion", [f.Surface.TypeId for f in ref.Faces])
+        y = 30 + math.sqrt(14**2 - 2**2)
+        self.assertEqual(len([f for f in ref.Faces if self.onCylinder(f, 10.0, y, 10.0)]), 1)
+
+    def testRoundAgainstItsWallIsUnchanged(self):
+        rounded = self.rounded(3.0, 38.0)
+        rounds = [f for f in rounded.Faces if self.onCylinder(f, 3.0, 37.0, 17.0)]
+        self.assertEqual(len(rounds), 1)
+        got = rounded.makeFillet(self.RF, self.corner(rounded, 38.0)).removeSplitter()
+        self.assertTrue(got.isValid())
+        self.assertEqual(len(got.Faces), len(rounded.Faces) + 1)

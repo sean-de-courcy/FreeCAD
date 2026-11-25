@@ -31,6 +31,10 @@
 #include <Geom_BezierCurve.hxx>
 #include <Geom_BezierSurface.hxx>
 #include <Geom_Line.hxx>
+#include <Geom_Conic.hxx>
+#include <Geom_TrimmedCurve.hxx>
+#include <gce_MakeCirc.hxx>
+#include <Geom_Circle.hxx>
 #include <Geom_CylindricalSurface.hxx>
 #include <Geom_ConicalSurface.hxx>
 #include <Geom_SphericalSurface.hxx>
@@ -9152,11 +9156,26 @@ bool constructOverKink(
 // their other faces (a plane tangent along the axis: the contact line). The topology and its order
 // stay OCCT's, so the names stay. Unrecognised: OCCT's result, as before. Recognised and failing a
 // check: the fillet refuses (decision 418), since OCCT's result there is valid and wrong.
+//
+// FreeCAD-CH (ops#1051, mechanism A): a lone round. Where OCCT extends a round's cylinder to meet
+// an obstacle at its end, it converts it to a rational B-spline that is the cylinder exactly (FGC
+// Triptych, Labyrinth, Case Base Vial Well: degree 2 x 2, on the cylinder to 3e-13). Onshape's face
+// is a Cylinder. Kept a B-spline, a later fill trimmed over a wall the round cut away gets the
+// prism's side over the B-spline edge, a SurfaceOfExtrusion that refine never merges with the round
+// (one face too many per fill). Recognised (with `lone`): a new B-spline face with no stripe of the
+// round beside it, all of whose samples lie on one cylinder of the round's radius within
+// Precision::Confusion. It takes the cylinder, and its B-spline edges the exact intersections
+// (circles on the planes square to the axis, lines along it). The geometry doesn't move. A lone
+// face that can't be made exact keeps OCCT's B-spline (it is exact already): never a refusal.
 class RoundCanonicalModification: public BRepTools_Modification
 {
 public:
-    RoundCanonicalModification(const TopoDS_Shape& result, const TopoDS_Shape& base, double radius)
+    RoundCanonicalModification(const TopoDS_Shape& result,
+                               const TopoDS_Shape& base,
+                               double radius,
+                               bool lone = false)
         : radius(radius)
+        , lone(lone)
     {
         TopTools_IndexedMapOfShape baseFaces;
         TopExp::MapShapes(base, TopAbs_FACE, baseFaces);
@@ -9178,6 +9197,12 @@ public:
     bool isEmpty() const
     {
         return surfaces.empty();
+    }
+
+    /// Whether a lone round (above) was recognised
+    bool hasLone() const
+    {
+        return loneCount > 0;
     }
 
     /// Why a recognised face could not be made exact (empty if every one was)
@@ -9425,6 +9450,10 @@ private:
                 others.push_back(edge);
             }
         }
+        if (!cylinder && stripes.empty() && lone) {
+            recogniseLone(face, old, others, edgeFaces);
+            return;
+        }
         if (!cylinder || stripes.size() != 2) {
             return;
         }
@@ -9444,15 +9473,39 @@ private:
         }
         // Recognised from here: a failure is the fillet's refusal
         worst = std::max(worst, off);
+        Handle(Geom_CylindricalSurface) exact;
+        double u {};
+        if (!orientedCylinder(old, u1, u2, v1, v2, *cylinder, exact, u)) {
+            return;
+        }
+        for (const TopoDS_Edge& edge : others) {
+            if (!exactEdge(edge, face, *cylinder, exact, edgeFaces, curves, false)) {
+                return;
+            }
+        }
+        surfaces[face.TShape().get()] = exact;
+        references[face.TShape().get()] = u;
+    }
+
+    /// The cylinder as a surface on the face's side, and a u of the face's period on it
+    bool orientedCylinder(const BRepAdaptor_Surface& old,
+                          double u1,
+                          double u2,
+                          double v1,
+                          double v2,
+                          const gp_Cylinder& cylinder,
+                          Handle(Geom_CylindricalSurface)& exact,
+                          double& u)
+    {
         gp_Pnt middle;
         gp_Vec du, dv;
         old.D1((u1 + u2) / 2, (v1 + v2) / 2, middle, du, dv);
-        Handle(Geom_CylindricalSurface) exact = new Geom_CylindricalSurface(*cylinder);
-        double u {}, v {};
+        exact = new Geom_CylindricalSurface(cylinder);
+        double v {};
         GeomAPI_ProjectPointOnSurf onExact(middle, exact);
         if (!onExact.IsDone() || onExact.NbPoints() == 0) {
             why = "the round's face has no point on its cylinder";
-            return;
+            return false;
         }
         onExact.LowerDistanceParameters(u, v);
         gp_Pnt point;
@@ -9463,21 +9516,143 @@ private:
             GeomAPI_ProjectPointOnSurf again(middle, exact);
             again.LowerDistanceParameters(u, v);
         }
-        for (const TopoDS_Edge& edge : others) {
-            if (!exactEdge(edge, face, *cylinder, exact, edgeFaces)) {
-                return;
-            }
-        }
-        surfaces[face.TShape().get()] = exact;
-        references[face.TShape().get()] = u;
+        return true;
     }
 
-    /// The edge's curve on the cylinder: kept if it lies on it, else the exact intersection
+    /** A lone round (ops#1051, the class comment): the cylinder through a cross-section of the
+     * face, taken if every sample of the face lies on it within Precision::Confusion. A face that
+     * isn't one, or can't be made exact, is left as OCCT built it, with no failure recorded
+     */
+    void recogniseLone(const TopoDS_Face& face,
+                       const BRepAdaptor_Surface& old,
+                       const std::vector<TopoDS_Edge>& edges,
+                       const TopTools_IndexedDataMapOfShapeListOfShape& edgeFaces)
+    {
+        double u1 {}, u2 {}, v1 {}, v2 {};
+        BRepTools::UVBounds(face, u1, u2, v1, v2);
+        if (u2 - u1 <= Precision::PConfusion() || v2 - v1 <= Precision::PConfusion()) {
+            return;
+        }
+        auto sample = [&](double s, double t) {
+            return old.Value(u1 + (u2 - u1) * s, v1 + (v2 - v1) * t);
+        };
+        std::optional<gp_Cylinder> cylinder;
+        for (int across = 0; across < 2 && !cylinder; ++across) {
+            // The iso line across the middle of the other parameter: a circle of the radius where
+            // it is the round's cross-section (three points on a ruling are on a line: no circle)
+            auto at = [&](double s) {
+                return across == 0 ? sample(s, 0.5) : sample(0.5, s);
+            };
+            try {
+                gce_MakeCirc circle(at(0.1), at(0.5), at(0.9));
+                if (!circle.IsDone()
+                    || std::abs(circle.Value().Radius() - radius) > Precision::Confusion()) {
+                    continue;
+                }
+                const gp_Cylinder candidate(gp_Ax3(circle.Value().Position()), radius);
+                double off = 0.0;
+                for (int i = 0; i <= 20 && off <= Precision::Confusion(); ++i) {
+                    for (int j = 0; j <= 20 && off <= Precision::Confusion(); ++j) {
+                        off = std::max(off, offCylinder(candidate, sample(i / 20.0, j / 20.0)));
+                    }
+                }
+                if (off <= Precision::Confusion()) {
+                    cylinder = candidate;
+                }
+            }
+            catch (const Standard_Failure&) {
+                continue;
+            }
+        }
+        if (!cylinder) {
+            return;
+        }
+        const std::string before = why;
+        Handle(Geom_CylindricalSurface) exact;
+        double u {};
+        std::map<const TopoDS_TShape*, NewEdge> staged;
+        bool made = orientedCylinder(old, u1, u2, v1, v2, *cylinder, exact, u);
+        for (const TopoDS_Edge& edge : edges) {
+            if (!made) {
+                break;
+            }
+            if (curves.count(edge.TShape().get()) == 0) {
+                made = exactEdge(edge, face, *cylinder, exact, edgeFaces, staged, true);
+            }
+        }
+        if (!made) {
+            FC_LOG("a lone round kept as OCCT's B-spline on its cylinder: " << why);
+            why = before;
+            return;
+        }
+        curves.insert(staged.begin(), staged.end());
+        surfaces[face.TShape().get()] = exact;
+        references[face.TShape().get()] = u;
+        ++loneCount;
+    }
+
+    /// The line or circle the curve runs along within Precision::Confusion, or null
+    static Handle(Geom_Curve) lineOrCircle(const Handle(Geom_Curve)& curve, double first, double last)
+    {
+        auto at = [&](double s) {
+            return curve->Value(first + (last - first) * s);
+        };
+        const gp_Pnt start = at(0.0);
+        const gp_Pnt end = at(1.0);
+        if (start.Distance(end) > Precision::Confusion()) {
+            const gp_Lin line(start, gp_Dir(gp_Vec(start, end)));
+            bool straight = true;
+            for (int k = 1; k < 16 && straight; ++k) {
+                straight = line.Distance(at(k / 16.0)) <= Precision::Confusion();
+            }
+            if (straight) {
+                return new Geom_Line(line.Position());
+            }
+        }
+        try {
+            gce_MakeCirc make(at(0.1), at(0.5), at(0.9));
+            if (!make.IsDone()) {
+                return {};
+            }
+            const gp_Circ circle = make.Value();
+            for (int k = 0; k <= 16; ++k) {
+                if (circle.Distance(at(k / 16.0)) > Precision::Confusion()) {
+                    return {};
+                }
+            }
+            return new Geom_Circle(circle);
+        }
+        catch (const Standard_Failure&) {
+            return {};
+        }
+    }
+
+    /// Whether the curve is a free form (a B-spline, a Bezier, an offset or other)
+    static bool freeForm(const TopoDS_Edge& edge)
+    {
+        switch (BRepAdaptor_Curve(edge).GetType()) {
+            case GeomAbs_Line:
+            case GeomAbs_Circle:
+            case GeomAbs_Ellipse:
+            case GeomAbs_Hyperbola:
+            case GeomAbs_Parabola:
+                return false;
+            default:
+                return true;
+        }
+    }
+
+    /** The edge's curve on the cylinder: kept if it lies on it, else the exact intersection, into
+     * `into`. With `analytic` (a lone round), a free-form curve on the cylinder is replaced by the
+     * intersection too, as its basis line or conic where it is one
+     */
     bool exactEdge(const TopoDS_Edge& edge,
                    const TopoDS_Face& face,
                    const gp_Cylinder& cylinder,
                    const Handle(Geom_CylindricalSurface)& exact,
-                   const TopTools_IndexedDataMapOfShapeListOfShape& edgeFaces)
+                   const TopTools_IndexedDataMapOfShapeListOfShape& edgeFaces,
+                   std::map<const TopoDS_TShape*, NewEdge>& into,
+                   bool analytic)
     {
         double first {}, last {};
         const Handle(Geom_Curve) curve = globalCurve(edge, first, last);
@@ -9490,7 +9665,7 @@ private:
             on = offCylinder(cylinder, curve->Value(first + (last - first) * k / 16))
                 <= Precision::Confusion();
         }
-        if (on) {
+        if (on && !(analytic && freeForm(edge))) {
             return true;  // only its pcurve on the new surface changes
         }
         TopoDS_Face other;
@@ -9509,8 +9684,14 @@ private:
         const gp_Pnt to = BRep_Tool::Pnt(end);
         const gp_Pnt middle = curve->Value((first + last) / 2);
         Handle(Geom_Curve) best;
+        if (on && analytic) {
+            // A free-form curve on the cylinder that is a line or a circle: that line or circle
+            // (where the face beside is tangent to the cylinder, as a slot's arc the round rolls
+            // onto, an intersection would be ill-conditioned)
+            best = lineOrCircle(curve, first, last);
+        }
         const BRepAdaptor_Surface surface(other);  // global
-        if (surface.GetType() == GeomAbs_Plane) {
+        if (best.IsNull() && surface.GetType() == GeomAbs_Plane) {
             // A plane tangent to the cylinder along the axis: the contact line
             const gp_Pln plane = surface.Plane();
             const gp_Dir axis = cylinder.Axis().Direction();
@@ -9541,6 +9722,15 @@ private:
             why = "the round's cylinder doesn't meet a face beside it";
             return false;
         }
+        if (analytic) {
+            // The line or conic itself, not a stretch of it: the vertices' parameters are on it
+            const Handle(Geom_TrimmedCurve) trimmed = Handle(Geom_TrimmedCurve)::DownCast(best);
+            if (!trimmed.IsNull()
+                && (trimmed->BasisCurve()->IsKind(STANDARD_TYPE(Geom_Line))
+                    || trimmed->BasisCurve()->IsKind(STANDARD_TYPE(Geom_Conic)))) {
+                best = trimmed->BasisCurve();
+            }
+        }
         // The vertices stay: they are on the exact stripes
         double a {}, b {};
         if (!parameterOn(best, from, a) || !parameterOn(best, to, b)) {
@@ -9559,12 +9749,24 @@ private:
                 }
             }
         }
+        if (analytic && best->IsPeriodic()
+            && best->Value((a + b) / 2).Distance(middle) > 0.1 * radius + worst) {
+            // A circle that runs the other way round from OCCT's edge: from a to b is the rest
+            best = best->Reversed();
+            if (!parameterOn(best, from, a) || !parameterOn(best, to, b)) {
+                why = "a vertex of the round is off its exact edge";
+                return false;
+            }
+            if (b < a) {
+                b += best->Period();
+            }
+        }
         // The same stretch as OCCT's edge: the old middle is near the new one
         if (best->Value((a + b) / 2).Distance(middle) > 0.1 * radius + worst) {
             why = "the round's exact edge runs elsewhere than OCCT's";
             return false;
         }
-        curves[edge.TShape().get()] = NewEdge {best, a, b};
+        into[edge.TShape().get()] = NewEdge {best, a, b};
         return true;
     }
 
@@ -9668,6 +9870,8 @@ private:
     }
 
     double radius;
+    bool lone;
+    int loneCount {0};
     double worst {0.0};
     std::string why;
     std::map<const TopoDS_TShape*, Handle(Geom_Surface)> surfaces;  // global
@@ -9685,21 +9889,13 @@ public:
     }
 };
 
-/// The round's stretches over a gap in its wall as its exact cylinder (above): the result is
-/// unchanged where nothing is recognised; refused (CADKernelError) where a recognised stretch
-/// can't be made exact with the same topology
-void makeRoundCanonical(TopoShape& round, const TopoShape& base, double radius)
+/// The shape rebuilt with the modification's exact faces into the round: empty on success, else
+/// why it can't be (the round unchanged)
+std::string rebuildRoundCanonical(TopoShape& round,
+                                  const TopoDS_Shape& shape,
+                                  const Handle(RoundCanonicalModification) & modification)
 {
-    const TopoDS_Shape shape = round.getShape();
-    if (shape.IsNull() || radius <= 0) {
-        return;
-    }
-    Handle(RoundCanonicalModification) modification
-        = new RoundCanonicalModification(shape, base.getShape(), radius);
     std::string why = modification->failure();
-    if (modification->isEmpty() && why.empty()) {
-        return;
-    }
     if (why.empty()) {
         try {
             RoundCanonicalMaker maker(shape, modification);
@@ -9748,12 +9944,44 @@ void makeRoundCanonical(TopoShape& round, const TopoShape& base, double radius)
             }
             if (why.empty()) {
                 round.setShape(result, false);
-                return;
+                return {};
             }
         }
         catch (const Standard_Failure& e) {
             why = std::string("OCCT: ") + e.GetMessageString();
         }
+    }
+    return why.empty() ? std::string("OCCT couldn't rebuild it") : why;
+}
+
+/// The round's stretches over a gap in its wall, and its lone rounds, as their exact cylinders
+/// (above): the result is unchanged where nothing is recognised; refused (CADKernelError) where a
+/// recognised stretch over a gap can't be made exact with the same topology. Lone rounds that keep
+/// the rebuild from passing stay OCCT's B-splines (exact already), and the rest is tried without
+void makeRoundCanonical(TopoShape& round, const TopoShape& base, double radius)
+{
+    const TopoDS_Shape shape = round.getShape();
+    if (shape.IsNull() || radius <= 0) {
+        return;
+    }
+    Handle(RoundCanonicalModification) modification
+        = new RoundCanonicalModification(shape, base.getShape(), radius, true);
+    if (modification->hasLone()) {
+        if (modification->failure().empty()) {
+            const std::string why = rebuildRoundCanonical(round, shape, modification);
+            if (why.empty()) {
+                return;
+            }
+            FC_LOG("the fillet's lone rounds kept as OCCT's B-splines on their cylinders: " << why);
+        }
+        modification = new RoundCanonicalModification(shape, base.getShape(), radius);
+    }
+    if (modification->isEmpty() && modification->failure().empty()) {
+        return;
+    }
+    const std::string why = rebuildRoundCanonical(round, shape, modification);
+    if (why.empty()) {
+        return;
     }
     FC_THROWM(
         Base::CADKernelError,
