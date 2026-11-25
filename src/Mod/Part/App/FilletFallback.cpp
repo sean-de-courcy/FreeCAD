@@ -10206,6 +10206,13 @@ void trimByWedge(Tool& tool, const TopoDS_Shape& wedge, const TopoDS_Shape& base
  * strip: no oracle says what Onshape builds), or runs along the foot of another wall on another
  * surface (otherFeet: the first wall's surface would cut the dress-up off in front of the second).
  *
+ * Onshape's wall cuts the round only by its own continuation, run on below the foot until it meets
+ * the round's circle (oracle RB7, ops#898): a piece the surface cuts off further on, which holds
+ * none of the strip past the foot and does not run along the foot (a wall leaning back 45 deg
+ * crosses the round's arc twice and the front face), stays in the tool. Where the continuation
+ * misses the circle, the piece behind it holds the other face's strip too, and that refuses as
+ * above (Onshape: FILLET_FAILED).
+ *
  * The kept piece is found by its boundary, not by a point inside it: on #105 the piece that goes
  * is a sliver 3e-4 thick (the round is tangent to the face where the wall cuts it), and OCCT's
  * solid classifier takes a point 0.9 away from it for inside it.
@@ -10273,6 +10280,19 @@ bool trimByWall(
         // surface cut the tool off here already (one wall with two feet, two walls on one surface)
         return false;
     }
+    // Whether a piece runs along a wall's foot, along a stretch that counts against the piece's
+    // own size, as in pastFoot: #105's piece behind the short blend touches the long blend's foot
+    // along 4e-4
+    auto alongFoot = [&](const TopoDS_Shape& piece, const TopoDS_Edge& foot) {
+        const double stretch
+            = std::max(1000 * linearTolerance, 0.02 * std::cbrt(volumeOf(piece)));
+        for (TopExp_Explorer it(piece, TopAbs_SHELL); it.More(); it.Next()) {
+            if (touch(foot, it.Current()) && lengthAlong(foot, it.Current()) > stretch) {
+                return true;
+            }
+        }
+        return false;
+    };
     Bnd_Box box;
     BRepBndLib::Add(tool.solid, box);
     const double reach = 2 * std::sqrt(box.SquareExtent());
@@ -10325,7 +10345,7 @@ bool trimByWall(
             }
         };
         int holding = 0;
-        TopoDS_Shape kept;
+        std::vector<TopoDS_Shape> staying;
         BRep_Builder builder;
         TopoDS_Compound away;
         builder.MakeCompound(away);
@@ -10333,7 +10353,7 @@ bool trimByWall(
         for (const auto& piece : pieces) {
             if (holds(piece)) {
                 ++holding;
-                kept = piece;
+                staying.push_back(piece);
                 continue;
             }
             double on = 0.0;
@@ -10344,7 +10364,14 @@ bool trimByWall(
                 refuse("a wall's surface cuts a dress-up off on its own face");
             }
             if (off <= tolerance) {
-                refuse("a wall's surface cuts a piece off a dress-up that is not behind the wall");
+                // Past where the wall's continuation meets the round's circle (RB7: no strip on
+                // the face or past the foot). The continuation runs on from the foot, so a piece
+                // that runs along the foot is not past that meeting
+                if (alongFoot(piece, at.foot)) {
+                    refuse("a wall's surface cuts a piece off a dress-up that is not behind the wall");
+                }
+                staying.push_back(piece);
+                continue;
             }
             // Nothing of the tool's other strips: the wall would cut the dress-up's own face away
             {
@@ -10365,15 +10392,9 @@ bool trimByWall(
                 }
             }
             // Nor in front of another wall: its own surface cuts the dress-up off there
-            // Along a stretch that counts against the piece's own size, as in pastFoot: #105's
-            // piece behind the short blend touches the long blend's foot along 4e-4
-            const double stretch
-                = std::max(1000 * linearTolerance, 0.02 * std::cbrt(volumeOf(piece)));
             for (const auto& foot : otherFeet) {
-                for (TopExp_Explorer it(piece, TopAbs_SHELL); it.More(); it.Next()) {
-                    if (touch(foot, it.Current()) && lengthAlong(foot, it.Current()) > stretch) {
-                        refuse("a wall's surface cuts a dress-up off in front of another wall");
-                    }
+                if (alongFoot(piece, foot)) {
+                    refuse("a wall's surface cuts a dress-up off in front of another wall");
                 }
             }
             builder.Add(away, piece);
@@ -10387,9 +10408,9 @@ bool trimByWall(
         }
         // What is left no longer runs off over the wall's foot
         bool stillPast = false;
-        {
+        for (const auto& piece : staying) {
             TopTools_IndexedMapOfShape faces;
-            TopExp::MapShapes(kept, TopAbs_FACE, faces);
+            TopExp::MapShapes(piece, TopAbs_FACE, faces);
             for (const auto& contact : strip->contacts) {
                 for (const auto& image : stage.images(contact)) {
                     stillPast = stillPast || (faces.Contains(image) && pastFoot(image));
@@ -20114,6 +20135,235 @@ bool constructSolid(
 }
 
 }  // namespace
+
+namespace
+{
+/// A point inside the face (its parameter box's middle, else the first of a grid inside it)
+std::optional<gp_Pnt> pointInFace(const TopoDS_Face& face)
+{
+    double u0 = 0.0;
+    double u1 = 0.0;
+    double v0 = 0.0;
+    double v1 = 0.0;
+    BRepTools::UVBounds(face, u0, u1, v0, v1);
+    BRepAdaptor_Surface surface(face);
+    const int steps = 8;
+    for (int k = -1; k < steps * steps; ++k) {
+        const double s = k < 0 ? 0.5 : (k % steps + 0.5) / steps;
+        const double t = k < 0 ? 0.5 : (k / steps + 0.5) / steps;
+        const gp_Pnt2d uv(u0 + (u1 - u0) * s, v0 + (v1 - v0) * t);
+        BRepClass_FaceClassifier classifier(face, uv, linearTolerance);
+        if (classifier.State() == TopAbs_IN) {
+            return surface.Value(uv.X(), uv.Y());
+        }
+    }
+    return std::nullopt;
+}
+
+/** The side of a sheet a piece of a solid split by it lies on: -1 where the piece's faces on the
+ * sheet look against the sheet's own orientation (the piece lies in front of it, on the side its
+ * normals point to), +1 where they look along it, 0 where it has no face on the sheet or its faces
+ * disagree (a sheet folding round it)
+ */
+int sideOfSheet(
+    const TopoDS_Shape& piece,
+    const TopoDS_Shape& sheet,
+    BRepAlgoAPI_Splitter& splitter
+)
+{
+    int side = 0;
+    for (TopExp_Explorer it(piece, TopAbs_FACE); it.More(); it.Next()) {
+        const TopoDS_Face& face = TopoDS::Face(it.Current());
+        for (TopExp_Explorer on(sheet, TopAbs_FACE); on.More(); on.Next()) {
+            const TopoDS_Face& source = TopoDS::Face(on.Current());
+            bool image = face.IsSame(source);
+            for (const auto& modified : splitter.Modified(source)) {
+                image = image || face.IsSame(modified);
+            }
+            if (!image) {
+                continue;
+            }
+            const std::optional<gp_Pnt> point = pointInFace(face);
+            if (!point) {
+                continue;
+            }
+            const double along = outwardNormalAny(face, *point).Dot(outwardNormalAny(source, *point));
+            if (std::abs(along) < 0.5) {
+                continue;
+            }
+            const int here = along > 0 ? 1 : -1;
+            if (side != 0 && side != here) {
+                return 0;
+            }
+            side = here;
+            break;
+        }
+    }
+    return side;
+}
+}  // namespace
+
+TopoDS_Shape trimRunOutAtFace(
+    const TopoShape& base,
+    const TopoDS_Shape& tool,
+    const TopoDS_Edge& edge,
+    const TopoDS_Face& endFace,
+    const TopoDS_Vertex& vertex,
+    double size,
+    const gp_Pnt& inside,
+    const gp_Pnt& past
+)
+{
+    try {
+        const Request request;
+        const Context ctx(base, request);
+        const auto faces = ctx.list(ctx.edgeFaces, edge);
+        if (faces.size() != 2) {
+            return {};
+        }
+        const TopoDS_Face edgeFaces[2] = {TopoDS::Face(faces[0]), TopoDS::Face(faces[1])};
+        const gp_Pnt at = BRep_Tool::Pnt(vertex);
+        // As trimBySurface: only the tool's part past the edge's middle, towards the end, is
+        // split, and nothing may go near the middle, where the surface would cross the tool
+        // further in than the end's half
+        BRepAdaptor_Curve curve(edge);
+        const gp_Pnt middle = curve.Value((curve.FirstParameter() + curve.LastParameter()) / 2);
+        const double half = middle.Distance(at);
+        if (half <= linearTolerance) {
+            return {};
+        }
+        const gp_Dir towards(gp_Vec(middle, at));
+        Bnd_Box box;
+        BRepBndLib::Add(tool, box);
+        const double extent = std::sqrt(box.SquareExtent()) + 1;
+        const TopoDS_Shape endPart = commonOf(tool, halfSpaceBeyond({middle, towards}, 4 * extent));
+        const gp_Pnt besideMiddle = inside.Translated(gp_Vec(towards) * (0.01 * half));
+        const TopoDS_Shape nearMiddle = commonOf(
+            halfSpaceBeyond({middle, towards}, 4 * extent),
+            halfSpaceBeyond({middle.Translated(gp_Vec(towards) * (0.1 * half)), towards.Reversed()}, 4 * extent)
+        );
+        const double whole = volumeOf(tool);
+        auto holds = [](const TopoDS_Shape& piece, const gp_Pnt& point) {
+            BRepClass3d_SolidClassifier classifier(piece, point, linearTolerance);
+            return classifier.State() == TopAbs_IN;
+        };
+        for (bool extend : {false, true}) {
+            Handle(Geom_Surface) surface;
+            TopLoc_Location location;
+            TopoDS_Face beyond;
+            const TopoDS_Face face = surfaceFace(
+                ctx,
+                endFace,
+                edgeFaces,
+                at,
+                4 * size + 1,
+                extend,
+                surface,
+                location,
+                beyond
+            );
+            if (face.IsNull()) {
+                break;
+            }
+            TopTools_ListOfShape arguments;
+            arguments.Append(endPart);
+            const TopoDS_Shape sheet = sheetWith(face, beyond);
+            // The sheet's orientation against the end face's outward normal at the end
+            double facing = 0.0;
+            for (TopExp_Explorer on(sheet, TopAbs_FACE); on.More() && std::abs(facing) < 0.5;
+                 on.Next()) {
+                try {
+                    facing = outwardNormalAny(TopoDS::Face(on.Current()), at)
+                                 .Dot(outwardNormalAny(endFace, at));
+                }
+                catch (const Refusal&) {
+                }
+            }
+            if (std::abs(facing) < 0.5) {
+                return {};
+            }
+            TopTools_ListOfShape tools;
+            tools.Append(sheet);
+            BRepAlgoAPI_Splitter splitter;
+            splitter.SetArguments(arguments);
+            splitter.SetTools(tools);
+            splitter.SetRunParallel(Standard_False);
+            splitter.SetNonDestructive(Standard_True);
+            splitter.Build();
+            if (!splitter.IsDone() || splitter.HasErrors()) {
+                return {};
+            }
+            // ops#1022: each piece by the side of the end face's surface it lies on (RB9): in front
+            // of it, on the air side, it stays in the tool wherever it is along the tool (a sliver
+            // the surface slices off the tool's face beside the edge, along a blend's contact
+            // line, is in front); behind it, it is cut
+            bool middleKept = false;
+            bool runOnKept = false;
+            double cut = 0.0;
+            BRep_Builder builder;
+            TopoDS_Compound away;
+            builder.MakeCompound(away);
+            for (TopExp_Explorer it(splitter.Shape(), TopAbs_SOLID); it.More(); it.Next()) {
+                const TopoDS_Shape& piece = it.Current();
+                const int side = sideOfSheet(piece, sheet, splitter) * (facing > 0 ? 1 : -1);
+                if (side == 0) {
+                    // No face on the sheet: the surface does not cut it; a piece on both sides
+                    // can't be told
+                    bool onSheet = false;
+                    for (TopExp_Explorer f(piece, TopAbs_FACE); f.More() && !onSheet; f.Next()) {
+                        for (TopExp_Explorer on(sheet, TopAbs_FACE); on.More() && !onSheet;
+                             on.Next()) {
+                            onSheet = f.Current().IsSame(on.Current());
+                            for (const auto& m : splitter.Modified(on.Current())) {
+                                onSheet = onSheet || f.Current().IsSame(m);
+                            }
+                        }
+                    }
+                    if (onSheet) {
+                        return {};
+                    }
+                }
+                if (side <= 0) {
+                    middleKept = middleKept || holds(piece, besideMiddle);
+                    runOnKept = runOnKept || holds(piece, past);
+                    continue;
+                }
+                if (volumeOf(commonOf(piece, nearMiddle)) > volumeTolerance * whole) {
+                    return {};
+                }
+                builder.Add(away, piece);
+                cut += volumeOf(piece);
+            }
+            if (cut <= 0.0) {
+                continue;  // the surface does not cut the tool there: extended
+            }
+            if (!middleKept || runOnKept) {
+                return {};
+            }
+            BRepAlgoAPI_Cut trimmed(tool, away);
+            if (!trimmed.IsDone() || trimmed.HasErrors()) {
+                return {};
+            }
+            TopoDS_Shape kept;
+            int solids = 0;
+            for (TopExp_Explorer it(trimmed.Shape(), TopAbs_SOLID); it.More(); it.Next()) {
+                kept = it.Current();
+                ++solids;
+            }
+            if (solids != 1
+                || std::abs(volumeOf(kept) + cut - whole)
+                    > volumeTolerance * whole + raisedTolerance(kept, {tool}) * squareSize(kept)) {
+                return {};
+            }
+            return kept;
+        }
+    }
+    catch (const Refusal&) {
+    }
+    catch (const Standard_Failure&) {
+    }
+    return {};
+}
 
 namespace
 {

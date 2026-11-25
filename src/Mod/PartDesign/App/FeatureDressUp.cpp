@@ -22,6 +22,7 @@
  *                                                                         *
  ***************************************************************************/
 
+#include <ChFi3d.hxx>
 #include <algorithm>
 #include <cmath>
 
@@ -91,6 +92,7 @@
 #include <App/ElementNamingUtils.h>
 #include <Base/Exception.h>
 #include <Base/Writer.h>
+#include "Mod/Part/App/FilletFallback.h"
 #include "Mod/Part/App/TopoShapeMapper.h"
 #include "Mod/Part/App/TopoShapeOpCode.h"
 #include "Body.h"
@@ -1642,6 +1644,16 @@ namespace
     ));
 }
 
+[[noreturn]] void endOnTangentFaces()
+{
+    throw Base::CADKernelError(QT_TRANSLATE_NOOP(
+        "Exception",
+        "Tangent propagation off: a picked edge ends on a face tangent to it where its tangent "
+        "chain does not go on, and that face's surface does not end the dress-up there. Pick the "
+        "whole tangent chain, or turn tangent propagation on."
+    ));
+}
+
 /// The corner region a fillet of `radius` (`arc`) or an equal-distance chamfer of size `radius`
 /// removes along a straight convex edge between two planar faces of `base`, extended along the
 /// edge past the body both ways, as a prism: Onshape's fillet and chamfer run straight on past a
@@ -1696,10 +1708,150 @@ TopoDS_Shape runOutTool(const TopoDS_Shape& base, const TopoDS_Edge& edge, doubl
     const double c = normal[0].Dot(normal[1]);
     const gp_Vec toCentre = (gp_Vec(normal[0]) + gp_Vec(normal[1])) * (-radius / (1.0 + c));
 
+    // ops#1022: the tool runs on past an end only where the tangent chain goes on there (GB13):
+    // an edge at the end that continues the edge tangentially, along one of its faces, with a
+    // convex corner. At another end on a face tangent to the edge's direction (a blend running
+    // out where a floor pinches out), Onshape ends the round as at any end on a face (RB9): the
+    // tool runs on by a margin and is cut by that face's surface (trimRunOutAtFace). Ends on
+    // other faces are as before
+    TopTools_IndexedDataMapOfShapeListOfShape vertexFaces;
+    TopExp::MapShapesAndAncestors(base, TopAbs_VERTEX, TopAbs_FACE, vertexFaces);
+    TopTools_IndexedDataMapOfShapeListOfShape vertexEdges;
+    TopExp::MapShapesAndAncestors(base, TopAbs_VERTEX, TopAbs_EDGE, vertexEdges);
+    const TopoDS_Vertex ends[2] = {TopExp::FirstVertex(edge), TopExp::LastVertex(edge)};
+    // One of the edge's faces, or a face on its plane with the same outside: the face split
+    // coplanar at an end (pads side by side with Refine off, a fuse without removeSplitter) goes
+    // on as one face, as on the refined body
+    auto onEdgesFace = [&](const TopoDS_Shape& shape) {
+        if (faces.Contains(shape)) {
+            return true;
+        }
+        const TopoDS_Face& face = TopoDS::Face(shape);
+        BRepAdaptor_Surface surface(face);
+        if (surface.GetType() != GeomAbs_Plane) {
+            return false;
+        }
+        gp_Dir outward = surface.Plane().Axis().Direction();
+        if (face.Orientation() == TopAbs_REVERSED) {
+            outward.Reverse();
+        }
+        if (surface.Plane().Distance(start) > Precision::Confusion()) {
+            return false;
+        }
+        return outward.Dot(normal[0]) > 1 - 1e-9 || outward.Dot(normal[1]) > 1 - 1e-9;
+    };
+    auto chainGoesOn = [&](int e) {
+        if (!vertexEdges.Contains(ends[e])) {
+            return false;
+        }
+        const gp_Dir outOf = e == 0 ? along.Reversed() : along;
+        TopTools_IndexedMapOfShape seen;
+        for (const auto& shape : vertexEdges.FindFromKey(ends[e])) {
+            const TopoDS_Edge& other = TopoDS::Edge(shape);
+            if (other.IsSame(edge) || seen.Contains(other) || BRep_Tool::Degenerated(other)
+                || !edgeFaces.Contains(other)) {
+                continue;
+            }
+            seen.Add(other);
+            TopTools_IndexedMapOfShape otherFaces;
+            for (const auto& face : edgeFaces.FindFromKey(other)) {
+                otherFaces.Add(face);
+            }
+            if (otherFaces.Extent() != 2
+                || !(onEdgesFace(otherFaces(1)) || onEdgesFace(otherFaces(2)))) {
+                continue;
+            }
+            BRepAdaptor_Curve curve(other);
+            const bool atFirst = TopExp::FirstVertex(other).IsSame(ends[e]);
+            gp_Pnt point;
+            gp_Vec tangent;
+            curve.D1(atFirst ? curve.FirstParameter() : curve.LastParameter(), point, tangent);
+            if (tangent.Magnitude() < Precision::Confusion()) {
+                continue;
+            }
+            if (!atFirst) {
+                tangent.Reverse();
+            }
+            if (gp_Dir(tangent).Dot(outOf) < 1 - 1e-6) {
+                continue;
+            }
+            if (ChFi3d::DefineConnectType(
+                    other,
+                    TopoDS::Face(otherFaces(1)),
+                    TopoDS::Face(otherFaces(2)),
+                    Precision::Angular(),
+                    Standard_False
+                )
+                == ChFiDS_Convex) {
+                return true;
+            }
+        }
+        return false;
+    };
+    // The outward normal of a face at an end of the edge
+    auto outwardAtEnd = [&](const TopoDS_Face& face, const TopoDS_Vertex& vertex, gp_Dir& outward) {
+        BRepAdaptor_Surface surface(face);
+        if (surface.GetType() == GeomAbs_Plane) {
+            outward = surface.Plane().Axis().Direction();
+        }
+        else {
+            const gp_Pnt2d uv = BRep_Tool::Parameters(vertex, face);
+            BRepLProp_SLProps props(surface, uv.X(), uv.Y(), 1, Precision::Confusion());
+            if (!props.IsNormalDefined()) {
+                return false;
+            }
+            outward = props.Normal();
+        }
+        if (face.Orientation() == TopAbs_REVERSED) {
+            outward.Reverse();
+        }
+        return true;
+    };
+    // The face that ends the round at an end where the chain does not go on: one tangent to the
+    // edge's direction there, or, for a fillet, a curved one facing back along the edge (RB9 with
+    // no blend: the scoop itself; its tangent plane cut too much). A chamfer has no Onshape fact
+    // at a tangent face: it refuses there, and keeps the tangent plane at a curved one
+    TopoDS_Face endFace[2];
+    for (int e = 0; e < 2; ++e) {
+        if (!vertexFaces.Contains(ends[e]) || chainGoesOn(e)) {
+            continue;
+        }
+        const gp_Dir intoEdge = e == 0 ? along : along.Reversed();
+        TopTools_IndexedMapOfShape seen;
+        for (const auto& shape : vertexFaces.FindFromKey(ends[e])) {
+            const TopoDS_Face& face = TopoDS::Face(shape);
+            if (onEdgesFace(face) || seen.Contains(face)) {
+                continue;
+            }
+            seen.Add(face);
+            gp_Dir outward;
+            if (!outwardAtEnd(face, ends[e], outward)) {
+                continue;
+            }
+            const double facing = outward.Dot(intoEdge);
+            const bool square = std::abs(facing) < 1e-6;
+            const bool curvedBack = facing >= 1e-6
+                && BRepAdaptor_Surface(face).GetType() != GeomAbs_Plane;
+            if (!square && !(arc && curvedBack)) {
+                continue;
+            }
+            if (!arc || !endFace[e].IsNull()) {
+                endOnTangentFaces();
+            }
+            endFace[e] = face;
+        }
+    }
+
     Bnd_Box box;
     BRepBndLib::Add(base, box);
     const double past = std::sqrt(box.SquareExtent()) + radius;
-    const gp_Pnt corner = start.Translated(gp_Vec(along) * -past);
+    // Past such an end, a margin: the face's surface cuts the round off within it
+    const double margin = 1 + 2 * radius;
+    const double runOn[2] = {
+        endFace[0].IsNull() ? past : margin,
+        endFace[1].IsNull() ? past : margin
+    };
+    const gp_Pnt corner = start.Translated(gp_Vec(along) * -runOn[0]);
     const gp_Pnt centre = corner.Translated(toCentre);
     // a fillet's arc touches each face where the ball does; a chamfer's line meets each face
     // `radius` from the edge
@@ -1722,18 +1874,17 @@ TopoDS_Shape runOutTool(const TopoDS_Shape& base, const TopoDS_Edge& edge, doubl
         BRepBuilderAPI_MakeEdge(tangent1, corner).Edge()
     );
     BRepBuilderAPI_MakeFace section(wire.Wire(), true);
-    TopoDS_Shape tool
-        = BRepPrimAPI_MakePrism(section.Face(), gp_Vec(along) * (start.Distance(end) + 2 * past))
-              .Shape();
+    TopoDS_Shape tool = BRepPrimAPI_MakePrism(
+                            section.Face(),
+                            gp_Vec(along) * (start.Distance(end) + runOn[0] + runOn[1])
+    )
+                            .Shape();
 
     // At an end where the edge meets a wall (a face there whose outside looks back along the edge:
     // a concave corner), the run-out stops at the wall as Onshape's does: the tool keeps only the
     // edge's side of the wall's plane (integrator 13, FilletRunOutPastWall). The face the body ends
     // at, or a face going on tangentially, looks away from or across the edge: the tool runs on.
-    TopTools_IndexedDataMapOfShapeListOfShape vertexFaces;
-    TopExp::MapShapesAndAncestors(base, TopAbs_VERTEX, TopAbs_FACE, vertexFaces);
     const double size = 2 * (start.Distance(end) + 2 * past + radius);
-    const TopoDS_Vertex ends[2] = {TopExp::FirstVertex(edge), TopExp::LastVertex(edge)};
     for (int e = 0; e < 2; ++e) {
         if (!vertexFaces.Contains(ends[e])) {
             continue;
@@ -1743,7 +1894,7 @@ TopoDS_Shape runOutTool(const TopoDS_Shape& base, const TopoDS_Edge& edge, doubl
         TopTools_IndexedMapOfShape seen;
         for (const auto& shape : vertexFaces.FindFromKey(ends[e])) {
             const TopoDS_Face& face = TopoDS::Face(shape);
-            if (faces.Contains(face) || seen.Contains(face)) {
+            if (faces.Contains(face) || seen.Contains(face) || face.IsSame(endFace[e])) {
                 continue;
             }
             seen.Add(face);
@@ -1779,6 +1930,30 @@ TopoDS_Shape runOutTool(const TopoDS_Shape& base, const TopoDS_Edge& edge, doubl
                 notStraightRunOut();
             }
             tool = trimmed.Shape();
+        }
+    }
+    // A point of the section near the edge at the edge's middle, and one in a run on
+    const gp_Vec inSection = (gp_Vec(corner, tangent0) + gp_Vec(corner, tangent1)) * 0.1;
+    for (int e = 0; e < 2; ++e) {
+        if (endFace[e].IsNull()) {
+            continue;
+        }
+        const gp_Pnt inside = middle.Translated(inSection);
+        const gp_Pnt runOnEnd = BRep_Tool::Pnt(ends[e]).Translated(
+            gp_Vec(e == 0 ? along.Reversed() : along) * (0.9 * margin) + inSection
+        );
+        tool = Part::FilletFallback::trimRunOutAtFace(
+            Part::TopoShape(base),
+            tool,
+            edge,
+            endFace[e],
+            ends[e],
+            radius,
+            inside,
+            runOnEnd
+        );
+        if (tool.IsNull()) {
+            endOnTangentFaces();
         }
     }
     return tool;
