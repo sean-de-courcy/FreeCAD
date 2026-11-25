@@ -5965,6 +5965,37 @@ class TestUpToACurvedFace(unittest.TestCase):
                 finally:
                     FreeCAD.closeDocument(doc.Name)
 
+    def testPadUpToACurvedFaceRegionsOnBothSides(self):
+        # A sketch of two rectangles, one outside the surface and one inside, neither covered by
+        # the face: refused in either drawing order, never one region up to the half of the
+        # surface away from the face (review pr1039-r1 T1, r1f T1). The cylinder from x = 19
+        # towards -x; the ball from x = -15 towards +x
+        def addRectangle(sketch, y0, y1, z0, z1):
+            V = FreeCAD.Vector
+            first = sketch.GeometryCount
+            corners = [V(-z1, y0, 0), V(-z0, y0, 0), V(-z0, y1, 0), V(-z1, y1, 0)]
+            for i in range(4):
+                sketch.addGeometry(Part.LineSegment(corners[i], corners[(i + 1) % 4]))
+            for i in range(4):
+                sketch.addConstraint(
+                    Sketcher.Constraint("Coincident", first + i, 2, first + (i + 1) % 4, 1)
+                )
+
+        for kind, x, sense, outside, inside in (
+            ("pie", 19, -1, (12, 14, 4, 6), (-1, 1, 12, 14)),
+            ("ball", -15, 1, (14, 16, -1, 1), (-1, 1, -1, 1)),
+        ):
+            for first, second in ((outside, inside), (inside, outside)):
+                with self.subTest(kind=kind, first=first):
+                    doc = FreeCAD.newDocument("PadUpToACurvedFaceRegionsOnBothSides")
+                    try:
+                        pad = padUpToACurvedFace(doc, kind, x, *first, sense=sense)
+                        addRectangle(pad.Profile[0], *second)
+                        doc.recompute()
+                        self.refused(pad)
+                    finally:
+                        FreeCAD.closeDocument(doc.Name)
+
     def testPocketUpToACylinderFaceBeside(self):
         # The pie slice joined with the block x 0..30, y 8..18, z 0..10: the face now spans
         # y -10..8. The rectangle y 14..16, z 4..6 at x = 40, beside the face, cuts the block

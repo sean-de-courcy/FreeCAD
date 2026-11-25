@@ -11828,25 +11828,60 @@ TopoDS_Face fullTurnOnFaceSide(
         return away.Normalized() - along * slope;
     };
     // The face's side: the sign of the outward normal along `direction`, the same, and clear of
-    // zero, over a grid of the face's parameter range (larger than the face: stricter)
+    // zero, over the face's parameter range (larger than the face: stricter). In the surface's
+    // frame (X, Y, Z) the normal along `direction` is A cos(u - phi) + c on a cylinder or a cone
+    // (c from the cone's slope; nothing in v) and cos(v) A cos(u - phi) + dZ sin(v) on a sphere,
+    // A = |(dX, dY)|, phi its angle: its extremes over the range are at u = uMin, uMax or
+    // phi + k pi, and for each such u at v = vMin, vMax or atan(dZ / (A cos(u - phi))). Those
+    // points alone are tested: a sign that holds there holds over the whole range
     double uMin, uMax, vMin, vMax;
     BRepTools::UVBounds(face, uMin, uMax, vMin, vMax);
-    const int steps = 8;
+    gp_Ax3 frame;
+    switch (type) {
+        case GeomAbs_Cylinder:
+            frame = surface.Cylinder().Position();
+            break;
+        case GeomAbs_Cone:
+            frame = surface.Cone().Position();
+            break;
+        default:
+            frame = surface.Sphere().Position();
+            break;
+    }
+    const gp_Vec d(direction);
+    const double dX = d.Dot(gp_Vec(frame.XDirection()));
+    const double dY = d.Dot(gp_Vec(frame.YDirection()));
+    const double dZ = d.Dot(gp_Vec(frame.Direction()));
+    const double across = std::hypot(dX, dY);
+    std::vector<double> us {uMin, uMax};
+    if (across > Precision::Angular()) {
+        const double phi = std::atan2(dY, dX);
+        const double turn = std::numbers::pi;
+        for (double u = phi + turn * std::floor((uMin - phi) / turn); u <= uMax; u += turn) {
+            if (u > uMin && u < uMax) {
+                us.push_back(u);
+            }
+        }
+    }
     int side = 0;
-    for (int i = 0; i <= steps; ++i) {
-        for (int j = 0; j <= steps; ++j) {
+    for (double u : us) {
+        std::vector<double> vs {vMin, vMax};
+        if (type == GeomAbs_Sphere) {
+            const double a = across * std::cos(u - std::atan2(dY, dX));
+            if (std::abs(a) > Precision::Angular()) {
+                const double v = std::atan(dZ / a);
+                if (v > vMin && v < vMax) {
+                    vs.push_back(v);
+                }
+            }
+        }
+        for (double v : vs) {
             bool inside = false;
-            const gp_Vec normal = outward(
-                surface.Value(
-                    uMin + (uMax - uMin) * i / steps,
-                    vMin + (vMax - vMin) * j / steps
-                ),
-                inside
-            );
+            const gp_Vec normal = outward(surface.Value(u, v), inside);
             if (normal.Magnitude() <= Precision::Confusion()) {
                 return {};
             }
-            const double along = normal.Normalized().Dot(gp_Vec(direction));
+            const double along = normal.Normalized().Dot(d);
             const int sign = along > Precision::Angular() ? 1
                 : along < -Precision::Angular()           ? -1
                                                           : 0;
@@ -11944,13 +11979,21 @@ TopoDS_Face fullTurnOnFaceSide(
     if (!distance.IsDone() || distance.Value() <= Precision::Confusion()) {
         return {};
     }
+    // Each region of the profile on its own side (review pr1039-r1 T1: two regions, one outside
+    // the region and one inside, met the surface on both halves): every vertex. As the profile
+    // touches the surface nowhere, each connected part lies wholly on its vertices' side
     TopExp_Explorer vertex(profile, TopAbs_VERTEX);
     if (!vertex.More()) {
         return {};
     }
-    bool inside = false;
-    outward(BRep_Tool::Pnt(TopoDS::Vertex(vertex.Current())), inside);
-    return inside == (side > 0) ? result : TopoDS_Face();
+    for (; vertex.More(); vertex.Next()) {
+        bool inside = false;
+        outward(BRep_Tool::Pnt(TopoDS::Vertex(vertex.Current())), inside);
+        if (inside != (side > 0)) {
+            return {};
+        }
+    }
+    return result;
 }
 
 // How far `shape` reaches both ways along `direction` (its lowest and highest coordinates along

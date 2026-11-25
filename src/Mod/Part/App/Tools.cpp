@@ -23,6 +23,8 @@
  ***************************************************************************/
 
 #include <cassert>
+#include <cmath>
+#include <limits>
 #include <BRep_Tool.hxx>
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
@@ -847,8 +849,23 @@ bool Part::Tools::isConcave(const TopoDS_Face& face, const gp_Pnt& pointOfVue, c
         if (!unlimited.IsDone() || unlimited.NbPoints() < 1) {
             return true;
         }
-        double w = 0.0;
-        unlimited.Parameters(1, hitU, hitV, w);
+        // The first crossing ahead of the point along the line, else the nearest behind it (the
+        // crossings come in no order along the line; review pr1039-r1f)
+        double best = std::numeric_limits<double>::max();
+        bool ahead = false;
+        for (int i = 1; i <= unlimited.NbPoints(); ++i) {
+            double u = 0.0;
+            double v = 0.0;
+            double w = 0.0;
+            unlimited.Parameters(i, u, v, w);
+            const bool isAhead = w >= 0.0;
+            if ((isAhead && !ahead) || (isAhead == ahead && std::abs(w) < best)) {
+                ahead = isAhead;
+                best = std::abs(w);
+                hitU = u;
+                hitV = v;
+            }
+        }
     }
 
     // compute normals at the intersection
