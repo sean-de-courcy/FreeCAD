@@ -536,7 +536,8 @@ names it.
 | `fix/i898-trimbywall-runon` | fix | ops#898, ops#1022 | - | integration | `3971b66962` (fork PR 534), 2026-11-25 | never (fork fix): a round past a narrow strip is cut by the wall's own continuation below the foot; with tangent propagation off a straight edge's run-out ends at a tangent end face instead of running on along the walls (ops#898, ops#1022) |
 | `fix/i1020-mitre-angle` | fix | ops#1020 | - | `integration` `3971b66962` | `900f25cdd4` (fork PR 535), 2026-11-25 | never (fork fix): the mitre run-on corner at wall angles of 90 to 135 degrees, asked before OCCT, as Onshape's (RB8) |
 | `fix/i1025-mitre-sphere` | fix | ops#1025, ops#1024 | - | `fix/i1020-mitre-angle` `7b882791ed` (stacked on fork PR 535) | `091421dbef` (fork PR 537), 2026-11-25 | never (fork fix): the mitre run-on corner from r = q, a sphere at r = q, as Onshape's (RB27) |
-| `fix/i1028-concave-outline-runout` | fix | ops#1028 | - | open | (fork PR 539) | drop when upstream refuses a run-out into a concave outline corner |
+| `fix/i1028-concave-outline-runout` | fix | ops#1028 | - | open | `d7af7bcf81` (fork PR 539), 2026-11-25 | drop when upstream refuses a run-out into a concave outline corner |
+| `infra/gen6-1125` | infra | ops#883 | - | `integration` `d7af7bcf81` | (fork PR 543) | never (fork corpus) |
 
 ## Fork-only commits in carried topics
 

@@ -1352,6 +1352,240 @@ set(PartDesign_CompatGen5Macos
     PartDesignTests/Compat/gen5-macos/VarSetDriven.oracle.json
 )
 
+# gen6 (ops#883): saved by a build of integration d7af7bcf81 (fork-1.0.9's source plus PR 539), for the release after fork-1.0.9.
+set(PartDesign_CompatGen6
+    PartDesignTests/Compat/gen6/MANIFEST
+    PartDesignTests/Compat/gen6/AsmEdited.FCStd
+    PartDesignTests/Compat/gen6/AsmEditedPart.oracle.json
+    PartDesignTests/Compat/gen6/AsmEditedParts.FCStd
+    PartDesignTests/Compat/gen6/AsmFastened.FCStd
+    PartDesignTests/Compat/gen6/AsmFastened.oracle.json
+    PartDesignTests/Compat/gen6/AsmFastenedParts.FCStd
+    PartDesignTests/Compat/gen6/AsmMotion.FCStd
+    PartDesignTests/Compat/gen6/AsmMotion.oracle.json
+    PartDesignTests/Compat/gen6/AsmOnshapeFrames.FCStd
+    PartDesignTests/Compat/gen6/AsmOnshapeFrames.oracle.json
+    PartDesignTests/Compat/gen6/AsmOnshapeFramesParts.FCStd
+    PartDesignTests/Compat/gen6/AsmSubAssembly.FCStd
+    PartDesignTests/Compat/gen6/AsmSubAssembly.oracle.json
+    PartDesignTests/Compat/gen6/Binders.FCStd
+    PartDesignTests/Compat/gen6/Binders.oracle.json
+    PartDesignTests/Compat/gen6/BodyFromFeature.FCStd
+    PartDesignTests/Compat/gen6/BodyFromFeature.oracle.json
+    PartDesignTests/Compat/gen6/ChamferVaryingAngle.FCStd
+    PartDesignTests/Compat/gen6/ChamferVaryingAngle.oracle.json
+    PartDesignTests/Compat/gen6/DatumPlane.FCStd
+    PartDesignTests/Compat/gen6/DatumPlane.oracle.json
+    PartDesignTests/Compat/gen6/DraftThickness.FCStd
+    PartDesignTests/Compat/gen6/DraftThickness.oracle.json
+    PartDesignTests/Compat/gen6/ExternalGeometry.FCStd
+    PartDesignTests/Compat/gen6/ExternalGeometry.oracle.json
+    PartDesignTests/Compat/gen6/FacePatternCentered.FCStd
+    PartDesignTests/Compat/gen6/FacePatternCentered.oracle.json
+    PartDesignTests/Compat/gen6/FilletChamfer.FCStd
+    PartDesignTests/Compat/gen6/FilletChamfer.oracle.json
+    PartDesignTests/Compat/gen6/GuessRecord.FCStd
+    PartDesignTests/Compat/gen6/GuessRecord.oracle.json
+    PartDesignTests/Compat/gen6/HoleFeature.FCStd
+    PartDesignTests/Compat/gen6/HoleFeature.oracle.json
+    PartDesignTests/Compat/gen6/HolePatternCopied.FCStd
+    PartDesignTests/Compat/gen6/HolePatternCopied.oracle.json
+    PartDesignTests/Compat/gen6/IndexToldGroups.FCStd
+    PartDesignTests/Compat/gen6/IndexToldGroups.oracle.json
+    PartDesignTests/Compat/gen6/LoftNormalToProfile.FCStd
+    PartDesignTests/Compat/gen6/LoftNormalToProfile.oracle.json
+    PartDesignTests/Compat/gen6/LoftPipe.FCStd
+    PartDesignTests/Compat/gen6/LoftPipe.oracle.json
+    PartDesignTests/Compat/gen6/MergeAccepted.FCStd
+    PartDesignTests/Compat/gen6/MergeAccepted.oracle.json
+    PartDesignTests/Compat/gen6/MirroredMultiTransform.FCStd
+    PartDesignTests/Compat/gen6/MirroredMultiTransform.oracle.json
+    PartDesignTests/Compat/gen6/MitreAtLobeCorners.FCStd
+    PartDesignTests/Compat/gen6/MitreAtLobeCorners.oracle.json
+    PartDesignTests/Compat/gen6/MitreRunOnHexagon.FCStd
+    PartDesignTests/Compat/gen6/MitreRunOnHexagon.oracle.json
+    PartDesignTests/Compat/gen6/MitreRunOnOctagonSphere.FCStd
+    PartDesignTests/Compat/gen6/MitreRunOnOctagonSphere.oracle.json
+    PartDesignTests/Compat/gen6/PadPocket.FCStd
+    PartDesignTests/Compat/gen6/PadPocket.oracle.json
+    PartDesignTests/Compat/gen6/PartBooleans.FCStd
+    PartDesignTests/Compat/gen6/PartBooleans.oracle.json
+    PartDesignTests/Compat/gen6/PartFilletChamfer.FCStd
+    PartDesignTests/Compat/gen6/PartFilletChamfer.oracle.json
+    PartDesignTests/Compat/gen6/PartLoftSweep.FCStd
+    PartDesignTests/Compat/gen6/PartLoftSweep.oracle.json
+    PartDesignTests/Compat/gen6/PartPrimitives.FCStd
+    PartDesignTests/Compat/gen6/PartPrimitives.oracle.json
+    PartDesignTests/Compat/gen6/PartProfiles.FCStd
+    PartDesignTests/Compat/gen6/PartProfiles.oracle.json
+    PartDesignTests/Compat/gen6/Patterns.FCStd
+    PartDesignTests/Compat/gen6/Patterns.oracle.json
+    PartDesignTests/Compat/gen6/PipeCorners.FCStd
+    PartDesignTests/Compat/gen6/PipeCorners.oracle.json
+    PartDesignTests/Compat/gen6/ReorderBar.FCStd
+    PartDesignTests/Compat/gen6/ReorderBar.oracle.json
+    PartDesignTests/Compat/gen6/RevolutionGroove.FCStd
+    PartDesignTests/Compat/gen6/RevolutionGroove.oracle.json
+    PartDesignTests/Compat/gen6/RevolveFreeFormProfile.FCStd
+    PartDesignTests/Compat/gen6/RevolveFreeFormProfile.oracle.json
+    PartDesignTests/Compat/gen6/RoundOnSpline.FCStd
+    PartDesignTests/Compat/gen6/RoundOnSpline.oracle.json
+    PartDesignTests/Compat/gen6/RoundUnderLeaningWall.FCStd
+    PartDesignTests/Compat/gen6/RoundUnderLeaningWall.oracle.json
+    PartDesignTests/Compat/gen6/ScriptCompound.FCStd
+    PartDesignTests/Compat/gen6/ScriptCompound.oracle.json
+    PartDesignTests/Compat/gen6/SiblingCuts.FCStd
+    PartDesignTests/Compat/gen6/SiblingCuts.oracle.json
+    PartDesignTests/Compat/gen6/SidedVariants.FCStd
+    PartDesignTests/Compat/gen6/SidedVariants.oracle.json
+    PartDesignTests/Compat/gen6/SketchCarbonCopy.FCStd
+    PartDesignTests/Compat/gen6/SketchCarbonCopy.oracle.json
+    PartDesignTests/Compat/gen6/SketchConstraints.FCStd
+    PartDesignTests/Compat/gen6/SketchConstraints.oracle.json
+    PartDesignTests/Compat/gen6/SketchCurves.FCStd
+    PartDesignTests/Compat/gen6/SketchCurves.oracle.json
+    PartDesignTests/Compat/gen6/SketchPatterns.FCStd
+    PartDesignTests/Compat/gen6/SketchPatterns.oracle.json
+    PartDesignTests/Compat/gen6/SketchUnderConstrained.FCStd
+    PartDesignTests/Compat/gen6/SketchUnderConstrained.oracle.json
+    PartDesignTests/Compat/gen6/SplitHalves.FCStd
+    PartDesignTests/Compat/gen6/SplitHalves.oracle.json
+    PartDesignTests/Compat/gen6/StudioNewPart.FCStd
+    PartDesignTests/Compat/gen6/StudioNewPart.oracle.json
+    PartDesignTests/Compat/gen6/SubShapeBinder.FCStd
+    PartDesignTests/Compat/gen6/SubShapeBinder.oracle.json
+    PartDesignTests/Compat/gen6/SurfaceTubeSplit.FCStd
+    PartDesignTests/Compat/gen6/SurfaceTubeSplit.oracle.json
+    PartDesignTests/Compat/gen6/TwoDocuments.FCStd
+    PartDesignTests/Compat/gen6/TwoDocuments.oracle.json
+    PartDesignTests/Compat/gen6/TwoDocumentsPart.FCStd
+    PartDesignTests/Compat/gen6/UpToFace.FCStd
+    PartDesignTests/Compat/gen6/UpToFace.oracle.json
+    PartDesignTests/Compat/gen6/UpToTwins.FCStd
+    PartDesignTests/Compat/gen6/UpToTwins.oracle.json
+    PartDesignTests/Compat/gen6/VarSetCopyDriven.FCStd
+    PartDesignTests/Compat/gen6/VarSetCopyDriven.oracle.json
+    PartDesignTests/Compat/gen6/VarSetDriven.FCStd
+    PartDesignTests/Compat/gen6/VarSetDriven.oracle.json
+)
+
+# The macOS half of gen6: saved by the macOS CI build of integration d7af7bcf81 (CI_macos.yml run 45658110368).
+set(PartDesign_CompatGen6Macos
+    PartDesignTests/Compat/gen6-macos/MANIFEST
+    PartDesignTests/Compat/gen6-macos/AsmEdited.FCStd
+    PartDesignTests/Compat/gen6-macos/AsmEditedPart.oracle.json
+    PartDesignTests/Compat/gen6-macos/AsmEditedParts.FCStd
+    PartDesignTests/Compat/gen6-macos/AsmFastened.FCStd
+    PartDesignTests/Compat/gen6-macos/AsmFastened.oracle.json
+    PartDesignTests/Compat/gen6-macos/AsmFastenedParts.FCStd
+    PartDesignTests/Compat/gen6-macos/AsmMotion.FCStd
+    PartDesignTests/Compat/gen6-macos/AsmMotion.oracle.json
+    PartDesignTests/Compat/gen6-macos/AsmOnshapeFrames.FCStd
+    PartDesignTests/Compat/gen6-macos/AsmOnshapeFrames.oracle.json
+    PartDesignTests/Compat/gen6-macos/AsmOnshapeFramesParts.FCStd
+    PartDesignTests/Compat/gen6-macos/AsmSubAssembly.FCStd
+    PartDesignTests/Compat/gen6-macos/AsmSubAssembly.oracle.json
+    PartDesignTests/Compat/gen6-macos/Binders.FCStd
+    PartDesignTests/Compat/gen6-macos/Binders.oracle.json
+    PartDesignTests/Compat/gen6-macos/BodyFromFeature.FCStd
+    PartDesignTests/Compat/gen6-macos/BodyFromFeature.oracle.json
+    PartDesignTests/Compat/gen6-macos/ChamferVaryingAngle.FCStd
+    PartDesignTests/Compat/gen6-macos/ChamferVaryingAngle.oracle.json
+    PartDesignTests/Compat/gen6-macos/DatumPlane.FCStd
+    PartDesignTests/Compat/gen6-macos/DatumPlane.oracle.json
+    PartDesignTests/Compat/gen6-macos/DraftThickness.FCStd
+    PartDesignTests/Compat/gen6-macos/DraftThickness.oracle.json
+    PartDesignTests/Compat/gen6-macos/ExternalGeometry.FCStd
+    PartDesignTests/Compat/gen6-macos/ExternalGeometry.oracle.json
+    PartDesignTests/Compat/gen6-macos/FacePatternCentered.FCStd
+    PartDesignTests/Compat/gen6-macos/FacePatternCentered.oracle.json
+    PartDesignTests/Compat/gen6-macos/FilletChamfer.FCStd
+    PartDesignTests/Compat/gen6-macos/FilletChamfer.oracle.json
+    PartDesignTests/Compat/gen6-macos/GuessRecord.FCStd
+    PartDesignTests/Compat/gen6-macos/GuessRecord.oracle.json
+    PartDesignTests/Compat/gen6-macos/HoleFeature.FCStd
+    PartDesignTests/Compat/gen6-macos/HoleFeature.oracle.json
+    PartDesignTests/Compat/gen6-macos/HolePatternCopied.FCStd
+    PartDesignTests/Compat/gen6-macos/HolePatternCopied.oracle.json
+    PartDesignTests/Compat/gen6-macos/IndexToldGroups.FCStd
+    PartDesignTests/Compat/gen6-macos/IndexToldGroups.oracle.json
+    PartDesignTests/Compat/gen6-macos/LoftNormalToProfile.FCStd
+    PartDesignTests/Compat/gen6-macos/LoftNormalToProfile.oracle.json
+    PartDesignTests/Compat/gen6-macos/LoftPipe.FCStd
+    PartDesignTests/Compat/gen6-macos/LoftPipe.oracle.json
+    PartDesignTests/Compat/gen6-macos/MergeAccepted.FCStd
+    PartDesignTests/Compat/gen6-macos/MergeAccepted.oracle.json
+    PartDesignTests/Compat/gen6-macos/MirroredMultiTransform.FCStd
+    PartDesignTests/Compat/gen6-macos/MirroredMultiTransform.oracle.json
+    PartDesignTests/Compat/gen6-macos/MitreAtLobeCorners.FCStd
+    PartDesignTests/Compat/gen6-macos/MitreAtLobeCorners.oracle.json
+    PartDesignTests/Compat/gen6-macos/MitreRunOnHexagon.FCStd
+    PartDesignTests/Compat/gen6-macos/MitreRunOnHexagon.oracle.json
+    PartDesignTests/Compat/gen6-macos/MitreRunOnOctagonSphere.FCStd
+    PartDesignTests/Compat/gen6-macos/MitreRunOnOctagonSphere.oracle.json
+    PartDesignTests/Compat/gen6-macos/PadPocket.FCStd
+    PartDesignTests/Compat/gen6-macos/PadPocket.oracle.json
+    PartDesignTests/Compat/gen6-macos/PartBooleans.FCStd
+    PartDesignTests/Compat/gen6-macos/PartBooleans.oracle.json
+    PartDesignTests/Compat/gen6-macos/PartFilletChamfer.FCStd
+    PartDesignTests/Compat/gen6-macos/PartFilletChamfer.oracle.json
+    PartDesignTests/Compat/gen6-macos/PartLoftSweep.FCStd
+    PartDesignTests/Compat/gen6-macos/PartLoftSweep.oracle.json
+    PartDesignTests/Compat/gen6-macos/PartPrimitives.FCStd
+    PartDesignTests/Compat/gen6-macos/PartPrimitives.oracle.json
+    PartDesignTests/Compat/gen6-macos/PartProfiles.FCStd
+    PartDesignTests/Compat/gen6-macos/PartProfiles.oracle.json
+    PartDesignTests/Compat/gen6-macos/Patterns.FCStd
+    PartDesignTests/Compat/gen6-macos/Patterns.oracle.json
+    PartDesignTests/Compat/gen6-macos/PipeCorners.FCStd
+    PartDesignTests/Compat/gen6-macos/PipeCorners.oracle.json
+    PartDesignTests/Compat/gen6-macos/ReorderBar.FCStd
+    PartDesignTests/Compat/gen6-macos/ReorderBar.oracle.json
+    PartDesignTests/Compat/gen6-macos/RevolutionGroove.FCStd
+    PartDesignTests/Compat/gen6-macos/RevolutionGroove.oracle.json
+    PartDesignTests/Compat/gen6-macos/RevolveFreeFormProfile.FCStd
+    PartDesignTests/Compat/gen6-macos/RevolveFreeFormProfile.oracle.json
+    PartDesignTests/Compat/gen6-macos/RoundOnSpline.FCStd
+    PartDesignTests/Compat/gen6-macos/RoundOnSpline.oracle.json
+    PartDesignTests/Compat/gen6-macos/RoundUnderLeaningWall.FCStd
+    PartDesignTests/Compat/gen6-macos/RoundUnderLeaningWall.oracle.json
+    PartDesignTests/Compat/gen6-macos/ScriptCompound.FCStd
+    PartDesignTests/Compat/gen6-macos/ScriptCompound.oracle.json
+    PartDesignTests/Compat/gen6-macos/SiblingCuts.FCStd
+    PartDesignTests/Compat/gen6-macos/SiblingCuts.oracle.json
+    PartDesignTests/Compat/gen6-macos/SidedVariants.FCStd
+    PartDesignTests/Compat/gen6-macos/SidedVariants.oracle.json
+    PartDesignTests/Compat/gen6-macos/SketchCarbonCopy.FCStd
+    PartDesignTests/Compat/gen6-macos/SketchCarbonCopy.oracle.json
+    PartDesignTests/Compat/gen6-macos/SketchConstraints.FCStd
+    PartDesignTests/Compat/gen6-macos/SketchConstraints.oracle.json
+    PartDesignTests/Compat/gen6-macos/SketchCurves.FCStd
+    PartDesignTests/Compat/gen6-macos/SketchCurves.oracle.json
+    PartDesignTests/Compat/gen6-macos/SketchPatterns.FCStd
+    PartDesignTests/Compat/gen6-macos/SketchPatterns.oracle.json
+    PartDesignTests/Compat/gen6-macos/SketchUnderConstrained.FCStd
+    PartDesignTests/Compat/gen6-macos/SketchUnderConstrained.oracle.json
+    PartDesignTests/Compat/gen6-macos/SplitHalves.FCStd
+    PartDesignTests/Compat/gen6-macos/SplitHalves.oracle.json
+    PartDesignTests/Compat/gen6-macos/StudioNewPart.FCStd
+    PartDesignTests/Compat/gen6-macos/StudioNewPart.oracle.json
+    PartDesignTests/Compat/gen6-macos/SubShapeBinder.FCStd
+    PartDesignTests/Compat/gen6-macos/SubShapeBinder.oracle.json
+    PartDesignTests/Compat/gen6-macos/SurfaceTubeSplit.FCStd
+    PartDesignTests/Compat/gen6-macos/SurfaceTubeSplit.oracle.json
+    PartDesignTests/Compat/gen6-macos/TwoDocuments.FCStd
+    PartDesignTests/Compat/gen6-macos/TwoDocuments.oracle.json
+    PartDesignTests/Compat/gen6-macos/TwoDocumentsPart.FCStd
+    PartDesignTests/Compat/gen6-macos/UpToFace.FCStd
+    PartDesignTests/Compat/gen6-macos/UpToFace.oracle.json
+    PartDesignTests/Compat/gen6-macos/UpToTwins.FCStd
+    PartDesignTests/Compat/gen6-macos/UpToTwins.oracle.json
+    PartDesignTests/Compat/gen6-macos/VarSetCopyDriven.FCStd
+    PartDesignTests/Compat/gen6-macos/VarSetCopyDriven.oracle.json
+    PartDesignTests/Compat/gen6-macos/VarSetDriven.FCStd
+    PartDesignTests/Compat/gen6-macos/VarSetDriven.oracle.json
+)
+
 set(PartDesign_GearScripts
     fcgear/__init__.py
     fcgear/fcgear.py
@@ -1397,6 +1631,8 @@ add_custom_target(PartDesignScripts ALL SOURCES
     ${PartDesign_CompatGen4Macos}
     ${PartDesign_CompatGen5}
     ${PartDesign_CompatGen5Macos}
+    ${PartDesign_CompatGen6}
+    ${PartDesign_CompatGen6Macos}
     ${PartDesign_GearScripts}
     ${PartDesign_SprocketScripts}
 )
@@ -1423,6 +1659,8 @@ fc_target_copy_resource(PartDesignScripts
     ${PartDesign_CompatGen4Macos}
     ${PartDesign_CompatGen5}
     ${PartDesign_CompatGen5Macos}
+    ${PartDesign_CompatGen6}
+    ${PartDesign_CompatGen6Macos}
     ${PartDesign_GearScripts}
     ${PartDesign_SprocketScripts}
 )
@@ -1558,6 +1796,20 @@ INSTALL(
         ${PartDesign_CompatGen5Macos}
     DESTINATION
         Mod/PartDesign/PartDesignTests/Compat/gen5-macos
+       )
+
+INSTALL(
+    FILES
+        ${PartDesign_CompatGen6}
+    DESTINATION
+        Mod/PartDesign/PartDesignTests/Compat/gen6
+       )
+
+INSTALL(
+    FILES
+        ${PartDesign_CompatGen6Macos}
+    DESTINATION
+        Mod/PartDesign/PartDesignTests/Compat/gen6-macos
        )
 
 INSTALL(
