@@ -20330,6 +20330,43 @@ bool constructOnce(
 
 }  // namespace
 
+namespace
+{
+
+/** Whether a nearest pair of points between a chain edge and another edge lies across the chain
+ * edge (the gap more than 60 degrees off its tangent there) rather than on along it: an edge
+ * beyond the chain edge's end, past the next chain edge (RB25 with a blend: the lip corner's
+ * line on the outer wall, 0.3151 from the long line's end), is no strip the round overflows. */
+bool acrossEdge(const TopoDS_Edge& edge, const BRepExtrema_DistShapeShape& distance)
+{
+    BRepAdaptor_Curve curve(edge);
+    for (int k = 1; k <= distance.NbSolution(); ++k) {
+        double parameter = 0.0;
+        if (distance.SupportTypeShape1(k) == BRepExtrema_IsOnEdge) {
+            distance.ParOnEdgeS1(k, parameter);
+        }
+        else if (distance.SupportTypeShape1(k) == BRepExtrema_IsVertex) {
+            parameter = BRep_Tool::Parameter(TopoDS::Vertex(distance.SupportOnShape1(k)), edge);
+        }
+        else {
+            continue;
+        }
+        gp_Pnt point;
+        gp_Vec tangent;
+        curve.D1(parameter, point, tangent);
+        const gp_Vec gap(distance.PointOnShape1(k), distance.PointOnShape2(k));
+        if (tangent.Magnitude() < Precision::Confusion() || gap.Magnitude() < Precision::Confusion()) {
+            return true;
+        }
+        if (std::abs(gap.Normalized().Dot(tangent.Normalized())) < 0.5) {
+            return true;
+        }
+    }
+    return false;
+}
+
+}  // namespace
+
 std::string overflowPastTightArc(
     const TopoDS_Shape& base,
     const std::vector<TopoDS_Shape>& edges,
@@ -20441,7 +20478,8 @@ std::string overflowPastTightArc(
                     continue;
                 }
                 BRepExtrema_DistShapeShape distance(edge, other);
-                if (distance.IsDone() && distance.Value() < setback - linearTolerance) {
+                if (distance.IsDone() && distance.Value() < setback - linearTolerance
+                    && acrossEdge(edge, distance)) {
                     width = std::min(width, distance.Value());
                 }
             }

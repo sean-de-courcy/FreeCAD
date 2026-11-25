@@ -10057,3 +10057,14 @@ class LipCornerOverflowTest(unittest.TestCase):
             result = body.makeFillet(radius, chain)
             self.assertTrue(result.isValid())
             self.assertAlmostEqual(result.Area - body.Area, area, delta=1e-4)
+
+    def testAnEdgeOnPastTheChainIsNoOverflow(self):
+        # RB 0.8 / LR 0.5 at r 0.6 (r > LR, no overflow: the floor is 0.972 wide): the lip corner's line
+        # on the outer wall lies 0.3151 on along the chain from its long line's end, not across it
+        body, chain = lip_corner(0.8, 0.5)
+        try:
+            result = body.makeFillet(0.6, chain)
+        except Exception as error:
+            self.assertNotIn("convex arc", str(error))
+        else:
+            self.assertTrue(result.isValid())
