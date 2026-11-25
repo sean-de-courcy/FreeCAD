@@ -642,6 +642,40 @@ class TestFilletPropagation(unittest.TestCase):
             self.doc.removeObject(fillet.Name)
             self.doc.recompute()
 
+    def testOffRunsOnAcrossCoplanarSplitFaces(self):
+        """Two pads side by side with Refine off (x 0..15 and 15..30, y 0..10, z 0..10): the top and front
+        faces are split at x = 15. The first pad's front top edge's chain goes on along the second pad's
+        coplanar faces, so the run-out runs along the whole 30 (GB13, as on the refined body): the
+        fillet r 2 removes 30 (4 - pi), the chamfer 2 removes 30 * 2."""
+        first = models.pad(self.body, models.sketch(self.doc, "A", models.rectangle(0, 0, 15, 10), self.body), 10)
+        first.Refine = False
+        second = models.pad(self.body, models.sketch(self.doc, "B", models.rectangle(15, 0, 30, 10), self.body), 10)
+        second.Refine = False
+        self.doc.recompute()
+        before = second.Shape.Volume
+        self.assertAlmostEqual(before, 3000, delta=1e-6)
+
+        def test(edge):
+            box = edge.BoundBox
+            return (
+                isinstance(edge.Curve, Part.Line)
+                and box.YMax < 1e-6
+                and box.ZMin > 10 - 1e-6
+                and box.XMin < 1e-6
+                and abs(box.XMax - 15) < 1e-6
+            )
+
+        line = self.edgeName(second.Shape, test)
+        fillet = self.fillet(second, [line], TangentPropagation=False)
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+        self.assertAlmostEqual(fillet.Shape.Volume - before, -30 * (4 - math.pi), delta=1e-4)
+        self.body.removeObject(fillet)
+        self.doc.removeObject(fillet.Name)
+        self.doc.recompute()
+        chamfer = self.chamfer(second, [line], TangentPropagation=False)
+        self.assertTrue(chamfer.isValid(), chamfer.getStatusString())
+        self.assertAlmostEqual(chamfer.Shape.Volume - before, -60, delta=1e-4)
+
 
 if __name__ == "__main__":
     unittest.main()

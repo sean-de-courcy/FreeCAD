@@ -1719,6 +1719,27 @@ TopoDS_Shape runOutTool(const TopoDS_Shape& base, const TopoDS_Edge& edge, doubl
     TopTools_IndexedDataMapOfShapeListOfShape vertexEdges;
     TopExp::MapShapesAndAncestors(base, TopAbs_VERTEX, TopAbs_EDGE, vertexEdges);
     const TopoDS_Vertex ends[2] = {TopExp::FirstVertex(edge), TopExp::LastVertex(edge)};
+    // One of the edge's faces, or a face on its plane with the same outside: the face split
+    // coplanar at an end (pads side by side with Refine off, a fuse without removeSplitter) goes
+    // on as one face, as on the refined body
+    auto onEdgesFace = [&](const TopoDS_Shape& shape) {
+        if (faces.Contains(shape)) {
+            return true;
+        }
+        const TopoDS_Face& face = TopoDS::Face(shape);
+        BRepAdaptor_Surface surface(face);
+        if (surface.GetType() != GeomAbs_Plane) {
+            return false;
+        }
+        gp_Dir outward = surface.Plane().Axis().Direction();
+        if (face.Orientation() == TopAbs_REVERSED) {
+            outward.Reverse();
+        }
+        if (surface.Plane().Distance(start) > Precision::Confusion()) {
+            return false;
+        }
+        return outward.Dot(normal[0]) > 1 - 1e-9 || outward.Dot(normal[1]) > 1 - 1e-9;
+    };
     auto chainGoesOn = [&](int e) {
         if (!vertexEdges.Contains(ends[e])) {
             return false;
@@ -1737,7 +1758,7 @@ TopoDS_Shape runOutTool(const TopoDS_Shape& base, const TopoDS_Edge& edge, doubl
                 otherFaces.Add(face);
             }
             if (otherFaces.Extent() != 2
-                || !(otherFaces.Contains(faces(1)) || otherFaces.Contains(faces(2)))) {
+                || !(onEdgesFace(otherFaces(1)) || onEdgesFace(otherFaces(2)))) {
                 continue;
             }
             BRepAdaptor_Curve curve(other);
@@ -1799,7 +1820,7 @@ TopoDS_Shape runOutTool(const TopoDS_Shape& base, const TopoDS_Edge& edge, doubl
         TopTools_IndexedMapOfShape seen;
         for (const auto& shape : vertexFaces.FindFromKey(ends[e])) {
             const TopoDS_Face& face = TopoDS::Face(shape);
-            if (faces.Contains(face) || seen.Contains(face)) {
+            if (onEdgesFace(face) || seen.Contains(face)) {
                 continue;
             }
             seen.Add(face);
