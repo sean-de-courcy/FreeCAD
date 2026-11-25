@@ -20330,6 +20330,137 @@ bool constructOnce(
 
 }  // namespace
 
+std::string overflowPastTightArc(
+    const TopoDS_Shape& base,
+    const std::vector<TopoDS_Shape>& edges,
+    const Request& request
+)
+{
+    if (request.kind != Kind::Fillet || request.size1 != request.size2) {
+        return {};
+    }
+    const double radius = request.size1;
+    // A convex arc of the chain smaller than the radius: a circle on a plane face whose material
+    // lies on the circle's centre side (the round's contact line would be the circle shrunk by the
+    // radius: Onshape's torus has major radius arc - r, a sphere at r = arc)
+    double tightest = std::numeric_limits<double>::infinity();
+    TopTools_IndexedMapOfShape tight;
+    TopTools_IndexedDataMapOfShapeListOfShape edgeFaces;
+    TopExp::MapShapesAndUniqueAncestors(base, TopAbs_EDGE, TopAbs_FACE, edgeFaces);
+    TopTools_IndexedMapOfShape chain;
+    for (const auto* list : {&edges, &request.contour}) {
+        for (const auto& edge : *list) {
+            if (!edge.IsNull() && edge.ShapeType() == TopAbs_EDGE) {
+                chain.Add(edge);
+            }
+        }
+    }
+    for (int i = 1; i <= chain.Extent(); ++i) {
+        const TopoDS_Edge& edge = TopoDS::Edge(chain(i));
+        if (BRep_Tool::Degenerated(edge) || !edgeFaces.Contains(edge)) {
+            continue;
+        }
+        BRepAdaptor_Curve curve(edge);
+        if (curve.GetType() != GeomAbs_Circle) {
+            continue;
+        }
+        const gp_Circ circle = curve.Circle();
+        if (circle.Radius() >= radius - Precision::Confusion()) {
+            continue;
+        }
+        const double mid = 0.5 * (curve.FirstParameter() + curve.LastParameter());
+        const gp_Pnt middle = curve.Value(mid);
+        for (const auto& shape : edgeFaces.FindFromKey(edge)) {
+            const TopoDS_Face& face = TopoDS::Face(shape);
+            BRepAdaptor_Surface surface(face);
+            if (surface.GetType() != GeomAbs_Plane
+                || !surface.Plane().Axis().IsParallel(circle.Axis(), Precision::Angular())) {
+                continue;
+            }
+            // a point just off the arc's middle towards its centre: inside the face?
+            const gp_Vec toCentre(middle, circle.Location());
+            if (toCentre.Magnitude() < Precision::Confusion()) {
+                continue;
+            }
+            const double probe = std::min(1e-3, 0.1 * circle.Radius());
+            const gp_Pnt inward = middle.Translated(toCentre.Normalized() * probe);
+            BRepClass_FaceClassifier inside(face, inward, Precision::Confusion());
+            if (inside.State() == TopAbs_IN) {
+                tightest = std::min(tightest, circle.Radius());
+                tight.Add(edge);
+            }
+        }
+    }
+    if (!std::isfinite(tightest)) {
+        return {};
+    }
+    // The overflow: on a face of a chain edge, an edge of that face that is not in the chain and
+    // shares no vertex with that chain edge, nearer to it than the round's setback (narrowStrip()
+    // skips every edge touching the chain; here the floor's far edge meets the chain's short lines
+    // at the outer walls, RB25 with no blend). Not from the small arcs themselves: their own strip
+    // narrows to the corner's tip (RB25: 0.665 from the lip corner's middle, where r 0.71 builds)
+    double width = std::numeric_limits<double>::infinity();
+    for (int i = 1; i <= chain.Extent(); ++i) {
+        const TopoDS_Edge& edge = TopoDS::Edge(chain(i));
+        if (tight.Contains(edge) || BRep_Tool::Degenerated(edge) || !edgeFaces.Contains(edge)) {
+            continue;
+        }
+        const TopTools_ListOfShape& faces = edgeFaces.FindFromKey(edge);
+        if (faces.Extent() != 2) {
+            continue;
+        }
+        double setback = radius;
+        try {
+            BRepAdaptor_Curve curve(edge);
+            const gp_Pnt middle = curve.Value(0.5 * (curve.FirstParameter() + curve.LastParameter()));
+            const double angle = outwardNormalAny(TopoDS::Face(faces.First()), middle)
+                                     .Angle(outwardNormalAny(TopoDS::Face(faces.Last()), middle));
+            if (angle < 1e-3) {
+                continue;
+            }
+            setback = radius * std::tan(0.5 * angle);
+        }
+        catch (const Refusal&) {
+            // No normal there: a right angle's setback
+        }
+        catch (const Standard_Failure&) {
+        }
+        TopTools_IndexedMapOfShape ownVertices;
+        TopExp::MapShapes(edge, TopAbs_VERTEX, ownVertices);
+        for (const auto& faceShape : faces) {
+            for (TopExp_Explorer it(faceShape, TopAbs_EDGE); it.More(); it.Next()) {
+                const TopoDS_Edge& other = TopoDS::Edge(it.Current());
+                if (chain.Contains(other) || BRep_Tool::Degenerated(other)) {
+                    continue;
+                }
+                bool shares = false;
+                for (TopExp_Explorer v(other, TopAbs_VERTEX); v.More() && !shares; v.Next()) {
+                    shares = ownVertices.Contains(v.Current());
+                }
+                if (shares) {
+                    continue;
+                }
+                BRepExtrema_DistShapeShape distance(edge, other);
+                if (distance.IsDone() && distance.Value() < setback - linearTolerance) {
+                    width = std::min(width, distance.Value());
+                }
+            }
+        }
+    }
+    if (!std::isfinite(width)) {
+        return {};
+    }
+    auto shortly = [](double value) {
+        std::ostringstream ss;
+        ss.precision(4);
+        ss << value;
+        return ss.str();
+    };
+    return "the round of radius " + shortly(radius) + " mm would overflow a strip of face "
+        + shortly(width) + " mm wide while its chain turns round a convex arc of radius "
+        + shortly(tightest) + " mm, smaller than the radius: Onshape's fillet fails there too";
+}
+
 bool construct(
     const TopoDS_Shape& base,
     const std::vector<TopoDS_Shape>& edges,

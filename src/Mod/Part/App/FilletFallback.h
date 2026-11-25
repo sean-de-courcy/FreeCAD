@@ -654,6 +654,19 @@ PartExport bool endsInRing(
     const Request& request
 );
 
+/** Why a fillet of equal radii must fail where its round overflows a strip of face narrower than
+ * its setback (the narrow-strip test of the construction's error) while its chain turns round a
+ * convex arc smaller than the radius: an arc on a plane face whose material lies on the arc's
+ * centre side (oracle RB25, ops#1027: overflow with r greater than the lip corner's radius fails;
+ * r equal to it builds a sphere). Empty where the fillet may go on. The edges of OCCT's contours
+ * (request.contour) count with the selected ones.
+ */
+PartExport std::string overflowPastTightArc(
+    const TopoDS_Shape& base,
+    const std::vector<TopoDS_Shape>& edges,
+    const Request& request
+);
+
 /** A point well inside the solid `region` that `result` holds, found without integrating a face:
  * the midpoints of the intervals that lines across region's box (9 x 9 along each axis) spend
  * inside it, kept when longer than 20 times the shapes' largest tolerance and classified IN

@@ -9974,3 +9974,86 @@ class SmoothEdgeTest(unittest.TestCase):
         tool.translate(V(10, 10, 15))
         body = Part.makeBox(60, 40, 20).cut(tool).removeSplitter()
         self.assertRefused(body, self.smoothEdges(body, V(13, 13, 0)))
+
+
+def lip_corner(blend, corner):
+    """RB6's corner (ops#898, ops#1027): a block 40 x 40 x 20; a sphere r 8 scaled 1.5 along z, centred
+    (3, 3, 0), cut out above z 1; a cylinder r 7 about the same axis cut through z 0..1: a lip 1 thick
+    whose floor at z 1 is 8 sqrt(1 - 1/144) - 7 = 0.972174 wide. Rounded `blend` where the scoop meets
+    the outer walls (0: none) and `corner` on the lip's two vertical edges. Returns the body and the
+    rim chain at z 1: the r 7 arc, the two lip-corner arcs and the two short lines on the outer walls."""
+    block = Part.makeBox(40, 40, 20)
+    sphere = Part.makeSphere(8)
+    scale = FreeCAD.Matrix()
+    scale.A33 = 1.5
+    sphere = sphere.transformGeometry(scale)
+    sphere.translate(V(3, 3, 0))
+    upper = sphere.common(Part.makeBox(60, 60, 60, V(-30, -30, 1)))
+    body = block.cut(upper).cut(Part.makeCylinder(7, 1, V(3, 3, 0))).removeSplitter()
+
+    def mid(edge):
+        return edge.valueAt((edge.FirstParameter + edge.LastParameter) / 2)
+
+    def kind(edge):
+        try:
+            return edge.Curve.TypeId
+        except Exception:
+            return ""
+
+    if blend > 0:
+        walls = [
+            e
+            for e in body.Edges
+            if kind(e) not in ("Part::GeomLine", "")
+            and mid(e).z > 1 + 1e-3
+            and (abs(mid(e).x) < 1e-6 or abs(mid(e).y) < 1e-6)
+        ]
+        body = body.makeFillet(blend, walls)
+    verticals = [
+        e
+        for e in body.Edges
+        if kind(e) == "Part::GeomLine"
+        and abs(e.Length - 1) < 1e-6
+        and abs(mid(e).z - 0.5) < 1e-6
+        and abs(math.hypot(mid(e).x - 3, mid(e).y - 3) - 7) < 1e-6
+    ]
+    body = body.makeFillet(corner, verticals)
+
+    def on_rim(edge):
+        p = mid(edge)
+        if abs(p.z - 1) > 1e-6 or any(abs(v.Point.z - 1) > 1e-6 for v in edge.Vertexes):
+            return False
+        if kind(edge) == "Part::GeomCircle":
+            return abs(edge.Curve.Radius - 7) < 1e-6 or abs(edge.Curve.Radius - corner) < 1e-6
+        return kind(edge) == "Part::GeomLine" and edge.Length < 3 and (abs(p.x) < 1e-6 or abs(p.y) < 1e-6)
+
+    return body, [e for e in body.Edges if on_rim(e)]
+
+
+class LipCornerOverflowTest(unittest.TestCase):
+    """ops#1027 (oracle RB25): where the rim round overflows the 0.972 mm floor while its chain turns round
+    a lip corner smaller than the radius, Onshape's fillet fails; OCCT built a valid wrong shape there
+    (RB 0 / LR 0.7 at r 0.999 and 1.0: 25 and 22 faces). With the corner at least the radius it builds."""
+
+    def assertRefused(self, body, chain, radius):
+        with self.assertRaises(Exception) as raised:
+            body.makeFillet(radius, chain)
+        self.assertIn("convex arc", str(raised.exception))
+
+    def testOverflowPastASmallerCornerFails(self):
+        body, chain = lip_corner(0, 0.7)
+        for radius in (0.999, 1.0):
+            self.assertRefused(body, chain, radius)
+
+    def testOverflowPastASmallerCornerWithTheBlendFails(self):
+        body, chain = lip_corner(0.8, 0.9)
+        self.assertRefused(body, chain, 1.0)
+
+    def testWithoutOverflowTheCornerAtLeastTheRadiusBuilds(self):
+        # RB6, RB 0.8 / LR 1: r 0.9 18 F dA -7.131906; r 0.97 18 F dA -7.665097 (r 0.98 and 1.0 overflow
+        # with r <= LR and build in Onshape; the fork refuses them: ops#898 debt)
+        body, chain = lip_corner(0.8, 1.0)
+        for radius, area in ((0.9, -7.131906), (0.97, -7.665097)):
+            result = body.makeFillet(radius, chain)
+            self.assertTrue(result.isValid())
+            self.assertAlmostEqual(result.Area - body.Area, area, delta=1e-4)
