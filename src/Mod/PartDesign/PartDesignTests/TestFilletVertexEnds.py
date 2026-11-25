@@ -175,27 +175,39 @@ class TestFilletVertexEnds(unittest.TestCase):
                 self.assertSameBody(shape, expected)
 
     def testFootThroughADimpleTouchingTheFloorRefuses(self):
-        """A ball's dimple (r 3, centred on the wall's face at z 7) touching the floor: its face is square to the wall
-        only along its equator, and the fill cut by the mouth's prism would be no surface of the body (review
-        pri1040 r1). Not known from Onshape: it stays refused."""
-        shape = wall_with_hole(7.0, hole=False).cut(Part.makeSphere(3, V(20, 5, 7)))
-        body = self.doc.addObject("PartDesign::Body", "Body")
-        base = self.doc.addObject("Part::Feature", "Base")
-        base.Shape = shape
-        body.BaseFeature = base
-        self.doc.recompute()
-        for kind in ("Fillet", "Chamfer"):
-            with self.subTest(kind=kind):
-                names = ["Edge%d" % (i + 1) for i, e in enumerate(shape.Edges) if foot(e)]
-                feature = body.newObject("PartDesign::" + kind, kind)
-                feature.Base = (body.Group[0], names)
-                feature.UseAllEdges = False
-                if kind == "Fillet":
-                    feature.Radius = 0.8
-                else:
-                    feature.Size = 0.8
-                self.doc.recompute()
-                self.assertFalse(feature.isValid())
-                body.removeObject(feature)
-                self.doc.removeObject(feature.Name)
-                self.doc.recompute()
+        """A dimple in the wall touching the floor at (20, 5, 4): a ball (r 3 about (20, 5, 7)), an ellipsoid of
+        revolution about the wall's normal (equator r 3 in the wall's face, half-depth 2) and the same as a
+        B-spline. Each face is square to the wall only along its equator, and the fill cut by the mouth's prism
+        would be no surface of the body (reviews pri1040 r1 and r2). Not known from Onshape: they stay refused."""
+        # the half ellipse x >= 20 (3 along x, 2 along y, in the plane z 7) turned about the line x 20, z 7 along y
+        arc = Part.ArcOfEllipse(Part.Ellipse(V(20, 5, 7), 3, 2), -1.5707963267948966, 1.5707963267948966)
+        half = Part.Face(Part.Wire([arc.toShape(), Part.LineSegment(V(20, 7, 7), V(20, 3, 7)).toShape()]))
+        ellipsoid = half.revolve(V(20, 5, 7), V(0, 1, 0), 360)
+        dimples = {
+            "ball": Part.makeSphere(3, V(20, 5, 7)),
+            "ellipsoid": ellipsoid,
+            "bspline": ellipsoid.toNurbs(),
+        }
+        for name, dimple in dimples.items():
+            shape = wall_with_hole(7.0, hole=False).cut(dimple)
+            self.assertTrue(shape.isValid())
+            body = self.doc.addObject("PartDesign::Body", "Body")
+            base = self.doc.addObject("Part::Feature", "Base")
+            base.Shape = shape
+            body.BaseFeature = base
+            self.doc.recompute()
+            names = ["Edge%d" % (i + 1) for i, e in enumerate(shape.Edges) if foot(e)]
+            for kind in ("Fillet", "Chamfer"):
+                with self.subTest(dimple=name, kind=kind):
+                    feature = body.newObject("PartDesign::" + kind, kind)
+                    feature.Base = (body.Group[0], names)
+                    feature.UseAllEdges = False
+                    if kind == "Fillet":
+                        feature.Radius = 0.8
+                    else:
+                        feature.Size = 0.8
+                    self.doc.recompute()
+                    self.assertFalse(feature.isValid())
+                    body.removeObject(feature)
+                    self.doc.removeObject(feature.Name)
+                    self.doc.recompute()

@@ -10227,28 +10227,29 @@ bool trimFusedToolOverFace(
             continue;
         }
         // The prism's side is the face beyond's surface run on only where that surface is ruled
-        // along the face's normal: a plane, or a cylinder whose axis is the normal (review
-        // pri1040 r1: a ball's dimple is square to the face along its equator, and the prism there
-        // is a cylinder no face of the body lies on). Other analytic surfaces never are; a
-        // B-spline (a blend's face) keeps the sampled test below
+        // along the face's normal: a plane, a cylinder whose axis is the normal, or an extrusion
+        // along it. A bound by type, not samples (reviews pri1040 r1 and r2: a ball's, an
+        // ellipsoid's or a B-spline dimple is square to the face along its equator, and the
+        // prism there is a surface no face of the body lies on); anything else refuses
         {
             BRepAdaptor_Surface beyondSurface(beyond, Standard_False);
+            bool ruled = false;
             switch (beyondSurface.GetType()) {
                 case GeomAbs_Plane:
+                    ruled = true;
                     break;
                 case GeomAbs_Cylinder:
-                    if (!parallel(beyondSurface.Cylinder().Axis().Direction(), outward)) {
-                        refuse("a concave dress-up runs past its face over an edge where the face "
-                               "beyond is a cylinder not along the face's normal");
-                    }
+                    ruled = parallel(beyondSurface.Cylinder().Axis().Direction(), outward);
                     break;
-                case GeomAbs_Cone:
-                case GeomAbs_Sphere:
-                case GeomAbs_Torus:
-                    refuse("a concave dress-up runs past its face over an edge where the face "
-                           "beyond is not ruled along the face's normal");
+                case GeomAbs_SurfaceOfExtrusion:
+                    ruled = parallel(beyondSurface.Direction(), outward);
+                    break;
                 default:
                     break;
+            }
+            if (!ruled) {
+                refuse("a concave dress-up runs past its face over an edge where the face beyond "
+                       "is not ruled along the face's normal (not square to it)");
             }
         }
         BRepAdaptor_Curve curve(edge);

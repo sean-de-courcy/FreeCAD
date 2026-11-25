@@ -7086,7 +7086,8 @@ class FillOverARingLedgeTest(unittest.TestCase):
         # The rim a cone, leaning out under the ledge: where Onshape trims is not measured. Refused
         body, foot = self.body(1.2, lean=0.8)
         for dress in (body.makeChamfer, body.makeFillet):
-            with self.assertRaisesRegex(Exception, "kept over its face: .*face beyond is not square"):
+            # ops#1040: the face beyond (a cone) is refused by type, as not ruled along the normal
+            with self.assertRaisesRegex(Exception, "kept over its face: .*face beyond is not (square|ruled)"):
                 dress(self.C, foot)
 
 
@@ -8681,7 +8682,9 @@ class NotchEndFilletTest(unittest.TestCase):
             and min(v.X for v in e.Vertexes) < 1e-7
         ]
         self.assertEqual(len(edges), 1)
-        with self.assertRaisesRegex(Exception, "4 edges meet"):
+        # ops#1040: whollyBeyond's box in the plane's frame folds the V's planes at the vertex, and the
+        # refusal is then the strip's overflow; either way refused
+        with self.assertRaisesRegex(Exception, "4 edges meet|would overflow a strip"):
             base.makeFillet(self.r, edges)
 
     def testVShapedChannelIsRefused(self):
