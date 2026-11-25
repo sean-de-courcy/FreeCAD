@@ -7101,13 +7101,17 @@ class FillPastANotchTest(unittest.TestCase):
     part in front of the notch. A closed window instead (a hole in the wall's face, ops#883 H): the
     hole runs on through the fill"""
 
-    def body(self, sill, window=False, radius=2.0):
+    def body(self, sill, window=False, radius=2.0, nurbs=False):
         V = FreeCAD.Vector
         plate = Part.makeBox(12, 20, 2, V(-2, 0, -2))
         wall = Part.makeBox(2, 20, 5, V(-2, 0, 0))
         hole = Part.makeCylinder(radius, 4, V(-3, 10, sill + radius), V(1, 0, 0))
         if not window:
             hole = hole.fuse(Part.makeBox(4, 4, 5, V(-3, 8, sill + 2))).removeSplitter()
+        if nurbs:
+            # Every face of the notch a B-spline (a transferred blend's faces come in so): the
+            # face beyond is still ruled along the wall's normal, exactly, by its poles
+            hole = hole.toNurbs()
         body = plate.fuse(wall).removeSplitter().cut(hole)
         foot = [
             e
@@ -7134,6 +7138,23 @@ class FillPastANotchTest(unittest.TestCase):
         self.assertLess(result.common(front).Volume, 1e-9)
         windows = [f for f in result.Faces if f.Surface.TypeId == "Part::GeomCylinder"]
         self.assertEqual(len(windows), 1)
+
+    def testBSplineNotchChamferPastTheSill(self):
+        """The same notch with B-spline faces (review pri1040 r3: a check of the face beyond by
+        type alone refused it; integration built it to the closed form): the same fill"""
+        body, foot = self.body(0.6, nurbs=True)
+        self.assertTrue(all(f.Surface.TypeId != "Part::GeomCylinder" for f in body.Faces))
+        result = body.makeChamfer(1.0, foot)
+        self.assertTrue(result.isValid())
+        self.assertEqual(len(result.Solids), 1)
+
+        def chord(t):
+            return 2 * (-1.6 * (t * math.sqrt(4 - t * t) + 4 * math.asin(t / 2)) / 2 + (4 - t * t) ** 1.5 / 3)
+
+        window = chord(-1.6) - chord(-2)
+        self.assertAlmostEqual(result.Volume - body.Volume, 10 - window, delta=1e-6)
+        front = Part.makeCylinder(2, 2, FreeCAD.Vector(0, 10, 2.6), FreeCAD.Vector(1, 0, 0))
+        self.assertLess(result.common(front).Volume, 1e-9)
 
     # A closed window (ops#883 H): a hole r 0.5 through the wall about y = 10, z = 1, its rim 0.5
     # above the floor, inside the fill's strip (OCCT fails on it, fillet and chamfer)

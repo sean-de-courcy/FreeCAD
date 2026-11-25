@@ -85,6 +85,8 @@
 #include <gp_Vec2d.hxx>
 #include <Geom_BSplineCurve.hxx>
 #include <Geom_BSplineSurface.hxx>
+#include <Geom_BezierSurface.hxx>
+#include <Geom_SurfaceOfRevolution.hxx>
 #include <Geom_Circle.hxx>
 #include <Geom_Curve.hxx>
 #include <GeomAdaptor_Curve.hxx>
@@ -10106,6 +10108,93 @@ bool trimFusedTool(
     return clipped;
 }
 
+/// Whether a B-spline or Bezier surface's poles run straight along a direction in one of its
+/// parameters: in every row along it each step between consecutive poles is parallel to the
+/// direction (to Precision::Confusion() across it) and, if rational, the weights are equal along
+/// it. Then S(u, v) = C(u) + along * g(u, v): every point lies on a line of the surface along the
+/// direction, exactly (convex hull), so its normal is square to it everywhere
+template<typename Surface>
+bool polesRuledAlong(const Surface& surface, const gp_Dir& along)
+{
+    const int nu = surface->NbUPoles();
+    const int nv = surface->NbVPoles();
+    const bool rational = surface->IsURational() || surface->IsVRational();
+    auto rowsRuled = [&](bool alongV) {
+        const int rows = alongV ? nu : nv;
+        const int steps = alongV ? nv : nu;
+        bool moves = false;
+        for (int r = 1; r <= rows; ++r) {
+            for (int s = 2; s <= steps; ++s) {
+                const int i0 = alongV ? r : s - 1;
+                const int j0 = alongV ? s - 1 : r;
+                const int i1 = alongV ? r : s;
+                const int j1 = alongV ? s : r;
+                const gp_Vec step(surface->Pole(i0, j0), surface->Pole(i1, j1));
+                if (step.Crossed(gp_Vec(along)).Magnitude() > Precision::Confusion()) {
+                    return false;
+                }
+                moves = moves || step.Magnitude() > Precision::Confusion();
+                if (rational) {
+                    const double w0 = surface->Weight(i0, j0);
+                    const double w1 = surface->Weight(i1, j1);
+                    if (std::abs(w1 - w0) > 1e-12 * std::max(std::abs(w0), std::abs(w1))) {
+                        return false;
+                    }
+                }
+            }
+        }
+        return moves;
+    };
+    return rowsRuled(true) || rowsRuled(false);
+}
+
+/// Whether a surface is ruled along a direction (every point of it on a line of it along the
+/// direction, so its normal square to the direction everywhere): a plane, a cylinder about it, an
+/// extrusion along it, a revolution of a line parallel to its axis about it, a B-spline or Bezier
+/// surface whose poles run straight along it, an offset or trimmed copy of one of these. Exact,
+/// by type and poles, never by samples (review pri1040 r3: a blend's B-spline face beyond, ruled
+/// along the normal, as FGC-NS44 #113's, refused under a check by type alone)
+bool ruledAlong(const Handle(Geom_Surface)& surface, const gp_Dir& along, int depth = 0)
+{
+    if (surface.IsNull() || depth > 8) {
+        return false;
+    }
+    if (auto trimmed = Handle(Geom_RectangularTrimmedSurface)::DownCast(surface)) {
+        return ruledAlong(trimmed->BasisSurface(), along, depth + 1);
+    }
+    if (auto offset = Handle(Geom_OffsetSurface)::DownCast(surface)) {
+        // An offset of a surface ruled along d: its normal is constant along each ruling (square
+        // to d and to the ruling's cross tangent), so the offset's points move by one vector per
+        // ruling, which stays a line along d
+        return ruledAlong(offset->BasisSurface(), along, depth + 1);
+    }
+    if (Handle(Geom_Plane)::DownCast(surface)) {
+        return true;
+    }
+    if (auto cylinder = Handle(Geom_CylindricalSurface)::DownCast(surface)) {
+        return parallel(cylinder->Axis().Direction(), along);
+    }
+    if (auto extrusion = Handle(Geom_SurfaceOfLinearExtrusion)::DownCast(surface)) {
+        return parallel(extrusion->Direction(), along);
+    }
+    if (auto revolution = Handle(Geom_SurfaceOfRevolution)::DownCast(surface)) {
+        Handle(Geom_Curve) basis = revolution->BasisCurve();
+        while (auto trimmedCurve = Handle(Geom_TrimmedCurve)::DownCast(basis)) {
+            basis = trimmedCurve->BasisCurve();
+        }
+        auto line = Handle(Geom_Line)::DownCast(basis);
+        return !line.IsNull() && parallel(revolution->Axis().Direction(), along)
+            && parallel(line->Position().Direction(), along);
+    }
+    if (auto bspline = Handle(Geom_BSplineSurface)::DownCast(surface)) {
+        return polesRuledAlong(bspline, along);
+    }
+    if (auto bezier = Handle(Geom_BezierSurface)::DownCast(surface)) {
+        return polesRuledAlong(bezier, along);
+    }
+    return false;
+}
+
 /** A fused tool whose strip runs off its planar face over edges where the face beyond drops away
  * square to it (ops#898 cause A: a boss's foot on a ledge narrower than the dress-up, the ledge's
  * outer edge tapering or about the arc's axis; a wall that an earlier blend cut away beside the
@@ -10187,7 +10276,7 @@ bool trimFusedToolOverFace(
     std::vector<TopoDS_Edge> runOver;
     std::vector<TopoDS_Edge> runOn;
     // The angle's cosine past which a face beyond is not square to the face: the census rows'
-    // faces beyond are square to 1e-12, a blend's B-spline face to its own approximation
+    // faces beyond are square to 1e-12; past ruledAlong it only tells a drop from a rise
     constexpr double squareCosine = 1e-6;
     for (TopExp_Explorer it(run.face, TopAbs_EDGE); it.More(); it.Next()) {
         const TopoDS_Edge& edge = TopoDS::Edge(it.Current());
@@ -10227,27 +10316,12 @@ bool trimFusedToolOverFace(
             continue;
         }
         // The prism's side is the face beyond's surface run on only where that surface is ruled
-        // along the face's normal: a plane, a cylinder whose axis is the normal, or an extrusion
-        // along it. A bound by type, not samples (reviews pri1040 r1 and r2: a ball's, an
-        // ellipsoid's or a B-spline dimple is square to the face along its equator, and the
-        // prism there is a surface no face of the body lies on); anything else refuses
+        // along the face's normal (ruledAlong: by type and poles, not samples; reviews pri1040 r1
+        // and r2: a ball's, an ellipsoid's or a B-spline dimple is square to the face along its
+        // equator, and the prism there is a surface no face of the body lies on); anything else
+        // refuses
         {
-            BRepAdaptor_Surface beyondSurface(beyond, Standard_False);
-            bool ruled = false;
-            switch (beyondSurface.GetType()) {
-                case GeomAbs_Plane:
-                    ruled = true;
-                    break;
-                case GeomAbs_Cylinder:
-                    ruled = parallel(beyondSurface.Cylinder().Axis().Direction(), outward);
-                    break;
-                case GeomAbs_SurfaceOfExtrusion:
-                    ruled = parallel(beyondSurface.Direction(), outward);
-                    break;
-                default:
-                    break;
-            }
-            if (!ruled) {
+            if (!ruledAlong(BRep_Tool::Surface(beyond), outward)) {
                 refuse("a concave dress-up runs past its face over an edge where the face beyond "
                        "is not ruled along the face's normal (not square to it)");
             }
