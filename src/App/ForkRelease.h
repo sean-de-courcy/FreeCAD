@@ -30,11 +30,12 @@ class Document;
  * fork-0.6.1 are 1 to 7, fork-0.7.0 is 8, fork-0.8.1 is 9 (as was fork-0.8.0, superseded before
  * it was handed off), fork-0.9.0 (the Onshape experiment's first modelling build, tagged on
  * `feat/onshape-experiment`) is 10, fork-0.10.0 (tagged on the same branch) is 11, fork-1.0.0 is
- * 12, fork-1.0.1 to fork-1.0.3 are 13 (no bump followed fork-1.0.1 or fork-1.0.2). The release
+ * 12, fork-1.0.1 to fork-1.0.3 are 13 (no bump followed fork-1.0.1 or fork-1.0.2), fork-1.0.4 to
+ * fork-1.0.10 are 14 (no bump followed fork-1.0.4 to fork-1.0.9; ops#1049). The release
  * routine bumps it in the first commit after each release tag on the branch it was cut from, so a
  * release build carries its own number and every later build a higher one.
  */
-constexpr int ForkRelease = 14;
+constexpr int ForkRelease = 15;
 
 /// The `ForkRelease` \a doc was opened from, 0 for a file without one; this build's for a new
 /// document and after a save to the document's own file.
