@@ -790,32 +790,32 @@ class TestFilletPropagation(unittest.TestCase):
             shape.common(under).Volume - fillet.Shape.common(under).Volume, 0.242862, delta=1e-4
         )
 
-    def assertWholeRoundAndOtherUntouched(self, shape, result, other, xa, xb, r=2.0):
-        """Over the top line from xa to xb the round removes (1 - pi/4) r^2 (xb - xa) from the box under its
-        corner, and `other` loses nothing"""
-        box = Part.makeBox(xb - xa, r, r, V(xa, 5 - r, 10 - r))
-        removed = shape.common(box).Volume - result.common(box).Volume
-        self.assertAlmostEqual(removed, (1 - math.pi / 4) * r * r * (xb - xa), delta=1e-4)
-        self.assertAlmostEqual(shape.common(other).Volume - result.common(other).Volume, 0, delta=1e-4)
+    def assertRunOnRefuses(self, base):
+        """The fillet and the chamfer of the top line, propagation off, both stop with the slanted-face error"""
+        for make in (self.fillet, self.chamfer):
+            feature = make(base, [self.topLine(base.Shape)], TangentPropagation=False)
+            self.assertFalse(feature.isValid(), "expected a stop")
+            self.assertIn("not a flat wall square to it", feature.getStatusString())
+            self.body.removeObject(feature)
+            self.doc.removeObject(feature.Name)
+            self.doc.recompute()
 
-    def testOffRunOnGrazingARoundPostKeepsTheRound(self):
-        """Review pr1028-r1, RunOnGrazesARoundPost: GB13's slot on a plate z -2..0 and a round post r 5 whose axis
-        is at (21, 0.01): the top line's run on pierces the post at a grazing angle at x 20.68, past the slot's
-        round end. The post's tangent plane there leans back over the whole picked edge: the run on stops past
-        the line's end vertex only, the round over the line is whole and the post loses nothing"""
+    def testOffRunOnGrazingARoundPostRefuses(self):
+        """Reviews pr1028-r1 and r2 (RunOnGrazesARoundPost, RunOnStopsShortOfAGrazedPost): GB13's slot on a plate
+        z -2..0 and a round post r 5 whose axis is at (21, 0.01): the top line's run on pierces the post at a
+        grazing angle at x 20.68, past the slot's round end. A stop by the post's tangent plane cuts the round
+        off the line (r1) or the slot's round end short (r2), where Onshape cuts GB13's -20.338042: a run on
+        meeting a curved face refuses"""
         post = Part.makeCylinder(5, 22, V(21, 0.01, -2))
         plate = Part.makeBox(46, 20, 2, V(-16, -10, -2))
-        shape = self.deeShape(slotEnd=True).fuse([plate, post]).removeSplitter()
-        base = self.baseOf(shape)
-        fillet = self.fillet(base, [self.topLine(base.Shape)], TangentPropagation=False)
-        self.assertTrue(fillet.isValid(), fillet.getStatusString())
-        self.assertWholeRoundAndOtherUntouched(shape, fillet.Shape, post, -10, 10)
+        self.assertRunOnRefuses(self.baseOf(self.deeShape(slotEnd=True).fuse([plate, post]).removeSplitter()))
 
-    def testOffRunOnPiercingARampKeepsTheRound(self):
-        """Review pr1028-r1, RunOnPiercesARamp: the dee with its convex corner at (-10, 5) rounded 1 (the run on
-        goes straight on, RB26) and a ramp block x -14..-10, y -2..14, whose top rises away from the dee at 30
-        degrees, z = 10 + (-10.5 - x) tan 30: the run on pierces it at x -10.5, and the ramp's plane, run back
-        over the dee, would cut the round off the line near its end. The round over the line is whole"""
+    def testOffRunOnPiercingARampRefuses(self):
+        """Reviews pr1028-r1 and r2 (RunOnPiercesARamp, RunOnStopsShortOfARamp): the dee with its convex corner at
+        (-10, 5) rounded 1 (the run on goes straight on, RB26) and a ramp block x -14..-10, y -2..14, whose top
+        rises away from the dee at 30 degrees, z = 10 + (-10.5 - x) tan 30: the run on pierces it at x -10.5, and
+        the ramp's plane, run back over the dee, cuts the round off the line (r1) or the corner's cut short (r2).
+        Onshape's stop at a slanted face is not known: a run on meeting a slanted plane refuses"""
         dee = self.deeShape()
         corner = [
             edge
@@ -833,11 +833,7 @@ class TestFilletPropagation(unittest.TestCase):
             [V(-14, -2, 0), V(-10, -2, 0), V(-10, -2, z(-10)), V(-14, -2, z(-14)), V(-14, -2, 0)]
         )
         ramp = Part.Face(profile).extrude(V(0, 16, 0))
-        shape = dee.makeFillet(1.0, corner).fuse(ramp).removeSplitter()
-        base = self.baseOf(shape)
-        fillet = self.fillet(base, [self.topLine(base.Shape)], TangentPropagation=False)
-        self.assertTrue(fillet.isValid(), fillet.getStatusString())
-        self.assertWholeRoundAndOtherUntouched(shape, fillet.Shape, ramp, -9, 10)
+        self.assertRunOnRefuses(self.baseOf(dee.makeFillet(1.0, corner).fuse(ramp).removeSplitter()))
 
 
 if __name__ == "__main__":

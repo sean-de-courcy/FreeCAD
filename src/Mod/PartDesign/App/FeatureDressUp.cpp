@@ -1666,6 +1666,16 @@ namespace
     ));
 }
 
+[[noreturn]] void runOnMeetsASlantedFace()
+{
+    throw Base::CADKernelError(QT_TRANSLATE_NOOP(
+        "Exception",
+        "Tangent propagation off: a picked edge's straight run on, where its tangent chain goes "
+        "on, meets a face that is not a flat wall square to it (a curved or slanted face), where "
+        "the run on's end is not known. Pick the whole tangent chain, or turn tangent propagation on."
+    ));
+}
+
 [[noreturn]] void endOnTangentFaces()
 {
     throw Base::CADKernelError(QT_TRANSLATE_NOOP(
@@ -2017,6 +2027,7 @@ TopoDS_Shape runOutTool(const TopoDS_Shape& base, const TopoDS_Edge& edge, doubl
         double nearest = std::numeric_limits<double>::infinity();
         gp_Pnt where;
         gp_Dir wallOutward;
+        TopoDS_Face nearestFace;
         for (int i = 1; i <= hits.NbPnt(); ++i) {
             const double w = hits.WParameter(i);
             if (hits.State(i) != TopAbs_IN || w < 1e-6 || w >= nearest) {
@@ -2044,13 +2055,19 @@ TopoDS_Shape runOutTool(const TopoDS_Shape& base, const TopoDS_Edge& edge, doubl
             nearest = w;
             where = hits.Pnt(i);
             wallOutward = outward;
+            nearestFace = face;
         }
         if (std::isfinite(nearest)) {
-            // Only the run on is stopped: the tool loses what lies behind the wall's tangent plane
-            // and beyond the end vertex, never anything over the edge itself (review pr1028-r1:
-            // a round post grazed by the run on, a ramp it pierces, whose planes run back over
-            // the edge). Behind a curved or sloping face's tangent plane past the vertex there is
-            // none of that face's material in front of it
+            // The stop is built only at a flat wall square to the run on (RB26 3), where the
+            // wall's plane lies wholly past the end vertex across the tool. A curved or slanted
+            // face's tangent plane runs back over the run on and cuts the body's own material
+            // between the vertex and the face (reviews pr1028-r1 and r2: a grazed round post, a
+            // ramp), and Onshape's stop there is not known: the dress-up refuses (the design's
+            // literal rule after a second silent find in this path)
+            if (BRepAdaptor_Surface(nearestFace).GetType() != GeomAbs_Plane
+                || !wallOutward.IsOpposite(outOf, 1e-9)) {
+                runOnMeetsASlantedFace();
+            }
             const gp_Pnt vertex = BRep_Tool::Pnt(ends[e]);
             auto halfSpace = [&](const gp_Pnt& at, const gp_Dir& towards) {
                 const gp_Ax2 frame(at, towards);
