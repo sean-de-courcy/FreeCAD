@@ -10074,6 +10074,14 @@ bool roundMitreRunOns(
         }
         return false;
     }
+    // Before OCCT only a selection the run-ons round whole: the rest's fillet on the stage is the
+    // whole fillet chain on the feature's own time, which a fillet that builds today must not
+    // spend before OCCT is asked (review fx1020-r1 T1). Such a selection goes on as without the
+    // attempt; where OCCT then fails, the late call rounds the rest on the stage
+    if (early && !split->rest.empty()) {
+        FC_LOG("fillet by mitre run-ons, before OCCT: the selection has other edges, left to OCCT");
+        return false;
+    }
     // A stage's merged-face note goes with it where the stage is thrown away (as the rim split's)
     const bool notedBefore = [] {
         std::string note = FilletFallback::takeNamingOrder();

@@ -19262,6 +19262,35 @@ Handle(BRepTools_History) runOnExactArcs(
             break;
         }
     }
+    // The same Boolean can leave, inside a torus's face, a wire of internal edges only (an
+    // approximated piece of the same tangent arc, 0.6-1.5 long at 10x-30x: review fx1020-r1): no
+    // boundary of anything, it is dropped
+    for (int i = 1; i <= torusImages.Extent(); ++i) {
+        if (torusImages(i).ShapeType() != TopAbs_FACE) {
+            continue;
+        }
+        for (TopoDS_Iterator wires(torusImages(i)); wires.More(); wires.Next()) {
+            const TopoDS_Shape& wire = wires.Value();
+            if (wire.ShapeType() != TopAbs_WIRE) {
+                continue;
+            }
+            bool inner = true;
+            bool empty = true;
+            for (TopoDS_Iterator it(wire); it.More() && inner; it.Next()) {
+                empty = false;
+                const int index = edgeFaces.FindIndex(it.Value());
+                inner = it.Value().Orientation() == TopAbs_INTERNAL && index > 0
+                    && edgeFaces(index).Extent() == 1;
+            }
+            if (inner && !empty) {
+                reshape.Remove(wire);
+                for (TopoDS_Iterator it(wire); it.More(); it.Next()) {
+                    history->Remove(it.Value());
+                    done.Add(it.Value());
+                }
+            }
+        }
+    }
     if (done.IsEmpty()) {
         return {};
     }
