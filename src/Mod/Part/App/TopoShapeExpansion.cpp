@@ -11860,8 +11860,10 @@ bool faceIsFirstCrossing(const TopoDS_Face& face, const TopoDS_Shape& profile, c
     if (!round) {
         return false;
     }
-    // The face's side: the sign of the outward normal along `direction`, the same, and clear of
-    // zero, over the face's parameter range (larger than the face: stricter). In the surface's
+    // The face's side: the sign of the outward normal along `direction`, the same over the face's
+    // parameter range (larger than the face: stricter). Zero is allowed where the other tested
+    // points give the sign: the normal at right angles to the direction only on the face's
+    // silhouette, a half turn's or a quarter-round's edge (review rv540 3). In the surface's
     // frame (X, Y, Z) the normal along `direction` is A cos(u - phi) + c on a cylinder or a cone
     // (c from the cone's slope; nothing in v) and cos(v) A cos(u - phi) + dZ sin(v) on a sphere,
     // A = |(dX, dY)|, phi its angle: its extremes over the range are at u = uMin, uMax or
@@ -11869,6 +11871,26 @@ bool faceIsFirstCrossing(const TopoDS_Face& face, const TopoDS_Shape& profile, c
     // points alone are tested: a sign that holds there holds over the whole range
     double uMin, uMax, vMin, vMax;
     BRepTools::UVBounds(face, uMin, uMax, vMin, vMax);
+    // A full turn (a sphere: whole in v too) holds every crossing of its surface within its axis
+    // range: the face as it is gives the first crossing to a profile wholly outside or wholly
+    // inside, and BRepFeat keeps the names it gives on integration (review rv540 3: the split
+    // named a Pad's end edges up to a full cylinder by duplicate counters)
+    const double wholeTurn = 2 * std::numbers::pi;
+    if (uMax - uMin >= wholeTurn - Precision::Angular()
+        && (round->type != GeomAbs_Sphere
+            || vMax - vMin >= std::numbers::pi - Precision::Angular())) {
+        int region = 0;
+        for (TopExp_Explorer vertex(profile, TopAbs_VERTEX); vertex.More(); vertex.Next()) {
+            bool inside = false;
+            round->outward(BRep_Tool::Pnt(TopoDS::Vertex(vertex.Current())), inside);
+            const int here = inside ? 1 : -1;
+            if (region != 0 && here != region) {
+                return false;
+            }
+            region = here;
+        }
+        return region != 0;
+    }
     const gp_Vec d(direction);
     const double dX = d.Dot(gp_Vec(round->frame.XDirection()));
     const double dY = d.Dot(gp_Vec(round->frame.YDirection()));
@@ -11906,11 +11928,17 @@ bool faceIsFirstCrossing(const TopoDS_Face& face, const TopoDS_Shape& profile, c
             const int sign = along > Precision::Angular() ? 1
                 : along < -Precision::Angular()           ? -1
                                                           : 0;
-            if (sign == 0 || (side != 0 && sign != side)) {
+            if (sign == 0) {
+                continue;
+            }
+            if (side != 0 && sign != side) {
                 return false;
             }
             side = sign;
         }
+    }
+    if (side == 0) {
+        return false;
     }
     // Every region of the profile on that side (review pr1039-r1 T1), tested at its vertices only.
     // A region can cross the surface with every vertex on one side (a square whose middle enters a
