@@ -532,11 +532,17 @@ PartExport bool preferConstruction(
  * between planes or cylinders along it, a circle between a plane and a coaxial cylinder or cone):
  * the edges it could build, as against those only OCCT builds (ops#952). Reads only plain
  * shapes; false where the analysis refuses or throws.
+ *
+ * @param extrudedCovered Whether a line on a wall extruded along it (ops#1045) counts: the
+ * analysis takes it, but its tool may still refuse (a round larger than the wall's curvature, an
+ * end on a face that is not a plane), so the split by coverage asks again without it where
+ * everything counted as covered
  */
 PartExport std::vector<bool> coveredEdges(
     const TopoDS_Shape& base,
     const std::vector<TopoDS_Shape>& edges,
-    const Request& request
+    const Request& request,
+    bool extrudedCovered = true
 );
 
 /** Whether a fillet's contact line on a face next to a selected edge runs along part of that face's

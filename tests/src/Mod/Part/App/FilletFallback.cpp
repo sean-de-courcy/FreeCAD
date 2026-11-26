@@ -54,6 +54,9 @@
 #include <chrono>
 #include <Message_ProgressRange.hxx>
 #include <GC_MakeArcOfCircle.hxx>
+#include <GC_MakeArcOfEllipse.hxx>
+#include <Geom_BSplineCurve.hxx>
+#include <Geom_Curve.hxx>
 #include <GeomAPI_Interpolate.hxx>
 #include <GProp_GProps.hxx>
 #include <ShapeUpgrade_UnifySameDomain.hxx>
@@ -5129,3 +5132,656 @@ TEST_F(FilletFallbackTest, dressUpWhoseFaceAWallCutsAwayWholeRefuses)
         EXPECT_FALSE(built) << first << " " << second << " " << size << " " << round;
     }
 }
+
+// ops#1045: rounds of a straight edge between a plane (or a cylinder along it) and a wall extruded
+// along it, a pad's curved side (notes/fillet-extruded-wall-1045.md; sk1126's and sk1045's cases).
+// Onshape's round is one cylinder of radius r along the edge, its axis r from both walls on the
+// ball's side (RB45, RB48). The expected values are worked out here from the profile's own curves,
+// apart from the construction: the ball's centre by bisection, the section's area by the boundary
+// integral with Simpson's rule. Onshape's dV is the difference of two volumes of about 3e4 measured
+// to about 1e-8 each: it agrees to about 1e-3
+// NOLINTBEGIN(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)
+namespace
+{
+
+/// A plane curve: its point and derivative at t
+struct PlaneCurve
+{
+    std::function<gp_XY(double)> point;
+    std::function<gp_XY(double)> derivative;
+};
+
+/// (cx + ax cos t, cy + by sin t)
+PlaneCurve ellipseCurve(double cx, double cy, double ax, double by)
+{
+    return {
+        [=](double t) {
+            return gp_XY(cx + ax * std::cos(t), cy + by * std::sin(t));
+        },
+        [=](double t) {
+            return gp_XY(-ax * std::sin(t), by * std::cos(t));
+        }
+    };
+}
+
+PlaneCurve curveOf(const Handle(Geom_Curve)& curve)
+{
+    return {
+        [=](double t) {
+            const gp_Pnt p = curve->Value(t);
+            return gp_XY(p.X(), p.Y());
+        },
+        [=](double t) {
+            gp_Pnt p;
+            gp_Vec d;
+            curve->D1(t, p, d);
+            return gp_XY(d.X(), d.Y());
+        }
+    };
+}
+
+double crossXY(const gp_XY& u, const gp_XY& v)
+{
+    return u.X() * v.Y() - u.Y() * v.X();
+}
+
+template<typename F>
+double simpson(F f, double lo, double hi, int n = 20000)
+{
+    const double h = (hi - lo) / n;
+    double sum = f(lo) + f(hi);
+    for (int i = 1; i < n; ++i) {
+        sum += f(lo + i * h) * (i % 2 == 1 ? 4 : 2);
+    }
+    return sum * h / 3;
+}
+
+/** The other wall's trace in the profile's plane: a line through a point with the unit normal
+ * toward the ball, or a circle about a centre whose ball lies inside (offset R - r) or outside
+ */
+struct OtherTrace
+{
+    bool circle = false;
+    gp_XY point;   // line: a point of it; circle: its centre
+    gp_XY normal;  // line: toward the ball
+    double radius = 0.0;
+    bool ballInside = true;
+
+    double residual(const gp_XY& centre, double r) const
+    {
+        if (!circle) {
+            return (centre - point).Dot(normal) - r;
+        }
+        return (centre - point).Modulus() - (ballInside ? radius - r : radius + r);
+    }
+    gp_XY touch(const gp_XY& centre) const
+    {
+        if (!circle) {
+            return centre - normal * (centre - point).Dot(normal);
+        }
+        gp_XY d = centre - point;
+        return point + d / d.Modulus() * radius;
+    }
+    /// Twice the boundary integral of (p - o) x dp from the corner o to the touch a along the trace
+    double twice(const gp_XY& o, const gp_XY& a) const
+    {
+        if (!circle) {
+            return 0.0;
+        }
+        const double from = std::atan2((o - point).Y(), (o - point).X());
+        const double to = std::atan2((a - point).Y(), (a - point).X());
+        const double turn = std::remainder(to - from, 2 * pi);
+        return simpson(
+            [&](double th) {
+                const gp_XY p = point + gp_XY(std::cos(th), std::sin(th)) * radius;
+                const gp_XY dp = gp_XY(-std::sin(th), std::cos(th)) * radius;
+                return crossXY(p - o, dp);
+            },
+            from,
+            from + turn,
+            4000
+        );
+    }
+};
+
+OtherTrace lineTrace(const gp_XY& point, const gp_XY& normal)
+{
+    OtherTrace t;
+    t.point = point;
+    t.normal = normal;
+    return t;
+}
+
+struct ExpectedRound
+{
+    bool found = false;
+    gp_XY centre;
+    double area = 0.0;
+};
+
+/** The round between the wall's curve from its corner at t0 toward t1 (the ball to its left or
+ * right) and the other trace: the first centre from the corner, and the section's area
+ */
+ExpectedRound expectedRound(
+    const PlaneCurve& c,
+    double t0,
+    double t1,
+    bool ballLeft,
+    const OtherTrace& other,
+    double r
+)
+{
+    auto normal = [&](double t) {
+        const gp_XY d = c.derivative(t);
+        gp_XY n(-d.Y(), d.X());
+        n.Normalize();
+        return ballLeft ? n : n.Reversed();
+    };
+    auto g = [&](double t) {
+        return other.residual(c.point(t) + normal(t) * r, r);
+    };
+    ExpectedRound out;
+    const int n = 20000;
+    double a = t0 + (t1 - t0) * 1e-9;
+    double fa = g(a);
+    double ts = 0.0;
+    for (int i = 1; i <= n && !out.found; ++i) {
+        double b = t0 + (t1 - t0) * i / n;
+        const double fb = g(b);
+        if ((fa < 0) != (fb < 0)) {
+            for (int k = 0; k < 200; ++k) {
+                const double m = (a + b) / 2;
+                const double fm = g(m);
+                if ((fm < 0) == (fa < 0)) {
+                    a = m;
+                    fa = fm;
+                }
+                else {
+                    b = m;
+                }
+            }
+            ts = (a + b) / 2;
+            out.found = true;
+        }
+        a = b;
+        fa = fb;
+    }
+    if (!out.found) {
+        return out;
+    }
+    const gp_XY o = c.point(t0);
+    const gp_XY touchWall = c.point(ts);
+    const gp_XY centre = touchWall + normal(ts) * r;
+    const gp_XY touchOther = other.touch(centre);
+    const double alpha = std::atan2((touchOther - centre).Y(), (touchOther - centre).X());
+    const double beta = std::atan2((touchWall - centre).Y(), (touchWall - centre).X());
+    const double delta = std::remainder(beta - alpha, 2 * pi);
+    const double twice = other.twice(o, touchOther)
+        + simpson(
+              [&](double th) {
+                  const gp_XY p = centre + gp_XY(std::cos(th), std::sin(th)) * r;
+                  const gp_XY dp = gp_XY(-std::sin(th), std::cos(th)) * r;
+                  return crossXY(p - o, dp);
+              },
+              alpha,
+              alpha + delta,
+              4000
+          )
+        - simpson(
+              [&](double t) {
+                  return crossXY(c.point(t) - o, c.derivative(t));
+              },
+              t0,
+              ts
+          );
+    out.centre = centre;
+    out.area = std::abs(twice) / 2;
+    return out;
+}
+
+/// The profile's edges in the plane z 0, padded up by the height
+TopoDS_Shape padOf(const std::vector<TopoDS_Edge>& edges, double height)
+{
+    BRepBuilderAPI_MakeWire wire;
+    for (const auto& edge : edges) {
+        wire.Add(edge);
+    }
+    TopoDS_Face face = BRepBuilderAPI_MakeFace(wire.Wire(), Standard_True).Face();
+    return BRepPrimAPI_MakePrism(face, gp_Vec(0, 0, height)).Shape();
+}
+
+TopoDS_Edge segment(double x0, double y0, double x1, double y1)
+{
+    return BRepBuilderAPI_MakeEdge(gp_Pnt(x0, y0, 0), gp_Pnt(x1, y1, 0)).Edge();
+}
+
+/// An arc of the ellipse about (cx, cy) with the semi-axes ax along x and by along y, from p to q
+/// counterclockwise
+TopoDS_Edge ellipseArc(double cx, double cy, double ax, double by, gp_Pnt p, gp_Pnt q)
+{
+    const bool alongX = ax >= by;
+    gp_Elips ellipse(
+        gp_Ax2(gp_Pnt(cx, cy, 0), gp::DZ(), alongX ? gp::DX() : gp::DY()),
+        alongX ? ax : by,
+        alongX ? by : ax
+    );
+    return BRepBuilderAPI_MakeEdge(GC_MakeArcOfEllipse(ellipse, p, q, Standard_True).Value()).Edge();
+}
+
+/// sk1126's P1: the plane y 0 and an extruded ellipse meeting at E, (qx, 0), convex
+const double qx = 40 + 10 * std::sqrt(1 - 0.75 * 0.75);
+const double tE = -std::asin(0.75);  // E on ellipseCurve(40, 15, 10, 20)
+
+TopoDS_Shape p1()
+{
+    return padOf(
+        {segment(0, 0, qx, 0),
+         ellipseArc(40, 15, 10, 20, gp_Pnt(qx, 0, 0), gp_Pnt(qx, 30, 0)),
+         segment(qx, 30, 0, 30),
+         segment(0, 30, 0, 0)},
+        20
+    );
+}
+
+/// The round of P1's E by r, worked out
+ExpectedRound p1Round(double r)
+{
+    return expectedRound(ellipseCurve(40, 15, 10, 20), tE, -tE, true, lineTrace({0, 0}, {0, 1}), r);
+}
+
+/// The faces of the result that are cylinders of radius r along z about (x, y)
+int cylindersAbout(const TopoShape& result, double r, const gp_XY& axis, double tolerance = 1e-6)
+{
+    int found = 0;
+    for (TopExp_Explorer it(result.getShape(), TopAbs_FACE); it.More(); it.Next()) {
+        BRepAdaptor_Surface s(TopoDS::Face(it.Current()));
+        if (s.GetType() != GeomAbs_Cylinder || std::abs(s.Cylinder().Radius() - r) > 1e-9) {
+            continue;
+        }
+        const gp_Ax1 a = s.Cylinder().Axis();
+        if (a.Direction().IsParallel(gp::DZ(), 1e-9)
+            && gp_Lin(a).Distance(gp_Pnt(axis.X(), axis.Y(), 0)) < tolerance) {
+            ++found;
+        }
+    }
+    return found;
+}
+
+/// A round below the limit too: the construction is asked as where OCCT failed on a wider
+/// selection, and as the preference of the extruded wall's round will ask it
+FF::Request wallRound(double r)
+{
+    FF::Request request = fillet(r);
+    request.limitOnly = false;
+    return request;
+}
+
+/// exact(), and the volume the round removes (or adds) as its section by the length, to 1e-6 of
+/// itself (exact() compares the whole volume)
+testing::AssertionResult changes(const TopoShape& result, double v0, double expected)
+{
+    auto whole = exact(result, v0 + expected);
+    if (!whole) {
+        return whole;
+    }
+    const double change = volume(result.getShape()) - v0;
+    if (std::abs(change - expected) > 1e-6 * std::abs(expected) + 1e-9 * v0) {
+        return testing::AssertionFailure() << "changed by " << change << ", expected " << expected;
+    }
+    return testing::AssertionSuccess();
+}
+
+TopoDS_Shape unified(const TopoDS_Shape& shape)
+{
+    ShapeUpgrade_UnifySameDomain unify(shape);
+    unify.Build();
+    return unify.Shape();
+}
+
+}  // namespace
+
+TEST_F(FilletFallbackTest, roundOnAnExtrudedEllipseIsACylinder)
+{
+    // sk1045 D1 (rows 1-3): P1's E rounded by 2, 0.5 and 5: one cylinder of radius r along E, its
+    // axis r from the plane y 0 and on the ellipse's parallel curve at r, 7 faces
+    TopoShape base(p1(), 1L);
+    const double v0 = volume(base.getShape());
+    TopoShape e = edgeBetween(base, {qx, 0, 0}, {qx, 0, 20});
+    for (double r : {2.0, 0.5, 5.0}) {
+        const ExpectedRound x = p1Round(r);
+        ASSERT_TRUE(x.found) << r;
+        TopoShape result = forced(base, {e}, wallRound(r));
+        EXPECT_TRUE(changes(result, v0, -(x.area * 20))) << r;
+        EXPECT_EQ(result.countSubElements("Face"), 7) << r;
+        EXPECT_EQ(cylindersAbout(result, r, x.centre), 1) << r;
+    }
+    // Onshape's (RB45 row 1): dV -5.050154, the axis at (45.4037, 2)
+    EXPECT_NEAR(p1Round(2).area * 20, 5.050154, 2e-3);
+    EXPECT_NEAR(p1Round(2).centre.X(), 45.4037, 1e-4);
+}
+
+TEST_F(FilletFallbackTest, roundOnAnExtrudedSplineIsACylinder)
+{
+    // sk1045 D2 (row 5): P2, the ellipse replaced by a spline through (46, 0), (50, 15), (46, 30)
+    Handle(TColgp_HArray1OfPnt) points = new TColgp_HArray1OfPnt(1, 3);
+    points->SetValue(1, gp_Pnt(46, 0, 0));
+    points->SetValue(2, gp_Pnt(50, 15, 0));
+    points->SetValue(3, gp_Pnt(46, 30, 0));
+    GeomAPI_Interpolate interpolate(points, Standard_False, 1e-9);
+    interpolate.Perform();
+    Handle(Geom_BSplineCurve) spline = interpolate.Curve();
+    TopoShape base(
+        padOf(
+            {segment(0, 0, 46, 0),
+             BRepBuilderAPI_MakeEdge(spline).Edge(),
+             segment(46, 30, 0, 30),
+             segment(0, 30, 0, 0)},
+            20
+        ),
+        1L
+    );
+    const double v0 = volume(base.getShape());
+    TopoShape e = edgeBetween(base, {46, 0, 0}, {46, 0, 20});
+    const ExpectedRound x = expectedRound(
+        curveOf(spline),
+        spline->FirstParameter(),
+        spline->LastParameter(),
+        true,
+        lineTrace({0, 0}, {0, 1}),
+        2
+    );
+    ASSERT_TRUE(x.found);
+    TopoShape result = forced(base, {e}, wallRound(2));
+    EXPECT_TRUE(changes(result, v0, -(x.area * 20)));
+    EXPECT_EQ(result.countSubElements("Face"), 7);
+    EXPECT_EQ(cylindersAbout(result, 2, x.centre), 1);
+}
+
+TEST_F(FilletFallbackTest, concaveRoundOnAnExtrudedEllipse)
+{
+    // sk1045 D3 (rows 6-7): P3, P1 on the block x 0..60, y -5..0: E concave, the ball in the air
+    // outside the ellipse; the round adds its section
+    TopoShape base(unified(BRepAlgoAPI_Fuse(p1(), box(60, 5, 20, gp_Pnt(0, -5, 0))).Shape()), 1L);
+    const double v0 = volume(base.getShape());
+    TopoShape e = edgeBetween(base, {qx, 0, 0}, {qx, 0, 20});
+    for (double r : {2.0, 1.0}) {
+        const ExpectedRound x
+            = expectedRound(ellipseCurve(40, 15, 10, 20), tE, -tE, false, lineTrace({0, 0}, {0, 1}), r);
+        ASSERT_TRUE(x.found) << r;
+        TopoShape result = forced(base, {e}, wallRound(r));
+        EXPECT_TRUE(changes(result, v0, x.area * 20)) << r;
+        EXPECT_EQ(result.countSubElements("Face"), base.countSubElements("Face") + 1) << r;
+        EXPECT_EQ(cylindersAbout(result, r, x.centre), 1) << r;
+        // Onshape's (RB45 rows 6, 7): dV +43.113903 and +11.892383
+        EXPECT_NEAR(x.area * 20, r == 2.0 ? 43.113903 : 11.892383, 2e-3) << r;
+    }
+}
+
+TEST_F(FilletFallbackTest, roundOnAnExtrudedEllipseWithOtherEdges)
+{
+    TopoShape base(p1(), 1L);
+    const double v0 = volume(base.getShape());
+    const ExpectedRound x = p1Round(2);
+    ASSERT_TRUE(x.found);
+    // sk1045 D7: E and the edge at (0, 0) between two planes
+    {
+        std::vector<TopoShape> edges {
+            edgeBetween(base, {qx, 0, 0}, {qx, 0, 20}),
+            edgeBetween(base, {0, 0, 0}, {0, 0, 20})
+        };
+        TopoShape result = forced(base, edges, wallRound(2));
+        EXPECT_TRUE(changes(result, v0, -(x.area * 20 + filletSection(2) * 20)));
+        EXPECT_EQ(cylindersAbout(result, 2, x.centre), 1);
+    }
+    // sk1045 D6 (row 17): the rib x 10..14, y -6..0 on P1; E and the rib's two outer edges: one
+    // feature, the rib's pair a full round (Onshape: dV the sum of row 1's and the rib's alone)
+    TopoShape ribbed(unified(BRepAlgoAPI_Fuse(p1(), box(4, 6, 20, gp_Pnt(10, -6, 0))).Shape()), 1L);
+    const double v1 = volume(ribbed.getShape());
+    std::vector<TopoShape> edges {
+        edgeBetween(ribbed, {qx, 0, 0}, {qx, 0, 20}),
+        edgeBetween(ribbed, {10, -6, 0}, {10, -6, 20}),
+        edgeBetween(ribbed, {14, -6, 0}, {14, -6, 20})
+    };
+    const double expected = v1 - x.area * 20 - 2 * filletSection(2) * 20;
+    TopoShape result = forced(ribbed, edges, wallRound(2));
+    EXPECT_TRUE(changes(result, v1, expected - v1));
+    EXPECT_EQ(cylindersAbout(result, 2, x.centre), 1);
+    EXPECT_EQ(cylindersAbout(result, 2, {12, -4}), 1);
+    EXPECT_EQ(result.countSubElements("Face"), 11);
+    // The public path: the same volume, whichever builds it
+    EXPECT_NEAR(volume(dressUp(ribbed, edges, fillet(2)).getShape()), expected, 1e-5);
+}
+
+TEST_F(FilletFallbackTest, roundOnAnExtrudedEllipseUnderALocation)
+{
+    // sk1045 D11: P1 placed by a turn and a move (the faces carry the location)
+    gp_Trsf place;
+    place.SetRotation(gp_Ax1(gp_Pnt(5, -3, 2), gp_Dir(1, 2, 3)), 0.7);
+    gp_Trsf move;
+    move.SetTranslation(gp_Vec(-12, 7, 30));
+    const gp_Trsf t = move * place;
+    TopoShape base(p1().Moved(TopLoc_Location(t)), 1L);
+    const double v0 = volume(base.getShape());
+    TopoShape e = edgeBetween(base, gp_Pnt(qx, 0, 0).Transformed(t), gp_Pnt(qx, 0, 20).Transformed(t));
+    const ExpectedRound x = p1Round(2);
+    TopoShape result = forced(base, {e}, wallRound(2));
+    EXPECT_TRUE(changes(result, v0, -(x.area * 20)));
+    EXPECT_EQ(result.countSubElements("Face"), 7);
+    // The cylinder about the moved axis
+    int found = 0;
+    for (TopExp_Explorer it(result.getShape(), TopAbs_FACE); it.More(); it.Next()) {
+        BRepAdaptor_Surface s(TopoDS::Face(it.Current()));
+        if (s.GetType() == GeomAbs_Cylinder && std::abs(s.Cylinder().Radius() - 2) < 1e-9
+            && gp_Lin(s.Cylinder().Axis())
+                    .Distance(gp_Pnt(x.centre.X(), x.centre.Y(), 0).Transformed(t))
+                < 1e-6) {
+            ++found;
+        }
+    }
+    EXPECT_EQ(found, 1);
+}
+
+TEST_F(FilletFallbackTest, roundsOnAnExtrudedEllipseAcrossItsSeam)
+{
+    // sk1045 D13: the ellipse about (0, 0) with semi-axes 10 and 6, cut by the chord x -6: its
+    // arc runs over the ellipse's seam at (10, 0); both chord-end edges rounded by 1
+    const double y = 6 * std::sqrt(1 - 0.36);
+    TopoShape base(
+        padOf({ellipseArc(0, 0, 10, 6, gp_Pnt(-6, -y, 0), gp_Pnt(-6, y, 0)), segment(-6, y, -6, -y)}, 20),
+        1L
+    );
+    const double v0 = volume(base.getShape());
+    std::vector<TopoShape> edges {
+        edgeBetween(base, {-6, y, 0}, {-6, y, 20}),
+        edgeBetween(base, {-6, -y, 0}, {-6, -y, 20})
+    };
+    // The lower edge: the ellipse from (-6, -y) counterclockwise, the plane x -6 with the ball at
+    // x > -6
+    const double t0 = std::atan2(-y / 6, -0.6) + 2 * pi;
+    const ExpectedRound x
+        = expectedRound(ellipseCurve(0, 0, 10, 6), t0, 2 * pi + pi / 2, true, lineTrace({-6, 0}, {1, 0}), 1);
+    ASSERT_TRUE(x.found);
+    TopoShape result = forced(base, edges, wallRound(1));
+    EXPECT_TRUE(changes(result, v0, -(2 * x.area * 20)));
+    EXPECT_EQ(cylindersAbout(result, 1, x.centre), 1);
+    EXPECT_EQ(cylindersAbout(result, 1, {x.centre.X(), -x.centre.Y()}), 1);
+}
+
+TEST_F(FilletFallbackTest, roundBetweenACylinderAndAnExtrudedEllipse)
+{
+    // sk1045 D9: a disc of radius 10 about (0, 0) cut by the ellipse about (8, 0) with semi-axes
+    // 6 and 8 (the region inside both): an edge where the circle meets the ellipse, r 1, the ball
+    // inside both. The corners: x^2 + y^2 = 100 on the ellipse
+    auto f = [](double x) {
+        return 100 - x * x - 64 * (1 - (x - 8) * (x - 8) / 36);
+    };
+    double a = 2.0;
+    double b = 9.99;
+    for (int k = 0; k < 200; ++k) {
+        const double m = (a + b) / 2;
+        if ((f(m) < 0) == (f(a) < 0)) {
+            a = m;
+        }
+        else {
+            b = m;
+        }
+    }
+    const double cx = (a + b) / 2;
+    const double cy = std::sqrt(100 - cx * cx);
+    TopoShape base(
+        padOf(
+            {BRepBuilderAPI_MakeEdge(
+                 GC_MakeArcOfCircle(gp_Pnt(cx, -cy, 0), gp_Pnt(10, 0, 0), gp_Pnt(cx, cy, 0)).Value()
+             )
+                 .Edge(),
+             ellipseArc(8, 0, 6, 8, gp_Pnt(cx, cy, 0), gp_Pnt(cx, -cy, 0))},
+            20
+        ),
+        1L
+    );
+    const double v0 = volume(base.getShape());
+    TopoShape e = edgeBetween(base, {cx, cy, 0}, {cx, cy, 20});
+    // From the upper corner along the ellipse counterclockwise (the ball to its left), the
+    // circle's ball inside it
+    OtherTrace circle;
+    circle.circle = true;
+    circle.point = gp_XY(0, 0);
+    circle.radius = 10;
+    circle.ballInside = true;
+    const double t0 = std::atan2(cy / 8, (cx - 8) / 6);
+    const ExpectedRound x = expectedRound(ellipseCurve(8, 0, 6, 8), t0, 2 * pi - t0, true, circle, 1);
+    ASSERT_TRUE(x.found);
+    TopoShape result = forced(base, {e}, wallRound(1));
+    EXPECT_TRUE(changes(result, v0, -(x.area * 20)));
+    EXPECT_EQ(cylindersAbout(result, 1, x.centre), 1);
+}
+
+TEST_F(FilletFallbackTest, roundOnAnExtrudedEllipsePastANarrowStrip)
+{
+    // sk1045 D5 (rows 13-16) and D5c: P1 with a groove (x qx - w - 5 .. qx - w, y 0..3) or a boss
+    // (the same x, y -3..0) leaving a strip of the plane y 0 w wide beside E. Wider than the
+    // round's setback (qx less its axis's x, 1.2107 at r 2) the result is D1's; narrower, the
+    // same cylinder runs on past the strip and is cut off by the groove's or the boss's wall plane
+    // x qx - w (Onshape, RB48 rows 14, 16: one face fewer, the section beyond the plane kept)
+    const ExpectedRound x = p1Round(2);
+    ASSERT_TRUE(x.found);
+    for (bool groove : {true, false}) {
+        for (double w : {1.5, 1.0, 1.19}) {
+            const TopoDS_Shape block = box(5, 3, 20, gp_Pnt(qx - w - 5, groove ? 0 : -3, 0));
+            const TopoDS_Shape shape = groove ? BRepAlgoAPI_Cut(p1(), block).Shape()
+                                              : BRepAlgoAPI_Fuse(p1(), block).Shape();
+            TopoShape base(unified(shape), 1L);
+            const double v0 = volume(base.getShape());
+            const int faces = base.countSubElements("Face");
+            // The section beyond the wall plane: under the arc, from its foot to the plane
+            const double d = std::max(0.0, (qx - w) - x.centre.X());
+            const double beyond = 2 * d - (d / 2 * std::sqrt(4 - d * d) + 2 * std::asin(d / 2));
+            TopoShape e = edgeBetween(base, {qx, 0, 0}, {qx, 0, 20});
+            std::string reason;
+            TopoShape result = forced(base, {e}, wallRound(2), &reason);
+            ASSERT_FALSE(result.isNull()) << groove << " " << w << ": " << reason;
+            EXPECT_TRUE(changes(result, v0, -((x.area - beyond) * 20))) << groove << " " << w;
+            EXPECT_EQ(result.countSubElements("Face"), faces + (d > 0 ? 0 : 1)) << groove << " " << w;
+            EXPECT_EQ(cylindersAbout(result, 2, x.centre), 1) << groove << " " << w;
+        }
+    }
+}
+
+TEST_F(FilletFallbackTest, roundOnAnExtrudedWallRefusals)
+{
+    std::string reason;
+    // sk1045 N1: the ellipse about (0, 0) with semi-axes 20 and by, kept for y >= -1; E at its
+    // right end, between the plane y -1 and the wall near the nose (curvature radius by^2 / 20)
+    auto nose = [](double by) {
+        const double xe = 20 * std::sqrt(1 - 1 / (by * by));
+        return std::pair {
+            padOf(
+                {segment(-xe, -1, xe, -1), ellipseArc(0, 0, 20, by, gp_Pnt(xe, -1, 0), gp_Pnt(-xe, -1, 0))},
+                20
+            ),
+            xe
+        };
+    };
+    {
+        auto [shape, xe] = nose(5);
+        TopoShape base(shape, 1L);
+        const double v0 = volume(base.getShape());
+        TopoShape e = edgeBetween(base, {xe, -1, 0}, {xe, -1, 20});
+        // r 1.2 fits the nose (1.25): the axis rule
+        const double t0 = std::asin(-1.0 / 5);
+        const ExpectedRound x
+            = expectedRound(ellipseCurve(0, 0, 20, 5), t0, pi - t0, true, lineTrace({0, -1}, {0, 1}), 1.2);
+        ASSERT_TRUE(x.found);
+        TopoShape result = forced(base, {e}, wallRound(1.2));
+        EXPECT_TRUE(changes(result, v0, -(x.area * 20)));
+        EXPECT_EQ(cylindersAbout(result, 1.2, x.centre), 1);
+        // r 2 is above the nose's curvature radius: refused (not measured against Onshape)
+        EXPECT_TRUE(forced(base, {e}, wallRound(2), &reason).isNull());
+        EXPECT_FALSE(reason.empty());
+    }
+    {
+        // sk1045 U1: the semi-axis along y 1.5, r 2: no ball fits
+        auto [shape, xe] = nose(1.5);
+        TopoShape base(shape, 1L);
+        TopoShape e = edgeBetween(base, {xe, -1, 0}, {xe, -1, 20});
+        EXPECT_TRUE(forced(base, {e}, wallRound(2), &reason).isNull());
+        EXPECT_FALSE(reason.empty());
+    }
+    TopoShape base(p1(), 1L);
+    TopoShape e = edgeBetween(base, {qx, 0, 0}, {qx, 0, 20});
+    // sk1045 U3: a chamfer of E is not measured: refused by name, equal or two distances
+    for (double second : {1.0, 1.5}) {
+        FF::Request chamfer;
+        chamfer.kind = FF::Kind::Chamfer;
+        chamfer.size1 = 1;
+        chamfer.size2 = second;
+        EXPECT_TRUE(forced(base, {e}, chamfer, &reason).isNull());
+        EXPECT_NE(reason.find("chamfer of a straight edge on an extruded wall"), std::string::npos)
+            << reason;
+    }
+    // sk1045 U8: an ellipse tangent to the plane at E: a smooth edge
+    {
+        TopoShape smooth(
+            padOf(
+                {segment(0, 0, 40, 0),
+                 ellipseArc(40, 20, 10, 20, gp_Pnt(40, 0, 0), gp_Pnt(40, 40, 0)),
+                 segment(40, 40, 0, 40),
+                 segment(0, 40, 0, 0)},
+                20
+            ),
+            1L
+        );
+        TopoShape edge = edgeBetween(smooth, {40, 0, 0}, {40, 0, 20});
+        EXPECT_TRUE(forced(smooth, {edge}, wallRound(2), &reason).isNull());
+        EXPECT_NE(reason.find("smooth edge"), std::string::npos) << reason;
+    }
+    // Two extruded walls (a lens of two ellipses, sk1045 D9's first pair): OCCT's
+    {
+        const double xl = 10 * std::sqrt(0.75);
+        TopoShape lens(
+            padOf(
+                {ellipseArc(0, -3, 10, 6, gp_Pnt(xl, 0, 0), gp_Pnt(-xl, 0, 0)),
+                 ellipseArc(0, 3, 10, 6, gp_Pnt(-xl, 0, 0), gp_Pnt(xl, 0, 0))},
+                20
+            ),
+            1L
+        );
+        TopoShape edge = edgeBetween(lens, {xl, 0, 0}, {xl, 0, 20});
+        EXPECT_TRUE(forced(lens, {edge}, wallRound(1), &reason).isNull());
+        EXPECT_NE(reason.find("two extruded walls"), std::string::npos) << reason;
+    }
+    // sk1045 U2 (rows 8-9): a cone's generator is not covered (Onshape's round there is
+    // free-form); E is, unless extruded walls are left out (the split by coverage's second ask)
+    {
+        TopoDS_Shape cone = BRepPrimAPI_MakeCone(12, 8, 20).Shape();
+        TopoShape half(BRepAlgoAPI_Common(cone, box(30, 30, 30, gp_Pnt(-15, 0, -5))).Shape(), 1L);
+        TopoShape edge = edgeBetween(half, {12, 0, 0}, {8, 0, 20});
+        EXPECT_EQ(FF::coveredEdges(half.getShape(), {edge.getShape()}, fillet(2)), std::vector<bool> {false});
+        EXPECT_EQ(FF::coveredEdges(base.getShape(), {e.getShape()}, fillet(2)), std::vector<bool> {true});
+        EXPECT_EQ(
+            FF::coveredEdges(base.getShape(), {e.getShape()}, fillet(2), false),
+            std::vector<bool> {false}
+        );
+    }
+}
+// NOLINTEND(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)
