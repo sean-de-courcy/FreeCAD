@@ -2303,15 +2303,15 @@ bool FaceUniter::process()
             }
             sew.Perform();
 
-            // update the list of modifications
+            // update the list of modifications: every pair, not the first one sewing changed
+            // (ops#1044). The first group's pairs were updated and every later group's kept
+            // its face from before sewing, which is not in the result; that face was then named
+            // as generated from its edges, and a reference to it broke. A B-spline wall merged
+            // with a hole across its seam showed it: the hole's halves merge first, and sewing
+            // changes both merged faces.
             for (auto& it : modifiedShapes) {
                 if (sew.IsModified(it.second)) {
                     it.second = sew.Modified(it.second);
-
-                    // TODO: uncomment in the V2 algorithm PR
-                    // if (this->myTopoShape.getHistoryAlgorithm() == App::HistoryAlgorithm::V1) {
-                    break;
-                    // }
                 }
             }
 

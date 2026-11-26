@@ -260,5 +260,103 @@ class RefineSplitWallReferenceTest(unittest.TestCase):
         self.assertLess((point.Placement.Base - face.CenterOfMass).Length, 1e-6)
 
 
+def unevenArch(fourth):
+    """ARCH with its fourth point at y = `fourth`: symmetric about x = 0 at 6"""
+    return [(-6, 3), (-3, 6), (0, 7), (3, fourth), (6, 3)]
+
+
+class RefineMergedHoledWallReferenceTest(unittest.TestCase):
+    """A reference to the left wall of a Part::Refine that merges two walls only after an edit.
+
+    The loft of arch sections with the fourth point at y = 5 (not symmetric), drilled along Y by a
+    round hole of radius 1.5 at (x, z) = (`holeX`, 6), halved at x = 0 and fused with its mirror
+    image: two walls meeting in a crease. A datum point at the centre of mass of the left wall.
+    The edit moves the fourth point to y = 6, the arch symmetric: the right wall is the left one's
+    surface run backwards in u and the refine merges them. With the hole across x = 0 the hole's
+    two halves merge too. Sewing after the merge changed both merged faces and only the first
+    face's history followed (ops#1044, review pr1044pre-r2): the wall was then named as new, and
+    the reference broke. Expected: the reference holds the merged wall, whose centre of mass is
+    on the mirror plane."""
+
+    holeX = 0.0
+
+    def setUp(self):
+        self.doc = App.newDocument("RefineMergedHoledWallReference")
+        doc = self.doc
+        self.bottom = doc.addObject("Part::Feature", "Bottom")
+        self.top = doc.addObject("Part::Feature", "Top")
+        self.sections(5)
+        loft = doc.addObject("Part::Loft", "Loft")
+        loft.Sections = [self.bottom, self.top]
+        loft.Solid = True
+        loft.Ruled = True
+        drill = doc.addObject("Part::Cylinder", "Drill")
+        drill.Radius = 1.5
+        drill.Height = 40
+        drill.Placement = App.Placement(V(self.holeX, -10, 6), App.Rotation(V(1, 0, 0), -90))
+        holed = doc.addObject("Part::Cut", "Holed")
+        holed.Base, holed.Tool = loft, drill
+        holed.Refine = False
+        box = doc.addObject("Part::Box", "Box")
+        box.Length = 100
+        box.Width = box.Height = 200
+        box.Placement.Base = V(-100, -100, -100)
+        common = doc.addObject("Part::Common", "Common")
+        common.Base, common.Tool = holed, box
+        common.Refine = False
+        mirror = doc.addObject("Part::Mirroring", "Mirror")
+        mirror.Source = common
+        mirror.Base = V(0, 0, 0)
+        mirror.Normal = V(1, 0, 0)
+        fuse = doc.addObject("Part::MultiFuse", "Fuse")
+        fuse.Shapes = [common, mirror]
+        fuse.Refine = False
+        self.refine = doc.addObject("Part::Refine", "Refine")
+        self.refine.Source = fuse
+        doc.recompute()
+
+    def tearDown(self):
+        App.closeDocument(self.doc.Name)
+
+    def sections(self, fourth):
+        self.bottom.Shape = archSection(0, 1, unevenArch(fourth))
+        self.top.Shape = archSection(12, 0.7, unevenArch(fourth))
+
+    def leftWall(self):
+        """The B-spline wall through the bottom section's point (-3, 6, 0)"""
+        at = Part.Vertex(V(-3, 6, 0))
+        faces = [
+            (i, f)
+            for i, f in enumerate(self.refine.Shape.Faces, 1)
+            if isinstance(f.Surface, Part.BSplineSurface) and f.distToShape(at)[0] < 1e-6
+        ]
+        self.assertEqual(len(faces), 1, kinds(self.refine.Shape))
+        return faces[0]
+
+    def testReferenceFollowsTheMerge(self):
+        self.assertEqual(len(bsplineFaces(self.refine.Shape)), 2, kinds(self.refine.Shape))
+        index, face = self.leftWall()
+        point = self.doc.addObject("Part::DatumPoint", "Point")
+        point.AttachmentSupport = [(self.refine, "Face%d" % index)]
+        point.MapMode = "CenterOfMass"
+        self.doc.recompute()
+        self.assertLess((point.Placement.Base - face.CenterOfMass).Length, 1e-6)
+
+        self.sections(6)
+        self.doc.recompute()
+        self.assertEqual(len(bsplineFaces(self.refine.Shape)), 1, kinds(self.refine.Shape))
+        index, face = self.leftWall()
+        self.assertTrue(point.isValid(), point.getStatusString())
+        self.assertEqual(point.AttachmentSupport[0][1], ("Face%d" % index,))
+        self.assertLess((point.Placement.Base - face.CenterOfMass).Length, 1e-6)
+        self.assertLess(abs(point.Placement.Base.x), 1e-6)
+
+
+class RefineMergedWallHoledInEachHalfReferenceTest(RefineMergedHoledWallReferenceTest):
+    """The control: the hole at x = -3, a whole hole in each half; the hole's halves don't merge."""
+
+    holeX = -3.0
+
+
 if __name__ == "__main__":
     unittest.main()
