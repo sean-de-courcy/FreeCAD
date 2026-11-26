@@ -1,0 +1,16 @@
+{
+"entries": {
+"LoneRoundSmaller|end_edge|V2s": {"axes": ["M1", "E1"], "classes": ["none"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr546-r1", "issue": "ops#1051", "tier": "F"},
+"LoneRoundSmaller|fill_edge|V2s": {"axes": ["M1", "E1"], "classes": ["none"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr546-r1", "issue": "ops#1051", "tier": "F"},
+"LoneRoundSmaller|round_edge|V2s": {"axes": ["M1", "E1"], "classes": ["none"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr546-r1", "issue": "ops#1051", "tier": "F"},
+"LoneRoundSwitch|end_edge|V2s": {"axes": ["M1", "E1", "switch"], "classes": ["none"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr546-r1", "issue": "ops#1051", "tier": "F"},
+"LoneRoundSwitch|fill_edge|V2s": {"axes": ["M1", "E1", "switch"], "classes": ["none"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr546-r1", "issue": "ops#1051", "tier": "F"},
+"LoneRoundSwitch|round_edge|V2s": {"axes": ["M1", "E1", "switch"], "classes": ["none"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr546-r1", "issue": "ops#1051", "tier": "F"},
+"LoneRoundTrayDeeper|end_edge|V2s": {"axes": ["M1", "E1"], "classes": ["none"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr546-r1", "issue": "ops#1051", "tier": "F"},
+"LoneRoundTrayDeeper|fill_edge|V2s": {"axes": ["M1", "E1"], "classes": ["none"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr546-r1", "issue": "ops#1051", "tier": "F"},
+"LoneRoundTrayDeeper|round_edge|V2s": {"axes": ["M1", "E1"], "classes": ["none"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr546-r1", "issue": "ops#1051", "tier": "F"},
+"LoneRoundTwins|end_edge|V2s": {"axes": ["M1", "E1", "twin"], "classes": ["none"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr546-r1", "issue": "ops#1051", "tier": "F"},
+"LoneRoundTwins|fill_edge|V2s": {"axes": ["M1", "E1", "twin"], "classes": ["none"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr546-r1", "issue": "ops#1051", "tier": "F"},
+"LoneRoundTwins|round_edges|V2s": {"axes": ["M1", "E1", "twin"], "classes": ["none"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr546-r1", "issue": "ops#1051", "tier": "F"}
+}
+}
