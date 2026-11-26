@@ -960,8 +960,9 @@ std::vector<TopoDS_Edge> chainWithVertices(
 /// divide the fewer side's span between those pairs into equal parts by count (Onshape, oracle 14
 /// LC1-LC2: thirds, midpoints). `partnersOf` gives each of the more side's inner vertices its partner
 /// on the fewer side, or -1; `partnerFractions` the fewer side's new vertex fractions. Every
-/// fewer-side vertex is matched, so each such span is one fewer-side edge.
-std::vector<int> partnersOf(const std::vector<double>& fewer, const std::vector<double>& more)
+/// fewer-side vertex is matched, so each such span is one fewer-side edge. `tied`, when given, is set
+/// when another matching costs the same within 1e-9 (the pick between them is then rounding's).
+std::vector<int> partnersOf(const std::vector<double>& fewer, const std::vector<double>& more, bool* tied = nullptr)
 {
     const size_t m = fewer.size();
     const size_t n = more.size();
@@ -977,6 +978,10 @@ std::vector<int> partnersOf(const std::vector<double>& fewer, const std::vector<
     }
     std::vector<int> partner(n, -1);  // more's vertex -> fewer's, or -1
     for (size_t i = m, j = n; i > 0 && j > 0;) {
+        if (tied && j > i
+            && std::abs(cost[i][j - 1] - (cost[i - 1][j - 1] + std::abs(fewer[i - 1] - more[j - 1]))) <= 1e-9) {
+            *tied = true;
+        }
         if (cost[i][j] == cost[i][j - 1] && j > i) {
             --j;
         }
@@ -1577,7 +1582,8 @@ LoopMatch connectedLoops(
 // OCCT's compatibility step casts polar rays. The start keeps the corners' positions: a pair is
 // admitted when the section vertex is the one nearest the profile vertex, each taken from its own
 // loop's centre; among those, the least arc-length mismatch of the chain started there, then the
-// nearest in space, then the indices.
+// chain's and the start's positional misfit. Two different chains still tied there are left to the
+// old pairing rather than picked by position or sketch order.
 
 /// The length-weighted centre of a loop's edges.
 gp_Pnt loopCentre(const std::vector<TopoDS_Edge>& edges)
@@ -1595,7 +1601,7 @@ gp_Pnt loopCentre(const std::vector<TopoDS_Edge>& edges)
 
 /// The start pairs to try for an unconnected loop pair, best first, one per distinct chain and at
 /// most `limit`: (profile vertex, section vertex) in the loops' frame, for `connectedLoops`. Empty
-/// when the loops can't be told the same way round.
+/// when the loops can't be told the same way round, or the best chains tie.
 std::vector<std::pair<gp_Pnt, gp_Pnt>> unconnectedStarts(
     const Part::TopoShape& profile,
     const Part::TopoShape& section,
@@ -1649,6 +1655,7 @@ std::vector<std::pair<gp_Pnt, gp_Pnt>> unconnectedStarts(
         int i, j;
         std::vector<double> keys;  // mismatch, then the tie-breaks (`unconnectedStarts`' order)
         std::set<std::pair<int, int>> chain;  // the vertex pairs the chain matches
+        bool tied = false;  // another chain from this start matches as well (partnersOf)
         int group = 0;
     };
     std::vector<Candidate> candidates;
@@ -1674,7 +1681,7 @@ std::vector<std::pair<gp_Pnt, gp_Pnt>> unconnectedStarts(
             Candidate c {i, j, {}, {}};
             c.chain.emplace(i, j);
             double mismatch = 0;  // the cost partnersOf's table minimises
-            const std::vector<int> partner = partnersOf(fewer, more);
+            const std::vector<int> partner = partnersOf(fewer, more, &c.tied);
             for (size_t k = 0; k < partner.size(); ++k) {
                 if (partner[k] >= 0) {
                     mismatch += std::abs(fewer[partner[k]] - more[k]);
@@ -1687,51 +1694,68 @@ std::vector<std::pair<gp_Pnt, gp_Pnt>> unconnectedStarts(
             }
             // Ties in mismatch (a rectangle and its copy with one corner chamfered: both chains
             // telescope to the same sum) are broken by the loops' geometry only, never by where or
-            // which way a sketch starts or where a loop sits (RB54: the pairing translates with B
-            // and ignores the sketch's order): (1) the chain's whole positional misfit, the sum of
-            // its vertex pairs' offset distances; (2) the start pair's offset distance; (3) the
-            // start pair's offsets, coordinate by coordinate (distinct vertices differ there).
+            // which way a sketch starts or where the loops sit or face (RB54: the pairing translates
+            // with B and ignores the sketch's order): (1) the chain's whole positional misfit, the
+            // sum of its vertex pairs' offset distances; (2) the start pair's offset distance.
             double misfit = 0;
             for (const auto& [ia, jb] : c.chain) {
                 misfit += apart(ia, jb);
             }
             c.keys = {mismatch, misfit, apart(i, j)};
-            for (const gp_Vec& v : {offA[i], offB[j]}) {
-                c.keys.insert(c.keys.end(), {v.X(), v.Y(), v.Z()});
-            }
             candidates.push_back(std::move(c));
         }
     }
     // Sort key by key, each into groups of equal value (mismatch within 1e-9, lengths within
     // 1e-7 of the loops' size), so no comparator uses a tolerance.
-    const size_t nkeys = 9;
-    for (size_t key = 0; key < nkeys; ++key) {
+    for (size_t key = 0; key < 3; ++key) {
         const double tolerance = key == 0 ? 1e-9 : (key == 1 ? 1e-7 * size * (na0 + nb0) : 1e-7 * size);
         std::ranges::sort(candidates, [key](const Candidate& x, const Candidate& y) {
             return std::tie(x.group, x.keys[key]) < std::tie(y.group, y.keys[key]);
         });
-        int next = 0;
+        int next = 0, firstGroup = 0;  // the group `first` had before this key
         for (size_t k = 0, first = 0; k < candidates.size(); ++k) {
-            const bool same = k > 0 && candidates[k].group == candidates[first].group
+            const int group = candidates[k].group;
+            const bool same = k > 0 && group == firstGroup
                 && candidates[k].keys[key] - candidates[first].keys[key] <= tolerance;
             if (!same) {
                 first = k;
+                firstGroup = group;
             }
             candidates[k].group = same ? candidates[k - 1].group : next++;
         }
+        // A start whose own matching ties among the least mismatch: which chain it builds is
+        // rounding's, and so is its misfit (and its group), differently each way round. Mismatch
+        // and the tie itself don't depend on the sketches' order, so this test doesn't either.
+        if (key == 0
+            && std::ranges::any_of(candidates, [](const Candidate& c) { return c.group == 0 && c.tied; })) {
+            return {};
+        }
     }
 
+    // One start per group, best first. A group still holding two different chains is a tie the
+    // loops' geometry can't break (a pair with a common mirror line: the chain and its mirror
+    // image; regular polygons, where one start's own matching ties too): no guess between them by
+    // position, sketch order or rounding, so the list
+    // ends there, and with nothing before it the loft is paired the old way (des1071 section 2,
+    // step 5).
     std::vector<std::pair<gp_Pnt, gp_Pnt>> starts;
     std::vector<const std::set<std::pair<int, int>>*> chains;
-    for (const auto& c : candidates) {
-        if (starts.size() >= limit) {
-            break;
+    for (size_t k = 0; k < candidates.size() && starts.size() < limit;) {
+        size_t end = k;
+        while (end < candidates.size() && candidates[end].group == candidates[k].group) {
+            ++end;
         }
-        if (std::ranges::any_of(chains, [&](const auto* seen) { return *seen == c.chain; })) {
-            continue;
+        for (size_t m = k; m < end; ++m) {
+            if (candidates[m].tied || candidates[m].chain != candidates[k].chain) {
+                return starts;
+            }
         }
-        chains.push_back(&c.chain);
-        starts.emplace_back(startPoint(a[c.i]), startPoint(b[c.j]));
+        const Candidate& c = candidates[k];
+        if (std::ranges::none_of(chains, [&](const auto* seen) { return *seen == c.chain; })) {
+            chains.push_back(&c.chain);
+            starts.emplace_back(startPoint(a[c.i]), startPoint(b[c.j]));
+        }
+        k = end;
     }
     return starts;
 }

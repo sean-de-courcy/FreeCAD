@@ -1206,26 +1206,27 @@ class TestLoftUnconnected(ConnectionCase):
                     self.fresh()
 
     # ties in mismatch: a rectangle to its copy with one corner chamfered gives two chains of exactly equal
-    # mismatch (both sums telescope); the loops' geometry decides, never B's place or the sketches' order (RB54:
-    # the chamfer's lower end takes B's corner, its upper end a new vertex at the middle of B's right side)
+    # mismatch (both sums telescope), and the starts' own matchings tie too; no geometric key may be replaced by
+    # B's place or the sketches' order (round 1 of the review: a move of 0.001 mm switched bodies). Onshape's
+    # answer for this pair is not measured (RB54's chamfer row has row 14's profiles), so only the invariance is
+    # asserted.
     CHAMFERED = [(-20, 10), (20, 10), (20, -7), (17, -10), (-20, -10)]
 
-    def chamferSides(self, dx=0):
-        return [((-20, 10), (-12 + dx, 6)), ((20, 10), (12 + dx, 6)), ((-20, -10), (-12 + dx, -6)),
-                ((17, -10), (12 + dx, -6)), ((20, -7), (12 + dx, 0))]
+    def shifted(self, loft, dx):
+        return sorted((p[0], p[1], round(p[2] - dx, 3) + 0.0, p[3]) for p in self.sideSet(loft))
 
     def testChamferedRectangleWithBMoved(self):
-        volume = None
+        reference = None
         for dx in (0, 0.001, -0.001, 5, -5, 8):
             with self.subTest(dx=dx):
                 try:
                     loft = self.build(models.polygon(self.CHAMFERED), models.rectangle(-12 + dx, -6, 12 + dx, 6))
                     self.assertValid(loft)
-                    self.assertEqual(len(loft.Shape.Faces), 7, self.sideSet(loft))
-                    self.assertSides(loft, self.chamferSides(dx))
-                    if volume is None:
-                        volume = loft.Shape.Volume
-                    self.assertAlmostEqual(loft.Shape.Volume, volume, delta=1e-6 * volume)
+                    got = (len(loft.Shape.Faces), self.shifted(loft, dx))
+                    if reference is None:
+                        reference = (got, loft.Shape.Volume)
+                    self.assertEqual(got, reference[0])
+                    self.assertAlmostEqual(loft.Shape.Volume, reference[1], delta=1e-6 * reference[1])
                 finally:
                     self.fresh()
 
@@ -1241,12 +1242,16 @@ class TestLoftUnconnected(ConnectionCase):
             q = rect[k:] + rect[:k]
             variants.append(("B from %d" % k, A, q))
             variants.append(("B back from %d" % k, A, [q[0]] + q[:0:-1]))
+        reference = None
         for label, bottom, top in variants:
             with self.subTest(variant=label):
                 try:
                     loft = self.build(models.polygon(bottom), models.polygon(top))
                     self.assertValid(loft)
-                    self.assertSides(loft, self.chamferSides())
+                    got = (self.sideSet(loft), round(loft.Shape.Volume, 6))
+                    if reference is None:
+                        reference = got
+                    self.assertEqual(got, reference)
                 finally:
                     self.fresh()
 
@@ -1268,6 +1273,37 @@ class TestLoftUnconnected(ConnectionCase):
                     self.assertAlmostEqual(loft.Shape.Volume, reference[1], delta=1e-6 * reference[1])
                 finally:
                     self.fresh()
+
+    # a pair with a common mirror line: a chain and its mirror image tie on every geometric key, so neither is
+    # picked by position (round 2 of the review: global coordinates gave the mirror body once the model was
+    # turned past 90 deg); the loft keeps the old pairing, which turns with the sketches
+    def assertTurnsWithTheSketches(self, bottom, top, angles=(0, 45, 91, 180, 270)):
+        reference = None
+        for degrees in angles:
+            with self.subTest(degrees=degrees):
+                try:
+                    c, s_ = math.cos(math.radians(degrees)), math.sin(math.radians(degrees))
+                    turn = lambda pts: [(c * x - s_ * y, s_ * x + c * y) for x, y in pts]
+                    loft = self.build(models.polygon(turn(bottom)), models.polygon(turn(top)))
+                    self.assertValid(loft)
+                    back = []
+                    for p in self.sideSet(loft):
+                        q = [(c * x + s_ * y, -s_ * x + c * y) for x, y in ((p[0], p[1]), (p[2], p[3]))]
+                        back.append(tuple(round(v, 2) + 0.0 for xy in q for v in xy))
+                    got = (sorted(back), round(loft.Shape.Volume, 4))
+                    if reference is None:
+                        reference = got
+                    self.assertEqual(got, reference)
+                finally:
+                    self.fresh()
+
+    def testSymmetricPairTurnedGivesTheTurnedBody(self):
+        self.assertTurnsWithTheSketches([(-20, -10), (20, -10), (20, 10), (-20, 10)], [(-12, -5), (12, -5), (0, 10)])
+        self.assertTurnsWithTheSketches([(-20, -12), (20, -12), (0, 13)], [(-12, -6), (12, -6), (12, 6), (-12, 6)])
+
+    def testTwoChamferRectangleTurned(self):
+        bottom = [(-17, -10), (17, -10), (20, -7), (20, 10), (-20, 10), (-20, -7)]
+        self.assertTurnsWithTheSketches(bottom, [(-12, -6), (12, -6), (12, 6), (-12, 6)])
 
     def testHexagonToSquareEveryOrder(self):
         hexagon = [(10 * math.cos(math.radians(60 * k)), 10 * math.sin(math.radians(60 * k))) for k in range(6)]
