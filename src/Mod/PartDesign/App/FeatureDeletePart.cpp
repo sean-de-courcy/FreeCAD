@@ -351,7 +351,9 @@ std::string DeletePart::deleteLock(const App::DocumentObject* feature)
             continue;
         }
         Feature* deleter = enderOf(other);
-        if (!deleter) {
+        // The ender itself (a studio owner's base, StudioBases, is the part's solid before it):
+        // its state is the part ended, nothing of it is read (ops#1065)
+        if (!deleter || read == deleter) {
             continue;
         }
         // The whole Body (a Boolean's tool, a binder, a link) is read at its end, which is empty

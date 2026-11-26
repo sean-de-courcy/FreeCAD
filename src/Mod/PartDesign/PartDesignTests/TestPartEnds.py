@@ -71,7 +71,7 @@ class TestPartEnds(unittest.TestCase):
 
     def padAfter(self, body, name="Next"):
         pad = body.newObject("PartDesign::Pad", name)
-        pad.Profile = sketch(body, name + "Sketch", (2, 2, 4, 4))
+        pad.Profile = sketch(body, name + "Sketch", (2, 2, 4, 4), z=2)
         pad.Length = 1
         self.doc.recompute()
         return pad
@@ -115,7 +115,7 @@ class TestPartEnds(unittest.TestCase):
         self.assertTrue(pocket.isValid(), pocket.getStatusString())
         self.assertFalse(pocket.PartEnded)
         self.assertAlmostEqual(body.Shape.Volume, 100, places=6)
-        half = pocket.Profile
+        half = pocket.Profile[0]
         full = sketch(body, "FullSketch", (-10, -10, 20, 20), z=2)
         pocket.Profile = full
         self.doc.recompute()
@@ -128,8 +128,8 @@ class TestPartEnds(unittest.TestCase):
         self.doc.recompute()
         self.assertFalse(pocket.PartEnded)
         self.assertTrue(pad.isValid(), pad.getStatusString())
-        # the Pad's 2 x 2 x 1 sits on the floor of the cut half (x 2..4 is cut away)
-        self.assertGreater(body.Shape.Volume, 100 - 1e-6)
+        # the Pad's 2 x 2 x 1 on the half left (x 0..5)
+        self.assertAlmostEqual(body.Shape.Volume, 104, places=6)
 
     def testLaterPadRefusedThenPocketSuppressedOrRolledBack(self):
         """Case 3: a Pad after the ending Pocket fails naming it and the Body stays empty; the
@@ -149,9 +149,17 @@ class TestPartEnds(unittest.TestCase):
         self.doc.recompute()
         self.assertTrue(pocket.PartEnded)
         self.assertFalse(pad.isValid())
-        body.Tip = block
+        # The bar above the Pocket, as TestDeletePart's testTheBarAboveBringsItBack: the Tip is the
+        # block, the Pocket is held, and the part ends again at the end
+        PartDesign.rollStudioTo(self.doc, block)
         self.doc.recompute()
-        self.assertAlmostEqual(body.Shape.Volume, 200, places=6)
+        self.assertIs(body.Tip, block)
+        self.assertTrue(body.holds(pocket))
+        self.assertAlmostEqual(block.Shape.Volume, 200, places=6)
+        PartDesign.rollStudioToEnd(self.doc)
+        self.doc.recompute()
+        self.assertTrue(pocket.PartEnded)
+        self.assertTrue(body.Shape.isNull())
 
     def testReopenKeepsTheEndAndTheLock(self):
         """Cases 4 and F: saved and reopened with no recompute, the states are the same; the Pad,
@@ -310,14 +318,13 @@ class TestPartEnds(unittest.TestCase):
         self.assertAlmostEqual(other.Shape.Volume, 100, places=6)
 
     def testBrokenSketchBringsThePartBack(self):
-        """E: the ended Pocket's sketch broken by a conflicting constraint: the Pocket in error,
-        PartEnded false, the block back (volume 200)."""
+        """E: the ended Pocket's profile broken (a side deleted: an open wire): the Pocket in
+        error, PartEnded false, the block back (volume 200)."""
         body, _ = self.block()
         pocket = self.pocket(body, (-10, -10, 20, 20))
         self.assertTrue(pocket.PartEnded)
-        sk = pocket.Profile
-        sk.addConstraint(Sketcher.Constraint("DistanceX", 0, 1, 0, 2, 30))
-        sk.addConstraint(Sketcher.Constraint("DistanceX", 0, 1, 0, 2, 40))
+        sk = pocket.Profile[0]
+        sk.delGeometry(0)
         self.doc.recompute()
         self.assertFalse(pocket.isValid())
         self.assertFalse(pocket.PartEnded)
@@ -409,6 +416,7 @@ class TestPartEnds(unittest.TestCase):
         pattern.Occurrences = 2
         if hasattr(pattern, "Reapply"):
             pattern.Reapply = False
+        body.Tip = pattern
         self.doc.recompute()
         self.assertEnded(pattern, body)
 
@@ -423,6 +431,7 @@ class TestPartEnds(unittest.TestCase):
         mixed.Direction = (other.Origin.OriginFeatures[0], [""])
         mixed.Length = 1
         mixed.Occurrences = 2
+        other.Tip = mixed
         self.doc.recompute()
         self.assertTrue(mixed.isValid(), mixed.getStatusString())
         self.emptyResult(mixed)
