@@ -672,6 +672,73 @@ class TestLoftTangentRuns(ConnectionCase):
         self.assertEqual(len(shape.Solids), 1)
         self.assertEqual(len(shape.Faces), 6)
 
+    def scaledRow(self, a, b, scale):
+        sa, ea, ba = self.spanA(a)
+        sb, eb, bb = self.spanB(b)
+        A = sa + models.polyline([ea, ba, (-20, -10), (-20, 10)])
+        B = sb + models.polyline([eb, bb, (-12, -6), (-12, 6)])
+        for g in A + B:
+            g.scale(V(0, 0, 0), scale)
+        s = lambda p: (p[0] * scale, p[1] * scale)
+        return self.loft(A, B, [(s((-20, 10)), s((-12, 6))), (s(ea), s(eb))], height=H * scale)
+
+    def testTheSidesDontDependOnTheModelsSize(self):
+        """Review r1f finding 1: the flat-side test is relative to the face's size: rows 7, 13 and 15 keep Onshape's F
+        at 600 mm and 4 m (scale 15 and 100)."""
+        for a, b, faces, volume in (("S2t", "S1", 7, 15090.177832), ("S3t", "S2t", 7, 14354.963591),
+                                    ("S2t", "S2t", 7, 14908.015301)):
+            for scale in (15, 100):
+                with self.subTest(a=a, b=b, scale=scale):
+                    loft = self.scaledRow(a, b, scale)
+                    self.assertTrue(loft.isValid(), loft.getStatusString())
+                    self.assertTrue(loft.Shape.isValid())
+                    self.assertEqual(len(loft.Shape.Faces), faces)
+                    self.assertAlmostEqual(loft.Shape.Volume / scale**3, volume, delta=ONSHAPE_SURFACE * volume)
+                    self.tearDown()
+                    self.setUp()
+
+    def slot(self, half=10, r=5):
+        return [Part.LineSegment(V(-half, -r, 0), V(half, -r, 0)), self.arc((half, 0), r, -90, 90),
+                Part.LineSegment(V(half, r, 0), V(-half, r, 0)), self.arc((-half, 0), r, 90, 270)]
+
+    def testEqualChainsEveryJointTangentBuildAsBefore(self):
+        """Review r1f finding 2: a slot to a smaller slot turned 20 degrees, one connection: every joint tangent, no side
+        flat, no new vertex. Onshape makes one closed side face (rule 5, not built yet); the loft builds as before
+        ops#1046, every side edge kept (F 6)."""
+        self.profile = models.sketch(self.doc, "Bottom", self.slot(), self.body)
+        turned = App.Placement(V(0, 0, H), App.Rotation(V(0, 0, 1), 20))
+        self.section = models.sketch(self.doc, "Top", self.slot(6, 3), self.body, placement=turned)
+        self.doc.recompute()
+        loft = self.body.newObject("PartDesign::AdditiveLoft", "Loft")
+        loft.Profile = self.profile
+        loft.Sections = [self.section]
+        self.connect(loft, [((10, -5), (6, -3))])
+        self.doc.recompute()
+        self.assertTrue(loft.isValid(), loft.getStatusString())
+        self.assertEqual(len(loft.Shape.Faces), 6)
+
+    def teardrop(self, d, r):
+        th = math.degrees(math.acos(r / d))
+        t = (r * math.cos(math.radians(th)), r * math.sin(math.radians(th)))
+        return [self.arc((0, 0), r, th, 360 - th)] + models.polyline([(t[0], -t[1]), (d, 0), t])
+
+    def testAWideArcInARunFits(self):
+        """Review r1f finding 3: a 240 degree arc inside a merged run needs more than 41 samples to fit."""
+        loft = self.loft(self.teardrop(20, 10), self.teardrop(10, 5), [((20, 0), (10, 0))])
+        self.assertTrue(loft.isValid(), loft.getStatusString())
+        self.assertTrue(loft.Shape.isValid())
+        self.assertEqual(len(loft.Shape.Solids), 1)
+
+    def testACircleRunEndingAtTheSeam(self):
+        """Review r1f finding 4: a circle against a rectangle with one rounded corner, connected at the circle's seam:
+        the run that ends at the seam joins its pieces back by their own parameters."""
+        rounded = models.polyline([(6, 4), (-6, 4), (-6, -2)]) + [self.arc((-4, -2), 2, 180, 270)]
+        rounded += models.polyline([(-4, -4), (6, -4), (6, 4)])
+        loft = self.loft([Part.Circle(V(0, 0, 0), V(0, 0, 1), 10)], rounded, [((10, 0), (6, -4))])
+        self.assertTrue(loft.isValid(), loft.getStatusString())
+        self.assertTrue(loft.Shape.isValid())
+        self.assertEqual(len(loft.Shape.Solids), 1)
+
     # refusals
     def testEveryJointSmoothWithNoPlaneStops(self):
         """sk1046 case 6: circle r 10 (vertices at 0 and 180 degrees) to circle r 6 (0, 90, 180, 270), one connection:

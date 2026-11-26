@@ -49,7 +49,6 @@
 #include <GeomAPI_PointsToBSpline.hxx>
 #include <GeomAPI_ProjectPointOnCurve.hxx>
 #include <GeomFill_Profiler.hxx>
-#include <GeomLib_IsPlanarSurface.hxx>
 #include <Geom_BSplineCurve.hxx>
 #include <Geom_BSplineSurface.hxx>
 #include <Geom_Curve.hxx>
@@ -1592,7 +1591,8 @@ struct MonotoneCubic
 };
 
 /// One piece of a rail: `at` on [u0, u1] fitted C2 (it is smooth there), raised to `railDegree`.
-/// `error` gets the largest distance from `at` between the samples.
+/// The samples double (41 to 1281) until the fit is within 1e-8 of `at` at three points between
+/// each two samples (a wide arc needs more than 41); `error` gets the largest distance found.
 Handle(Geom_BSplineCurve) fitRailPiece(
     const std::function<gp_Pnt(double)>& at,
     double u0,
@@ -1600,24 +1600,37 @@ Handle(Geom_BSplineCurve) fitRailPiece(
     double& error
 )
 {
-    constexpr int count = 41;
-    TColgp_Array1OfPnt points(1, count);
-    TColStd_Array1OfReal params(1, count);
-    for (int i = 0; i < count; ++i) {
-        const double u = u0 + (u1 - u0) * i / (count - 1);
-        points(i + 1) = at(u);
-        params(i + 1) = u;
+    Handle(Geom_BSplineCurve) curve;
+    double worst = 0;
+    for (int count = 41; count <= 1281; count = 2 * count - 1) {
+        TColgp_Array1OfPnt points(1, count);
+        TColStd_Array1OfReal params(1, count);
+        for (int i = 0; i < count; ++i) {
+            const double u = u0 + (u1 - u0) * i / (count - 1);
+            points(i + 1) = at(u);
+            params(i + 1) = u;
+        }
+        GeomAPI_PointsToBSpline approx(points, params, 3, railDegree, GeomAbs_C2, 1e-9);
+        if (!approx.IsDone()) {
+            continue;
+        }
+        curve = approx.Curve();
+        worst = 0;
+        for (int i = 0; i + 1 < count; ++i) {
+            for (double f : {0.25, 0.5, 0.75}) {
+                const double u = u0 + (u1 - u0) * (i + f) / (count - 1);
+                worst = std::max(worst, curve->Value(u).Distance(at(u)));
+            }
+        }
+        if (worst < 1e-8) {
+            break;
+        }
     }
-    GeomAPI_PointsToBSpline approx(points, params, 3, railDegree, GeomAbs_C2, 1e-9);
-    if (!approx.IsDone()) {
+    if (curve.IsNull()) {
         throw Base::CADKernelError("Loft: failed to fit a side face over tangent joints");
     }
-    Handle(Geom_BSplineCurve) curve = approx.Curve();
     curve->IncreaseDegree(railDegree);
-    for (int i = 0; i + 1 < count; ++i) {
-        const double u = u0 + (u1 - u0) * (i + 0.5) / (count - 1);
-        error = std::max(error, curve->Value(u).Distance(at(u)));
-    }
+    error = std::max(error, worst);
     return curve;
 }
 
@@ -1839,19 +1852,16 @@ TopoDS_Edge edgeBetween(
     Part::ShapeMapper& mapper
 )
 {
-    const auto forward = TopoDS::Edge(origin.Oriented(TopAbs_FORWARD));
+    // the pieces lie on the origin's curve with its parameters (`splitEdge`): the span runs from
+    // where `from`'s traversal starts to where `to`'s ends
     double first = 0;
     double last = 0;
-    const Handle(Geom_Curve) curve = BRep_Tool::Curve(forward, first, last);
+    const Handle(Geom_Curve) curve = BRep_Tool::Curve(from, first, last);
+    const double u0 = from.Orientation() == TopAbs_REVERSED ? last : first;
+    BRep_Tool::Curve(to, first, last);
+    const double u1 = to.Orientation() == TopAbs_REVERSED ? first : last;
     const TopoDS_Vertex v0 = TopExp::FirstVertex(from, Standard_True);
     const TopoDS_Vertex v1 = TopExp::LastVertex(to, Standard_True);
-    GeomAPI_ProjectPointOnCurve p0(BRep_Tool::Pnt(v0), curve, first, last);
-    GeomAPI_ProjectPointOnCurve p1(BRep_Tool::Pnt(v1), curve, first, last);
-    if (p0.NbPoints() == 0 || p1.NbPoints() == 0) {
-        throw Base::CADKernelError("Loft: a profile edge could not be joined again");
-    }
-    const double u0 = p0.LowerDistanceParameter();
-    const double u1 = p1.LowerDistanceParameter();
     TopoDS_Edge edge;
     if (u0 < u1) {
         BRepBuilderAPI_MakeEdge make(curve, v0, v1, u0, u1);
@@ -1871,13 +1881,36 @@ TopoDS_Edge edgeBetween(
     return edge;
 }
 
-bool isFlat(const TopoDS_Face& face)
+/// Whether the side face between the paired pieces `a` and `b` is flat: both straight, the four
+/// ends in one plane (relative to the face's size, so a model's scale doesn't change the answer),
+/// and that plane holds the normal of each profile that has a condition.
+bool flatSide(const TopoDS_Edge& a, const TopoDS_Edge& b, const SideConditions& conditions)
 {
-    BRepAdaptor_Surface adaptor(face);
-    if (adaptor.GetType() == GeomAbs_Plane) {
-        return true;
+    if (!isLine(a) || !isLine(b)) {
+        return false;
     }
-    return GeomLib_IsPlanarSurface(BRep_Tool::Surface(face), 1e-7).IsPlanar();
+    const gp_Pnt p0 = startPoint(a);
+    const gp_Vec u(p0, endPoint(a));
+    const gp_Vec w0(p0, startPoint(b));
+    const gp_Vec w1(p0, endPoint(b));
+    const double size = std::max({u.Magnitude(), w0.Magnitude(), w1.Magnitude()});
+    gp_Vec normal = u.Crossed(w0).Magnitude() > u.Crossed(w1).Magnitude() ? u.Crossed(w0) : u.Crossed(w1);
+    if (normal.Magnitude() < 1e-12 * size * size) {
+        return true;  // the four ends on one line
+    }
+    normal.Normalize();
+    const double tolerance = std::max(Precision::Confusion(), 1e-9 * size);
+    if (std::abs(normal.Dot(w0)) > tolerance || std::abs(normal.Dot(w1)) > tolerance) {
+        return false;
+    }
+    constexpr double angle = 1e-7;
+    if (conditions.start && std::abs(normal.Dot(gp_Vec(conditions.normal0))) > angle) {
+        return false;
+    }
+    if (conditions.end && std::abs(normal.Dot(gp_Vec(conditions.normal1))) > angle) {
+        return false;
+    }
+    return true;
 }
 
 /// Whether the face has an edge through the point.
@@ -1926,9 +1959,14 @@ Part::TopoShape mergeSmoothRuns(Part::TopoShape shell, LoopMatch& match, SideCon
             }
         }
         if (faces[k].IsNull()) {
-            return shell;  // not the side faces this match describes: the loft as built
+            throw Base::CADKernelError("Loft: a side face of the connected loft was not found");
         }
-        flat[k] = isFlat(faces[k]);
+    }
+    if (conditions.start || conditions.end) {
+        profileNormals(match.wireA.getShape(), match.wireB.getShape(), conditions.normal0, conditions.normal1);
+    }
+    for (size_t k = 0; k < n; ++k) {
+        flat[k] = flatSide(match.edgesA[k], match.edgesB[k], conditions);
     }
     std::vector<bool> drop(n);
     size_t dropped = 0;
@@ -1942,7 +1980,14 @@ Part::TopoShape mergeSmoothRuns(Part::TopoShape shell, LoopMatch& match, SideCon
         return shell;
     }
     if (dropped == n) {
-        // Onshape: one closed side face with the first connection's edge as its seam (rule 5)
+        // Onshape: one closed side face with the first connection's edge as its seam (rule 5). Without
+        // new vertices the loft builds as it did before ops#1046, with every side edge (debt);
+        // with them it stops
+        const bool split = std::ranges::find(match.freshA, true) != match.freshA.end()
+            || std::ranges::find(match.freshB, true) != match.freshB.end();
+        if (!split) {
+            return shell;
+        }
         throw Base::CADKernelError(QT_TRANSLATE_NOOP(
             "Exception",
             "Loft: every side joint of the connected loop is tangent with no flat side beside it; "
@@ -1965,10 +2010,6 @@ Part::TopoShape mergeSmoothRuns(Part::TopoShape shell, LoopMatch& match, SideCon
             groups.push_back({k});
         }
     }
-    if (conditions.start || conditions.end) {
-        profileNormals(match.wireA.getShape(), match.wireB.getShape(), conditions.normal0, conditions.normal1);
-    }
-
     BRepBuilderAPI_Sewing sewer(1e-6);
     std::vector<TopoDS_Face> kept;
     std::vector<std::pair<std::vector<TopoDS_Face>, TopoDS_Face>> merged;
