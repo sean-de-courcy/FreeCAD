@@ -84,7 +84,10 @@
 #include <gp_Dir2d.hxx>
 #include <gp_Vec2d.hxx>
 #include <Geom_BSplineCurve.hxx>
+#include <Geom_BezierCurve.hxx>
 #include <Geom_BSplineSurface.hxx>
+#include <Geom_BezierSurface.hxx>
+#include <Geom_SurfaceOfRevolution.hxx>
 #include <Geom_Circle.hxx>
 #include <Geom_Curve.hxx>
 #include <GeomAdaptor_Curve.hxx>
@@ -2058,8 +2061,14 @@ bool edgeInPlane(const TopoDS_Edge& edge, const gp_Pln& plane)
 /// beyond the plane within the box's own enlargement
 bool whollyBeyond(const TopoDS_Face& face, const gp_Pnt& point, const gp_Dir& toward)
 {
+    // The box in the plane's own frame (z along toward, the point at the origin), so the bound
+    // does not loosen with the model's orientation (review pri1040 r1, T5: an axis-aligned box of
+    // a wall drawn at an angle reaches past the plane)
+    gp_Trsf frame;
+    frame.SetTransformation(gp_Ax3(point, toward));
+    const TopoDS_Face local = TopoDS::Face(face.Moved(TopLoc_Location(frame)));
     Bnd_Box box;
-    BRepBndLib::Add(face, box, Standard_False);
+    BRepBndLib::Add(local, box, Standard_False);
     if (box.IsVoid() || box.IsOpen()) {
         return false;
     }
@@ -2067,18 +2076,8 @@ bool whollyBeyond(const TopoDS_Face& face, const gp_Pnt& point, const gp_Dir& to
     double y[2];
     double z[2];
     box.Get(x[0], y[0], z[0], x[1], y[1], z[1]);
-    double slack = linearTolerance
-        + box.GetGap() * (std::abs(toward.X()) + std::abs(toward.Y()) + std::abs(toward.Z()));
-    for (double cx : x) {
-        for (double cy : y) {
-            for (double cz : z) {
-                if (gp_Vec(point, gp_Pnt(cx, cy, cz)).Dot(gp_Vec(toward)) > slack) {
-                    return false;
-                }
-            }
-        }
-    }
-    return true;
+    // Get() includes the box's gap
+    return z[1] <= linearTolerance + box.GetGap();
 }
 
 /// ops#640, the replica's #150 (a round at the end of a wall that stands flush on a chamfered
@@ -3189,6 +3188,211 @@ std::optional<VertexEnd> notchEnd(
     return end;
 }
 
+/** ops#1040, case 3 (a ramp lip across a half-round bar): a concave straight edge between two
+ * planes F and W ends at a vertex of 4 edges and 4 faces, the other two a plane G through the
+ * vertex, transversal to the edge, and a face S that meets the vertex only through one edge with F
+ * and one with G, is tangent to G along the latter, and lies wholly behind F's plane (in the
+ * material under F). The concave dress-up's fill lies in front of F and never reaches S: S is left
+ * out, its two edges count as one (F's rim against G), and G is the end face, as on a plain step.
+ * Called only for a 4/4 vertex that notchEnd and overflowEnd refused; anything less clear-cut
+ * stays refused
+ */
+void foldBehindFace(const Context& ctx,
+                    const EdgeData& data,
+                    const TopoDS_Vertex& vertex,
+                    std::vector<TopoDS_Shape>& edges,
+                    std::vector<TopoDS_Shape>& faces)
+{
+    if (!data.line || data.convex || data.ruled || edges.size() != 4 || faces.size() != 4) {
+        return;
+    }
+    for (const auto& own : data.faces) {
+        if (BRepAdaptor_Surface(own, Standard_False).GetType() != GeomAbs_Plane) {
+            return;
+        }
+    }
+    const gp_Pnt point = BRep_Tool::Pnt(vertex);
+    const gp_Dir away = awayFrom(data.edge, vertex);
+    std::vector<TopoDS_Face> others;
+    for (const auto& face : faces) {
+        if (!face.IsSame(data.faces[0]) && !face.IsSame(data.faces[1])) {
+            others.push_back(TopoDS::Face(face));
+        }
+    }
+    if (others.size() != 2) {
+        return;
+    }
+    auto has = [&](const TopoDS_Shape& edge, const TopoDS_Shape& face) {
+        for (const auto& of : ctx.list(ctx.edgeFaces, edge)) {
+            if (of.IsSame(face)) {
+                return true;
+            }
+        }
+        return false;
+    };
+    int found = 0;
+    std::vector<TopoDS_Shape> foldedEdges;
+    std::vector<TopoDS_Shape> foldedFaces;
+    for (int k = 0; k < 2; ++k) {
+        const TopoDS_Face& end = others[k];
+        const TopoDS_Face& behind = others[1 - k];
+        BRepAdaptor_Surface endSurface(end, Standard_False);
+        if (endSurface.GetType() != GeomAbs_Plane) {
+            continue;
+        }
+        const gp_Pln endPlane = endSurface.Plane();
+        if (endPlane.Distance(point) > linearTolerance
+            || std::abs(endPlane.Axis().Direction().Dot(away)) < 1e-6) {
+            continue;
+        }
+        // S's edges at the vertex: one with an own face F, one with G; nothing else
+        TopoDS_Edge withOwn;
+        TopoDS_Edge withEnd;
+        int ownIndex = -1;
+        bool holds = true;
+        std::vector<TopoDS_Shape> keptEdges;
+        for (const auto& edge : edges) {
+            if (!has(edge, behind)) {
+                keptEdges.push_back(edge);
+                continue;
+            }
+            if (edge.IsSame(data.edge) || ctx.selected.Contains(edge)
+                || ctx.list(ctx.edgeFaces, edge).size() != 2) {
+                holds = false;
+                break;
+            }
+            int which = has(edge, data.faces[0]) ? 0 : has(edge, data.faces[1]) ? 1 : -1;
+            if (which >= 0 && withOwn.IsNull()) {
+                withOwn = TopoDS::Edge(edge);
+                ownIndex = which;
+            }
+            else if (which < 0 && has(edge, end) && withEnd.IsNull()) {
+                withEnd = TopoDS::Edge(edge);
+            }
+            else {
+                holds = false;
+                break;
+            }
+        }
+        if (!holds || withOwn.IsNull() || withEnd.IsNull() || keptEdges.size() != 2) {
+            continue;
+        }
+        if (!ChFi3d::IsTangentFaces(withEnd, end, behind)) {
+            continue;
+        }
+        const TopoDS_Face& floor = data.faces[ownIndex];
+        if (!whollyBeyond(behind, point, outwardNormal(floor, point))) {
+            continue;
+        }
+        keptEdges.push_back(withOwn);
+        ++found;
+        foldedEdges = std::move(keptEdges);
+        foldedFaces = {data.faces[0], data.faces[1], end};
+    }
+    if (found == 1) {
+        edges = std::move(foldedEdges);
+        faces = std::move(foldedFaces);
+    }
+}
+
+/** ops#1040, case 1 (a through hole in a wall whose bottom touches the floor the wall stands on):
+ * a concave straight edge between two planes F and W carries on through the vertex in a straight
+ * edge on the same two faces (the foot line split at the point the hole touches), and every other
+ * edge at the vertex lies between F or W and faces wholly behind that face's plane (the hole's
+ * cylinder, behind the wall). The concave fill lies in front of both planes and never reaches those
+ * faces: they are left out with their edges, and the vertex is one inside the foot line (2 edges,
+ * 2 faces). Where the fill crosses the hole's mouth, the trims over the face take it, or the
+ * run-off check refuses. Called only for a vertex that would be refused
+ */
+void foldBehindOwn(const Context& ctx,
+                   const EdgeData& data,
+                   const TopoDS_Vertex& vertex,
+                   std::vector<TopoDS_Shape>& edges,
+                   std::vector<TopoDS_Shape>& faces)
+{
+    if (!data.line || data.convex || data.ruled) {
+        return;
+    }
+    for (const auto& own : data.faces) {
+        if (BRepAdaptor_Surface(own, Standard_False).GetType() != GeomAbs_Plane) {
+            return;
+        }
+    }
+    const gp_Pnt point = BRep_Tool::Pnt(vertex);
+    const gp_Dir away = awayFrom(data.edge, vertex);
+    auto ownIndex = [&](const TopoDS_Shape& face) {
+        return face.IsSame(data.faces[0]) ? 0 : face.IsSame(data.faces[1]) ? 1 : -1;
+    };
+    // Each other face: wholly behind one own face's plane, and that face's index
+    std::vector<std::pair<TopoDS_Shape, int>> behind;
+    for (const auto& face : faces) {
+        if (ownIndex(face) >= 0) {
+            continue;
+        }
+        int which = -1;
+        for (int k = 0; k < 2 && which < 0; ++k) {
+            if (whollyBeyond(TopoDS::Face(face), point, outwardNormal(data.faces[k], point))) {
+                which = k;
+            }
+        }
+        if (which < 0) {
+            return;
+        }
+        behind.emplace_back(face, which);
+    }
+    if (behind.empty() || faces.size() != behind.size() + 2) {
+        return;
+    }
+    auto behindIndex = [&](const TopoDS_Shape& face) {
+        for (const auto& [f, k] : behind) {
+            if (f.IsSame(face)) {
+                return k;
+            }
+        }
+        return -1;
+    };
+    std::vector<TopoDS_Shape> keptEdges;
+    bool continuation = false;
+    for (const auto& edge : edges) {
+        if (edge.IsSame(data.edge)) {
+            keptEdges.push_back(edge);
+            continue;
+        }
+        auto ofEdge = ctx.list(ctx.edgeFaces, edge);
+        if (ofEdge.size() != 2) {
+            return;
+        }
+        const int a = ownIndex(ofEdge[0]);
+        const int b = ownIndex(ofEdge[1]);
+        if (a >= 0 && b >= 0) {
+            // The foot line's other piece, straight on through the vertex
+            BRepAdaptor_Curve curve(TopoDS::Edge(edge));
+            if (continuation || curve.GetType() != GeomAbs_Line
+                || awayFrom(TopoDS::Edge(edge), vertex).Dot(away) > -1 + angularTolerance) {
+                return;
+            }
+            continuation = true;
+            keptEdges.push_back(edge);
+            continue;
+        }
+        if (ctx.selected.Contains(edge)) {
+            return;
+        }
+        // Between an own face and a face behind its plane, or between two faces behind
+        const int own = a >= 0 ? a : b;
+        const TopoDS_Shape& other = a >= 0 ? ofEdge[1] : ofEdge[0];
+        if (own >= 0 ? behindIndex(other) != own
+                     : behindIndex(ofEdge[0]) < 0 || behindIndex(ofEdge[1]) < 0) {
+            return;
+        }
+    }
+    if (!continuation) {
+        return;
+    }
+    edges = std::move(keptEdges);
+    faces = {data.faces[0], data.faces[1]};
+}
+
 /// 5.6, interface point 1: how the selected edge ends at the vertex
 VertexEnd classify(
     const Context& ctx,
@@ -3229,6 +3433,10 @@ VertexEnd classify(
             && (edges.size() != 4 || faces.size() != 4)) {
             foldFloorPieces(ctx, data, vertex, edges, faces);
         }
+        if (!(edges.size() == 2 && faces.size() == 2) && (edges.size() != 3 || faces.size() != 3)
+            && (edges.size() != 4 || faces.size() != 4)) {
+            foldBehindOwn(ctx, data, vertex, edges, faces);
+        }
     }
     // A vertex inside a curve, between two edges on the same two faces (a circle split at its
     // cylinder's seam, as a fused stadium's half circle): only a tangent continuation
@@ -3241,8 +3449,11 @@ VertexEnd classify(
         if (auto overflow = overflowEnd(ctx, data, vertex, edges, faces, why)) {
             return *overflow;
         }
-        end.reason = "a vertex where 4 edges meet (" + why + ")";
-        return end;
+        foldBehindFace(ctx, data, vertex, edges, faces);
+        if (edges.size() == 4) {
+            end.reason = "a vertex where 4 edges meet (" + why + ")";
+            return end;
+        }
     }
     if (!insideCurve && (edges.size() != 3 || faces.size() != 3)) {
         end.reason = "a vertex where " + std::to_string(edges.size()) + " edges meet";
@@ -9898,6 +10109,149 @@ bool trimFusedTool(
     return clipped;
 }
 
+/// Whether a B-spline or Bezier surface's poles run straight along a direction in one of its
+/// parameters: in every row along it each step between consecutive poles is parallel to the
+/// direction (to Precision::Confusion() across it) and, if rational, the weights are equal along
+/// it. Then S(u, v) = C(u) + along * g(u, v): every point lies on a line of the surface along the
+/// direction, exactly (convex hull), so its normal is square to it everywhere
+template<typename Surface>
+bool polesRuledAlong(const Surface& surface, const gp_Dir& along)
+{
+    const int nu = surface->NbUPoles();
+    const int nv = surface->NbVPoles();
+    const bool rational = surface->IsURational() || surface->IsVRational();
+    auto rowsRuled = [&](bool alongV) {
+        const int rows = alongV ? nu : nv;
+        const int steps = alongV ? nv : nu;
+        bool moves = false;
+        for (int r = 1; r <= rows; ++r) {
+            for (int s = 2; s <= steps; ++s) {
+                const int i0 = alongV ? r : s - 1;
+                const int j0 = alongV ? s - 1 : r;
+                const int i1 = alongV ? r : s;
+                const int j1 = alongV ? s : r;
+                const gp_Vec step(surface->Pole(i0, j0), surface->Pole(i1, j1));
+                if (step.Crossed(gp_Vec(along)).Magnitude() > Precision::Confusion()) {
+                    return false;
+                }
+                moves = moves || step.Magnitude() > Precision::Confusion();
+                if (rational) {
+                    const double w0 = surface->Weight(i0, j0);
+                    const double w1 = surface->Weight(i1, j1);
+                    if (std::abs(w1 - w0) > 1e-12 * std::max(std::abs(w0), std::abs(w1))) {
+                        return false;
+                    }
+                }
+            }
+        }
+        return moves;
+    };
+    if (rowsRuled(true) || rowsRuled(false)) {
+        return true;
+    }
+    // Or every pole in one plane that holds the direction (to Precision::Confusion()): the
+    // surface lies in that plane (convex hull, the weights positive), a plane whatever its pole
+    // grid (review pri1040 r4: a flat face stored with a skewed grid)
+    const gp_Pnt origin = surface->Pole(1, 1);
+    gp_Vec normal;
+    for (int i = 1; i <= nu && normal.Magnitude() <= Precision::Confusion(); ++i) {
+        for (int j = 1; j <= nv; ++j) {
+            const gp_Vec across = gp_Vec(along).Crossed(gp_Vec(origin, surface->Pole(i, j)));
+            if (across.Magnitude() > 1000 * Precision::Confusion()) {
+                normal = across.Normalized();
+                break;
+            }
+        }
+    }
+    if (normal.Magnitude() <= Precision::Confusion()) {
+        return false;
+    }
+    for (int i = 1; i <= nu; ++i) {
+        for (int j = 1; j <= nv; ++j) {
+            if (std::abs(gp_Vec(origin, surface->Pole(i, j)).Dot(normal)) > Precision::Confusion()) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+/// Whether a curve is straight along a direction: a line along it, or a B-spline or Bezier curve
+/// whose poles all lie on one line along it (to Precision::Confusion(); convex hull), trimmed or not
+bool straightAlong(Handle(Geom_Curve) curve, const gp_Dir& along)
+{
+    while (auto trimmed = Handle(Geom_TrimmedCurve)::DownCast(curve)) {
+        curve = trimmed->BasisCurve();
+    }
+    if (auto line = Handle(Geom_Line)::DownCast(curve)) {
+        return parallel(line->Position().Direction(), along);
+    }
+    auto onLine = [&](const auto& poles) {
+        const int n = poles->NbPoles();
+        if (n < 2) {
+            return false;
+        }
+        const gp_Pnt origin = poles->Pole(1);
+        for (int k = 2; k <= n; ++k) {
+            if (gp_Vec(origin, poles->Pole(k)).Crossed(gp_Vec(along)).Magnitude()
+                > Precision::Confusion()) {
+                return false;
+            }
+        }
+        return true;
+    };
+    if (auto bspline = Handle(Geom_BSplineCurve)::DownCast(curve)) {
+        return onLine(bspline);
+    }
+    if (auto bezier = Handle(Geom_BezierCurve)::DownCast(curve)) {
+        return onLine(bezier);
+    }
+    return false;
+}
+
+/// Whether a surface is ruled along a direction (every point of it on a line of it along the
+/// direction, so its normal square to the direction everywhere): a plane, a cylinder about it, an
+/// extrusion along it, a revolution about it of a curve straight along it (straightAlong), a
+/// B-spline or Bezier surface whose poles run straight along it or lie in a plane holding it, an
+/// offset or trimmed copy of one of these. Exact,
+/// by type and poles, never by samples (review pri1040 r3: a blend's B-spline face beyond, ruled
+/// along the normal, as FGC-NS44 #113's, refused under a check by type alone)
+bool ruledAlong(const Handle(Geom_Surface)& surface, const gp_Dir& along, int depth = 0)
+{
+    if (surface.IsNull() || depth > 8) {
+        return false;
+    }
+    if (auto trimmed = Handle(Geom_RectangularTrimmedSurface)::DownCast(surface)) {
+        return ruledAlong(trimmed->BasisSurface(), along, depth + 1);
+    }
+    if (auto offset = Handle(Geom_OffsetSurface)::DownCast(surface)) {
+        // An offset of a surface ruled along d: its normal is constant along each ruling (square
+        // to d and to the ruling's cross tangent), so the offset's points move by one vector per
+        // ruling, which stays a line along d
+        return ruledAlong(offset->BasisSurface(), along, depth + 1);
+    }
+    if (Handle(Geom_Plane)::DownCast(surface)) {
+        return true;
+    }
+    if (auto cylinder = Handle(Geom_CylindricalSurface)::DownCast(surface)) {
+        return parallel(cylinder->Axis().Direction(), along);
+    }
+    if (auto extrusion = Handle(Geom_SurfaceOfLinearExtrusion)::DownCast(surface)) {
+        return parallel(extrusion->Direction(), along);
+    }
+    if (auto revolution = Handle(Geom_SurfaceOfRevolution)::DownCast(surface)) {
+        return parallel(revolution->Axis().Direction(), along)
+            && straightAlong(revolution->BasisCurve(), along);
+    }
+    if (auto bspline = Handle(Geom_BSplineSurface)::DownCast(surface)) {
+        return polesRuledAlong(bspline, along);
+    }
+    if (auto bezier = Handle(Geom_BezierSurface)::DownCast(surface)) {
+        return polesRuledAlong(bezier, along);
+    }
+    return false;
+}
+
 /** A fused tool whose strip runs off its planar face over edges where the face beyond drops away
  * square to it (ops#898 cause A: a boss's foot on a ledge narrower than the dress-up, the ledge's
  * outer edge tapering or about the arc's axis; a wall that an earlier blend cut away beside the
@@ -9979,7 +10333,7 @@ bool trimFusedToolOverFace(
     std::vector<TopoDS_Edge> runOver;
     std::vector<TopoDS_Edge> runOn;
     // The angle's cosine past which a face beyond is not square to the face: the census rows'
-    // faces beyond are square to 1e-12, a blend's B-spline face to its own approximation
+    // faces beyond are square to 1e-12; past ruledAlong it only tells a drop from a rise
     constexpr double squareCosine = 1e-6;
     for (TopExp_Explorer it(run.face, TopAbs_EDGE); it.More(); it.Next()) {
         const TopoDS_Edge& edge = TopoDS::Edge(it.Current());
@@ -10017,6 +10371,17 @@ bool trimFusedToolOverFace(
         if (partnerWalls && std::any_of(partnerWalls->begin(), partnerWalls->end(), isBeyond)) {
             runOn.push_back(edge);
             continue;
+        }
+        // The prism's side is the face beyond's surface run on only where that surface is ruled
+        // along the face's normal (ruledAlong: by type and poles, not samples; reviews pri1040 r1
+        // and r2: a ball's, an ellipsoid's or a B-spline dimple is square to the face along its
+        // equator, and the prism there is a surface no face of the body lies on); anything else
+        // refuses
+        {
+            if (!ruledAlong(BRep_Tool::Surface(beyond), outward)) {
+                refuse("a concave dress-up runs past its face over an edge where the face beyond "
+                       "is not ruled along the face's normal (not square to it)");
+            }
         }
         BRepAdaptor_Curve curve(edge);
         const double first = curve.FirstParameter();
@@ -21714,6 +22079,11 @@ bool buildAcrossRecess(
     request.size1 = radius;
     request.size2 = radius;
     request.limitOnly = false;
+    // Called only where the feature refuses OCCT's valid result (its band crosses a recess): the
+    // wider scope, as a result refused inside makeElementFillet() gets (out.refused). Nothing that
+    // builds today moves; a strip running off into the air is trimmed over the face (ops#1040: a
+    // wall's foot under a hole 0.2 above the floor, a rib's nose 0.3 short of the plate's side)
+    request.widerScope = true;
     // The selection and what OCCT's contours carry it on to along tangent chains (a rim picked by
     // one edge): the construction rounds them all, as OCCT did. The maker is only read, not built
     std::vector<TopoDS_Shape> rounded;

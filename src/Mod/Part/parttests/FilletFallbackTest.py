@@ -7086,7 +7086,8 @@ class FillOverARingLedgeTest(unittest.TestCase):
         # The rim a cone, leaning out under the ledge: where Onshape trims is not measured. Refused
         body, foot = self.body(1.2, lean=0.8)
         for dress in (body.makeChamfer, body.makeFillet):
-            with self.assertRaisesRegex(Exception, "kept over its face: .*face beyond is not square"):
+            # ops#1040: the face beyond (a cone) is refused by type, as not ruled along the normal
+            with self.assertRaisesRegex(Exception, "kept over its face: .*face beyond is not (square|ruled)"):
                 dress(self.C, foot)
 
 
@@ -7100,13 +7101,17 @@ class FillPastANotchTest(unittest.TestCase):
     part in front of the notch. A closed window instead (a hole in the wall's face, ops#883 H): the
     hole runs on through the fill"""
 
-    def body(self, sill, window=False, radius=2.0):
+    def body(self, sill, window=False, radius=2.0, nurbs=False):
         V = FreeCAD.Vector
         plate = Part.makeBox(12, 20, 2, V(-2, 0, -2))
         wall = Part.makeBox(2, 20, 5, V(-2, 0, 0))
         hole = Part.makeCylinder(radius, 4, V(-3, 10, sill + radius), V(1, 0, 0))
         if not window:
             hole = hole.fuse(Part.makeBox(4, 4, 5, V(-3, 8, sill + 2))).removeSplitter()
+        if nurbs:
+            # Every face of the notch a B-spline (a transferred blend's faces come in so): the
+            # face beyond is still ruled along the wall's normal, exactly, by its poles
+            hole = hole.toNurbs()
         body = plate.fuse(wall).removeSplitter().cut(hole)
         foot = [
             e
@@ -7133,6 +7138,73 @@ class FillPastANotchTest(unittest.TestCase):
         self.assertLess(result.common(front).Volume, 1e-9)
         windows = [f for f in result.Faces if f.Surface.TypeId == "Part::GeomCylinder"]
         self.assertEqual(len(windows), 1)
+
+    def testBSplineNotchChamferPastTheSill(self):
+        """The same notch with B-spline faces (review pri1040 r3: a check of the face beyond by
+        type alone refused it; integration built it to the closed form): the same fill"""
+        body, foot = self.body(0.6, nurbs=True)
+        self.assertTrue(all(f.Surface.TypeId != "Part::GeomCylinder" for f in body.Faces))
+        result = body.makeChamfer(1.0, foot)
+        self.assertTrue(result.isValid())
+        self.assertEqual(len(result.Solids), 1)
+
+        def chord(t):
+            return 2 * (-1.6 * (t * math.sqrt(4 - t * t) + 4 * math.asin(t / 2)) / 2 + (4 - t * t) ** 1.5 / 3)
+
+        window = chord(-1.6) - chord(-2)
+        # The volume integral over B-spline faces is good to about 3e-5 here (the body alone)
+        self.assertAlmostEqual(result.Volume - body.Volume, 10 - window, delta=1e-5)
+        front = Part.makeCylinder(2, 2, FreeCAD.Vector(0, 10, 2.6), FreeCAD.Vector(1, 0, 0))
+        self.assertLess(result.common(front).Volume, 1e-9)
+        # The same solid as the analytic notch's
+        plainBody, plainFoot = self.body(0.6)
+        plain = plainBody.makeChamfer(1.0, plainFoot)
+        self.assertLess(result.cut(plain).Volume, 1e-6)
+        self.assertLess(plain.cut(result).Volume, 1e-6)
+
+    def testRevolvedBSplineLineNotch(self):
+        """The notch's round bottom a revolution about its axis of a straight degree-1 B-spline
+        curve parallel to it (an imported face's form; review pri1040 r4): exactly the cylinder,
+        ruled along the wall's normal, so the same fill as the analytic notch's"""
+        V = FreeCAD.Vector
+        c = 2.6
+        a, b = V(-3, 12, c), V(2, 12, c)
+        line = Part.BSplineCurve()
+        line.buildFromPolesMultsKnots([a, b], [2, 2], [0, 1], False, 1)
+        pa, pb = V(-3, 10, c), V(2, 10, c)
+        strip = Part.Face(
+            Part.Wire(
+                [
+                    Part.LineSegment(pa, a).toShape(),
+                    line.toShape(),
+                    Part.LineSegment(b, pb).toShape(),
+                    Part.LineSegment(pb, pa).toShape(),
+                ]
+            )
+        )
+        half = strip.revolve(V(0, 10, c), V(1, 0, 0), -180)
+        if half.ShapeType != "Solid":
+            half = Part.Solid(Part.Shell(half.Faces))
+        notch = half.fuse(Part.makeBox(5, 4, 5, V(-3, 8, c))).removeSplitter()
+        plate = Part.makeBox(12, 20, 2, V(-2, 0, -2))
+        wall = Part.makeBox(2, 20, 5, V(-2, 0, 0))
+        body = plate.fuse(wall).removeSplitter().cut(notch)
+        self.assertTrue(any(f.Surface.TypeId == "Part::GeomSurfaceOfRevolution" for f in body.Faces))
+        foot = [
+            e
+            for e in body.Edges
+            if e.Curve.TypeId == "Part::GeomLine"
+            and all(abs(v.Point.x) < 1e-9 and abs(v.Point.z) < 1e-9 for v in e.Vertexes)
+        ]
+        self.assertEqual(len(foot), 1)
+        result = body.makeChamfer(1.0, foot)
+        self.assertTrue(result.isValid())
+        self.assertEqual(len(result.Solids), 1)
+        plainBody, plainFoot = self.body(0.6)
+        plain = plainBody.makeChamfer(1.0, plainFoot)
+        self.assertLess(result.cut(plain).Volume, 1e-6)
+        self.assertLess(plain.cut(result).Volume, 1e-6)
+        self.assertAlmostEqual(result.Volume - body.Volume, plain.Volume - plainBody.Volume, delta=1e-5)
 
     # A closed window (ops#883 H): a hole r 0.5 through the wall about y = 10, z = 1, its rim 0.5
     # above the floor, inside the fill's strip (OCCT fails on it, fillet and chamfer)
@@ -8681,7 +8753,9 @@ class NotchEndFilletTest(unittest.TestCase):
             and min(v.X for v in e.Vertexes) < 1e-7
         ]
         self.assertEqual(len(edges), 1)
-        with self.assertRaisesRegex(Exception, "4 edges meet"):
+        # ops#1040: whollyBeyond's box in the plane's frame folds the V's planes at the vertex, and the
+        # refusal is then the strip's overflow; either way refused
+        with self.assertRaisesRegex(Exception, "4 edges meet|would overflow a strip"):
             base.makeFillet(self.r, edges)
 
     def testVShapedChannelIsRefused(self):

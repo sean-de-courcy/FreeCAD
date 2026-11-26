@@ -77,6 +77,7 @@ set(PartDesign_TestScripts
     PartDesignTests/TestBaseFeature.py
     PartDesignTests/TestFillet.py
     PartDesignTests/TestFilletPropagation.py
+    PartDesignTests/TestFilletVertexEnds.py
     PartDesignTests/TestFilletFailureText.py
     PartDesignTests/TestChamfer.py
     PartDesignTests/TestDraft.py
