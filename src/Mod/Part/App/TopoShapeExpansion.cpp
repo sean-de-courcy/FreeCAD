@@ -10107,7 +10107,12 @@ bool roundCoveredFirst(
     }
     FilletFallback::Request single = request;
     single.contour.clear();
-    const std::vector<bool> covered = FilletFallback::coveredEdges(input.getShape(), plain, single);
+    std::vector<bool> covered = FilletFallback::coveredEdges(input.getShape(), plain, single);
+    // Everything covered, and the construction refused the whole (asked only once it has): a
+    // line on an extruded wall counted as the rest, as before ops#1045 covered it (sk1045 change 7)
+    if (std::all_of(covered.begin(), covered.end(), [](bool c) { return c; })) {
+        covered = FilletFallback::coveredEdges(input.getShape(), plain, single, false);
+    }
     if (covered.size() != edges.size()) {
         return false;
     }
