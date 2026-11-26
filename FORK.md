@@ -539,7 +539,8 @@ names it.
 | `fix/i1028-concave-outline-runout` | fix | ops#1028 | - | open | `d7af7bcf81` (fork PR 539), 2026-11-25 | drop when upstream refuses a run-out into a concave outline corner |
 | `infra/gen6-1125` | infra | ops#883 | - | `integration` `d7af7bcf81` | `8388e5e747` (fork PR 543), 2026-11-25 | never (fork corpus) |
 | `fix/i1040-vertex-fillets` | fix | ops#1040 | - | `integration` `091421dbef` | `be7163b688` (fork PR 542), 2026-11-26 | never (fork fix): fillets and chamfers ending at a vertex of 4 edges behind a face (folds), fills run past their face over a face beyond ruled along its normal, decided exactly |
-| `fix/i1027-overflow-tight-arc` | fix | ops#1027 | - | open | (fork PR 538) | drop when upstream fails the overflow past a tight arc |
+| `fix/i1027-overflow-tight-arc` | fix | ops#1027 | - | open | `959829cc91` (fork PR 538), 2026-11-26 | drop when upstream fails the overflow past a tight arc |
+| `infra/i1049-forkrelease-15` | infra | ops#1049 | - | `integration` `d7af7bcf81` | (fork PR 544) | never (fork stamp) |
 
 ## Fork-only commits in carried topics
 
