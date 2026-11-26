@@ -8916,6 +8916,9 @@ std::shared_ptr<DressUpOutcome> buildDressUp(
                 if (!out.constructed && (out.reflexFirst || invalidWider) && !request.widerScope) {
                     const std::string firstReason = out.reason;
                     request.widerScope = true;
+                    // (ops#1053: the route under an overhang reads no scope, and its fuzzy tries
+                    // were asked above on the same edges)
+                    request.overhangFuzzy = false;
                     out.constructed = FilletFallback::construct(
                         base,
                         edges,
@@ -8923,6 +8926,7 @@ std::shared_ptr<DressUpOutcome> buildDressUp(
                         out.construction,
                         &out.reason
                     );
+                    request.overhangFuzzy = true;
                     if (!out.constructed) {
                         out.reason = firstReason + " (with the wider scope: " + out.reason + ")";
                     }
@@ -10790,6 +10794,8 @@ TopoShape& TopoShape::makeElementFillet(
         }
         FilletFallback::Request againRequest = request;
         againRequest.faceTolerances = FilletFallback::faceTolerances(againInput.getShape());
+        // (ops#1053: a construction in this order is never taken, below: no fuzzy tries)
+        againRequest.overhangFuzzy = false;
         auto second
             = buildDressUp(again, againInput, againEdges, againRequest, "The fillet", false, reflex);
         // Where OCCT's first result was invalid (ops#925), the second stands only as a valid closed
@@ -10831,8 +10837,12 @@ TopoShape& TopoShape::makeElementFillet(
     if (outcome->failed || outcome->thin || outcome->invalid || outcome->turns
         || outcome->reflexFirst || outcome->ring || !outcome->wrongWay.empty() || outcome->refused) {
         // (Where the construction refuses OCCT's refused result, OCCT's is returned: the feature's
-        // check refuses it as before, ops#990)
-        if (finishConstruction(*this, *outcome, input, op)) {
+        // check refuses it as before, ops#990.) ops#1053: where OCCT failed outright and the
+        // construction built it only by a further, fuzzy try under an overhang, the two routes
+        // below, which built it before, are asked first
+        const bool fuzzyLast
+            = outcome->failed && outcome->constructed && outcome->construction.fuzzy;
+        if (!fuzzyLast && finishConstruction(*this, *outcome, input, op)) {
             return *this;
         }
         if (outcome->failed && radius1 == radius2 && !mitreRunOnsRefused
@@ -10841,6 +10851,9 @@ TopoShape& TopoShape::makeElementFillet(
         }
         if (outcome->failed && edges.size() > 1 && radius1 == radius2
             && roundCoveredFirst(*this, shape, edges, input, inputEdges, radius1, op, request)) {
+            return *this;
+        }
+        if (fuzzyLast && finishConstruction(*this, *outcome, input, op)) {
             return *this;
         }
         if (outcome->failed) {
