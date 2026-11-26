@@ -10,6 +10,7 @@
 #include <functional>
 #include <limits>
 #include <numbers>
+#include <tuple>
 #include <set>
 #include <sstream>
 #include <gtest/gtest.h>
@@ -45,6 +46,7 @@
 #include <BRepPrimAPI_MakeRevol.hxx>
 #include <BRepPrimAPI_MakeSphere.hxx>
 #include <BRepAdaptor_Curve.hxx>
+#include <BRepBuilderAPI_Transform.hxx>
 #include <BRepAdaptor_Surface.hxx>
 #include <BRep_Builder.hxx>
 #include <ShapeFix_ShapeTolerance.hxx>
@@ -58,6 +60,7 @@
 #include <StdFail_NotDone.hxx>
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
+#include <TopLoc_Location.hxx>
 #include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <TColgp_HArray1OfPnt.hxx>
@@ -70,6 +73,7 @@
 #include <gp_Lin.hxx>
 #include <gp_Mat.hxx>
 #include <gp_Pln.hxx>
+#include <gp_Trsf.hxx>
 #include <gp_XY.hxx>
 
 // NOLINTBEGIN(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)
@@ -4823,5 +4827,305 @@ TEST_F(FilletFallbackTest, roundPastAStripIsCutByTheWallsContinuation)
         ASSERT_FALSE(result.isNull()) << c.w << " " << c.r;
         EXPECT_NEAR(volume(result.getShape()), c.base - c.removed, 1e-5) << c.w << " " << c.r;
         EXPECT_EQ(result.countSubElements("Face"), 8) << c.w << " " << c.r;
+    }
+}
+
+TEST_F(FilletFallbackTest, roundPastStripsOnBothFacesIsNotCutAwayWhole)
+{
+    // ops#1026, review pr1026-r1f: strips on both faces of the edge, each ending at a wall that
+    // leans back (the top one RB7's W 6 or W 11, the front one falling 1 over 10 from 0.5 below
+    // the edge). Where the top wall's continuation misses the round's circle, the front wall must
+    // not trim first and let the top wall cut the whole round away (a notch with no round or
+    // chamfer face): it refuses, as before. No oracle covers two walls on different faces
+    for (auto [rise, size, round] :
+         {std::tuple {5.0, 3.0, true}, std::tuple {5.0, 3.0, false}, std::tuple {10.0, 2.0, true}}) {
+        TopoShape base(
+            profileAlongX(
+                {{20, -10}, {20, 20}, {1 + rise, 20}, {1, 10}, {0, 10}, {0, 9.5}, {-10, 8.5}, {-10, -10}},
+                30
+            ),
+            1L
+        );
+        TopoShape front = edgeBetween(base, {0, 0, 10}, {30, 0, 10});
+        bool built = false;
+        try {
+            TopoShape result = dressUp(base, {front}, round ? fillet(size) : chamfer(size));
+            built = !result.isNull() && volume(result.getShape()) > 0;
+        }
+        catch (...) {
+        }
+        EXPECT_FALSE(built) << rise << " " << size << " " << round;
+    }
+}
+
+TEST_F(FilletFallbackTest, roundPastAStripUnderTwoWallsIsCutByTheMiddleWall)
+{
+    // ops#1026, oracles RB22 and RB35: RB7's section (0, 0), (20, 0), (20, 20), (w, 20), (s, 10),
+    // (0, 10) along x over each stretch, the stretches fused; the front top edge (y 0, z 10) is
+    // one edge over x 0..30. W 1 rises straight up, W 6 leans back 26.6 deg, W 11 45 deg, W 16
+    // 56.3 deg, W -4 overhangs. On one foot line, Onshape cuts the whole edge by the continuation
+    // of the wall whose stretch holds the edge's middle (x 15; where two stretches meet there, the
+    // one over 15..30), or, where that one misses the round's circle, by the other's; each stretch
+    // loses its length's share. On two foot lines (s 1 and 0.6), each stretch is cut by its own wall
+    struct Stretch
+    {
+        double w;
+        double x0;
+        double x1;
+        double s = 1.0;
+    };
+    struct Case
+    {
+        const char* name;
+        std::vector<Stretch> stretches;
+        bool round;
+        double size;
+        double removed;  // NaN: Onshape fails
+        std::vector<double> perStretch = {};  // empty: each its length's share
+    };
+    const double fails = std::numeric_limits<double>::quiet_NaN();
+    const double w6[] = {13.994095, 22.362287, 29.671771, 30.724084};  // r 1.5, 2, 2.5, 2.6
+    const double w11 = 13.879918;  // r 1.5
+    // Two walls on different planes meeting exactly at the middle: Onshape builds the row given
+    // (RB35: the stretch over 15..30's wall), but what its tie depends on is not known; the
+    // fork refuses there (review pr541-r2f, ruling c816) until an oracle settles it
+    auto tie = [&](double /*onshape*/) { return fails; };
+    const std::vector<Case> cases = {
+        // Which wall: the middle's (RB35 1a, 1b, 1c, the moved split, RB22 rerun)
+        {"1a W6|W11", {{6, 0, 15}, {11, 15, 30}}, true, 1.5, tie(w11)},
+        {"1a W6|W11", {{6, 0, 15}, {11, 15, 30}}, true, 2.0, tie(w6[1])},
+        {"RB22 W11|W6", {{11, 0, 15}, {6, 15, 30}}, true, 1.5, tie(w6[0])},
+        {"RB22 W11|W6", {{11, 0, 15}, {6, 15, 30}}, true, 2.0, tie(w6[1])},
+        {"W11 14|W6", {{11, 0, 14}, {6, 14, 30}}, true, 1.5, w6[0]},
+        {"W11 16|W6", {{11, 0, 16}, {6, 16, 30}}, true, 1.5, w11},
+        {"1b W11 27|W6", {{11, 0, 27}, {6, 27, 30}}, true, 1.5, w11, {12.491926, 1.387992}},
+        {"1b W11 27|W6", {{11, 0, 27}, {6, 27, 30}}, true, 2.0, w6[1]},
+        {"1c W6 3|W11", {{6, 0, 3}, {11, 3, 30}}, true, 1.5, w11},
+        {"1c W6 3|W11", {{6, 0, 3}, {11, 3, 30}}, true, 2.0, w6[1]},
+        {"W11 3|W6", {{11, 0, 3}, {6, 3, 30}}, true, 1.5, w6[0]},
+        // An upright or overhanging wall beside a leaning one (RB35 2a, 2b, 2c, each reversed)
+        {"2a W1|W11", {{1, 0, 15}, {11, 15, 30}}, true, 1.5, tie(w11)},
+        {"2a W1|W11", {{1, 0, 15}, {11, 15, 30}}, true, 2.0, tie(23.148909)},
+        {"2a W1|W11", {{1, 0, 15}, {11, 15, 30}}, true, 3.0, tie(43.537769)},
+        {"2a W11|W1", {{11, 0, 15}, {1, 15, 30}}, true, 1.5, tie(14.061721)},
+        {"2c W-4|W1", {{-4, 0, 15}, {1, 15, 30}}, true, 1.5, tie(14.061721)},
+        {"2c W-4|W1", {{-4, 0, 15}, {1, 15, 30}}, true, 2.0, tie(23.148909)},
+        {"2c W-4|W1", {{-4, 0, 15}, {1, 15, 30}}, true, 3.0, tie(43.537769)},
+        {"2c W1|W-4", {{1, 0, 15}, {-4, 15, 30}}, true, 1.5, tie(14.108818)},
+        {"2b W-4|W6", {{-4, 0, 15}, {6, 15, 30}}, true, 1.5, tie(w6[0])},
+        {"2b W-4|W6", {{-4, 0, 15}, {6, 15, 30}}, true, 2.0, tie(w6[1])},
+        {"2b W-4|W6", {{-4, 0, 15}, {6, 15, 30}}, true, 3.0, tie(46.634575)},
+        {"2b W6|W-4", {{6, 0, 15}, {-4, 15, 30}}, true, 1.5, tie(14.108818)},
+        // Three stretches: the middle one's wall (RB35 4a, 4b)
+        {"4a W11|W6|W11", {{11, 0, 10}, {6, 10, 20}, {11, 20, 30}}, true, 1.5, w6[0]},
+        {"4a W11|W6|W11", {{11, 0, 10}, {6, 10, 20}, {11, 20, 30}}, true, 2.0, w6[1]},
+        {"4b W6|W11|W6", {{6, 0, 10}, {11, 10, 20}, {6, 20, 30}}, true, 1.5, w11},
+        {"4b W6|W11|W6", {{6, 0, 10}, {11, 10, 20}, {6, 20, 30}}, true, 2.0, w6[1]},
+        // The middle wall misses the circle and the two either side are as far from the middle:
+        // no oracle, the fork refuses (review pr541-r3)
+        {"W11|W16|W6", {{11, 0, 10}, {16, 10, 20}, {6, 20, 30}}, true, 1.5, fails},
+        {"W6|W16|W11", {{6, 0, 10}, {16, 10, 20}, {11, 20, 30}}, true, 1.5, fails},
+        // Where it must refuse, or still builds (RB35 5a, 5b, 5c)
+        {"5a W6", {{6, 0, 30}}, true, 2.5, w6[2]},
+        {"5a W6", {{6, 0, 30}}, true, 2.6, w6[3]},
+        {"5a W6", {{6, 0, 30}}, true, 2.65, fails},
+        {"5a W6", {{6, 0, 30}}, true, 2.7, fails},
+        {"5b W11|W6", {{11, 0, 15}, {6, 15, 30}}, true, 2.5, tie(w6[2])},
+        {"5b W11|W6", {{11, 0, 15}, {6, 15, 30}}, true, 2.6, tie(w6[3])},
+        {"5b W11|W6", {{11, 0, 15}, {6, 15, 30}}, true, 2.65, fails},
+        {"5b W11|W6", {{11, 0, 15}, {6, 15, 30}}, true, 2.7, fails},
+        {"RB22 W11|W6", {{11, 0, 15}, {6, 15, 30}}, true, 3.0, fails},
+        // A join fails where the cutting wall's continuation crosses the arc twice and a second
+        // crossing lies far from the arc's end (RB35 5c, RB42, RB43), though each wall builds alone
+        {"1a W6|W11", {{6, 0, 15}, {11, 15, 30}}, true, 1.55, tie(14.652835)},
+        {"1a W6|W11", {{6, 0, 15}, {11, 15, 30}}, true, 1.6, fails},
+        {"1a W6|W11", {{6, 0, 15}, {11, 15, 30}}, true, 1.65, fails},
+        {"1a W6|W11", {{6, 0, 15}, {11, 15, 30}}, true, 1.7, fails},
+        {"2a W1|W11", {{1, 0, 15}, {11, 15, 30}}, true, 1.6, fails},
+        {"2a W1|W11", {{1, 0, 15}, {11, 15, 30}}, true, 1.7, fails},
+        {"RB22 W11|W6", {{11, 0, 15}, {6, 15, 30}}, true, 2.61, tie(30.809822)},
+        {"RB22 W11|W6", {{11, 0, 15}, {6, 15, 30}}, true, 2.615, tie(30.849924)},
+        {"W6", {{6, 0, 30}}, true, 2.615, 30.849924},
+        {"W16|W6", {{16, 0, 15}, {6, 15, 30}}, true, 1.4, tie(12.356948)},
+        {"W16|W6", {{16, 0, 15}, {6, 15, 30}}, true, 1.5, tie(w6[0])},
+        {"5c W11|W16", {{11, 0, 15}, {16, 15, 30}}, true, 1.1, tie(7.784952)},
+        {"5c W11|W16", {{11, 0, 15}, {16, 15, 30}}, true, 1.2, fails},
+        {"5c W11|W16", {{11, 0, 15}, {16, 15, 30}}, true, 1.3, fails},
+        {"5c W11|W16", {{11, 0, 15}, {16, 15, 30}}, true, 1.4, fails},
+        {"5c W11|W16", {{11, 0, 15}, {16, 15, 30}}, true, 1.7, fails},
+        {"5c W16|W11", {{16, 0, 15}, {11, 15, 30}}, true, 1.4, fails},
+        {"5c W16|W11", {{16, 0, 15}, {11, 15, 30}}, true, 1.7, fails},
+        {"5c W11|W16", {{11, 0, 15}, {16, 15, 30}}, true, 1.5, tie(w11)},
+        {"5c W11|W16", {{11, 0, 15}, {16, 15, 30}}, true, 1.75, fails},
+        {"5c W16|W11", {{16, 0, 15}, {11, 15, 30}}, true, 1.5, tie(w11)},
+        {"5c W16|W11", {{16, 0, 15}, {11, 15, 30}}, true, 1.75, fails},
+        // Two foot lines: each stretch its own wall (RB35 3a, 3b)
+        {"3a W1 s1|W0.6 s0.6", {{1, 0, 15, 1}, {0.6, 15, 30, 0.6}}, true, 0.8, 4.095115, {2.060178, 2.034938}},
+        {"3a W1 s1|W0.6 s0.6", {{1, 0, 15, 1}, {0.6, 15, 30, 0.6}}, true, 1.5, 12.982754, {7.030861, 5.951893}},
+        {"3a W1 s1|W0.6 s0.6", {{1, 0, 15, 1}, {0.6, 15, 30, 0.6}}, true, 2.0, 20.709489, {11.574455, 9.135035}},
+        {"3b W6 s1|W10.6 s0.6", {{6, 0, 15, 1}, {10.6, 15, 30, 0.6}}, true, 1.5, fails},
+        // Chamfers (RB35 6, RB22)
+        {"1a W6|W11", {{6, 0, 15}, {11, 15, 30}}, false, 1.5, tie(26.25)},
+        {"1a W6|W11", {{6, 0, 15}, {11, 15, 30}}, false, 2.0, fails},
+        {"RB22 W11|W6", {{11, 0, 15}, {6, 15, 30}}, false, 1.5, tie(26.25)},
+        {"2a W1|W11", {{1, 0, 15}, {11, 15, 30}}, false, 1.5, tie(30)},
+        {"2a W1|W11", {{1, 0, 15}, {11, 15, 30}}, false, 2.0, tie(45)},
+        {"2b W-4|W6", {{-4, 0, 15}, {6, 15, 30}}, false, 1.5, tie(26.25)},
+        {"2b W-4|W6", {{-4, 0, 15}, {6, 15, 30}}, false, 2.0, fails},
+        {"3a W1 s1|W0.6 s0.6", {{1, 0, 15, 1}, {0.6, 15, 30, 0.6}}, false, 1.5, 25.8, {15, 10.8}},
+        {"3a W1 s1|W0.6 s0.6", {{1, 0, 15, 1}, {0.6, 15, 30, 0.6}}, false, 2.0, 37.8, {22.5, 15.3}},
+        {"W11", {{11, 0, 30}}, false, 1.5, fails},
+    };
+    auto stretch = [](const Stretch& at) {
+        TopoDS_Shape prism = profileAlongX(
+            {{0, 0}, {20, 0}, {20, 20}, {at.w, 20}, {at.s, 10}, {0, 10}},
+            at.x1 - at.x0
+        );
+        gp_Trsf move;
+        move.SetTranslation(gp_Vec(at.x0, 0, 0));
+        return prism.Moved(TopLoc_Location(move));
+    };
+    // Each case twice: as listed, and built mirrored across x 15 from the stretches in reverse
+    // order, then mirrored back: the same solid, its front edge running the other way (review
+    // pr541-r2f: the tie at the middle must not depend on the edge's direction)
+    auto frontRunsUp = [](const TopoShape& base) {
+        const TopoDS_Edge front
+            = TopoDS::Edge(edgeBetween(base, {0, 0, 10}, {30, 0, 10}).getShape());
+        BRepAdaptor_Curve curve(front);
+        return curve.Value(curve.LastParameter()).X() > curve.Value(curve.FirstParameter()).X();
+    };
+    std::vector<bool> directions;
+    for (const auto& c : cases) {
+        for (bool mirrored : {false, true}) {
+        const std::string label = std::string(c.name) + (c.round ? " r " : " chamfer ")
+            + std::to_string(c.size) + (mirrored ? " mirrored build" : "");
+        auto placed = [&](size_t k) {
+            Stretch at = c.stretches[k];
+            if (mirrored) {
+                at.x0 = 30 - c.stretches[k].x1;
+                at.x1 = 30 - c.stretches[k].x0;
+            }
+            return stretch(at);
+        };
+        TopoDS_Shape shape = placed(0);
+        for (size_t k = 1; k < c.stretches.size(); ++k) {
+            BRepAlgoAPI_Fuse fuse(shape, placed(k));
+            shape = fuse.Shape();
+        }
+        ShapeUpgrade_UnifySameDomain unify(shape);
+        unify.Build();
+        shape = unify.Shape();
+        if (mirrored) {
+            gp_Trsf mirror;
+            mirror.SetMirror(gp_Ax2(gp_Pnt(15, 0, 0), gp_Dir(1, 0, 0)));
+            shape = BRepBuilderAPI_Transform(shape, mirror, Standard_True).Shape();
+        }
+        TopoShape base(shape, 1L);
+        if (c.stretches.size() > 1) {
+            directions.push_back(frontRunsUp(base));
+        }
+        TopoShape front = edgeBetween(base, {0, 0, 10}, {30, 0, 10});
+        const double before = volume(base.getShape());
+        TopoShape result;
+        try {
+            result = dressUp(base, {front}, c.round ? fillet(c.size) : chamfer(c.size));
+        }
+        catch (...) {
+            result = TopoShape();
+        }
+        if (std::isnan(c.removed)) {
+            EXPECT_TRUE(result.isNull() || volume(result.getShape()) <= 0) << label;
+            continue;
+        }
+        ASSERT_FALSE(result.isNull()) << label;
+        EXPECT_NEAR(before - volume(result.getShape()), c.removed, 1e-5) << label;
+        for (size_t k = 0; k < c.stretches.size(); ++k) {
+            const Stretch& at = c.stretches[k];
+            const double share = c.perStretch.empty() ? c.removed * (at.x1 - at.x0) / 30
+                                                      : c.perStretch[k];
+            TopoDS_Shape over = box(at.x1 - at.x0, 40, 40, gp_Pnt(at.x0, -10, -10));
+            const double lost = volume(BRepAlgoAPI_Common(base.getShape(), over).Shape())
+                - volume(BRepAlgoAPI_Common(result.getShape(), over).Shape());
+            EXPECT_NEAR(lost, share, 1e-5) << label << " stretch " << k;
+        }
+        }
+    }
+    // Both edge directions were covered
+    EXPECT_NE(std::count(directions.begin(), directions.end(), true), 0);
+    EXPECT_NE(std::count(directions.begin(), directions.end(), false), 0);
+}
+
+TEST_F(FilletFallbackTest, roundPastTwoWallsOnOneFootLineAndAFrontWallIsNotCutAwayWhole)
+{
+    // ops#1026, review pr1026-r1b: RB22's two walls on the top strip (W 11 over x 0..15, then W 6
+    // or W 16 over x 15..30, one foot line) and a front strip 0.5 high ending at a wall falling 1
+    // over 10. The pair must not wait while the front wall trims first and then cut the whole
+    // round away (a notch with no round or chamfer face): it refuses, as before. No oracle covers
+    // walls on both faces
+    auto stretch = [](double w, double x0, double x1) {
+        TopoDS_Shape prism = profileAlongX(
+            {{20, -10}, {20, 20}, {w, 20}, {1, 10}, {0, 10}, {0, 9.5}, {-10, 8.5}, {-10, -10}},
+            x1 - x0
+        );
+        gp_Trsf move;
+        move.SetTranslation(gp_Vec(x0, 0, 0));
+        return prism.Moved(TopLoc_Location(move));
+    };
+    for (auto [second, size, round] :
+         {std::tuple {6.0, 3.0, true},
+          std::tuple {6.0, 2.5, true},
+          std::tuple {6.0, 3.0, false},
+          std::tuple {16.0, 2.0, true}}) {
+        BRepAlgoAPI_Fuse fuse(stretch(11, 0, 15), stretch(second, 15, 30));
+        ShapeUpgrade_UnifySameDomain unify(fuse.Shape());
+        unify.Build();
+        TopoShape base(unify.Shape(), 1L);
+        TopoShape front = edgeBetween(base, {0, 0, 10}, {30, 0, 10});
+        bool built = false;
+        try {
+            TopoShape result = dressUp(base, {front}, round ? fillet(size) : chamfer(size));
+            built = !result.isNull() && volume(result.getShape()) > 0;
+        }
+        catch (...) {
+        }
+        EXPECT_FALSE(built) << second << " " << size << " " << round;
+    }
+}
+
+TEST_F(FilletFallbackTest, dressUpWhoseFaceAWallCutsAwayWholeRefuses)
+{
+    // ops#1026, review pr1026-r1c: RB22's two walls (W 11 over x 0..15, W 6 over x 15..30, one
+    // foot line). At chamfer 2, W 6's plane run on (z = 2y + 8) passes through the chamfer's
+    // front edge (0, 8): the piece that stays holds no chamfer face, and a notch with no chamfer
+    // face must not build. The same with a front wall on W 6's plane under both halves (W 6 |
+    // W 11 on top, round 2.6: that wall is on W 6's own surface, so W 6 must not take the pair's
+    // path alone). Integration refuses both; no oracle covers them
+    auto stretch = [](double w, double x0, double x1, bool frontWall) {
+        // RB22's section, or with the front face ending 2 below the edge at a wall on W 6's plane
+        std::vector<std::pair<double, double>> section = frontWall
+            ? std::vector<std::pair<double, double>> {{20, -10}, {20, 20}, {w, 20}, {1, 10}, {0, 10}, {0, 8}, {-9, -10}}
+            : std::vector<std::pair<double, double>> {{0, 0}, {20, 0}, {20, 20}, {w, 20}, {1, 10}, {0, 10}};
+        TopoDS_Shape prism = profileAlongX(section, x1 - x0);
+        gp_Trsf move;
+        move.SetTranslation(gp_Vec(x0, 0, 0));
+        return prism.Moved(TopLoc_Location(move));
+    };
+    for (auto [first, second, frontWall, size, round] :
+         {std::tuple {11.0, 6.0, false, 2.0, false},
+          std::tuple {6.0, 11.0, true, 2.6, true},
+          std::tuple {6.0, 11.0, true, 2.5, true}}) {
+        BRepAlgoAPI_Fuse fuse(stretch(first, 0, 15, frontWall), stretch(second, 15, 30, frontWall));
+        ShapeUpgrade_UnifySameDomain unify(fuse.Shape());
+        unify.Build();
+        TopoShape base(unify.Shape(), 1L);
+        TopoShape front = edgeBetween(base, {0, 0, 10}, {30, 0, 10});
+        bool built = false;
+        try {
+            TopoShape result = dressUp(base, {front}, round ? fillet(size) : chamfer(size));
+            built = !result.isNull() && volume(result.getShape()) > 0;
+        }
+        catch (...) {
+        }
+        EXPECT_FALSE(built) << first << " " << second << " " << size << " " << round;
     }
 }
