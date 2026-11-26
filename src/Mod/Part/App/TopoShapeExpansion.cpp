@@ -32,10 +32,14 @@
 #include <Geom_BezierSurface.hxx>
 #include <Geom_Line.hxx>
 #include <Geom_CylindricalSurface.hxx>
+#include <Geom_ConicalSurface.hxx>
+#include <Geom_SphericalSurface.hxx>
 #include <GeomAPI_IntSS.hxx>
 #include <GeomConvert_CompCurveToBSplineCurve.hxx>
 #include <Geom_BoundedCurve.hxx>
+#include <gp_Cone.hxx>
 #include <gp_Cylinder.hxx>
+#include <gp_Sphere.hxx>
 #include <gp_Pnt2d.hxx>
 #include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
 #include <gp_Lin.hxx>
@@ -47,6 +51,7 @@
 #include <BRepTools_History.hxx>
 #include <array>
 #include <cmath>
+#include <numbers>
 #include <charconv>
 #include <cstdlib>
 #include <string>
@@ -86,6 +91,7 @@
 #include <BRepFill_Generator.hxx>
 #include <BOPTools_AlgoTools3D.hxx>
 #include <BRepAdaptor_Surface.hxx>
+#include <BRepIntCurveSurface_Inter.hxx>
 #include <BRepTopAdaptor_FClass2d.hxx>
 #include <BRepTools.hxx>
 #include <IntTools_Context.hxx>
@@ -193,6 +199,7 @@
 #include "BRepOffsetAPI_MakeOffsetFix.h"
 #include "PipeShellApproximation.h"
 #include "KernelBudget.h"
+#include "PrismUntilPick.h"
 #include "ProgressIndicator.h"
 #include "ShapeAnalysis_FreeBoundsFix.h"
 #include "SweepFrenet.h"
@@ -11707,6 +11714,22 @@ double splitLength(const TopoDS_Shape& profile, const TopoDS_Shape& upTo)
 // shape's unrelated faces, e.g. a whole base's) don't count: BRepFeat keeps building what it
 // built before. A single face always counts: BRepFeat chooses its own sense and gets the face
 // without its limits, larger than the face (PR 324 round 1 verification).
+// Whether every solid of `prism` touches `face` (ops#1039, review rv540 1)
+bool touchesEverySolid(const TopoDS_Shape& prism, const TopoDS_Shape& face)
+{
+    TopExp_Explorer solid(prism, TopAbs_SOLID);
+    if (!solid.More()) {
+        return false;
+    }
+    for (; solid.More(); solid.Next()) {
+        BRepExtrema_DistShapeShape distance(solid.Current(), face);
+        if (!distance.IsDone() || distance.Value() > 1e-4) {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool brepFeatReaches(const TopoDS_Shape& profile, const TopoDS_Shape& upTo, const gp_Dir& direction)
 {
     int faceCount = 0;
@@ -11759,6 +11782,290 @@ bool onClosedSurface(const TopoShape& face)
     const BRepAdaptor_Surface surface(TopoDS::Face(face.getShape()), Standard_False);
     return surface.IsUClosed() || surface.IsVClosed() || surface.IsUPeriodic()
         || surface.IsVPeriodic();
+}
+
+// A cylinder, a cone or a sphere, from a face on it (ops#1039): the region its surface bounds is
+// convex. A line from a point outside the region meets the surface first where the outward normal
+// points against the line, and from a point inside where it points along it
+struct RoundSurface
+{
+    GeomAbs_SurfaceType type = GeomAbs_OtherSurface;
+    gp_Ax1 axis;
+    gp_Pnt centre;
+    gp_Ax3 frame;
+    double radius = 0.0;
+    double slope = 0.0;  // a cone's tan(semi-angle): its radius grows by it along the axis
+
+    // The outward normal at `point`, away from the axis or the centre (a cone: the gradient of
+    // the distance to the axis less the nappe's radius at the point's height), and whether
+    // `point` lies inside the region. Null at the axis, the centre or the apex
+    gp_Vec outward(const gp_Pnt& point, bool& inside) const
+    {
+        if (type == GeomAbs_Sphere) {
+            const gp_Vec away(centre, point);
+            inside = away.Magnitude() < radius;
+            return away.Magnitude() > Precision::Confusion() ? away.Normalized() : gp_Vec();
+        }
+        const gp_Vec along(axis.Direction());
+        const gp_Vec from(axis.Location(), point);
+        const double height = from.Dot(along);
+        const gp_Vec away = from - along * height;
+        const double nappe = radius + height * slope;  // the region's radius at that height
+        inside = nappe > 0.0 && away.Magnitude() < nappe;
+        if (away.Magnitude() <= Precision::Confusion() || nappe <= Precision::Confusion()) {
+            return {};
+        }
+        return away.Normalized() - along * slope;
+    }
+};
+
+std::optional<RoundSurface> roundSurface(const BRepAdaptor_Surface& surface)
+{
+    RoundSurface round;
+    round.type = surface.GetType();
+    switch (round.type) {
+        case GeomAbs_Cylinder:
+            round.axis = surface.Cylinder().Axis();
+            round.frame = surface.Cylinder().Position();
+            round.radius = surface.Cylinder().Radius();
+            break;
+        case GeomAbs_Cone:
+            round.axis = surface.Cone().Axis();
+            round.frame = surface.Cone().Position();
+            round.radius = surface.Cone().RefRadius();
+            round.slope = std::tan(surface.Cone().SemiAngle());
+            break;
+        case GeomAbs_Sphere:
+            round.centre = surface.Sphere().Location();
+            round.frame = surface.Sphere().Position();
+            round.radius = surface.Sphere().Radius();
+            break;
+        default:
+            return std::nullopt;
+    }
+    return round;
+}
+
+// Whether every line of `profile` along `direction` that meets `face` (one face of a cylinder, a
+// cone or a sphere) meets its surface there first, so that the face as it is gives each point its
+// first crossing of the surface (ops#1039). It does when the face's outward normal points against
+// `direction` everywhere on it and the profile lies wholly outside the region, or along it
+// everywhere and the profile lies wholly inside. False when that can't be said: then the full
+// turn, fullTurnSurface(), decides, as Onshape does (orc1125c, RB34: a face on the far side of its
+// cylinder stops the prism at the near side)
+bool faceIsFirstCrossing(const TopoDS_Face& face, const TopoDS_Shape& profile, const gp_Dir& direction)
+{
+    const BRepAdaptor_Surface surface(face);
+    const std::optional<RoundSurface> round = roundSurface(surface);
+    if (!round) {
+        return false;
+    }
+    // The face's side: the sign of the outward normal along `direction`, the same over the face's
+    // parameter range (larger than the face: stricter). Zero is allowed where the other tested
+    // points give the sign: the normal at right angles to the direction only on the face's
+    // silhouette, a half turn's or a quarter-round's edge (review rv540 3). In the surface's
+    // frame (X, Y, Z) the normal along `direction` is A cos(u - phi) + c on a cylinder or a cone
+    // (c from the cone's slope; nothing in v) and cos(v) A cos(u - phi) + dZ sin(v) on a sphere,
+    // A = |(dX, dY)|, phi its angle: its extremes over the range are at u = uMin, uMax or
+    // phi + k pi, and for each such u at v = vMin, vMax or atan(dZ / (A cos(u - phi))). Those
+    // points alone are tested: a sign that holds there holds over the whole range
+    double uMin, uMax, vMin, vMax;
+    BRepTools::UVBounds(face, uMin, uMax, vMin, vMax);
+    const gp_Vec d(direction);
+    const double dX = d.Dot(gp_Vec(round->frame.XDirection()));
+    const double dY = d.Dot(gp_Vec(round->frame.YDirection()));
+    const double dZ = d.Dot(gp_Vec(round->frame.Direction()));
+    // A full turn across its axis (a sphere: whole in v too, any direction) holds every crossing
+    // of its surface that a line keeping its height meets: the face as it is gives the first
+    // crossing to a profile wholly outside or wholly inside, and BRepFeat keeps the names it gives
+    // on integration (review rv540 3: the split named a Pad's end edges up to a full cylinder by
+    // duplicate counters). Not along an oblique direction: a line can cross the surface first
+    // above or below the face, then meet the face on the far side (review rv540-2 F1)
+    const double wholeTurn = 2 * std::numbers::pi;
+    if (uMax - uMin >= wholeTurn - Precision::Angular()
+        && (round->type == GeomAbs_Sphere ? vMax - vMin >= std::numbers::pi - Precision::Angular()
+                                          : std::abs(dZ) <= Precision::Angular())) {
+        int region = 0;
+        for (TopExp_Explorer vertex(profile, TopAbs_VERTEX); vertex.More(); vertex.Next()) {
+            bool inside = false;
+            round->outward(BRep_Tool::Pnt(TopoDS::Vertex(vertex.Current())), inside);
+            const int here = inside ? 1 : -1;
+            if (region != 0 && here != region) {
+                return false;
+            }
+            region = here;
+        }
+        return region != 0;
+    }
+    const double across = std::hypot(dX, dY);
+    std::vector<double> us {uMin, uMax};
+    if (across > Precision::Angular()) {
+        const double phi = std::atan2(dY, dX);
+        const double turn = std::numbers::pi;
+        for (double u = phi + turn * std::floor((uMin - phi) / turn); u <= uMax; u += turn) {
+            if (u > uMin && u < uMax) {
+                us.push_back(u);
+            }
+        }
+    }
+    int side = 0;
+    for (double u : us) {
+        std::vector<double> vs {vMin, vMax};
+        if (round->type == GeomAbs_Sphere) {
+            const double a = across * std::cos(u - std::atan2(dY, dX));
+            if (std::abs(a) > Precision::Angular()) {
+                const double v = std::atan(dZ / a);
+                if (v > vMin && v < vMax) {
+                    vs.push_back(v);
+                }
+            }
+        }
+        for (double v : vs) {
+            bool inside = false;
+            const gp_Vec normal = round->outward(surface.Value(u, v), inside);
+            if (normal.Magnitude() <= Precision::Confusion()) {
+                return false;
+            }
+            const double along = normal.Normalized().Dot(d);
+            const int sign = along > Precision::Angular() ? 1
+                : along < -Precision::Angular()           ? -1
+                                                          : 0;
+            if (sign == 0) {
+                continue;
+            }
+            if (side != 0 && sign != side) {
+                return false;
+            }
+            side = sign;
+        }
+    }
+    if (side == 0) {
+        return false;
+    }
+    // Every region of the profile on that side (review pr1039-r1 T1), tested at its vertices only.
+    // A region can cross the surface with every vertex on one side (a square whose middle enters a
+    // sphere, a circle's one vertex: review rv540 4); then BRepFeat decides, as on integration
+    TopExp_Explorer vertex(profile, TopAbs_VERTEX);
+    if (!vertex.More()) {
+        return false;
+    }
+    for (; vertex.More(); vertex.Next()) {
+        bool inside = false;
+        round->outward(BRep_Tool::Pnt(TopoDS::Vertex(vertex.Current())), inside);
+        if (inside != (side > 0)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// For a prism up to one face of a cylinder, a cone or a sphere (ops#1039): the face's surface
+// without its limits as a finite face, the whole turn, long enough along the axis for every line
+// of the profile's sweep that meets the surface (a cone: its nappe on the face's side of the
+// apex), so that the split gives each point its first crossing of the surface, as Onshape does
+// (orc1125c, RB34: the full turn, unbounded along the axis, the first crossing, whichever side of
+// the surface the face is on). A null face for another surface, or when the profile touches the
+// surface (no first crossing to speak of)
+TopoDS_Face fullTurnSurface(const TopoDS_Face& face, const TopoDS_Shape& profile, const gp_Dir& direction)
+{
+    const BRepAdaptor_Surface surface(face);
+    const std::optional<RoundSurface> round = roundSurface(surface);
+    if (!round) {
+        return {};
+    }
+    const GeomAbs_SurfaceType type = round->type;
+    const gp_Ax1& axis = round->axis;
+    const double radius = round->radius;
+    const double slope = round->slope;
+    // The surface without its limits, finite: the axis's span of the profile's box swept along
+    // `direction` far enough that a line reaching the surface at all reaches it within it. A line
+    // that meets the surface only past that span finds no surface: it goes on to the split's far
+    // end, and the split refuses it
+    Bnd_Box around;
+    BRepBndLib::Add(profile, around);
+    BRepBndLib::Add(face, around);
+    if (around.IsVoid() || around.IsOpen()) {
+        return {};
+    }
+    const double reach = 4.0 * std::sqrt(around.SquareExtent()) + 1.0;
+    BRepBuilderAPI_MakeFace whole;
+    if (type == GeomAbs_Sphere) {
+        whole.Init(
+            new Geom_SphericalSurface(surface.Sphere()),
+            Standard_True,
+            Precision::Confusion()
+        );
+    }
+    else {
+        Bnd_Box swept(around);
+        gp_Trsf shift;
+        shift.SetTranslation(gp_Vec(direction) * reach);
+        Bnd_Box start;
+        BRepBndLib::Add(profile, start);
+        swept.Add(start.Transformed(shift));
+        double xMin, yMin, zMin, xMax, yMax, zMax;
+        swept.Get(xMin, yMin, zMin, xMax, yMax, zMax);
+        const gp_Vec along(axis.Direction());
+        double lower = std::numeric_limits<double>::max();
+        double upper = -std::numeric_limits<double>::max();
+        for (double x : {xMin, xMax}) {
+            for (double y : {yMin, yMax}) {
+                for (double z : {zMin, zMax}) {
+                    const double height = gp_Vec(axis.Location(), gp_Pnt(x, y, z)).Dot(along);
+                    lower = std::min(lower, height);
+                    upper = std::max(upper, height);
+                }
+            }
+        }
+        lower -= 1.0;
+        upper += 1.0;
+        if (type == GeomAbs_Cylinder) {
+            whole.Init(
+                new Geom_CylindricalSurface(surface.Cylinder()),
+                0.0,
+                2.0 * std::numbers::pi,
+                lower,
+                upper,
+                Precision::Confusion()
+            );
+        }
+        else {
+            // Heights to the cone's parameter along its generatrix, kept on the face's nappe:
+            // the region's radius at the face's height is positive (its outward normals exist)
+            const gp_Cone& cone = surface.Cone();
+            const double cosine = std::cos(cone.SemiAngle());
+            if (std::abs(slope) > Precision::Angular()) {
+                const double apex = -radius / slope;
+                if (slope > 0.0) {
+                    lower = std::max(lower, apex);
+                }
+                else {
+                    upper = std::min(upper, apex);
+                }
+            }
+            if (upper - lower <= Precision::Confusion()) {
+                return {};
+            }
+            whole.Init(
+                new Geom_ConicalSurface(cone),
+                0.0,
+                2.0 * std::numbers::pi,
+                lower / cosine,
+                upper / cosine,
+                Precision::Confusion()
+            );
+        }
+    }
+    if (!whole.IsDone()) {
+        return {};
+    }
+    const TopoDS_Face result = whole.Face();
+    // The profile touching the surface nowhere
+    BRepExtrema_DistShapeShape distance(profile, result);
+    if (!distance.IsDone() || distance.Value() <= Precision::Confusion()) {
+        return {};
+    }
+    return result;
 }
 
 // How far `shape` reaches both ways along `direction` (its lowest and highest coordinates along
@@ -12279,6 +12586,27 @@ TopoShape joinPrisms(const TopoShape& blank, const std::vector<TopoShape>& piece
 }
 }  // namespace
 
+namespace
+{
+thread_local bool prismUntilPicked = false;
+}
+
+PrismUntilPick::PrismUntilPick(bool picked)
+    : previous(prismUntilPicked)
+{
+    prismUntilPicked = picked;
+}
+
+PrismUntilPick::~PrismUntilPick()
+{
+    prismUntilPicked = previous;
+}
+
+bool PrismUntilPick::current()
+{
+    return prismUntilPicked;
+}
+
 TopoShape& TopoShape::makeElementPrismUntil(
     const TopoShape& baseShape,
     const TopoShape& profileShape,
@@ -12311,6 +12639,15 @@ TopoShape& TopoShape::makeElementPrismUntil(
         }
     }
 
+    // The caller's word, before the concave test below overrides it: false keeps the face as it is
+    // (the full turn below never runs)
+    const bool mayExtend = checkLimits;
+    // Up to a picked face only (PrismUntilPick): up to first or last the face is the part's, and
+    // the first-crossing rule below would move the end to a part of the surface that isn't there
+    // (review rv540 1: a pocket up to last along a tab with a full-round end stopped about 2 r
+    // short of it)
+    const bool picked = PrismUntilPick::current();
+
     // FreeCAD-CH (ops#640, FSLC #49): up to a plane parallel to the profile, each face's prism is
     // the blind one of the plane's distance, made directly: no BRepFeat pass against the base per
     // face, none of the checks of what BRepFeat built (a blind prism neither passes the plane nor
@@ -12324,10 +12661,33 @@ TopoShape& TopoShape::makeElementPrismUntil(
 
     // don't remove limits of concave face. The default centre of a long curved B-spline profile is
     // millimetres off, enough to take the wrong side of a curved face (ops#428)
-    if (checkLimits && __uptoface.shapeType(true) == TopAbs_FACE) {
+    // Up to one curved face that the line from the profile's centre along the direction misses
+    // (ops#1039): BRepFeat isn't asked (on fork-1.0.8 the concave test raised there, an empty
+    // message). Its retries could end the prism off the face, its base's side a unit short of it
+    // (review pr1039-r3: the centre line through a window of the face, the face behind), with no
+    // check catching it. The full turn makes the prism, or it fails, saying so. So too up to a
+    // face of a cylinder, a cone or a sphere that isn't where each line of the profile first
+    // meets its surface (faceIsFirstCrossing(): a face on the far side, a profile on both sides
+    // of the surface): Onshape stops each point at its first crossing of the surface extended
+    // around (orc1125c, RB34), and BRepFeat would stop it at the face
+    bool centreMisses = false;
+    bool notFirst = false;
+    if (__uptoface.shapeType(true) == TopAbs_FACE) {
         gp_Pnt pCog;
         MassProperties::centreOfMass(profile.getShape(), pCog);
-        checkLimits = !Part::Tools::isConcave(TopoDS::Face(__uptoface.getShape()), pCog, direction);
+        const TopoDS_Face& face = TopoDS::Face(__uptoface.getShape());
+        if (BRepAdaptor_Surface(face).GetType() != GeomAbs_Plane) {
+            BRepIntCurveSurface_Inter section;
+            section.Init(face, gp_Lin(pCog, direction), Precision::Confusion());
+            centreMisses = !section.More();
+            if (mayExtend && picked && profile.hasSubShape(TopAbs_FACE)
+                && roundSurface(BRepAdaptor_Surface(face))) {
+                notFirst = !faceIsFirstCrossing(face, profile.getShape(), direction);
+            }
+        }
+        if (checkLimits) {
+            checkLimits = !Part::Tools::isConcave(face, pCog, direction);
+        }
     }
 
     TopoShape _uptoface(__uptoface);
@@ -12460,12 +12820,86 @@ TopoShape& TopoShape::makeElementPrismUntil(
             }
         }
     };
-    const bool bySplit = !flatLength
+    // Up to one face of a cylinder, a cone or a sphere that doesn't cover the profile's
+    // projection, or isn't where its lines first meet the surface (`notFirst`): by the split, up
+    // to the face's surface without its limits, the whole turn (fullTurnSurface(); ops#1039). The
+    // split gives each point its first crossing and refuses a profile that partly misses the
+    // surface. Nothing when the face covers the profile and is its first crossing (BRepFeat's
+    // case), or the profile touches the surface: the first error stands
+    // Up to a picked face only: up to first or last the face is the part's, and the full turn
+    // would end the prism on a part of the surface that isn't there (review rv540-3 F1: a pad up
+    // to first into a cradle with a profile taller than it, every point stopped short of the
+    // cradle by the fallbacks below; integration refuses it, and so does this now)
+    auto byFullTurn = [&]() -> std::optional<TopoShape> {
+        if (!mayExtend || !picked || __uptoface.shapeType(true) != TopAbs_FACE
+            || !profile.hasSubShape(TopAbs_FACE) || KernelBudget::pastDeadline()) {
+            return std::nullopt;
+        }
+        const TopoDS_Face face = TopoDS::Face(__uptoface.getShape());
+        // The test above that decides whether the face's limits are removed: a profile face's
+        // outer wire that projects onto the face as no closed wire, or a hole of the face in
+        // the profile's way. `notFirst` decides alone: the projections are per region (review
+        // rv540 7)
+        bool covers = !notFirst;
+        if (covers) {
+            for (auto& sketchface : profile.getSubTopoShapes(TopAbs_FACE)) {
+                TopoShape outerWire = sketchface.splitWires();
+                BRepProj_Projection proj(TopoDS::Wire(outerWire.getShape()), face, direction);
+                if (!proj.More() || !proj.Current().Closed()) {
+                    covers = false;
+                    break;
+                }
+            }
+        }
+        if (covers) {
+            std::vector<TopoShape> wires;
+            __uptoface.splitWires(&wires);
+            for (auto& w : wires) {
+                BRepProj_Projection proj(TopoDS::Wire(w.getShape()), profile.getShape(), -direction);
+                if (proj.More()) {
+                    covers = false;
+                    break;
+                }
+            }
+        }
+        // A covered face whose first crossing it is stays BRepFeat's, except when the centre line
+        // misses it: BRepFeat isn't asked then, and the face's surface is what Onshape reaches
+        // (review rv540 2: the centre line through a window of a face that covers every region)
+        if (covers && !notFirst && !centreMisses) {
+            return std::nullopt;
+        }
+        const TopoDS_Face whole = fullTurnSurface(face, profile.getShape(), direction);
+        if (whole.IsNull()) {
+            return std::nullopt;
+        }
+        const TopoShape named(Tag, Hasher, historyAlgorithm);
+        try {
+            return prismUpToBySplit(named, profile, TopoShape(whole), direction, op);
+        }
+        catch (const Standard_Failure&) {
+            throw Base::CADKernelError(
+                QT_TRANSLATE_NOOP("Exception", "Could not extrude up to the face")
+            );
+        }
+    };
+    bool fullTurn = false;
+    if (centreMisses || notFirst) {
+        std::optional<TopoShape> made = byFullTurn();
+        if (!made) {
+            throw Base::RuntimeError(QT_TRANSLATE_NOOP(
+                "Exception",
+                "The face's surface can't be extended around to meet the whole profile"
+            ));
+        }
+        result = *made;
+        fullTurn = true;
+    }
+    const bool bySplit = !fullTurn && !flatLength
         && !brepFeatReaches(profile.getShape(), _uptoface.getShape(), direction);
     if (bySplit) {
         result = prismBySplit();
     }
-    while (!bySplit) {
+    while (!bySplit && !fullTurn) {
         try {
             // We do not rely on BRepFeat_MakePrism to perform fuse or cut for
             // us because of its poor support of shape history.
@@ -12574,28 +13008,73 @@ TopoShape& TopoShape::makeElementPrismUntil(
         }
         // Past the feature's limit, a retry would only spend more: the stop stands
         catch (Base::Exception&) {
-            if (flatLength || KernelBudget::pastDeadline() || !retry()) {
+            if (flatLength || KernelBudget::pastDeadline()) {
                 throw;
+            }
+            if (!retry()) {
+                std::optional<TopoShape> made = byFullTurn();
+                if (!made) {
+                    throw;
+                }
+                result = *made;
+                fullTurn = true;
+                break;
             }
         }
         catch (Standard_Failure&) {
-            if (flatLength || KernelBudget::pastDeadline() || !retry()) {
+            if (flatLength || KernelBudget::pastDeadline()) {
                 throw;
+            }
+            if (!retry()) {
+                std::optional<TopoShape> made = byFullTurn();
+                if (!made) {
+                    throw;
+                }
+                result = *made;
+                fullTurn = true;
+                break;
             }
         }
     }
+    // The retry on a base of its own (`checkBase`: the up-to face swept along the direction) can
+    // end a prism short of the face, valid: a pocket up to last along a tab with a full-round end
+    // stopped 44 mm short of it (review rv540 1's case, integration too), and a prism through a
+    // window of the face 1 mm short (review pr1039-r3). Every solid must touch the face (or the
+    // face without its limits, which the retry went up to: review rv540-2 F2); one that doesn't
+    // goes to the split, which reaches the face or refuses
+    if (checkBase && !bySplit && !flatLength && !fullTurn
+        && !touchesEverySolid(result.getShape(), _uptoface.getShape())
+        && (uptofaceCopy.isSame(_uptoface)
+            || !touchesEverySolid(result.getShape(), uptofaceCopy.getShape()))) {
+        result = prismBySplit();
+    }
     // As the split refuses it (ops#356). `result` is the profile's prisms alone here: each
     // face's prism is made with mode None
-    if (!bySplit && !flatLength
+    if (!bySplit && !flatLength && !fullTurn
         && reachesPast(result.getShape(), profile.getShape(), uptoface.getShape(), direction)) {
-        throw Base::RuntimeError(QT_TRANSLATE_NOOP(
-            "Exception",
-            "Could not extrude up to the face: part of the profile doesn't meet it"
-        ));
+        std::optional<TopoShape> made = byFullTurn();
+        if (!made) {
+            throw Base::RuntimeError(QT_TRANSLATE_NOOP(
+                "Exception",
+                "Could not extrude up to the face: part of the profile doesn't meet it"
+            ));
+        }
+        result = *made;
+        fullTurn = true;
     }
     // By the split, which builds the first contact or refuses it, saying why (ops#361)
-    if (!bySplit && !flatLength && fillsBehind(result.getShape(), profile.getShape(), direction)) {
-        result = prismBySplit();
+    if (!bySplit && !flatLength && !fullTurn
+        && fillsBehind(result.getShape(), profile.getShape(), direction)) {
+        try {
+            result = prismBySplit();
+        }
+        catch (const Base::Exception&) {
+            std::optional<TopoShape> made = byFullTurn();
+            if (!made) {
+                throw;
+            }
+            result = *made;
+        }
     }
 
     if (!_base.isNull() && Mode != PrismMode::None) {

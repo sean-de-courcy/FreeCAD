@@ -47,6 +47,8 @@ from PartDesignTests.TestPad import (
     TestPad,
     TestUpToPlanePlacement,
     TestUpToPlanePlacementInAPlacedBody,
+    TestUpToACurvedFace,  # FreeCAD-CH, ops#1039
+    TestUpToFirstLastRoundFace,  # FreeCAD-CH, ops#1039 (review rv540)
 )
 from PartDesignTests.TestPocket import TestPocket
 from PartDesignTests.TestPocket import TestRefineKeepsAValidResult  # FreeCAD-CH, ops#640

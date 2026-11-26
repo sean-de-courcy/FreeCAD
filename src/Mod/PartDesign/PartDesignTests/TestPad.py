@@ -5788,3 +5788,502 @@ class TestUpToPlanePlacementInAPlacedBody(TestUpToPlanePlacement):
     bodyPlacement = FreeCAD.Placement(
         FreeCAD.Vector(5, -4, 9), FreeCAD.Rotation(FreeCAD.Vector(1, 1, 0), 30)
     )
+
+
+def curvedFaceWall(kind, start=-30.0):
+    """ops#1039: a solid whose one curved face, 60 degrees about the z axis from `start`, is the
+    face a prism goes up to: `pie`, a pie slice r 20, z 0..10 (its face is the r 20 cylinder);
+    `ring`, a ring sector r 20..30, z 0..10 (its face is the inner r 20 cylinder); `cone`, a
+    slice of the cone r 20 at z 0 to r 15 at z 10; `ball`, a slice of the ball r 20 between
+    latitudes -30 and 30. Returns the solid and the face's name"""
+    V = FreeCAD.Vector
+    if kind == "pie":
+        solid = Part.makeCylinder(20, 10, V(0, 0, 0), V(0, 0, 1), 60)
+    elif kind == "ring":
+        solid = Part.makeCylinder(30, 10, V(0, 0, 0), V(0, 0, 1), 60).cut(
+            Part.makeCylinder(20, 10, V(0, 0, 0), V(0, 0, 1), 60)
+        )
+    elif kind == "cone":
+        solid = Part.makeCone(20, 15, 10, V(0, 0, 0), V(0, 0, 1), 60)
+    else:
+        solid = Part.makeSphere(20, V(0, 0, 0), V(0, 0, 1), -30, 30, 60)
+    solid.rotate(V(0, 0, 0), V(0, 0, 1), start)
+    names = [
+        "Face%d" % (i + 1)
+        for i, face in enumerate(solid.Faces)
+        if face.Surface.TypeId != "Part::GeomPlane"
+        and (kind != "ring" or abs(face.Surface.Radius - 20) < 1e-9)
+    ]
+    assert len(names) == 1, names
+    return solid, names[0]
+
+
+def rectangleOnX(body, x, y0, y1, z0, z1):
+    """A sketch of the rectangle y y0..y1, z z0..z1 in the plane at `x`, its normal +x"""
+    V = FreeCAD.Vector
+    sketch = body.newObject("Sketcher::SketchObject", "Rectangle")
+    # Sketch x is world -z, y is y, the normal +x
+    sketch.Placement = FreeCAD.Placement(V(x, 0, 0), FreeCAD.Rotation(V(0, 1, 0), 90))
+    corners = [V(-z1, y0, 0), V(-z0, y0, 0), V(-z0, y1, 0), V(-z1, y1, 0)]
+    for i in range(4):
+        sketch.addGeometry(Part.LineSegment(corners[i], corners[(i + 1) % 4]))
+    for i in range(4):
+        sketch.addConstraint(Sketcher.Constraint("Coincident", i, 2, (i + 1) % 4, 1))
+    return sketch
+
+
+def padUpToACurvedFace(doc, kind, x, y0, y1, z0, z1, start=-30.0, sense=-1, direction=None):
+    """ops#1039: a Pad of rectangleOnX() along (`sense`, 0, 0), or `direction`, up to
+    curvedFaceWall()'s face, the wall a separate Part::Feature. Recomputed, not checked"""
+    V = FreeCAD.Vector
+    solid, name = curvedFaceWall(kind, start)
+    wall = doc.addObject("Part::Feature", "Wall")
+    wall.Shape = solid
+    body = doc.addObject("PartDesign::Body", "Body")
+    pad = body.newObject("PartDesign::Pad", "Pad")
+    pad.Profile = rectangleOnX(body, x, y0, y1, z0, z1)
+    pad.Type = "UpToFace"
+    pad.UpToFace = (wall, [name])
+    pad.UseCustomVector = True
+    pad.AlongSketchNormal = False
+    pad.Direction = direction if direction is not None else V(sense, 0, 0)
+    doc.recompute()
+    return pad
+
+
+def reachToCurvedFace(radiusAt, x, y0, y1, z0, z1, sense=-1):
+    """The volume of the prism over the rectangle y y0..y1, z z0..z1 of the plane at `x`, along
+    (`sense`, 0, 0) up to the surface of revolution about the z axis whose radius at (y, z) is
+    radiusAt(y, z), each point stopping at its first crossing x = sqrt(r^2 - y^2) (from outside,
+    sense -1) or leaving the inside there (sense +1). Gauss-Legendre, exact to far below
+    PRISM_VOLUME_RELATIVE for these smooth integrands"""
+    import numpy
+
+    nodes, weights = numpy.polynomial.legendre.leggauss(24)
+    total = 0.0
+    for ny, wy in zip(nodes, weights):
+        y = (y0 + y1) / 2 + (y1 - y0) / 2 * ny
+        for nz, wz in zip(nodes, weights):
+            z = (z0 + z1) / 2 + (z1 - z0) / 2 * nz
+            crossing = math.sqrt(radiusAt(y, z) ** 2 - y * y)
+            total += wy * wz * (x - crossing if sense < 0 else crossing - x)
+    return total * (y1 - y0) / 2 * (z1 - z0) / 2
+
+
+def cylinderReach(x, y0, y1, z0, z1, sense=-1):
+    """reachToCurvedFace() for the cylinder r 20, in closed form"""
+    area = lambda y: (y * math.sqrt(400 - y * y) + 400 * math.asin(y / 20)) / 2
+    inner = area(y1) - area(y0)
+    return (z1 - z0) * ((y1 - y0) * x - inner if sense < 0 else inner - (y1 - y0) * x)
+
+
+class TestUpToACurvedFace(unittest.TestCase):
+    """ops#1039: a Pad or a Pocket up to one face of a cylinder, a cone or a sphere that doesn't
+    cover the profile, or isn't where the profile's lines first meet its surface, goes up to the
+    face's surface extended around, each point to its first crossing, as Onshape does (orc1125c,
+    RB34). It failed: with an empty message where the line from the profile's centre missed the
+    face, or "part of the profile doesn't meet it" for a cylinder across its axis, whose limits
+    were never removed"""
+
+    def setUp(self):
+        self.Doc = FreeCAD.newDocument("UpToACurvedFace")
+
+    def tearDown(self):
+        FreeCAD.closeDocument(self.Doc.Name)
+
+    def check(self, pad, expected):
+        self.assertTrue(pad.isValid(), pad.getStatusString())
+        prism = pad.AddSubShape
+        self.assertTrue(prism.isValid())
+        self.assertEqual(len(prism.Solids), 1)
+        self.assertAlmostEqual(prism.Volume, expected, delta=PRISM_VOLUME_RELATIVE * expected)
+
+    def checkSolids(self, pad, expected, count):
+        self.assertTrue(pad.isValid(), pad.getStatusString())
+        prism = pad.AddSubShape
+        self.assertTrue(prism.isValid())
+        self.assertEqual(len(prism.Solids), count)
+        self.assertAlmostEqual(prism.Volume, expected, delta=PRISM_VOLUME_RELATIVE * expected)
+
+    def refused(self, pad, text=None):
+        self.assertFalse(pad.isValid())
+        self.assertNotEqual(pad.getStatusString().strip(), "")
+        if text:
+            self.assertIn(text, pad.getStatusString())
+
+    def testPadUpToACylinderFaceFromOutside(self):
+        # The pie slice's face, from the plane x = 40 towards -x. Covered (the control), beside
+        # in angle, across its side edge, wider than it, beside and across along the axis, and
+        # beside both ways: each point to the cylinder r 20
+        for y0, y1, z0, z1 in (
+            (-1, 1, 4, 6),
+            (14, 16, 4, 6),
+            (9, 11, 4, 6),
+            (-15, 15, 4, 6),
+            (-1, 1, 12, 14),
+            (-1, 1, 9, 11),
+            (14, 16, 12, 14),
+        ):
+            with self.subTest(y0=y0, y1=y1, z0=z0, z1=z1):
+                doc = FreeCAD.newDocument("PadUpToACylinderFaceFromOutside")
+                try:
+                    pad = padUpToACurvedFace(doc, "pie", 40, y0, y1, z0, z1)
+                    self.check(pad, cylinderReach(40, y0, y1, z0, z1))
+                finally:
+                    FreeCAD.closeDocument(doc.Name)
+
+    def testPadUpToACylinderFaceFromInside(self):
+        # The ring sector's inner face, from the plane x = 5 towards +x: covered and beside
+        for y0, y1 in ((-1, 1), (14, 16)):
+            with self.subTest(y0=y0, y1=y1):
+                doc = FreeCAD.newDocument("PadUpToACylinderFaceFromInside")
+                try:
+                    pad = padUpToACurvedFace(doc, "ring", 5, y0, y1, 4, 6, sense=1)
+                    self.check(pad, cylinderReach(5, y0, y1, 4, 6, sense=1))
+                finally:
+                    FreeCAD.closeDocument(doc.Name)
+
+    def testPadUpToAConeAndABallFaceBeside(self):
+        # Beside the cone's and the ball's face in angle: to the cone r 20 - z / 2, the ball r 20
+        cases = (
+            ("cone", 13, 15, 1, 3, lambda y, z: 20 - z / 2),
+            ("ball", 12, 14, -1, 1, lambda y, z: math.sqrt(400 - z * z)),
+        )
+        for kind, y0, y1, z0, z1, radiusAt in cases:
+            with self.subTest(kind=kind):
+                doc = FreeCAD.newDocument("PadUpToAConeAndABallFaceBeside")
+                try:
+                    pad = padUpToACurvedFace(doc, kind, 40, y0, y1, z0, z1)
+                    self.check(pad, reachToCurvedFace(radiusAt, 40, y0, y1, z0, z1))
+                finally:
+                    FreeCAD.closeDocument(doc.Name)
+
+    def testPadUpToACylinderFaceRefusals(self):
+        # Still refused, with a message: a rectangle that passes the cylinder wholly (y 24..26:
+        # its lines miss the surface, and the Pad turns away from it) or in part (y 19..21,
+        # saying so). Onshape fails both (orc1125c, case 6)
+        for y0, y1 in ((24, 26), (19, 21)):
+            with self.subTest(y0=y0, y1=y1):
+                doc = FreeCAD.newDocument("PadUpToACylinderFaceRefusals")
+                try:
+                    pad = padUpToACurvedFace(doc, "pie", 40, y0, y1, 4, 6)
+                    self.refused(pad, "doesn't meet" if y0 == 19 else None)
+                finally:
+                    FreeCAD.closeDocument(doc.Name)
+
+    def testPadUpToACylinderFaceOnTheFarSide(self):
+        # The face on the cylinder's far side (150..210 degrees), the rectangle at x = 40: the
+        # near side of the cylinder, where no face is, stops it, covered (y -1..1) or beside
+        # (y 14..16): Onshape's case 3, 80.033346 and 107.200907 (orc1125c, RB34)
+        for y0, y1 in ((-1, 1), (14, 16)):
+            with self.subTest(y0=y0, y1=y1):
+                doc = FreeCAD.newDocument("PadUpToACylinderFaceOnTheFarSide")
+                try:
+                    pad = padUpToACurvedFace(doc, "pie", 40, y0, y1, 4, 6, start=150)
+                    self.check(pad, cylinderReach(40, y0, y1, 4, 6))
+                finally:
+                    FreeCAD.closeDocument(doc.Name)
+
+    def testPadUpToACurvedFaceRegionsOnBothSides(self):
+        # A sketch of two rectangles, one outside the surface and one inside, neither covered by
+        # the face: each goes to its own first crossing of the surface extended around, the
+        # outside one to the near half and the inside one to the half ahead, in either drawing
+        # order (reviews pr1039-r1 T1, r1f T1 found the second order taken from the first;
+        # orc1125c, RB34: the first crossing). The cylinder from x = 19 towards -x; the ball from
+        # x = -15 towards +x
+        def addRectangle(sketch, y0, y1, z0, z1):
+            V = FreeCAD.Vector
+            first = sketch.GeometryCount
+            corners = [V(-z1, y0, 0), V(-z0, y0, 0), V(-z0, y1, 0), V(-z1, y1, 0)]
+            for i in range(4):
+                sketch.addGeometry(Part.LineSegment(corners[i], corners[(i + 1) % 4]))
+            for i in range(4):
+                sketch.addConstraint(
+                    Sketcher.Constraint("Coincident", first + i, 2, first + (i + 1) % 4, 1)
+                )
+
+        ball = lambda y, z: math.sqrt(400 - z * z)
+        for kind, x, sense, outside, inside, expected in (
+            (
+                "pie",
+                19,
+                -1,
+                (12, 14, 4, 6),
+                (-1, 1, 12, 14),
+                cylinderReach(19, 12, 14, 4, 6) + cylinderReach(-19, -1, 1, 12, 14, sense=1),
+            ),
+            (
+                "ball",
+                -15,
+                1,
+                (14, 16, -1, 1),
+                (-1, 1, -1, 1),
+                reachToCurvedFace(ball, 15, 14, 16, -1, 1)
+                + reachToCurvedFace(ball, -15, -1, 1, -1, 1, sense=1),
+            ),
+        ):
+            for first, second in ((outside, inside), (inside, outside)):
+                with self.subTest(kind=kind, first=first):
+                    doc = FreeCAD.newDocument("PadUpToACurvedFaceRegionsOnBothSides")
+                    try:
+                        pad = padUpToACurvedFace(doc, kind, x, *first, sense=sense)
+                        addRectangle(pad.Profile[0], *second)
+                        doc.recompute()
+                        self.checkSolids(pad, expected, 2)
+                    finally:
+                        FreeCAD.closeDocument(doc.Name)
+
+    def testPadUpToACylinderFaceObliqueDirection(self):
+        # Along (-1, 0, -0.3), the rectangle's centre line missing the face (review pr1039-r2).
+        # The face at 150..210 degrees, the rectangle beside it at x = 40: up to the cylinder's
+        # near side, below the face's height (the surface is unbounded along its axis, orc1125c,
+        # RB34); the volume is the one along -x, the prism only sheared along the axis. The face
+        # at -30..30, the rectangle on the plane x = 10 inside and outside the cylinder: the
+        # surface cuts the profile, refused
+        V = FreeCAD.Vector
+        for start, x, y0, y1 in ((150, 40, -14, -12), (-30, 10, -19, -12)):
+            with self.subTest(start=start, x=x):
+                doc = FreeCAD.newDocument("PadUpToACylinderFaceObliqueDirection")
+                try:
+                    pad = padUpToACurvedFace(
+                        doc, "pie", x, y0, y1, 4, 6, start=start, direction=V(-1, 0, -0.3)
+                    )
+                    if x == 40:
+                        self.check(pad, cylinderReach(40, y0, y1, 4, 6))
+                    else:
+                        self.refused(pad)
+                finally:
+                    FreeCAD.closeDocument(doc.Name)
+
+    def testPadUpToACylinderFaceCentreThroughAWindowBehind(self):
+        # The pie slice's face with a window y -2..2, z 3..7; two rectangles y 4..6 and -6..-4,
+        # z 4..6, on the plane x = 0, padded along -x, away from the face: the line from the
+        # profile's centre passes through the window. Each rectangle goes to its first crossing
+        # ahead, the cylinder's half at x < 0 (orc1125c, RB34), never a prism ending off the
+        # surface (review pr1039-r3: a retry ended it 1 mm short)
+        V = FreeCAD.Vector
+        solid, _ = curvedFaceWall("pie")
+        solid = solid.cut(Part.makeBox(30, 4, 4, V(0, -2, 3)))
+        names = [
+            "Face%d" % (i + 1)
+            for i, face in enumerate(solid.Faces)
+            if face.Surface.TypeId == "Part::GeomCylinder"
+        ]
+        self.assertEqual(len(names), 1)
+        wall = self.Doc.addObject("Part::Feature", "Wall")
+        wall.Shape = solid
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        pad = body.newObject("PartDesign::Pad", "Pad")
+        sketch = rectangleOnX(body, 0, 4, 6, 4, 6)
+        first = sketch.GeometryCount
+        corners = [V(-6, -6, 0), V(-4, -6, 0), V(-4, -4, 0), V(-6, -4, 0)]
+        for i in range(4):
+            sketch.addGeometry(Part.LineSegment(corners[i], corners[(i + 1) % 4]))
+        for i in range(4):
+            sketch.addConstraint(
+                Sketcher.Constraint("Coincident", first + i, 2, first + (i + 1) % 4, 1)
+            )
+        pad.Profile = sketch
+        pad.Type = "UpToFace"
+        pad.UpToFace = (wall, names)
+        pad.UseCustomVector = True
+        pad.AlongSketchNormal = False
+        pad.Direction = V(-1, 0, 0)
+        self.Doc.recompute()
+        self.checkSolids(pad, 2 * cylinderReach(0, 4, 6, 4, 6, sense=1), 2)
+
+    def testPocketUpToACylinderFaceBeside(self):
+        # The pie slice joined with the block x 0..30, y 8..18, z 0..10: the face now spans
+        # y -10..8. The rectangle y 14..16, z 4..6 at x = 40, beside the face, cuts the block
+        # from its face x = 30 to the cylinder r 20
+        V = FreeCAD.Vector
+        solid, _ = curvedFaceWall("pie")
+        solid = solid.fuse(Part.makeBox(30, 10, 10, V(0, 8, 0))).removeSplitter()
+        names = [
+            "Face%d" % (i + 1)
+            for i, face in enumerate(solid.Faces)
+            if face.Surface.TypeId == "Part::GeomCylinder"
+        ]
+        self.assertEqual(len(names), 1)
+        base = self.Doc.addObject("Part::Feature", "Base")
+        base.Shape = solid
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        body.BaseFeature = base
+        pocket = body.newObject("PartDesign::Pocket", "Pocket")
+        pocket.Profile = rectangleOnX(body, 40, 14, 16, 4, 6)
+        pocket.Type = "UpToFace"
+        pocket.UpToFace = (base, names)
+        self.Doc.recompute()
+        self.assertTrue(pocket.isValid(), pocket.getStatusString())
+        self.assertTrue(pocket.Shape.isValid())
+        removed = solid.Volume - pocket.Shape.Volume
+        expected = cylinderReach(30, 14, 16, 4, 6)
+        self.assertAlmostEqual(removed, expected, delta=PRISM_VOLUME_RELATIVE * expected)
+
+    def testPadUpToACylinderFaceCoveringButCentreThroughAWindow(self):
+        # The window wall above (the pie slice's face with a window y -2..2, z 3..7), the two
+        # rectangles y 4..6 and -6..-4, z 4..6 on the plane x = 40 towards -x: the face covers
+        # both and is their first crossing, but the line from the profile's centre passes the
+        # window. Onshape extends the face to its surface (orc1125c, RB34): each to the cylinder
+        # r 20 (review rv540 2: refused, "can't be extended around")
+        V = FreeCAD.Vector
+        solid, _ = curvedFaceWall("pie")
+        solid = solid.cut(Part.makeBox(30, 4, 4, V(0, -2, 3)))
+        names = [
+            "Face%d" % (i + 1)
+            for i, face in enumerate(solid.Faces)
+            if face.Surface.TypeId == "Part::GeomCylinder"
+        ]
+        self.assertEqual(len(names), 1)
+        wall = self.Doc.addObject("Part::Feature", "Wall")
+        wall.Shape = solid
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        pad = body.newObject("PartDesign::Pad", "Pad")
+        sketch = rectangleOnX(body, 40, 4, 6, 4, 6)
+        first = sketch.GeometryCount
+        corners = [V(-6, -6, 0), V(-4, -6, 0), V(-4, -4, 0), V(-6, -4, 0)]
+        for i in range(4):
+            sketch.addGeometry(Part.LineSegment(corners[i], corners[(i + 1) % 4]))
+        for i in range(4):
+            sketch.addConstraint(
+                Sketcher.Constraint("Coincident", first + i, 2, first + (i + 1) % 4, 1)
+            )
+        pad.Profile = sketch
+        pad.Type = "UpToFace"
+        pad.UpToFace = (wall, names)
+        pad.UseCustomVector = True
+        pad.AlongSketchNormal = False
+        pad.Direction = V(-1, 0, 0)
+        self.Doc.recompute()
+        self.checkSolids(pad, 2 * cylinderReach(40, 4, 6, 4, 6), 2)
+
+    def testPadUpToAFullCylinderObliqueAboveIt(self):
+        # The side face of the whole cylinder r 20, z 0..10, the rectangle y -2..2, z 15..17 on the
+        # plane x = 40, along (-1, 0, -0.2): the lines cross the surface first at x = +20, z
+        # 11..13, above the face, and meet the face only on the far side. Onshape stops each
+        # point at its first crossing of the whole surface (orc1125c, RB34): the near side, the
+        # volume of cylinderReach() (a shear along the axis). Review rv540-2 F1: BRepFeat went
+        # to the far side, 479.73 (integration too)
+        V = FreeCAD.Vector
+        wall = self.Doc.addObject("Part::Feature", "Wall")
+        wall.Shape = Part.makeCylinder(20, 10)
+        names = [
+            "Face%d" % (i + 1)
+            for i, face in enumerate(wall.Shape.Faces)
+            if face.Surface.TypeId == "Part::GeomCylinder"
+        ]
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        pad = body.newObject("PartDesign::Pad", "Pad")
+        pad.Profile = rectangleOnX(body, 40, -2, 2, 15, 17)
+        pad.Type = "UpToFace"
+        pad.UpToFace = (wall, names)
+        pad.UseCustomVector = True
+        pad.AlongSketchNormal = False
+        pad.Direction = V(-1, 0, -0.2)
+        self.Doc.recompute()
+        self.check(pad, cylinderReach(40, -2, 2, 15, 17))
+
+
+def roundEndReach(x, y0, y1, z0, z1, r=5.0):
+    """The volume over the rectangle y y0..y1, z z0..z1 of the plane at `x`, along -x to the far
+    half (x <= 0) of the cylinder r `r` about the z axis: each point to x = -sqrt(r^2 - y^2)"""
+    area = lambda y: (y * math.sqrt(r * r - y * y) + r * r * math.asin(y / r)) / 2
+    return (z1 - z0) * ((y1 - y0) * x + area(y1) - area(y0))
+
+
+class TestUpToFirstLastRoundFace(unittest.TestCase):
+    """ops#1039, review rv540 1: up to first and up to last end on the part's face itself (O8,
+    RB29), not on the first crossing of the face's surface extended around, which is Onshape's
+    rule up to a picked face only (orc1125c, RB34). A round end's face (a half turn) is not on
+    one side of the direction, and the first-crossing rule moved the end about 2 r short"""
+
+    def setUp(self):
+        self.Doc = FreeCAD.newDocument("UpToFirstLastRoundFace")
+
+    def tearDown(self):
+        FreeCAD.closeDocument(self.Doc.Name)
+
+    def roundEndTab(self):
+        """The tab x 0..60, y -5..5, z 0..4 with a full-round end: the half cylinder r 5 about
+        the z axis, its face at 90..270 degrees"""
+        V = FreeCAD.Vector
+        half = Part.makeCylinder(5, 4, V(0, 0, 0), V(0, 0, 1), 180)
+        half.rotate(V(0, 0, 0), V(0, 0, 1), 90)
+        return Part.makeBox(60, 10, 4, V(0, -5, 0)).fuse(half).removeSplitter()
+
+    def testPocketUpToFirstAndLastAlongATabWithARoundEnd(self):
+        # The rectangle y -2..2, z 1..3 on the tab's face x = 60, pocketed towards -x: the first
+        # and the last face on its centre line are both the round end, and each point stops on
+        # it, at x = -sqrt(25 - y^2)
+        for method in ("UpToLast", "UpToFirst"):
+            with self.subTest(method=method):
+                doc = FreeCAD.newDocument("PocketUpToFirstLastRoundEnd")
+                try:
+                    solid = self.roundEndTab()
+                    base = doc.addObject("Part::Feature", "Tab")
+                    base.Shape = solid
+                    body = doc.addObject("PartDesign::Body", "Body")
+                    body.BaseFeature = base
+                    pocket = body.newObject("PartDesign::Pocket", "Pocket")
+                    pocket.Profile = rectangleOnX(body, 60, -2, 2, 1, 3)
+                    pocket.Type = method
+                    doc.recompute()
+                    self.assertTrue(pocket.isValid(), pocket.getStatusString())
+                    self.assertTrue(pocket.Shape.isValid())
+                    removed = solid.Volume - pocket.Shape.Volume
+                    expected = roundEndReach(60, -2, 2, 1, 3)
+                    self.assertAlmostEqual(
+                        removed, expected, delta=PRISM_VOLUME_RELATIVE * expected
+                    )
+                finally:
+                    FreeCAD.closeDocument(doc.Name)
+
+    def testPadUpToFirstIntoACradle(self):
+        # A cradle: the block x -10..0, y -10..10, z 0..4 less the cylinder r 5 about the z
+        # axis, its face the half turn at 90..270 degrees, concave. The rectangle y -2..2, z 1..3
+        # on the plane x = 60, padded towards -x up to first: the cradle's face, each point to
+        # x = -sqrt(25 - y^2), filling the cradle (not stopping at x = +sqrt(25 - y^2), a gap)
+        V = FreeCAD.Vector
+        solid = Part.makeBox(10, 20, 4, V(-10, -10, 0)).cut(Part.makeCylinder(5, 4))
+        base = self.Doc.addObject("Part::Feature", "Cradle")
+        base.Shape = solid
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        body.BaseFeature = base
+        pad = body.newObject("PartDesign::Pad", "Pad")
+        pad.Profile = rectangleOnX(body, 60, -2, 2, 1, 3)
+        pad.Type = "UpToFirst"
+        pad.UseCustomVector = True
+        pad.AlongSketchNormal = False
+        pad.Direction = V(-1, 0, 0)
+        self.Doc.recompute()
+        self.assertTrue(pad.isValid(), pad.getStatusString())
+        prism = pad.AddSubShape
+        self.assertTrue(prism.isValid())
+        self.assertEqual(len(prism.Solids), 1)
+        expected = roundEndReach(60, -2, 2, 1, 3)
+        self.assertAlmostEqual(prism.Volume, expected, delta=PRISM_VOLUME_RELATIVE * expected)
+        self.assertAlmostEqual(
+            pad.Shape.Volume, solid.Volume + expected, delta=PRISM_VOLUME_RELATIVE * expected
+        )
+
+    def testPadUpToFirstIntoACradleTallerProfileIsRefused(self):
+        # The cradle above, the rectangle y -2..2, z 1..6 on the plane x = 60 (2 mm taller than
+        # the cradle), padded towards -x up to first: the part's face doesn't take the part of the
+        # profile above it, and up to first never ends on the face's surface extended around
+        # (review rv540-3 F1: every point stopped at x = +sqrt(25 - y^2), the cradle left empty,
+        # Valid). Refused with a message, as on integration
+        V = FreeCAD.Vector
+        solid = Part.makeBox(10, 20, 4, V(-10, -10, 0)).cut(Part.makeCylinder(5, 4))
+        base = self.Doc.addObject("Part::Feature", "Cradle")
+        base.Shape = solid
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        body.BaseFeature = base
+        pad = body.newObject("PartDesign::Pad", "Pad")
+        pad.Profile = rectangleOnX(body, 60, -2, 2, 1, 6)
+        pad.Type = "UpToFirst"
+        pad.UseCustomVector = True
+        pad.AlongSketchNormal = False
+        pad.Direction = V(-1, 0, 0)
+        self.Doc.recompute()
+        self.assertFalse(pad.isValid())
+        self.assertNotEqual(pad.getStatusString().strip(), "")

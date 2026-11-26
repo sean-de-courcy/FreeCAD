@@ -540,7 +540,8 @@ names it.
 | `infra/gen6-1125` | infra | ops#883 | - | `integration` `d7af7bcf81` | `8388e5e747` (fork PR 543), 2026-11-25 | never (fork corpus) |
 | `fix/i1040-vertex-fillets` | fix | ops#1040 | - | `integration` `091421dbef` | `be7163b688` (fork PR 542), 2026-11-26 | never (fork fix): fillets and chamfers ending at a vertex of 4 edges behind a face (folds), fills run past their face over a face beyond ruled along its normal, decided exactly |
 | `fix/i1027-overflow-tight-arc` | fix | ops#1027 | - | open | `959829cc91` (fork PR 538), 2026-11-26 | drop when upstream fails the overflow past a tight arc |
-| `infra/i1049-forkrelease-15` | infra | ops#1049 | - | `integration` `d7af7bcf81` | (fork PR 544) | never (fork stamp) |
+| `infra/i1049-forkrelease-15` | infra | ops#1049 | - | `integration` `d7af7bcf81` | `fd104faf25` (fork PR 544), 2026-11-26 | never (fork stamp) |
+| `fix/i1039-upto-curved-face` | fix | ops#1039 | - | `integration` `fd104faf25` | (fork PR 540) | never (fork fix): up to a picked cylinder, cone or sphere face by the split against its full turn, each point to its first crossing; BRepFeat's own-base retry must reach the face |
 
 ## Fork-only commits in carried topics
 

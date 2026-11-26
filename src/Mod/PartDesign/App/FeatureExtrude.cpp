@@ -81,6 +81,7 @@
 #include <Mod/Part/App/Tools.h>
 #include "Mod/Part/App/TopoShapeOpCode.h"
 #include <Mod/Part/App/PartFeature.h>
+#include <Mod/Part/App/PrismUntilPick.h>
 
 #include "Body.h"
 #include "FeatureExtrude.h"
@@ -2250,6 +2251,14 @@ App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions opt
                 "Intersecting sketch entities or multiple faces in a sketch are not allowed."
             ));
         }
+        else if (std::string(e.GetMessageString()).empty()) {
+            // OCCT's failures often carry no text (StdFail_NotDone): an Invalid feature that
+            // says nothing (ops#1039)
+            return new App::DocumentObjectExecReturn(QT_TRANSLATE_NOOP(
+                "Exception",
+                "The extrusion failed in the geometry kernel"
+            ));
+        }
         else {
             return new App::DocumentObjectExecReturn(e.GetMessageString());
         }
@@ -2376,6 +2385,11 @@ TopoShape FeatureExtrude::generateSingleExtrusionSide(
             if (addSubType != FeatureAddSub::Type::Subtractive && !runsAsStudioOwner(this)) {
                 _base = base;  // avoid issue #16690
             }
+            // Up to a face picked by the user, Onshape's first crossing of the face's whole
+            // surface; up to first or last, the part's face itself (ops#1039, review rv540 1)
+            Part::PrismUntilPick picked(
+                method == "UpToFace" || (method == "UpToShape" && faceCount == 1)
+            );
             prism.makeElementPrismUntil(
                 _base,
                 sketchshape,

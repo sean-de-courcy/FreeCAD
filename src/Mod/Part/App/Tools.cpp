@@ -831,7 +831,16 @@ bool Part::Tools::isConcave(const TopoDS_Face& face, const gp_Pnt& pointOfVue, c
     BRepIntCurveSurface_Inter mkSection;
     mkSection.Init(face, line, Precision::Confusion());
 
-    result = mkSection.Transition() == IntCurveSurface_In;
+    // Where the line meets the face. Read without asking, a miss raised StdFail_NotDone, whose
+    // message is empty: an extrusion up to a face beside the profile's centre failed saying
+    // nothing (ops#1039). A miss keeps the face's limits: the prism then goes up to the face as it
+    // is, and a face that doesn't cover the profile is extended only by makeElementPrismUntil()'s
+    // full turn, each point to its first crossing of the face's whole surface (review pr1039-r2:
+    // the surface without limits, read off the face here, sent oblique profiles to the half of a
+    // cylinder away from the face)
+    if (!mkSection.More()) {
+        return true;
+    }
 
     // compute normals at the intersection
     gp_Pnt iPnt;
