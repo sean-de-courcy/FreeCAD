@@ -5785,3 +5785,68 @@ TEST_F(FilletFallbackTest, roundOnAnExtrudedWallRefusals)
     }
 }
 // NOLINTEND(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)
+
+// ops#1045, the preference (betweenPrisms()): a round whose every edge lies on a wall extruded along
+// it is built by the construction first, below the limit too, through the public path; a refusal
+// falls back to OCCT. A plane and a cylinder along the edge stay OCCT's (its round there is a
+// cylinder already)
+// NOLINTBEGIN(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)
+TEST_F(FilletFallbackTest, roundOnAnExtrudedWallIsPreferred)
+{
+    TopoShape base(p1(), 1L);
+    const double v0 = volume(base.getShape());
+    TopoShape e = edgeBetween(base, {qx, 0, 0}, {qx, 0, 20});
+    EXPECT_TRUE(FF::preferConstruction(base.getShape(), {e.getShape()}, fillet(2)));
+    for (double r : {2.0, 0.5}) {
+        const ExpectedRound x = p1Round(r);
+        TopoShape result = dressUp(base, {e}, fillet(r));
+        EXPECT_TRUE(changes(result, v0, -(x.area * 20))) << r;
+        EXPECT_EQ(result.countSubElements("Face"), 7) << r;
+        EXPECT_EQ(cylindersAbout(result, r, x.centre), 1) << r;
+    }
+    // The concave edge (P3)
+    TopoShape p3(unified(BRepAlgoAPI_Fuse(p1(), box(60, 5, 20, gp_Pnt(0, -5, 0))).Shape()), 1L);
+    TopoShape concave = edgeBetween(p3, {qx, 0, 0}, {qx, 0, 20});
+    const ExpectedRound x
+        = expectedRound(ellipseCurve(40, 15, 10, 20), tE, -tE, false, lineTrace({0, 0}, {0, 1}), 2);
+    TopoShape fill = dressUp(p3, {concave}, fillet(2));
+    EXPECT_TRUE(changes(fill, volume(p3.getShape()), x.area * 20));
+    EXPECT_EQ(cylindersAbout(fill, 2, x.centre), 1);
+    // A refusal (N1 at r 2, above the nose's curvature) is not preferred away: OCCT's, or its error,
+    // as before
+    {
+        const double xe = 20 * std::sqrt(1 - 1.0 / 25);
+        TopoShape nose(
+            padOf({segment(-xe, -1, xe, -1), ellipseArc(0, 0, 20, 5, gp_Pnt(xe, -1, 0), gp_Pnt(-xe, -1, 0))}, 20),
+            1L
+        );
+        TopoShape edge = edgeBetween(nose, {xe, -1, 0}, {xe, -1, 20});
+        EXPECT_TRUE(FF::preferConstruction(nose.getShape(), {edge.getShape()}, fillet(2)));
+        std::string reason;
+        EXPECT_TRUE(forced(nose, {edge}, fillet(2), &reason).isNull());
+        bool occt = !occtFilletFails(nose, {edge}, 2, 2);
+        bool built = false;
+        try {
+            built = !dressUp(nose, {edge}, fillet(2)).isNull();
+        }
+        catch (...) {
+        }
+        EXPECT_EQ(built, occt);
+    }
+    // All of the selection: E with a plane-plane edge stays OCCT's (sk1045 change 6, case D7)
+    TopoShape corner = edgeBetween(base, {0, 0, 0}, {0, 0, 20});
+    EXPECT_FALSE(FF::preferConstruction(base.getShape(), {e.getShape(), corner.getShape()}, fillet(2)));
+    // A plane and a cylinder along the edge: not preferred
+    TopoShape quarter(
+        padOf(
+            {segment(0, 0, 10, 0),
+             BRepBuilderAPI_MakeEdge(GC_MakeArcOfCircle(gp_Pnt(10, 0, 0), gp_Pnt(10 * std::cos(pi / 4), 10 * std::sin(pi / 4), 0), gp_Pnt(0, 10, 0)).Value()).Edge(),
+             segment(0, 10, 0, 0)},
+            20
+        ),
+        1L
+    );
+    TopoShape onCylinder = edgeBetween(quarter, {10, 0, 0}, {10, 0, 20});
+    EXPECT_FALSE(FF::preferConstruction(quarter.getShape(), {onCylinder.getShape()}, fillet(2)));
+}
+// NOLINTEND(readability-magic-numbers,cppcoreguidelines-avoid-magic-numbers)

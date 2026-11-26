@@ -2046,6 +2046,22 @@ bool betweenCylinders(const EdgeData& data)
     return data.ruled && onCylinder(data.faces[0]) && onCylinder(data.faces[1]);
 }
 
+/** ops#1045: a straight edge with a wall extruded along it among its faces (EdgeData::extruded).
+ * OCCT's round there is a B-spline face; Onshape's, and the construction's (extrudedTool()), is a
+ * cylinder along the edge (RB45, RB48). Only this kind: a plane and a cylinder stay OCCT's, whose
+ * round there is a cylinder already
+ */
+bool betweenPrisms(const EdgeData& data)
+{
+    return data.extruded;
+}
+
+/// Rounds the construction builds wherever they fit, not only at the limit
+bool preferredRound(const EdgeData& data)
+{
+    return betweenCylinders(data) || betweenPrisms(data);
+}
+
 /// The direction along the edge away from the vertex, and the vertex's parameter
 gp_Dir awayFrom(const TopoDS_Edge& edge, const TopoDS_Vertex& vertex, double* parameter = nullptr)
 {
@@ -13240,10 +13256,11 @@ TopoDS_Shape constructShape(
     // The faces beyond the tools kept over their faces (trimFusedToolOverFace), among wallFaces
     std::vector<TopoDS_Face> faceWalls;
     std::vector<FusedRun> fusedRuns;
-    // Rounds between two cylinders are built wherever they fit, not only at the limit: OCCT's own
-    // are B-spline faces there (preferConstruction())
+    // Rounds between two cylinders, or on a wall extruded along the edge (ops#1045), are built
+    // wherever they fit, not only at the limit: OCCT's own are B-spline faces there
+    // (preferConstruction())
     const bool limitOnly = request.limitOnly && !request.mitreOnly
-        && !(!data.empty() && std::all_of(data.begin(), data.end(), betweenCylinders)) && !notchEnds;
+        && !(!data.empty() && std::all_of(data.begin(), data.end(), preferredRound)) && !notchEnds;
     std::vector<SurfaceWall> surfaceWalls;
     std::vector<std::pair<TopoDS_Shape, TopoDS_Shape>> overlapPairs;
     for (const auto& corner : overlapCorners) {
@@ -22638,8 +22655,9 @@ bool preferConstruction(
     try {
         const TopoShape base(baseShape);
         Context ctx(base, request);
-        // Every selected edge straight between two cylinders along it (betweenCylinders()): the
-        // construction builds the round as a cylinder, below the limit too (constructShape())
+        // Every selected edge straight between two cylinders along it (betweenCylinders()), or on a
+        // wall extruded along it (betweenPrisms(), ops#1045): the construction builds the round as
+        // a cylinder, below the limit too (constructShape()). A refusal falls back to OCCT
         int picked = 0;
         int ruledOnCylinders = 0;
         for (const auto& edge : edges) {
@@ -22652,7 +22670,7 @@ bool preferConstruction(
                 if (tightArc(ctx, data)) {
                     return true;
                 }
-                if (betweenCylinders(data)) {
+                if (preferredRound(data)) {
                     ++ruledOnCylinders;
                 }
             }
