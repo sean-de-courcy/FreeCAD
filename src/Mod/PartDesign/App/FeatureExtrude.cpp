@@ -81,6 +81,7 @@
 #include <Mod/Part/App/Tools.h>
 #include "Mod/Part/App/TopoShapeOpCode.h"
 #include <Mod/Part/App/PartFeature.h>
+#include <Mod/Part/App/PrismUntilPick.h>
 
 #include "Body.h"
 #include "FeatureExtrude.h"
@@ -2384,6 +2385,11 @@ TopoShape FeatureExtrude::generateSingleExtrusionSide(
             if (addSubType != FeatureAddSub::Type::Subtractive && !runsAsStudioOwner(this)) {
                 _base = base;  // avoid issue #16690
             }
+            // Up to a face picked by the user, Onshape's first crossing of the face's whole
+            // surface; up to first or last, the part's face itself (ops#1039, review rv540 1)
+            Part::PrismUntilPick picked(
+                method == "UpToFace" || (method == "UpToShape" && faceCount == 1)
+            );
             prism.makeElementPrismUntil(
                 _base,
                 sketchshape,

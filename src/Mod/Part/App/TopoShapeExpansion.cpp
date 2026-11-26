@@ -199,6 +199,7 @@
 #include "BRepOffsetAPI_MakeOffsetFix.h"
 #include "PipeShellApproximation.h"
 #include "KernelBudget.h"
+#include "PrismUntilPick.h"
 #include "ProgressIndicator.h"
 #include "ShapeAnalysis_FreeBoundsFix.h"
 #include "SweepFrenet.h"
@@ -12538,6 +12539,27 @@ TopoShape joinPrisms(const TopoShape& blank, const std::vector<TopoShape>& piece
 }
 }  // namespace
 
+namespace
+{
+thread_local bool prismUntilPicked = false;
+}
+
+PrismUntilPick::PrismUntilPick(bool picked)
+    : previous(prismUntilPicked)
+{
+    prismUntilPicked = picked;
+}
+
+PrismUntilPick::~PrismUntilPick()
+{
+    prismUntilPicked = previous;
+}
+
+bool PrismUntilPick::current()
+{
+    return prismUntilPicked;
+}
+
 TopoShape& TopoShape::makeElementPrismUntil(
     const TopoShape& baseShape,
     const TopoShape& profileShape,
@@ -12573,6 +12595,11 @@ TopoShape& TopoShape::makeElementPrismUntil(
     // The caller's word, before the concave test below overrides it: false keeps the face as it is
     // (the full turn below never runs)
     const bool mayExtend = checkLimits;
+    // Up to a picked face only (PrismUntilPick): up to first or last the face is the part's, and
+    // the first-crossing rule below would move the end to a part of the surface that isn't there
+    // (review rv540 1: a pocket up to last along a tab with a full-round end stopped about 2 r
+    // short of it)
+    const bool picked = PrismUntilPick::current();
 
     // FreeCAD-CH (ops#640, FSLC #49): up to a plane parallel to the profile, each face's prism is
     // the blind one of the plane's distance, made directly: no BRepFeat pass against the base per
@@ -12606,7 +12633,7 @@ TopoShape& TopoShape::makeElementPrismUntil(
             BRepIntCurveSurface_Inter section;
             section.Init(face, gp_Lin(pCog, direction), Precision::Confusion());
             centreMisses = !section.More();
-            if (mayExtend && profile.hasSubShape(TopAbs_FACE)
+            if (mayExtend && picked && profile.hasSubShape(TopAbs_FACE)
                 && roundSurface(BRepAdaptor_Surface(face))) {
                 notFirst = !faceIsFirstCrossing(face, profile.getShape(), direction);
             }
@@ -12781,7 +12808,10 @@ TopoShape& TopoShape::makeElementPrismUntil(
                 }
             }
         }
-        if (covers && !notFirst) {
+        // A covered face whose first crossing it is stays BRepFeat's, except when the centre line
+        // misses it: BRepFeat isn't asked then, and the face's surface is what Onshape reaches
+        // (review rv540 2: the centre line through a window of a face that covers every region)
+        if (covers && !notFirst && !centreMisses) {
             return std::nullopt;
         }
         const TopoDS_Face whole = fullTurnSurface(face, profile.getShape(), direction);

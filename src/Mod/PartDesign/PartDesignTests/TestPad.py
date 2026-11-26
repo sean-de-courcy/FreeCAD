@@ -6119,3 +6119,123 @@ class TestUpToACurvedFace(unittest.TestCase):
         removed = solid.Volume - pocket.Shape.Volume
         expected = cylinderReach(30, 14, 16, 4, 6)
         self.assertAlmostEqual(removed, expected, delta=PRISM_VOLUME_RELATIVE * expected)
+
+    def testPadUpToACylinderFaceCoveringButCentreThroughAWindow(self):
+        # The window wall above (the pie slice's face with a window y -2..2, z 3..7), the two
+        # rectangles y 4..6 and -6..-4, z 4..6 on the plane x = 40 towards -x: the face covers
+        # both and is their first crossing, but the line from the profile's centre passes the
+        # window. Onshape extends the face to its surface (orc1125c, RB34): each to the cylinder
+        # r 20 (review rv540 2: refused, "can't be extended around")
+        V = FreeCAD.Vector
+        solid, _ = curvedFaceWall("pie")
+        solid = solid.cut(Part.makeBox(30, 4, 4, V(0, -2, 3)))
+        names = [
+            "Face%d" % (i + 1)
+            for i, face in enumerate(solid.Faces)
+            if face.Surface.TypeId == "Part::GeomCylinder"
+        ]
+        self.assertEqual(len(names), 1)
+        wall = self.Doc.addObject("Part::Feature", "Wall")
+        wall.Shape = solid
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        pad = body.newObject("PartDesign::Pad", "Pad")
+        sketch = rectangleOnX(body, 40, 4, 6, 4, 6)
+        first = sketch.GeometryCount
+        corners = [V(-6, -6, 0), V(-4, -6, 0), V(-4, -4, 0), V(-6, -4, 0)]
+        for i in range(4):
+            sketch.addGeometry(Part.LineSegment(corners[i], corners[(i + 1) % 4]))
+        for i in range(4):
+            sketch.addConstraint(
+                Sketcher.Constraint("Coincident", first + i, 2, first + (i + 1) % 4, 1)
+            )
+        pad.Profile = sketch
+        pad.Type = "UpToFace"
+        pad.UpToFace = (wall, names)
+        pad.UseCustomVector = True
+        pad.AlongSketchNormal = False
+        pad.Direction = V(-1, 0, 0)
+        self.Doc.recompute()
+        self.checkSolids(pad, 2 * cylinderReach(40, 4, 6, 4, 6), 2)
+
+
+def roundEndReach(x, y0, y1, z0, z1, r=5.0):
+    """The volume over the rectangle y y0..y1, z z0..z1 of the plane at `x`, along -x to the far
+    half (x <= 0) of the cylinder r `r` about the z axis: each point to x = -sqrt(r^2 - y^2)"""
+    area = lambda y: (y * math.sqrt(r * r - y * y) + r * r * math.asin(y / r)) / 2
+    return (z1 - z0) * ((y1 - y0) * x + area(y1) - area(y0))
+
+
+class TestUpToFirstLastRoundFace(unittest.TestCase):
+    """ops#1039, review rv540 1: up to first and up to last end on the part's face itself (O8,
+    RB29), not on the first crossing of the face's surface extended around, which is Onshape's
+    rule up to a picked face only (orc1125c, RB34). A round end's face (a half turn) is not on
+    one side of the direction, and the first-crossing rule moved the end about 2 r short"""
+
+    def setUp(self):
+        self.Doc = FreeCAD.newDocument("UpToFirstLastRoundFace")
+
+    def tearDown(self):
+        FreeCAD.closeDocument(self.Doc.Name)
+
+    def roundEndTab(self):
+        """The tab x 0..60, y -5..5, z 0..4 with a full-round end: the half cylinder r 5 about
+        the z axis, its face at 90..270 degrees"""
+        V = FreeCAD.Vector
+        half = Part.makeCylinder(5, 4, V(0, 0, 0), V(0, 0, 1), 180)
+        half.rotate(V(0, 0, 0), V(0, 0, 1), 90)
+        return Part.makeBox(60, 10, 4, V(0, -5, 0)).fuse(half).removeSplitter()
+
+    def testPocketUpToFirstAndLastAlongATabWithARoundEnd(self):
+        # The rectangle y -2..2, z 1..3 on the tab's face x = 60, pocketed towards -x: the first
+        # and the last face on its centre line are both the round end, and each point stops on
+        # it, at x = -sqrt(25 - y^2)
+        for method in ("UpToLast", "UpToFirst"):
+            with self.subTest(method=method):
+                doc = FreeCAD.newDocument("PocketUpToFirstLastRoundEnd")
+                try:
+                    solid = self.roundEndTab()
+                    base = doc.addObject("Part::Feature", "Tab")
+                    base.Shape = solid
+                    body = doc.addObject("PartDesign::Body", "Body")
+                    body.BaseFeature = base
+                    pocket = body.newObject("PartDesign::Pocket", "Pocket")
+                    pocket.Profile = rectangleOnX(body, 60, -2, 2, 1, 3)
+                    pocket.Type = method
+                    doc.recompute()
+                    self.assertTrue(pocket.isValid(), pocket.getStatusString())
+                    self.assertTrue(pocket.Shape.isValid())
+                    removed = solid.Volume - pocket.Shape.Volume
+                    expected = roundEndReach(60, -2, 2, 1, 3)
+                    self.assertAlmostEqual(
+                        removed, expected, delta=PRISM_VOLUME_RELATIVE * expected
+                    )
+                finally:
+                    FreeCAD.closeDocument(doc.Name)
+
+    def testPadUpToFirstIntoACradle(self):
+        # A cradle: the block x -10..0, y -10..10, z 0..4 less the cylinder r 5 about the z
+        # axis, its face the half turn at 90..270 degrees, concave. The rectangle y -2..2, z 1..3
+        # on the plane x = 60, padded towards -x up to first: the cradle's face, each point to
+        # x = -sqrt(25 - y^2), filling the cradle (not stopping at x = +sqrt(25 - y^2), a gap)
+        V = FreeCAD.Vector
+        solid = Part.makeBox(10, 20, 4, V(-10, -10, 0)).cut(Part.makeCylinder(5, 4))
+        base = self.Doc.addObject("Part::Feature", "Cradle")
+        base.Shape = solid
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        body.BaseFeature = base
+        pad = body.newObject("PartDesign::Pad", "Pad")
+        pad.Profile = rectangleOnX(body, 60, -2, 2, 1, 3)
+        pad.Type = "UpToFirst"
+        pad.UseCustomVector = True
+        pad.AlongSketchNormal = False
+        pad.Direction = V(-1, 0, 0)
+        self.Doc.recompute()
+        self.assertTrue(pad.isValid(), pad.getStatusString())
+        prism = pad.AddSubShape
+        self.assertTrue(prism.isValid())
+        self.assertEqual(len(prism.Solids), 1)
+        expected = roundEndReach(60, -2, 2, 1, 3)
+        self.assertAlmostEqual(prism.Volume, expected, delta=PRISM_VOLUME_RELATIVE * expected)
+        self.assertAlmostEqual(
+            pad.Shape.Volume, solid.Volume + expected, delta=PRISM_VOLUME_RELATIVE * expected
+        )
