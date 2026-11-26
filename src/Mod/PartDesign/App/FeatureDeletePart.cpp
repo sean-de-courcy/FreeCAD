@@ -56,7 +56,9 @@ Feature* asEnder(App::DocumentObject* obj)
     if (!feature || feature->Suppressed.getValue()) {
         return nullptr;
     }
-    if (feature->isDerivedFrom<DeletePart>() || feature->PartEnded.getValue()) {
+    // A feature in error passes its base through and ends nothing, whatever its flag says
+    // (review pr1065-r1 F1)
+    if (feature->isDerivedFrom<DeletePart>() || (feature->PartEnded.getValue() && !feature->isError())) {
         return feature;
     }
     return nullptr;
@@ -351,9 +353,10 @@ std::string DeletePart::deleteLock(const App::DocumentObject* feature)
             continue;
         }
         Feature* deleter = enderOf(other);
-        // The ender itself (a studio owner's base, StudioBases, is the part's solid before it):
-        // its state is the part ended, nothing of it is read (ops#1065)
-        if (!deleter || read == deleter) {
+        // A feature that ended the part, read itself (a studio owner's base, StudioBases, is the
+        // part's solid before it): its state is the part ended, nothing of it is read (ops#1065).
+        // A Delete part read keeps its lock, as before (review pr1065-r1 T2)
+        if (!deleter || (read == deleter && !deleter->isDerivedFrom<DeletePart>())) {
             continue;
         }
         // The whole Body (a Boolean's tool, a binder, a link) is read at its end, which is empty

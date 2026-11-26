@@ -255,6 +255,82 @@ class TestPartEnds(unittest.TestCase):
         self.emptyResult(pocket)
         self.assertLost(pocket)
 
+    def testToolWithHoleIsNotAnEnd(self):
+        """Review pr1065-r1 T1: a Pocket through all of -1..11 with a hole 1.0..1.6 leaves a pin
+        (0.6 x 0.6 x 2); emptied, the tool's hole walls inside the block say it is no end: the
+        kernel's error, at 10 mm and at 4 m."""
+        for scale in (1, 400):
+            with self.subTest(scale=scale):
+                s = scale
+                body, _ = self.block(x1=10 * s, y1=10 * s, height=2 * s, name="Pin%d" % s)
+                pocket = self.pocket(body, (-1 * s, -1 * s, 11 * s, 11 * s), (1.0 * s, 1.0 * s, 1.6 * s, 1.6 * s),
+                                     z=2 * s, name="PinPocket%d" % s)
+                self.assertTrue(pocket.isValid(), pocket.getStatusString())
+                self.assertFalse(pocket.PartEnded)
+                self.assertAlmostEqual(body.Shape.Volume, 0.72 * s**3, delta=1e-6 * s**3)
+                self.emptyResult(pocket)
+                self.assertLost(pocket)
+
+    def testOutOfStepSiblingDoesNotHoldThePartOff(self):
+        """Review pr1065-r1 F1: a sibling that ended B, then out of step with its primary (fails
+        before it runs): B is back, and a Pad after the sibling is not refused for a gone part."""
+        a, ablock = self.block(name="A")
+        b, _ = self.block(name="B")
+        pocket = self.pocket(a, (-10, -10, 20, 20))
+        [sibling] = PartDesign.makeSiblings(pocket, [b])
+        self.doc.recompute()
+        self.assertEnded(sibling, b)
+        pocket.UpToFace = (ablock, ["Face1"])
+        self.doc.recompute()
+        self.assertFalse(sibling.isValid())
+        self.assertFalse(sibling.PartEnded)
+        pad = self.padAfter(b, "AfterSibling")
+        self.assertNotIn(LOCK, pad.getStatusString())
+
+    def testBooleanBeingSetUpIsNotAKernelError(self):
+        """Review pr1065-r1 F2: a new Boolean before its first tool (its command recomputes it
+        before the panel opens) is no kernel error, whatever its Type."""
+        for kind in ("Fuse", "Cut", "Common"):
+            with self.subTest(kind=kind):
+                body, _ = self.block(name="Set" + kind)
+                boolean = body.newObject("PartDesign::Boolean", "Bool" + kind)
+                boolean.Type = kind
+                self.doc.recompute()
+                self.assertNotIn(LOST, boolean.getStatusString())
+                self.assertFalse(boolean.PartEnded)
+
+    def testHeldEnderRecomputedKeepsItsEnd(self):
+        """Review pr1065-r1 F3: the ending Pocket held by the bar and recomputed directly keeps
+        its end; at the end of the history a Pad after it is still refused."""
+        body, block = self.block()
+        pocket = self.pocket(body, (-10, -10, 20, 20))
+        PartDesign.rollStudioTo(self.doc, block)
+        self.doc.recompute()
+        pocket.recompute()
+        self.assertTrue(pocket.PartEnded)
+        PartDesign.rollStudioToEnd(self.doc)
+        self.doc.recompute()
+        self.assertTrue(pocket.PartEnded)
+        pad = self.padAfter(body)
+        self.assertFalse(pad.isValid())
+        self.assertIn(LOCK, pad.getStatusString())
+
+    def testToolWithAnUnsampledHoleIsNotAnEnd(self):
+        """Review pr1065-r1 F4: a Pocket through all of -10..20 with a round hole r 0.4 at
+        (1.3, 1.7), between the block's samples, leaves a cylinder; emptied, the hole's wall
+        inside the block says it is no end: the kernel's error."""
+        body, _ = self.block()
+        pocket = body.newObject("PartDesign::Pocket", "HolePocket")
+        sk = sketch(body, "HolePocketSketch", (-10, -10, 20, 20), z=2)
+        sk.addGeometry(Part.Circle(V(1.3, 1.7, 0), V(0, 0, 1), 0.4))
+        pocket.Profile = sk
+        pocket.Type = "ThroughAll"
+        self.doc.recompute()
+        self.assertTrue(pocket.isValid(), pocket.getStatusString())
+        self.assertAlmostEqual(body.Shape.Volume, 3.14159265 * 0.16 * 2, places=5)
+        self.emptyResult(pocket)
+        self.assertLost(pocket)
+
     # -- sk1065's cases --------------------------------------------------------------------------
 
     def testToolEqualToThePart(self):

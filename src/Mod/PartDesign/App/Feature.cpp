@@ -696,6 +696,66 @@ std::vector<gp_Pnt> surfacePoints(const TopoDS_Shape& shape)
     return out;
 }
 
+/// Points along shape's edges where they may pass through box: a straight edge clipped to the box
+/// exactly (an extruded tool's wall edges run far past the part: a through-all hole's seam), a
+/// curved one sampled along its whole length (review pr1065-r1 T1/F4)
+std::vector<gp_Pnt> edgePointsIn(const TopoDS_Shape& shape, const Bnd_Box& box)
+{
+    std::vector<gp_Pnt> out;
+    if (box.IsVoid()) {
+        return out;
+    }
+    double lo[3];
+    double hi[3];
+    box.Get(lo[0], lo[1], lo[2], hi[0], hi[1], hi[2]);
+    TopTools_IndexedMapOfShape edges;
+    TopExp::MapShapes(shape, TopAbs_EDGE, edges);
+    for (int i = 1; i <= edges.Extent(); ++i) {
+        const TopoDS_Edge& edge = TopoDS::Edge(edges(i));
+        if (BRep_Tool::Degenerated(edge)) {
+            continue;
+        }
+        BRepAdaptor_Curve curve(edge);
+        double t0 = curve.FirstParameter();
+        double t1 = curve.LastParameter();
+        if (curve.GetType() == GeomAbs_Line) {
+            // The slab clip of the line to the box
+            const gp_Lin line = curve.Line();
+            const double origin[3] = {line.Location().X(), line.Location().Y(), line.Location().Z()};
+            const double dir[3] = {line.Direction().X(), line.Direction().Y(), line.Direction().Z()};
+            bool misses = false;
+            for (int axis = 0; axis < 3 && !misses; ++axis) {
+                if (std::abs(dir[axis]) < 1e-12) {
+                    misses = origin[axis] < lo[axis] || origin[axis] > hi[axis];
+                    continue;
+                }
+                double a = (lo[axis] - origin[axis]) / dir[axis];
+                double b = (hi[axis] - origin[axis]) / dir[axis];
+                if (a > b) {
+                    std::swap(a, b);
+                }
+                t0 = std::max(t0, a);
+                t1 = std::min(t1, b);
+                misses = t0 > t1;
+            }
+            if (misses) {
+                continue;
+            }
+            for (int k = 1; k <= 7; ++k) {
+                out.push_back(curve.Value(t0 + (t1 - t0) * k / 8.0));
+            }
+            continue;
+        }
+        for (int k = 1; k <= 31; ++k) {
+            const gp_Pnt point = curve.Value(t0 + (t1 - t0) * k / 32.0);
+            if (!box.IsOut(point)) {
+                out.push_back(point);
+            }
+        }
+    }
+    return out;
+}
+
 /// A point strictly inside solid: the midpoint between a face's point and the first hit along
 /// its inward normal (sk1065 4: any thickness; on the boundary is not inside). False where no
 /// face gives one
@@ -808,6 +868,27 @@ bool toolsHoldBase(const TopoDS_Shape& base, const std::vector<TopoDS_Shape>& to
         gp_Pnt inner;
         if (!innerPoint(solid, tolerance, inner) || !holders.holds(inner)) {
             return false;
+        }
+    }
+    // The other way (review pr1065-r1 T1): no point of a tool's boundary strictly inside the base,
+    // unless it is inside another tool too (overlapping copies' inner walls). A hole or channel in
+    // the tool between the base's samples has its walls there: a pin it would leave is no end
+    const Classifiers base1({base}, tolerance);
+    for (std::size_t t = 0; t < tools.size(); ++t) {
+        std::vector<TopoDS_Shape> others;
+        for (std::size_t o = 0; o < tools.size(); ++o) {
+            if (o != t) {
+                others.push_back(tools[o]);
+            }
+        }
+        const Classifiers otherTools(others, tolerance);
+        std::vector<gp_Pnt> points = surfacePoints(tools[t]);
+        const std::vector<gp_Pnt> along = edgePointsIn(tools[t], baseBox);
+        points.insert(points.end(), along.begin(), along.end());
+        for (const gp_Pnt& point : points) {
+            if (base1.holds(point, /*strictly=*/true) && !otherTools.holds(point, /*strictly=*/true)) {
+                return false;
+            }
         }
     }
     return true;
@@ -1167,17 +1248,18 @@ App::DocumentObjectExecReturn* Feature::recompute()
     // The result this recompute may find again: then its check has nothing new to read
     const TopoDS_Shape lastVouched = vouchedShape;
     vouchedShape.Nullify();
+    // Held by the Body's roll-back bar (ops#127): not run on any path (also obj.recompute()); it
+    // stays touched and runs when the bar passes it. Its end stays: enderOf() stops at the Tip,
+    // and the end is back when the bar passes it (review pr1065-r1 F3)
+    if (auto body = getFeatureBody(); body && body->holds(this)) {
+        return App::DocumentObject::StdReturn;
+    }
     // Set only where this recompute ends the part, below: every other path, its stops and
     // failures included, leaves the part to the features after it (ops#1065, sk1065 1)
     if (PartEnded.getValue()) {
         PartEnded.setValue(false);
     }
     forgetRemovalOperands();
-    // Held by the Body's roll-back bar (ops#127): not run on any path (also obj.recompute()); it
-    // stays touched and runs when the bar passes it
-    if (auto body = getFeatureBody(); body && body->holds(this)) {
-        return App::DocumentObject::StdReturn;
-    }
 
     setMaterialToBodyMaterial();
 
@@ -1290,6 +1372,8 @@ App::DocumentObjectExecReturn* Feature::recompute()
             ret = new App::DocumentObjectExecReturn(why, this);
         }
     }
+    // The operands serve the settle only: a pattern's copies aren't kept with the document (F5)
+    forgetRemovalOperands();
     // FreeCAD-CH kernel safety S2: a result the kernel got wrong fails here, at its feature. A
     // BaseFeature builds nothing: the first feature on it checks the base it passes on
     if (ret == App::DocumentObject::StdReturn && !ends && getFeatureBody()
@@ -1377,6 +1461,10 @@ std::string Feature::settleNoSolid(bool& ends)
     ends = false;
     const TopoDS_Shape result = Shape.getShape().getShape();
     if (!result.IsNull() && TopExp_Explorer(result, TopAbs_SOLID).More()) {
+        return {};
+    }
+    // A Boolean being set up, before its first tool, ran no boolean (review pr1065-r1 F2)
+    if (auto boolean = freecad_cast<Boolean*>(this); boolean && boolean->Group.getValues().empty()) {
         return {};
     }
     TopoShape base;
@@ -1916,6 +2004,8 @@ bool Feature::relinkToMatchingSubelements(
 
 Feature::~Feature()
 {
+    // A new object at this address isn't emptied by an old test's hook (review pr1065-r1)
+    setTestEmptyResult(this, false);
     if (countedEnded) {
         DeletePart::noteEnded(-1);
     }

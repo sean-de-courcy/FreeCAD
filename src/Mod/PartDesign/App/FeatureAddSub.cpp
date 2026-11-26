@@ -217,6 +217,11 @@ App::DocumentObjectExecReturn* FeatureAddSub::recompute()
     const bool runs = !Suppressed.getValue() && !(body && body->holds(this));
     if (runs) {
         if (std::string why = outOfStep(); !why.empty()) {
+            // Failed before Feature::recompute(): the part it ended is no longer ended (ops#1065,
+            // review pr1065-r1 F1)
+            if (PartEnded.getValue()) {
+                PartEnded.setValue(false);
+            }
             return new App::DocumentObjectExecReturn(why, this);
         }
     }
