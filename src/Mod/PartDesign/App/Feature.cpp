@@ -873,20 +873,38 @@ bool toolsHoldBase(const TopoDS_Shape& base, const std::vector<TopoDS_Shape>& to
     // The other way (review pr1065-r1 T1): no point of a tool's boundary strictly inside the base,
     // unless it is inside another tool too (overlapping copies' inner walls). A hole or channel in
     // the tool between the base's samples has its walls there: a pin it would leave is no end
+    // Per tool solid, the same tool's other solids included, and on another solid excuses a point:
+    // abutting tool Bodies or copies end the part (review pr1065-r2 R2-1)
     const Classifiers base1({base}, tolerance);
-    for (std::size_t t = 0; t < tools.size(); ++t) {
-        std::vector<TopoDS_Shape> others;
-        for (std::size_t o = 0; o < tools.size(); ++o) {
-            if (o != t) {
-                others.push_back(tools[o]);
-            }
+    std::vector<TopoDS_Shape> toolSolids;
+    for (const TopoDS_Shape& tool : tools) {
+        for (const TopoDS_Shape& solid : solidsOf(tool)) {
+            toolSolids.push_back(solid);
         }
-        const Classifiers otherTools(others, tolerance);
-        std::vector<gp_Pnt> points = surfacePoints(tools[t]);
-        const std::vector<gp_Pnt> along = edgePointsIn(tools[t], baseBox);
+    }
+    std::vector<std::unique_ptr<BRepClass3d_SolidClassifier>> each;
+    for (const TopoDS_Shape& solid : toolSolids) {
+        each.push_back(std::make_unique<BRepClass3d_SolidClassifier>(solid));
+    }
+    for (std::size_t t = 0; t < toolSolids.size(); ++t) {
+        // Many copies cost the square of their count: the feature's deadline holds (R2-2)
+        ResultCheck::stopIfPastTheLimit("The check of the part a feature ends");
+        std::vector<gp_Pnt> points = surfacePoints(toolSolids[t]);
+        const std::vector<gp_Pnt> along = edgePointsIn(toolSolids[t], baseBox);
         points.insert(points.end(), along.begin(), along.end());
         for (const gp_Pnt& point : points) {
-            if (base1.holds(point, /*strictly=*/true) && !otherTools.holds(point, /*strictly=*/true)) {
+            if (!base1.holds(point, /*strictly=*/true)) {
+                continue;
+            }
+            bool inAnother = false;
+            for (std::size_t o = 0; o < each.size() && !inAnother; ++o) {
+                if (o == t) {
+                    continue;
+                }
+                each[o]->Perform(point, tolerance);
+                inAnother = each[o]->State() == TopAbs_IN || each[o]->State() == TopAbs_ON;
+            }
+            if (!inAnother) {
                 return false;
             }
         }

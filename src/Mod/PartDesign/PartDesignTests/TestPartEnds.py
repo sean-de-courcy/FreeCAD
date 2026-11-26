@@ -430,6 +430,27 @@ class TestPartEnds(unittest.TestCase):
         self.assertFalse(pad.isValid())
         self.assertIn(LOCK, pad.getStatusString())
 
+    def testAbuttingToolsEndThePart(self):
+        """Review pr1065-r2 R2-1: a Boolean Cut by two tool Bodies that meet at x 5 inside the
+        block, and by one tool Body made of two touching boxes: each holds all of it: ended."""
+        body, _ = self.block()
+        left = self.booleanTool("Left", Part.makeBox(6, 12, 4, V(-1, -1, -1)))
+        right = self.booleanTool("Right", Part.makeBox(6, 12, 4, V(5, -1, -1)))
+        cut = body.newObject("PartDesign::Boolean", "Cut")
+        cut.setObjects([left, right])
+        cut.Type = "Cut"
+        self.doc.recompute()
+        self.assertEnded(cut, body)
+
+        other, _ = self.block(name="Other")
+        pair = Part.makeCompound([Part.makeBox(6, 12, 4, V(-1, -1, -1)), Part.makeBox(6, 12, 4, V(5, -1, -1))])
+        tool = self.booleanTool("Pair", pair)
+        cut2 = other.newObject("PartDesign::Boolean", "Cut2")
+        cut2.setObjects([tool])
+        cut2.Type = "Cut"
+        self.doc.recompute()
+        self.assertEnded(cut2, other)
+
     def testBooleanIntersectOfDisjointBodies(self):
         """H: a Boolean Intersect of two disjoint Bodies leaves nothing: ended; with Keep tools
         both as they were."""
