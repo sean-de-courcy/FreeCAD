@@ -436,11 +436,22 @@ class TestLoftConnectionsSplitLines(ConnectionCase):
         for a, b in self.PAIRS + [((5, -5), (2, -4)), ((5, 5), (2, 4))]:
             self.assertJoined(split, a, b)
 
-    def testASkewPartnerStillStops(self):
-        # the split line runs (5, 5) -> (-10, 6): not parallel to the top line (2, 4) -> (-6, 4), so the side face
-        # between them isn't a plane and depends on which vertices Onshape matches (the open part of ops#729)
+    def testASkewPartnerMergesTheSplit(self):
+        # the split line runs (5, 5) -> (-10, 6): not parallel to the top line (2, 4) -> (-6, 4), so no side face
+        # beside the split vertex is a plane and its side edge goes (ops#1046's rule): one side face spans the split
+        # line against the top line, and the top line keeps no vertex for it
         loft = self.loft(self.bottom(split=(0, 5 + 1 / 3), end=(-10, 6)), self.top(), [((-10, -5), (-6, -4)), ((-10, 6), (-6, 4))])
-        self.assertStops(loft, "tangent")
+        self.assertTrue(loft.isValid(), loft.getStatusString())
+        self.assertTrue(loft.Shape.isValid())
+        self.assertEqual(len(loft.Shape.Solids), 1)
+        split = V(0, 5 + 1 / 3, 0)
+        for edge in loft.Shape.Edges:
+            ends = [v.Point for v in edge.Vertexes]
+            if len(ends) == 2 and abs(ends[0].z - ends[1].z) > H - 1e-6:
+                self.assertTrue(all((p - split).Length > 1e-6 for p in ends), "a side edge at the split vertex")
+        for vertex in loft.Shape.Vertexes:
+            self.assertFalse(abs(vertex.Point.z - H) < 1e-6 and abs(vertex.Point.y - 4) < 1e-6
+                             and -6 + 1e-6 < vertex.Point.x < 2 - 1e-6, "a new vertex on the top line")
 
 
 class TestLoftTangentRuns(ConnectionCase):
@@ -527,11 +538,12 @@ class TestLoftTangentRuns(ConnectionCase):
         import tempfile
 
         before = (len(loft.Shape.Faces), loft.Shape.Volume)
+        name = loft.Name
         path = os.path.join(tempfile.mkdtemp(), "tangent-runs.FCStd")
         self.doc.saveAs(path)
         App.closeDocument(self.doc.Name)
         self.doc = App.openDocument(path)
-        loft = self.doc.getObject(loft.Name)
+        loft = self.doc.getObject(name)
         loft.touch()
         self.doc.recompute()
         self.assertTrue(loft.isValid(), loft.getStatusString())
