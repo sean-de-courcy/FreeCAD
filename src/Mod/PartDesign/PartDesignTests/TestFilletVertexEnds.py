@@ -211,3 +211,117 @@ class TestFilletVertexEnds(unittest.TestCase):
                     body.removeObject(feature)
                     self.doc.removeObject(feature.Name)
                     self.doc.recompute()
+
+
+# ops#1040 K2: three more vertex forms of 4 or 6 edges (fabvtx's census read, notes vertex-fillets-k2-1126).
+# A: the foot line through a U-groove touching the floor whose axis is at the wall's top, so that the wall under it
+#    is two cusp faces of one plane touching only at the vertex (4 edges, 4 faces). Expected: the same dress-up of
+#    the wall without the groove, the groove then cut on through it (RB36 1a's rule, the fill run on by the groove).
+# C: a wall's convex corner edge on a floor, its outer face running on below the floor into a face behind it (a
+#    scallop's cylinder tangent to it, or a step's plane square to it): 4 edges, 4 faces. Both corners of the wall's
+#    end at half its width, where OCCT fails. Expected: the wall rounded alone, then fused with the base.
+# D: ops#938's 6-edge vertex (a block's corner above a cut's corner) with the cut's wall merged by refine with a
+#    coplanar face of a second block that rises above the floor farther away. Expected: the body without the second
+#    block, dressed, and the block fused back. Within the tool's reach the merged face is refused.
+
+
+def grooved_wall(top, groove=True):
+    """Plate 40 x 30 x 4, wall x 0..40, y 0..5, z 4..top; a groove r 3 along y about (20, 7)."""
+    shape = Part.makeBox(40, 30, 4).fuse(Part.makeBox(40, 5, top - 4, V(0, 0, 4)))
+    if groove:
+        shape = shape.cut(groove_tool())
+    return shape.removeSplitter()
+
+
+def groove_tool():
+    return Part.makeCylinder(3, 40, V(20, -10, 7), V(0, 1, 0))
+
+
+def scalloped_base(form):
+    """Two plates 3 thick, x 0..30 by y 0..10 and x -5..30 by y 10..20; form "scallop" cuts a cylinder r 6 about
+    (-6, 10) out of them (tangent to x = 0 at y = 10), form "step" leaves the step's corner at (0, 10)."""
+    base = Part.makeBox(30, 10, 3).fuse(Part.makeBox(35, 10, 3, V(-5, 10, 0)))
+    if form == "scallop":
+        base = base.cut(Part.makeCylinder(6, 3, V(-6, 10, 0)))
+    return base
+
+
+def end_wall():
+    return Part.makeBox(8, 4, 4, V(0, 6, 3))
+
+
+def end_corner(edge):
+    """The wall's two vertical corner edges at x = 0."""
+    return on(edge, lambda p: abs(p.x) < 1e-7 and (abs(p.y - 10) < 1e-7 or abs(p.y - 6) < 1e-7) and p.z > 3 - 1e-7)
+
+
+def stepped_plate(width, second_x=None):
+    """Plate 40 x 40 x 4 about the origin less the quadrant x, y >= 0; a block x -20..0, y -width..0, z 4..9; with
+    second_x, a block x second_x..second_x+4, y -4..0, z 4..9 whose face y = 0 merges with the cut's wall."""
+    shape = Part.makeBox(40, 40, 4, V(-20, -20, 0)).cut(Part.makeBox(20, 20, 4))
+    shape = shape.fuse(Part.makeBox(20, width, 5, V(-20, -width, 4)))
+    if second_x is not None:
+        shape = shape.fuse(Part.makeBox(4, 4, 5, V(second_x, -4, 4)))
+    return shape.removeSplitter()
+
+
+def block_corner(width):
+    return lambda edge: on(
+        edge, lambda p: abs(p.x) < 1e-7 and (abs(p.y) < 1e-7 or abs(p.y + width) < 1e-7) and p.z > 4 - 1e-7
+    )
+
+
+class TestFilletVertexFolds(unittest.TestCase):
+    setUp = TestFilletVertexEnds.setUp
+    tearDown = TestFilletVertexEnds.tearDown
+    dressUp = TestFilletVertexEnds.dressUp
+    plain = TestFilletVertexEnds.plain
+    assertSameBody = TestFilletVertexEnds.assertSameBody
+
+    def refuses(self, shape, test, size, kind="Fillet"):
+        body = self.doc.addObject("PartDesign::Body", "Body")
+        base = self.doc.addObject("Part::Feature", "Base")
+        base.Shape = shape
+        body.BaseFeature = base
+        self.doc.recompute()
+        feature = body.newObject("PartDesign::" + kind, kind)
+        feature.Base = (body.Group[0], ["Edge%d" % (i + 1) for i, e in enumerate(shape.Edges) if test(e)])
+        feature.UseAllEdges = False
+        if kind == "Fillet":
+            feature.Radius = size
+        else:
+            feature.Size = size
+        self.doc.recompute()
+        return not feature.isValid()
+
+    def testFootThroughAGrooveWithTwoCuspFaces(self):
+        """Cause A (FG Heat Wire Clip #14, Waffle Nuggets Holder #26): the wall's top at the groove's axis."""
+        for kind, size in (("Fillet", 0.5), ("Fillet", 0.8), ("Chamfer", 0.8)):
+            with self.subTest(kind=kind, size=size):
+                shape = self.dressUp(grooved_wall(7.0), foot, size, kind)
+                expected = self.plain(grooved_wall(7.0, groove=False), foot, size, kind).cut(groove_tool())
+                self.assertSameBody(shape, expected)
+
+    def testCornerOverAFaceBelowTheFloor(self):
+        """Cause C (FG Vial #20, New FG #20, New HNY Trio #23): the wall's outer face x = 0 runs on below the
+        floor z = 3 into a scallop tangent to it, or a step square to it; the end rounded whole at r 2."""
+        for form in ("scallop", "step"):
+            for size in (1.0, 2.0):
+                with self.subTest(form=form, size=size):
+                    base = scalloped_base(form).fuse(end_wall()).removeSplitter()
+                    shape = self.dressUp(base, end_corner, size)
+                    wall = end_wall()
+                    rounded = wall.makeFillet(size, [e for e in wall.Edges if end_corner(e)])
+                    expected = scalloped_base(form).fuse(rounded).removeSplitter()
+                    self.assertSameBody(shape, expected)
+
+    def testSixEdgeCornerWithAMergedFaceBehindTheFloor(self):
+        """Cause D (HNY Honeypot #10): the end 3.9375 wide, r 2 (OCCT fails where the rounds overlap). The second
+        block 8 away is past the tool's reach; 1 away it is within it, and the vertex stays refused."""
+        width = 3.9375
+        corner = block_corner(width)
+        shape = self.dressUp(stepped_plate(width, second_x=8.0), corner, 2.0)
+        alone = self.dressUp(stepped_plate(width), corner, 2.0)
+        expected = alone.fuse(Part.makeBox(4, 4, 5, V(8, -4, 4))).removeSplitter()
+        self.assertSameBody(shape, expected)
+        self.assertTrue(self.refuses(stepped_plate(width, second_x=1.0), corner, 2.0))
