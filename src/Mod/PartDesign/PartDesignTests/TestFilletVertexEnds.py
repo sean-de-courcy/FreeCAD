@@ -239,10 +239,14 @@ def groove_tool():
 
 def scalloped_base(form):
     """Two plates 3 thick, x 0..30 by y 0..10 and x -5..30 by y 10..20; form "scallop" cuts a cylinder r 6 about
-    (-6, 10) out of them (tangent to x = 0 at y = 10), form "step" leaves the step's corner at (0, 10)."""
+    (-6, 10) out of them (tangent to x = 0 at y = 10), form "step" leaves the step's corner at (0, 10), form
+    "slant" adds a wedge over x -5..0 whose sloped face runs from (y 10, z 3) down to (y 8, z 0)."""
     base = Part.makeBox(30, 10, 3).fuse(Part.makeBox(35, 10, 3, V(-5, 10, 0)))
     if form == "scallop":
         base = base.cut(Part.makeCylinder(6, 3, V(-6, 10, 0)))
+    elif form == "slant":
+        side = Part.Face(Part.makePolygon([V(-5, 10, 3), V(-5, 8, 0), V(-5, 10, 0), V(-5, 10, 3)]))
+        base = base.fuse(side.extrude(V(5, 0, 0))).removeSplitter()
     return base
 
 
@@ -314,6 +318,19 @@ class TestFilletVertexFolds(unittest.TestCase):
                     rounded = wall.makeFillet(size, [e for e in wall.Edges if end_corner(e)])
                     expected = scalloped_base(form).fuse(rounded).removeSplitter()
                     self.assertSameBody(shape, expected)
+
+    def testCornerOverASlopeBelowTheFloorStaysRefused(self):
+        """Cause C's limit (review prfx1040k2-r1, Onshape RB149): below the floor the wall's face x = 0 runs on
+        beside the corner (0, 10) down to a slope, and a round there runs on down that face, which the fold
+        does not build: r 2 on both corners stays refused. The corner (0, 6) alone, where the face ends square
+        below the floor, builds the wall's own round."""
+        base = scalloped_base("slant").fuse(end_wall()).removeSplitter()
+        self.assertTrue(self.refuses(base, end_corner, 2.0))
+        lower = lambda e: end_corner(e) and e.CenterOfMass.y < 8
+        shape = self.dressUp(base, lower, 2.0)
+        wall = end_wall()
+        rounded = wall.makeFillet(2.0, [e for e in wall.Edges if lower(e)])
+        self.assertSameBody(shape, scalloped_base("slant").fuse(rounded).removeSplitter())
 
     def testSixEdgeCornerWithAMergedFaceBehindTheFloor(self):
         """Cause D (HNY Honeypot #10): the end 3.9375 wide, r 2 (OCCT fails where the rounds overlap). The second
