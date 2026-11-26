@@ -112,6 +112,7 @@ set(PartDesign_TestScripts
     PartDesignTests/TestSplit.py
     PartDesignTests/TestDeletePart.py
     PartDesignTests/TestPartEnds.py
+    PartDesignTests/TestPatternGapClose.py
     PartDesignTests/TestStudio.py
     PartDesignTests/TestStudioSequence.py
     PartDesignTests/TestBarPlace.py

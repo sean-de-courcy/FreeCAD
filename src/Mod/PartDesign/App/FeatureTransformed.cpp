@@ -25,6 +25,7 @@
 #include <Bnd_Box.hxx>
 #include <BRep_Builder.hxx>
 #include <Mod/Part/App/FCBRepAlgoAPI_Cut.h>
+#include <Mod/Part/App/FCBRepAlgoAPI_Common.h>
 #include <Mod/Part/App/FCBRepAlgoAPI_Fuse.h>
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepBndLib.hxx>
@@ -45,9 +46,26 @@
 #include <gp_Pnt2d.hxx>
 #include <unordered_set>
 #include <TopoDS_Compound.hxx>
+#include <BRepAlgoAPI_Splitter.hxx>
+#include <BRepBuilderAPI_MakeFace.hxx>
+#include <BRepBuilderAPI_MakeSolid.hxx>
+#include <BRepClass3d_SolidClassifier.hxx>
+#include <BRepLib.hxx>
+#include <BRepLProp_SLProps.hxx>
+#include <BRepTools.hxx>
+#include <BRep_Tool.hxx>
+#include <BRepAdaptor_Curve2d.hxx>
+#include <GeomAPI_IntCS.hxx>
+#include <GeomAPI_ProjectPointOnSurf.hxx>
+#include <GeomLProp_SLProps.hxx>
+#include <Geom_Line.hxx>
+#include <IntCurvesFace_ShapeIntersector.hxx>
+#include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
+#include <gp_Lin.hxx>
 
 
 #include <array>
+#include <memory>
 #include <cstring>
 #include <limits>
 #include <optional>
@@ -2054,6 +2072,559 @@ double solidVolume(const TopoDS_Shape& shape)
     return std::abs(props.Mass());
 }
 
+// FreeCAD-CH ops#1041 (notes/pattern-gap-close-1041-design.md): an adding copy whose face stands a
+// narrow gap off the part has that gap closed, as Onshape's pattern does (RB143, RB151, RB152).
+// The three widths are readings of Onshape's rows (design section 1), not its constants
+constexpr double gapLimit = 0.008375;      // T_gap, rule 3a
+constexpr double crossOutLimit = 0.0054;   // T_x, rule 3b: a seated edge's reach outside the wall
+constexpr double crossInLimit = 0.015;     // T_in, rule 3b: its reach inside the wall
+
+/// What closeNarrowGaps() did to one copy
+struct GapClosing
+{
+    bool closed = false;    ///< slabs were added
+    bool unsound = false;   ///< a face qualified but no sound slab was made for it (R5a)
+    double rigidVolume = 0.0;  ///< the copy's volume before closing
+    double allowance = 0.0;    ///< the closed faces' area x g, summed (step 6's bound)
+};
+
+/// The part measured against: one classifier per solid and one ray caster
+struct GapProbe
+{
+    explicit GapProbe(const TopoDS_Shape& part, double tol)
+        : shape(part)
+        , tolerance(tol)
+    {
+        BRepBndLib::Add(part, box);
+        for (TopExp_Explorer it(part, TopAbs_SOLID); it.More(); it.Next()) {
+            solids.push_back(std::make_unique<BRepClass3d_SolidClassifier>(it.Current()));
+        }
+        rays.Load(part, tol);
+    }
+    /// IN, ON (within the tolerance) or OUT of the part
+    TopAbs_State state(const gp_Pnt& p)
+    {
+        bool on = false;
+        for (auto& solid : solids) {
+            solid->Perform(p, tolerance);
+            if (solid->State() == TopAbs_IN) {
+                return TopAbs_IN;
+            }
+            on = on || solid->State() == TopAbs_ON;
+        }
+        return on ? TopAbs_ON : TopAbs_OUT;
+    }
+    TopoDS_Shape shape;
+    double tolerance;
+    Bnd_Box box;
+    std::vector<std::unique_ptr<BRepClass3d_SolidClassifier>> solids;
+    IntCurvesFace_ShapeIntersector rays;
+};
+
+/// The point and outward normal of \a face at (u, v); false where no normal is defined
+bool gapPointNormal(const BRepAdaptor_Surface& surface, double u, double v, gp_Pnt& point, gp_Dir& normal)
+{
+    BRepLProp_SLProps props(surface, u, v, 1, Precision::Confusion());
+    if (!props.IsNormalDefined()) {
+        return false;
+    }
+    point = props.Value();
+    normal = props.Normal();
+    if (surface.Face().Orientation() == TopAbs_REVERSED) {
+        normal.Reverse();
+    }
+    return true;
+}
+
+/// Section 4 step 2's grid: 7 x 7 over the face's parameter box, the points inside the face
+std::vector<gp_Pnt2d> gapGrid(const TopoDS_Face& face, double tol)
+{
+    double u0 = 0.0, u1 = 0.0, v0 = 0.0, v1 = 0.0;
+    BRepTools::UVBounds(face, u0, u1, v0, v1);
+    std::vector<gp_Pnt2d> out;
+    constexpr int n = 7;
+    for (int i = 0; i < n; ++i) {
+        for (int j = 0; j < n; ++j) {
+            const gp_Pnt2d uv(u0 + (i + 0.5) / n * (u1 - u0), v0 + (j + 0.5) / n * (v1 - v0));
+            BRepClass_FaceClassifier inside(face, uv, tol);
+            if (inside.State() == TopAbs_IN) {
+                out.push_back(uv);
+            }
+        }
+    }
+    return out;
+}
+
+/// Section 4 step 2's edge samples: 33 points along \a edge, each moved 1e-4 into \a face toward
+/// its parameter box's centre
+std::vector<gp_Pnt2d> gapEdgeSamples(const TopoDS_Face& face, const TopoDS_Edge& edge,
+                                     const BRepAdaptor_Surface& surface)
+{
+    std::vector<gp_Pnt2d> out;
+    if (BRep_Tool::Degenerated(edge)) {
+        return out;
+    }
+    double u0 = 0.0, u1 = 0.0, v0 = 0.0, v1 = 0.0;
+    BRepTools::UVBounds(face, u0, u1, v0, v1);
+    const double uc = (u0 + u1) / 2.0;
+    const double vc = (v0 + v1) / 2.0;
+    BRepAdaptor_Curve2d curve(edge, face);
+    const double a = curve.FirstParameter();
+    const double b = curve.LastParameter();
+    constexpr int m = 33;
+    constexpr double inset = 1e-4;
+    for (int i = 0; i < m; ++i) {
+        const gp_Pnt2d uv = curve.Value(a + (i + 0.5) / m * (b - a));
+        const double du = uc - uv.X();
+        const double dv = vc - uv.Y();
+        const gp_Pnt p = surface.Value(uv.X(), uv.Y());
+        const gp_Pnt q = surface.Value(uv.X() + 1e-3 * du, uv.Y() + 1e-3 * dv);
+        const double length = p.Distance(q);
+        if (length < 1e-12) {
+            continue;
+        }
+        const double s = 1e-3 * inset / length;
+        out.emplace_back(uv.X() + s * du, uv.Y() + s * dv);
+    }
+    return out;
+}
+
+/// The other faces of \a copy at \a edge
+std::vector<TopoDS_Face> gapNeighbours(const TopTools_IndexedDataMapOfShapeListOfShape& edgeFaces,
+                                       const TopoDS_Edge& edge, const TopoDS_Face& face)
+{
+    std::vector<TopoDS_Face> out;
+    const int index = edgeFaces.FindIndex(edge);
+    if (index == 0) {
+        return out;
+    }
+    for (TopTools_ListOfShape::Iterator it(edgeFaces(index)); it.More(); it.Next()) {
+        if (!it.Value().IsSame(face)) {
+            out.push_back(TopoDS::Face(it.Value()));
+        }
+    }
+    return out;
+}
+
+enum class GapVerdict
+{
+    untouched,
+    close,
+    excluded
+};
+
+/// Rule 3 lines a and b for \a face of the copy (section 4 step 2): its verdict, and g, the widest
+/// outside distance
+GapVerdict measureGap(const TopoDS_Face& face,
+                      const TopTools_IndexedDataMapOfShapeListOfShape& edgeFaces,
+                      GapProbe& part,
+                      double& g)
+{
+    g = 0.0;
+    const double tol = part.tolerance;
+    Bnd_Box box;
+    BRepBndLib::Add(face, box);
+    box.Enlarge(gapLimit);
+    if (box.IsOut(part.box)) {
+        return GapVerdict::untouched;
+    }
+    BRepAdaptor_Surface surface(face);
+    std::vector<gp_Pnt2d> samples = gapGrid(face, tol);
+    std::vector<TopoDS_Edge> edges;
+    for (TopExp_Explorer it(face, TopAbs_EDGE); it.More(); it.Next()) {
+        const TopoDS_Edge& edge = TopoDS::Edge(it.Current());
+        if (std::ranges::any_of(edges, [&](const TopoDS_Edge& e) { return e.IsSame(edge); })) {
+            continue;  // a seam, met twice
+        }
+        edges.push_back(edge);
+        const auto along = gapEdgeSamples(face, edge, surface);
+        samples.insert(samples.end(), along.begin(), along.end());
+    }
+    int outside = 0;
+    TopTools_IndexedMapOfShape walls;
+    std::vector<int> wallHits;
+    for (const gp_Pnt2d& uv : samples) {
+        gp_Pnt p;
+        gp_Dir n;
+        if (!gapPointNormal(surface, uv.X(), uv.Y(), p, n)) {
+            continue;
+        }
+        const TopAbs_State state = part.state(p);
+        if (state != TopAbs_OUT) {
+            continue;  // on the part, or inside it (d < 0)
+        }
+        part.rays.Perform(gp_Lin(p, n), -tol, gapLimit);
+        if (!part.rays.IsDone() || part.rays.NbPnt() == 0) {
+            return GapVerdict::untouched;  // an outside point with nothing within T_gap
+        }
+        int first = 1;
+        for (int i = 2; i <= part.rays.NbPnt(); ++i) {
+            if (part.rays.WParameter(i) < part.rays.WParameter(first)) {
+                first = i;
+            }
+        }
+        const double t = part.rays.WParameter(first);
+        if (t <= tol) {
+            continue;  // the part within the tolerance: on it
+        }
+        ++outside;
+        g = std::max(g, t);
+        const int wall = walls.Add(part.rays.Face(first));
+        if (wall > static_cast<int>(wallHits.size())) {
+            wallHits.resize(wall, 0);
+        }
+        ++wallHits[wall - 1];
+    }
+    if (outside == 0) {
+        return GapVerdict::untouched;  // wholly on or inside the part
+    }
+    const int wallIndex =
+        static_cast<int>(std::ranges::max_element(wallHits) - wallHits.begin()) + 1;
+    const Handle(Geom_Surface) wall = BRep_Tool::Surface(TopoDS::Face(walls(wallIndex)));
+    // Line b: an edge is seated when the copy's other face at it lies on or inside the part. Its
+    // reach is the signed distance along n to the wall's own surface (section 4 step 2; H7: the
+    // edge may lie anywhere, on the flange or buried)
+    for (const TopoDS_Edge& edge : edges) {
+        const auto others = gapNeighbours(edgeFaces, edge, face);
+        if (others.empty()) {
+            continue;
+        }
+        const TopoDS_Face& other = others.front();
+        BRepAdaptor_Surface otherSurface(other);
+        const auto otherSamples = gapEdgeSamples(other, edge, otherSurface);
+        if (otherSamples.empty()
+            || std::ranges::any_of(otherSamples, [&](const gp_Pnt2d& uv) {
+                   return part.state(otherSurface.Value(uv.X(), uv.Y())) == TopAbs_OUT;
+               })) {
+            continue;
+        }
+        double reachOut = -std::numeric_limits<double>::infinity();
+        double reachIn = std::numeric_limits<double>::infinity();
+        bool any = false;
+        for (const gp_Pnt2d& uv : gapEdgeSamples(face, edge, surface)) {
+            gp_Pnt p;
+            gp_Dir n;
+            if (!gapPointNormal(surface, uv.X(), uv.Y(), p, n)) {
+                continue;
+            }
+            GeomAPI_IntCS hits(new Geom_Line(p, n), wall);
+            if (!hits.IsDone()) {
+                continue;
+            }
+            std::optional<double> nearest;
+            for (int i = 1; i <= hits.NbPoints(); ++i) {
+                const double t = gp_Vec(p, hits.Point(i)).Dot(gp_Vec(n));
+                if (t < -crossInLimit - 0.01 || t > gapLimit + 0.01) {
+                    continue;
+                }
+                if (!nearest || std::abs(t) < std::abs(*nearest)) {
+                    nearest = t;
+                }
+            }
+            if (nearest) {
+                any = true;
+                reachOut = std::max(reachOut, *nearest);
+                reachIn = std::min(reachIn, *nearest);
+            }
+        }
+        if (any && reachOut > tol && reachIn < -tol
+            && (reachOut > crossOutLimit || reachIn < -crossInLimit)) {
+            return GapVerdict::excluded;
+        }
+    }
+    return GapVerdict::close;
+}
+
+/// \a face's surface re-trimmed to its parameter box widened by the length \a by (turned into
+/// each parameter's units at its centre), within the surface's own bounds
+TopoDS_Face gapWidened(const TopoDS_Face& face, double by)
+{
+    double u0 = 0.0, u1 = 0.0, v0 = 0.0, v1 = 0.0;
+    BRepTools::UVBounds(face, u0, u1, v0, v1);
+    BRepAdaptor_Surface surface(face);
+    const double uc = (u0 + u1) / 2.0;
+    const double vc = (v0 + v1) / 2.0;
+    constexpr double eps = 1e-4;
+    const gp_Pnt c = surface.Value(uc, vc);
+    const double lu = surface.Value(uc + eps * (u1 - u0), vc).Distance(c) / (eps * (u1 - u0));
+    const double lv = surface.Value(uc, vc + eps * (v1 - v0)).Distance(c) / (eps * (v1 - v0));
+    double a = u0 - by / std::max(lu, 1e-12);
+    double b = u1 + by / std::max(lu, 1e-12);
+    double cc = v0 - by / std::max(lv, 1e-12);
+    double d = v1 + by / std::max(lv, 1e-12);
+    const Handle(Geom_Surface) geom = BRep_Tool::Surface(face);
+    double ua = 0.0, ub = 0.0, va = 0.0, vb = 0.0;
+    geom->Bounds(ua, ub, va, vb);
+    if (geom->IsUPeriodic()) {
+        if (b - a >= geom->UPeriod()) {
+            a = uc - geom->UPeriod() / 2.0;
+            b = a + geom->UPeriod();
+        }
+    }
+    else {
+        a = std::max(a, ua);
+        b = std::min(b, ub);
+    }
+    if (geom->IsVPeriodic()) {
+        if (d - cc >= geom->VPeriod()) {
+            cc = vc - geom->VPeriod() / 2.0;
+            d = cc + geom->VPeriod();
+        }
+    }
+    else {
+        cc = std::max(cc, va);
+        d = std::min(d, vb);
+    }
+    BRepBuilderAPI_MakeFace maker(geom, a, b, cc, d, Precision::Confusion());
+    if (!maker.IsDone()) {
+        return {};
+    }
+    return maker.Face();
+}
+
+int gapSolids(const TopoDS_Shape& shape)
+{
+    int n = 0;
+    for (TopExp_Explorer it(shape, TopAbs_SOLID); it.More(); it.Next()) {
+        ++n;
+    }
+    return n;
+}
+
+double gapArea(const TopoDS_Shape& shape)
+{
+    GProp_GProps props;
+    BRepGProp::SurfaceProperties(shape, props);
+    return props.Mass();
+}
+
+/// Section 4 step 3: the slab on \a face, thickness \a depth along its outward normal, cut by the
+/// surface of each face of the copy that shares an edge with it, keeping the copy's side. Null
+/// where it can't be made
+TopoDS_Shape gapSlab(const TopoDS_Face& face,
+                     const TopTools_IndexedDataMapOfShapeListOfShape& edgeFaces,
+                     double depth)
+{
+    const TopoDS_Face widened = gapWidened(face, 4.0 * depth);
+    if (widened.IsNull()) {
+        return {};
+    }
+    // The widened face is the face's own surface, oriented forward: the outward side is the
+    // surface's normal unless the face is reversed
+    const double sign = face.Orientation() == TopAbs_REVERSED ? -1.0 : 1.0;
+    Part::TopoShape thick = Part::TopoShape(widened).makeElementOffset(
+        sign * depth,
+        1e-7,
+        false,
+        false,
+        0,
+        Part::JoinType::arc,
+        Part::FillType::fill
+    );
+    TopoDS_Shape slab = thick.getShape();
+    if (slab.IsNull()) {
+        return {};
+    }
+    if (slab.ShapeType() != TopAbs_SOLID) {
+        TopExp_Explorer shell(slab, TopAbs_SHELL);
+        if (!shell.More()) {
+            return {};
+        }
+        BRepBuilderAPI_MakeSolid solid(TopoDS::Shell(shell.Current()));
+        if (!solid.IsDone()) {
+            return {};
+        }
+        TopoDS_Solid made = solid.Solid();
+        BRepLib::OrientClosedSolid(made);
+        slab = made;
+    }
+    std::vector<TopoDS_Face> neighbours;
+    for (TopExp_Explorer it(face, TopAbs_EDGE); it.More(); it.Next()) {
+        for (const TopoDS_Face& other : gapNeighbours(edgeFaces, TopoDS::Edge(it.Current()), face)) {
+            if (std::ranges::none_of(neighbours, [&](const TopoDS_Face& f) { return f.IsSame(other); })) {
+                neighbours.push_back(other);
+            }
+        }
+    }
+    for (const TopoDS_Face& other : neighbours) {
+        const TopoDS_Face cutter = gapWidened(other, 8.0 * depth + 1.0);
+        if (cutter.IsNull()) {
+            return {};
+        }
+        BRepAlgoAPI_Splitter splitter;
+        TopTools_ListOfShape arguments;
+        TopTools_ListOfShape tools;
+        arguments.Append(slab);
+        tools.Append(cutter);
+        splitter.SetArguments(arguments);
+        splitter.SetTools(tools);
+        splitter.Build();
+        if (!splitter.IsDone()) {
+            return {};
+        }
+        const Handle(Geom_Surface) otherSurface = BRep_Tool::Surface(other);
+        const double otherSign = other.Orientation() == TopAbs_REVERSED ? -1.0 : 1.0;
+        std::vector<TopoDS_Shape> kept;
+        for (TopExp_Explorer piece(splitter.Shape(), TopAbs_SOLID); piece.More(); piece.Next()) {
+            GProp_GProps props;
+            BRepGProp::VolumeProperties(piece.Current(), props);
+            const gp_Pnt centre = props.CentreOfMass();
+            GeomAPI_ProjectPointOnSurf onOther(centre, otherSurface);
+            if (onOther.NbPoints() == 0) {
+                continue;
+            }
+            double u = 0.0, v = 0.0;
+            onOther.LowerDistanceParameters(u, v);
+            GeomLProp_SLProps props2(otherSurface, u, v, 1, Precision::Confusion());
+            if (!props2.IsNormalDefined()) {
+                continue;
+            }
+            const gp_Vec outward = gp_Vec(props2.Normal()) * otherSign;
+            if (gp_Vec(props2.Value(), centre).Dot(outward) < 0.0) {
+                kept.push_back(piece.Current());
+            }
+        }
+        if (kept.empty()) {
+            return {};
+        }
+        if (kept.size() == 1) {
+            slab = kept.front();
+        }
+        else {
+            // Pieces on one side of a single cutter are apart: a compound holds them
+            BRep_Builder builder;
+            TopoDS_Compound pieces;
+            builder.MakeCompound(pieces);
+            for (const TopoDS_Shape& piece : kept) {
+                builder.Add(pieces, piece);
+            }
+            slab = pieces;
+        }
+    }
+    return slab;
+}
+
+/// Section 4 step 4: the slab's face on \a face's surface is \a face in area; its farFaces face lies
+/// wholly inside the part; the slab less the part holds no more than the face's area x g
+bool gapSlabSound(const TopoDS_Shape& slab, const TopoDS_Face& face, const TopoDS_Shape& part,
+                  double g, double depth)
+{
+    const Handle(Geom_Surface) surface = BRep_Tool::Surface(face);
+    const double sign = face.Orientation() == TopAbs_REVERSED ? -1.0 : 1.0;
+    double nearArea = 0.0;
+    BRep_Builder builder;
+    TopoDS_Compound farFaces;
+    builder.MakeCompound(farFaces);
+    bool anyFar = false;
+    for (TopExp_Explorer it(slab, TopAbs_FACE); it.More(); it.Next()) {
+        const TopoDS_Face& f = TopoDS::Face(it.Current());
+        double u0 = 0.0, u1 = 0.0, v0 = 0.0, v1 = 0.0;
+        BRepTools::UVBounds(f, u0, u1, v0, v1);
+        const gp_Pnt c = BRepAdaptor_Surface(f).Value((u0 + u1) / 2.0, (v0 + v1) / 2.0);
+        GeomAPI_ProjectPointOnSurf on(c, surface);
+        if (on.NbPoints() == 0) {
+            continue;
+        }
+        const double distance = on.LowerDistance();
+        if (distance < 1e-6) {
+            nearArea += gapArea(f);
+            continue;
+        }
+        double u = 0.0, v = 0.0;
+        on.LowerDistanceParameters(u, v);
+        GeomLProp_SLProps props(surface, u, v, 1, Precision::Confusion());
+        if (std::abs(distance - depth) < 1e-4 && props.IsNormalDefined()
+            && gp_Vec(on.NearestPoint(), c).Dot(gp_Vec(props.Normal()) * sign) > 0.0) {
+            builder.Add(farFaces, f);
+            anyFar = true;
+        }
+    }
+    const double faceArea = gapArea(face);
+    if (std::abs(nearArea - faceArea) > 1e-6 * faceArea || !anyFar) {
+        return false;
+    }
+    const double farArea = gapArea(farFaces);
+    FCBRepAlgoAPI_Common inside(farFaces, part);
+    if (!inside.IsDone() || std::abs(gapArea(inside.Shape()) - farArea) > 1e-6 * farArea) {
+        return false;
+    }
+    FCBRepAlgoAPI_Cut rest(slab, part);
+    return rest.IsDone() && solidVolume(rest.Shape()) <= faceArea * g + 1e-9;
+}
+
+/// FreeCAD-CH ops#1041: \a copy, an adding copy of a pattern with Reapply on, with every narrow
+/// gap to \a part closed (rule 3 of the design: section 4 steps 1-5): the copy fused with a sound
+/// slab on each face that qualifies. The copy itself where nothing qualifies, it touches nothing
+/// (rule 3c, R6), or the fused copy isn't one solid at least the copy's volume
+Part::TopoShape closeNarrowGaps(const Part::TopoShape& copy, const Part::TopoShape& part, GapClosing& out)
+{
+    out = GapClosing {};
+    const TopoDS_Shape& shape = copy.getShape();
+    if (shape.IsNull()) {
+        return copy;
+    }
+    out.rigidVolume = solidVolume(shape);
+    if (part.isNull() || !FeatureAddSub::shapesTouch(shape, part.getShape())) {
+        return copy;
+    }
+    Bnd_Box both;
+    BRepBndLib::Add(shape, both);
+    BRepBndLib::Add(part.getShape(), both);
+    const double fuzzy =
+        Part::FuzzyHelper::getBooleanFuzzy() * std::sqrt(both.SquareExtent()) * Precision::Confusion();
+    GapProbe probe(part.getShape(), fuzzy);
+    TopTools_IndexedDataMapOfShapeListOfShape edgeFaces;
+    TopExp::MapShapesAndAncestors(shape, TopAbs_EDGE, TopAbs_FACE, edgeFaces);
+    const double margin = std::max(0.01, 100.0 * fuzzy);
+    std::vector<Part::TopoShape> sources {copy};
+    double allowance = 0.0;
+    for (TopExp_Explorer it(shape, TopAbs_FACE); it.More(); it.Next()) {
+        const TopoDS_Face& face = TopoDS::Face(it.Current());
+        double g = 0.0;
+        if (measureGap(face, edgeFaces, probe, g) != GapVerdict::close) {
+            continue;
+        }
+        const double depth = g + margin;
+        TopoDS_Shape slab;
+        try {
+            slab = gapSlab(face, edgeFaces, depth);
+            if (slab.IsNull() || !gapSlabSound(slab, face, part.getShape(), g, depth)) {
+                slab.Nullify();
+            }
+        }
+        catch (const Standard_Failure&) {
+            slab.Nullify();
+        }
+        if (slab.IsNull()) {
+            out.unsound = true;
+            continue;
+        }
+        sources.emplace_back(slab);
+        allowance += gapArea(face) * g;
+    }
+    if (sources.size() == 1) {
+        return copy;
+    }
+    Part::TopoShape closed(copy.Tag, copy.Hasher, copy.getHistoryAlgorithm());
+    try {
+        closed.makeElementBoolean(Part::OpCodes::Fuse, sources);
+    }
+    catch (const Standard_Failure&) {
+        closed = Part::TopoShape();
+    }
+    catch (const Base::Exception&) {
+        closed = Part::TopoShape();
+    }
+    if (closed.isNull() || gapSolids(closed.getShape()) != 1
+        || solidVolume(closed.getShape()) < out.rigidVolume * (1.0 - 1e-9)) {
+        out.unsound = true;
+        return copy;
+    }
+    out.closed = true;
+    out.allowance = allowance;
+    return closed;
+}
+
 }  // namespace
 
 App::DocumentObjectExecReturn* Transformed::execute()
@@ -2174,7 +2745,55 @@ App::DocumentObjectExecReturn* Transformed::execute()
     // The copies of fused originals tried, and those made: none made fails (ops#640, A-2' d)
     std::size_t copiesTried = 0;
     std::size_t copiesMade = 0;
-    auto getTransformedCompShape = [&](const auto& supportShape, const auto& origShape) {
+    // FreeCAD-CH ops#1041 (notes/pattern-gap-close-1041-design.md 3): with Reapply on, an adding
+    // copy's narrow gaps to the part are closed. Every copy is measured against the part before
+    // the pattern's first instance, on both paths; step 6 checks each fuse that closed something
+    const Part::TopoShape gapBase = supportShape;
+    std::vector<std::string> gapsNotClosed;
+    bool gapsClosed = false;
+    double gapRigid = 0.0;
+    double gapAllowance = 0.0;
+    const auto closeGaps = [&](Part::TopoShape& copy, int instance) {
+        GapClosing closing;
+        copy = closeNarrowGaps(copy, gapBase, closing);
+        gapRigid += closing.rigidVolume;
+        if (closing.closed) {
+            gapsClosed = true;
+            gapAllowance += closing.allowance;
+        }
+        if (closing.unsound) {
+            // R5a: the copy stays rigid, today's result, and the pattern says so
+            Body* body = getFeatureBody();
+            gapsNotClosed.push_back(
+                "instance " + std::to_string(instance) + ": its gap to "
+                + (body ? quoted(body) : std::string("the part")) + " wasn't closed"
+            );
+        }
+    };
+    const auto resetGaps = [&]() {
+        gapsClosed = false;
+        gapRigid = 0.0;
+        gapAllowance = 0.0;
+    };
+    // Step 6 (R4, R5b): a fuse with closed copies keeps the part's shells and adds no more than
+    // the copies plus the gaps they close
+    const auto gapsWrong = [&](const Part::TopoShape& before, const Part::TopoShape& after) {
+        if (!gapsClosed) {
+            return std::string();
+        }
+        const double was = solidVolume(before.getShape());
+        const double gain = solidVolume(after.getShape()) - was;
+        if (Feature::countSolids(after.getShape(), TopAbs_SHELL)
+                == Feature::countSolids(before.getShape(), TopAbs_SHELL)
+            && gain <= gapRigid + gapAllowance + 1e-6 * was) {
+            return std::string();
+        }
+        Body* body = getFeatureBody();
+        return std::string("The copies with their narrow gaps to ")
+            + (body ? quoted(body) : std::string("the part"))
+            + " closed don't make one sound part (ops#1041)";
+    };
+    auto getTransformedCompShape = [&](const auto& supportShape, const auto& origShape, bool closing) {
         std::vector<TopoShape> shapes = {supportShape};
         int instance = 1;
         auto transformIter = transformations.cbegin();
@@ -2190,6 +2809,10 @@ App::DocumentObjectExecReturn* Transformed::execute()
             }
             shapes.emplace_back(makeResultShape(origShape)
                                     .makeElementTransform(origShape, *transformIter, opName.c_str()));
+            if (closing) {
+                // closed before its section is appended: a closed copy is named as an open one
+                closeGaps(shapes.back(), instance);
+            }
             if (nameInstances) {
                 // a studio step names by its owner (ops#654, notes/stored-tags.md 3 item 2)
                 shapes.back().appendElementSection(
@@ -2502,6 +3125,10 @@ App::DocumentObjectExecReturn* Transformed::execute()
                                     : Data::indexSuffix(static_cast<int>(position));
                                 Part::TopoShape placed =
                                     makeResultShape(shape).makeElementTransform(shape, outer, op.c_str());
+                                resetGaps();
+                                if (reapply && item.additive && !item.rerun && !item.hole) {
+                                    closeGaps(placed, static_cast<int>(position) + 1);
+                                }
                                 if (nameInstances) {
                                     placed.appendElementSection(
                                         tag,
@@ -2551,6 +3178,12 @@ App::DocumentObjectExecReturn* Transformed::execute()
                                 }
                                 if (item.additive && copiedHere) {
                                     ++addsMade;
+                                }
+                                if (std::string why = gapsWrong(supportShape, result); !why.empty()) {
+                                    return new App::DocumentObjectExecReturn(
+                                        quoted(item.named) + " at " + instance + ": " + why,
+                                        this
+                                    );
                                 }
                                 supportShape = result;
                                 inputCheck = ownResultCheck();
@@ -2631,7 +3264,8 @@ App::DocumentObjectExecReturn* Transformed::execute()
                 auto feature = tool.seed;
                 if (!fuseShape.isNull()) {
                     removesOnly = false;
-                    auto shapes = getTransformedCompShape(supportShape, fuseShape);
+                    resetGaps();
+                    auto shapes = getTransformedCompShape(supportShape, fuseShape, reapply);
                     if (Base::Sequencer().wasCanceled()) {
                         return new App::DocumentObjectExecReturn("User aborted");
                     }
@@ -2689,11 +3323,14 @@ App::DocumentObjectExecReturn* Transformed::execute()
                     else {
                         copiesMade += shapes.size() - 1;
                     }
+                    if (std::string why = gapsWrong(supportShape, fused); !why.empty()) {
+                        return new App::DocumentObjectExecReturn(why, this);
+                    }
                     supportShape = fused;
                     inputCheck = ownResultCheck();
                 }
                 if (!cutShape.isNull()) {
-                    auto shapes = getTransformedCompShape(supportShape, cutShape);
+                    auto shapes = getTransformedCompShape(supportShape, cutShape, false);
                     if (Base::Sequencer().wasCanceled()) {
                         return new App::DocumentObjectExecReturn("User aborted");
                     }
@@ -2785,7 +3422,7 @@ App::DocumentObjectExecReturn* Transformed::execute()
             break;
         }
         case Mode::WholeShape: {
-            auto shapes = getTransformedCompShape(supportShape, supportShape);
+            auto shapes = getTransformedCompShape(supportShape, supportShape, false);
             if (Base::Sequencer().wasCanceled()) {
                 return new App::DocumentObjectExecReturn("User aborted");
             }
@@ -2799,6 +3436,17 @@ App::DocumentObjectExecReturn* Transformed::execute()
                 &booleanInputsValid
             );
             break;
+        }
+    }
+
+    if (!gapsNotClosed.empty()) {
+        if (App::Document* doc = getDocument()) {
+            std::string text;
+            for (const std::string& line : gapsNotClosed) {
+                text += (text.empty() ? "" : "\n") + line;
+            }
+            const char* previous = doc->getWarningDescription(this);
+            doc->setWarning(this, previous && *previous ? std::string(previous) + "\n" + text : text);
         }
     }
 
