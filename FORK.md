@@ -550,7 +550,8 @@ names it.
 | `fix/i1053-scoop-rim` | fix | ops#1053 | - | open | `0096eaa7c0` (fork PR 550), 2026-11-26 | drop when upstream's round under an overhang builds a free-form rim near a tangent line without fuzzy Booleans |
 | `fix/i1079-pattern-after-end` | fix | ops#1079 | - | open | `8398037544` (fork PR 555), 2026-11-26 | dropped if upstream gains cross-Body patterns after a part end |
 | `fix/i1071-loft-pairing` | fix | ops#1071 | - | open | `99059a9fc5` (fork PR 556), 2026-11-26 | never (fork fix): unconnected lofts with unequal vertex counts pair from Onshape's start pair |
-| `fix/i1045-prism-preference` | fix | ops#1045 | - | open | (fork PR 554) | carries `fix/i1045-extruded-wall-coverage` (fork PR 553, closed): rounds of a straight edge on a wall extruded along it by the exact construction, then preferred to OCCT's; drop when upstream rounds a straight edge on an extruded wall as an exact cylinder |
+| `fix/i1045-prism-preference` | fix | ops#1045 | - | open | `4ec0a989c8` (fork PR 554), 2026-11-26 | carries `fix/i1045-extruded-wall-coverage` (fork PR 553, closed): rounds of a straight edge on a wall extruded along it by the exact construction, then preferred to OCCT's; drop when upstream rounds a straight edge on an extruded wall as an exact cylinder |
+| `fix/i1044-refine-cb` | fix | ops#1044 | - | open | (fork PR 552) | drop if upstream's refine merges reversed B-spline walls and updates every merged pair after sewing |
 
 ## Fork-only commits in carried topics
 

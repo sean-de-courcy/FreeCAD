@@ -113,6 +113,10 @@ from parttests.GTransformKeepsPlanesTest import GTransformKeepsPlanesTest
 from parttests.FlatFaceAxesTest import FlatFaceAxesTest
 from parttests.RefineFuseEdgesTest import RefineFuseEdgesTest
 from parttests.RefineInternalVertexTest import RefineInternalVertexTest
+from parttests.RefineSplitWallsTest import RefineSplitWallsTest  # ops#1044
+from parttests.RefineSplitWallsTest import RefineSplitWallReferenceTest  # ops#1044
+from parttests.RefineSplitWallsTest import RefineMergedHoledWallReferenceTest  # ops#1044
+from parttests.RefineSplitWallsTest import RefineMergedWallHoledInEachHalfReferenceTest  # ops#1044
 from parttests.SplitEdgeNamesTest import SplitEdgeNamesTest
 from parttests.SweepFrenetTest import SweepFrenetTest, SweepApproximationTest
 from parttests.BooleanLocationsTest import BooleanLocationsTest
