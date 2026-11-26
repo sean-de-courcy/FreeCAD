@@ -24,10 +24,13 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
+#include <cstdlib>
 #include <functional>
 #include <limits>
 #include <optional>
 #include <set>
+#include <tuple>
 
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
@@ -1569,6 +1572,189 @@ LoopMatch connectedLoops(
     return match;
 }
 
+// ops#1071 (notes/loft-unconnected-design-1071.md): Onshape pairs an unconnected two-profile loft
+// with different vertex counts as one chain from a start pair (RB47, RB54, RB124, RB130), where
+// OCCT's compatibility step casts polar rays. The start keeps the corners' positions: a pair is
+// admitted when the section vertex is the one nearest the profile vertex, each taken from its own
+// loop's centre; among those, the least arc-length mismatch of the chain started there, then the
+// nearest in space, then the indices.
+
+/// The length-weighted centre of a loop's edges.
+gp_Pnt loopCentre(const std::vector<TopoDS_Edge>& edges)
+{
+    gp_XYZ sum(0, 0, 0);
+    double mass = 0;
+    for (const auto& edge : edges) {
+        GProp_GProps props;
+        BRepGProp::LinearProperties(edge, props);
+        sum += props.CentreOfMass().XYZ() * props.Mass();
+        mass += props.Mass();
+    }
+    return gp_Pnt(mass > 0 ? sum / mass : sum);
+}
+
+/// The sum of |fraction - partner's fraction| over the fewer side's vertices `partnersOf` matches:
+/// the cost its table minimises.
+double partnerCost(const std::vector<double>& fewer, const std::vector<double>& more)
+{
+    const std::vector<int> partner = partnersOf(fewer, more);
+    double cost = 0;
+    for (size_t j = 0; j < partner.size(); ++j) {
+        if (partner[j] >= 0) {
+            cost += std::abs(fewer[partner[j]] - more[j]);
+        }
+    }
+    return cost;
+}
+
+/// The start pairs to try for an unconnected loop pair, best first, one per distinct chain and at
+/// most `limit`: (profile vertex, section vertex) in the loops' frame, for `connectedLoops`. Empty
+/// when the loops can't be told the same way round.
+std::vector<std::pair<gp_Pnt, gp_Pnt>> unconnectedStarts(
+    const Part::TopoShape& profile,
+    const Part::TopoShape& section,
+    size_t limit
+)
+{
+    auto a = loopEdges(profile.getShape());
+    auto b = loopEdges(section.getShape());
+    if (a.size() < 2 || b.size() < 2 || a.size() == b.size()) {
+        return {};
+    }
+    const auto samplesA = loopSamples(a);
+    const auto samplesB = loopSamples(b);
+    const gp_Vec na = areaVector(samplesA);
+    const gp_Vec nb = areaVector(samplesB);
+    if (na.Magnitude() < Precision::Confusion() || nb.Magnitude() < Precision::Confusion()) {
+        return {};
+    }
+    const double sense = loopSense(samplesA, samplesB, na, nb);
+    if (sense == 0) {
+        return {};
+    }
+    if (sense < 0) {
+        b = reversedLoop(b);
+    }
+    const int na0 = static_cast<int>(a.size());
+    const int nb0 = static_cast<int>(b.size());
+    double lengthA = 0, lengthB = 0;
+    for (const auto& e : a) {
+        lengthA += edgeLength(e);
+    }
+    for (const auto& e : b) {
+        lengthB += edgeLength(e);
+    }
+    const double size = std::max(lengthA, lengthB);
+    const gp_Pnt ca = loopCentre(a);
+    const gp_Pnt cb = loopCentre(b);
+
+    struct Candidate
+    {
+        int i, j;
+        double mismatch, distance;
+        std::set<std::pair<int, int>> chain;  // the vertex pairs the chain matches
+        int mismatchGroup = 0, distanceGroup = 0;
+    };
+    std::vector<Candidate> candidates;
+    for (int i = 0; i < na0; ++i) {
+        const gp_Vec ra(ca, startPoint(a[i]));
+        std::vector<double> offsets;
+        for (int j = 0; j < nb0; ++j) {
+            offsets.push_back(ra.Subtracted(gp_Vec(cb, startPoint(b[j]))).Magnitude());
+        }
+        const double nearest = *std::ranges::min_element(offsets);
+        for (int j = 0; j < nb0; ++j) {
+            if (offsets[j] > nearest + 1e-7 * size) {
+                continue;
+            }
+            std::vector<TopoDS_Edge> ra0(a), rb0(b);
+            std::rotate(ra0.begin(), ra0.begin() + i, ra0.end());
+            std::rotate(rb0.begin(), rb0.begin() + j, rb0.end());
+            double la = 0, lb = 0;
+            const auto fa = innerFractions(ra0, la);
+            const auto fb = innerFractions(rb0, lb);
+            const bool aFewer = fa.size() < fb.size();
+            const auto& fewer = aFewer ? fa : fb;
+            const auto& more = aFewer ? fb : fa;
+            Candidate c {i, j, partnerCost(fewer, more), startPoint(a[i]).Distance(startPoint(b[j])), {}};
+            c.chain.emplace(i, j);
+            const std::vector<int> partner = partnersOf(fewer, more);
+            for (size_t k = 0; k < partner.size(); ++k) {
+                if (partner[k] >= 0) {
+                    const int kf = partner[k] + 1;  // inner vertex k of a chain is its vertex k + 1
+                    const int km = static_cast<int>(k) + 1;
+                    const int ia = (i + (aFewer ? kf : km)) % na0;
+                    const int jb = (j + (aFewer ? km : kf)) % nb0;
+                    c.chain.emplace(ia, jb);
+                }
+            }
+            candidates.push_back(std::move(c));
+        }
+    }
+    // groups of equal mismatch, inside them of equal distance; then the indices (no tolerant comparator)
+    std::ranges::sort(candidates, {}, &Candidate::mismatch);
+    for (size_t k = 1, first = 0; k < candidates.size(); ++k) {
+        if (candidates[k].mismatch - candidates[first].mismatch > 1e-9) {
+            first = k;
+            candidates[k].mismatchGroup = candidates[k - 1].mismatchGroup + 1;
+        }
+        else {
+            candidates[k].mismatchGroup = candidates[first].mismatchGroup;
+        }
+    }
+    std::ranges::sort(candidates, [](const Candidate& x, const Candidate& y) {
+        return std::tie(x.mismatchGroup, x.distance) < std::tie(y.mismatchGroup, y.distance);
+    });
+    for (size_t k = 1, first = 0; k < candidates.size(); ++k) {
+        if (candidates[k].mismatchGroup != candidates[first].mismatchGroup) {
+            first = k;
+            continue;
+        }
+        if (candidates[k].distance - candidates[first].distance > 1e-7 * size) {
+            first = k;
+            candidates[k].distanceGroup = candidates[k - 1].distanceGroup + 1;
+        }
+        else {
+            candidates[k].distanceGroup = candidates[first].distanceGroup;
+        }
+    }
+    std::ranges::sort(candidates, [](const Candidate& x, const Candidate& y) {
+        return std::tie(x.mismatchGroup, x.distanceGroup, x.i, x.j)
+            < std::tie(y.mismatchGroup, y.distanceGroup, y.i, y.j);
+    });
+
+    std::vector<std::pair<gp_Pnt, gp_Pnt>> starts;
+    std::vector<const std::set<std::pair<int, int>>*> chains;
+    for (const auto& c : candidates) {
+        if (starts.size() >= limit) {
+            break;
+        }
+        if (std::ranges::any_of(chains, [&](const auto* seen) { return *seen == c.chain; })) {
+            continue;
+        }
+        chains.push_back(&c.chain);
+        starts.emplace_back(startPoint(a[c.i]), startPoint(b[c.j]));
+    }
+    return starts;
+}
+
+/// The loops of an unconnected loft matched from the first start pair whose chain builds
+/// (`unconnectedStarts`), or nothing.
+std::optional<LoopMatch> unconnectedMatch(const Part::TopoShape& profile, const Part::TopoShape& section)
+{
+    constexpr size_t maxChains = 12;
+    for (const auto& start : unconnectedStarts(profile, section, maxChains)) {
+        try {
+            return connectedLoops(profile, section, {start});
+        }
+        catch (const Base::Exception&) {
+        }
+        catch (const Standard_Failure&) {
+        }
+    }
+    return std::nullopt;
+}
+
 // ops#1046 B + C (notes/loft-tangent-joints-1046.md): Onshape keeps a side edge whose ends are both
 // smooth (a tangent joint, or a new vertex inside an edge) only where a planar side face ends on it;
 // elsewhere one side face spans the run, and a new vertex there doesn't survive (RB44, RB47). The
@@ -2729,6 +2915,37 @@ std::vector<Part::TopoShape> Loft::getSectionShape(
 
 App::DocumentObjectExecReturn* Loft::execute()
 {
+    // ops#1071: an automatic start pair that fails anywhere after the match (the merge, the loft,
+    // the solid) gives way to the old pairing, OCCT's, with a warning; never for a loft with
+    // connections (they turn the automatic path off)
+    bool automaticUsed = false;
+    App::DocumentObjectExecReturn* ret = executeLoft(true, automaticUsed);
+    if (!ret || !automaticUsed) {
+        return ret;
+    }
+    std::string why = ret->Why;
+    delete ret;
+    bool unused = false;
+    ret = executeLoft(false, unused);
+    if (!ret) {
+        if (auto doc = getDocument()) {
+            std::string lower = why;
+            std::ranges::transform(lower, lower.begin(), [](unsigned char ch) { return std::tolower(ch); });
+            std::string text = "Loft: the profiles' vertices were paired the old way (OCCT's polar method), "
+                               "not by corner position as Onshape's";
+            if (!why.empty() && lower.find("connection") == std::string::npos) {
+                text += ": " + why;
+            }
+            const char* previous = doc->getWarningDescription(this);
+            doc->setWarning(this, previous && *previous ? std::string(previous) + "\n" + text : text);
+        }
+    }
+    return ret;
+}
+
+App::DocumentObjectExecReturn* Loft::executeLoft(bool automaticStarts, bool& automaticUsed)
+{
+    automaticUsed = false;
     if (onlyHaveRefined()) {
         return App::DocumentObject::StdReturn;
     }
@@ -2837,10 +3054,28 @@ App::DocumentObjectExecReturn* Loft::execute()
                     }
                 }
             }
-            const bool connected = !loopConnections.empty();
             std::optional<LoopMatch> match;
-            if (connected) {
+            if (!loopConnections.empty()) {
                 match = connectedLoops(sectionWires.front(), sectionWires.back(), loopConnections);
+            }
+            // ops#1071: an unconnected two-profile loop pair with different vertex counts is paired
+            // as Onshape's, one chain from a start pair, and then lofts as a connected one
+            else if (automaticStarts && connections.empty() && sectionWires.size() == 2 && !closed
+                     && !legacy && sectionWires.front().shapeType() == TopAbs_WIRE
+                     && sectionWires.back().shapeType() == TopAbs_WIRE
+                     && BRep_Tool::IsClosed(sectionWires.front().getShape())
+                     && BRep_Tool::IsClosed(sectionWires.back().getShape())) {
+                match = unconnectedMatch(sectionWires.front(), sectionWires.back());
+                if (match) {
+                    automaticUsed = true;
+                    if (const char* hook = std::getenv("FREECAD_CH_LOFT_START_TEST");
+                        hook && std::string(hook) == "throw") {
+                        throw Base::CADKernelError("Loft: test hook, the automatic start fails");
+                    }
+                }
+            }
+            const bool connected = match.has_value();
+            if (connected) {
                 sectionWires.front() = match->wireA;
                 sectionWires.back() = match->wireB;
             }

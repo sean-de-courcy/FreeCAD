@@ -83,6 +83,10 @@ protected:
     ) override;
 
 private:
+    /// The loft, with Onshape's automatic start pairs for unconnected profiles or without them
+    /// (ops#1071); `automaticUsed` says whether one was taken.
+    App::DocumentObjectExecReturn* executeLoft(bool automaticStarts, bool& automaticUsed);
+
     static const char* ConditionEnums[];
     static const char* TangentRuleEnums[];
     // static const char* TypeEnums[];
