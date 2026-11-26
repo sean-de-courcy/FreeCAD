@@ -545,7 +545,8 @@ names it.
 | `fix/i1026-two-walls` | fix | ops#1026 | - | open | `24f9ac5566` (fork PR 541), 2026-11-26 | drop when upstream builds a dress-up past a strip under two walls |
 | `fix/i1060-fix-twin-order` | fix | ops#1060 | - | open | `51fa2be4ed` (fork PR 547), 2026-11-26 | drop when `BRepTools_History` gives a split source's pieces in a repeatable order |
 | `fix/i1051-fill-on-bspline-round` | fix | ops#1051 | - | open | `fb9f29e63a` (fork PR 546), 2026-11-26 | drop when upstream builds a lone round on its cylinder as one cylinder face |
-| `fix/i1065-part-ends` | fix | ops#1065 | - | `integration` `8388e5e747` | (fork PR 548) | never (fork fix): a removing feature that takes its whole part ends it (PartEnded, shared with Delete part), confirmed by point classification; a feature that loses its part unconfirmed fails with the kernel's error |
+| `fix/i1065-part-ends` | fix | ops#1065 | - | `integration` `8388e5e747` | `126ae57d81` (fork PR 548), 2026-11-26 | never (fork fix): a removing feature that takes its whole part ends it (PartEnded, shared with Delete part), confirmed by point classification; a feature that loses its part unconfirmed fails with the kernel's error |
+| `fix/i1046-loft-tangent-runs` | fix | ops#1046 | - | open | (fork PR 549) | never (fork fix): connected lofts with tangent joints match and merge as Onshape's |
 
 ## Fork-only commits in carried topics
 

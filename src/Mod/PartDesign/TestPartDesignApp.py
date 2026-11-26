@@ -97,6 +97,7 @@ from PartDesignTests.TestLoftConnections import (  # FreeCAD-CH, ops#640
     TestLoftConnectionsTwist,
     TestLoftConnectionsUnequal,
     TestLoftConnectionsSplitLines,  # ops#729
+    TestLoftTangentRuns,  # ops#1046
     TestLoftElbowPairing,  # ops#933
 )
 from PartDesignTests.TestPrimitive import TestPrimitive
