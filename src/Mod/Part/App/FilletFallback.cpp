@@ -3703,6 +3703,42 @@ void foldBehindOwn(const Context& ctx,
     faces = {data.faces[0], data.faces[1]};
 }
 
+/** Cause B's cusp end (VertexEnd::stripCusp): an unselected edge between the concave arc's plane
+ * face and the end face leaves the vertex the arc's way, and the end face drops away from the
+ * floor along it (FGC-FM44 #152's outer cylinder; ops#898 cause P's plane side). A wall rising
+ * there (a pocket's, a channel's) is not measured (review of the cause B branch, note 1)
+ */
+bool rimDropsAway(const Context& ctx,
+                  const EdgeData& data,
+                  const TopoDS_Vertex& vertex,
+                  const std::vector<TopoDS_Shape>& edges,
+                  const TopoDS_Face& endFace,
+                  const TopoDS_Face& planar,
+                  const gp_Dir& away)
+{
+    const gp_Pnt point = BRep_Tool::Pnt(vertex);
+    return std::any_of(edges.begin(), edges.end(), [&](const TopoDS_Shape& shape) {
+        const TopoDS_Edge& other = TopoDS::Edge(shape);
+        if (other.IsSame(data.edge) || ctx.selected.Contains(other)) {
+            return false;
+        }
+        auto ofOther = ctx.list(ctx.edgeFaces, other);
+        auto has = [&](const TopoDS_Face& face) {
+            return std::any_of(ofOther.begin(), ofOther.end(), [&](const TopoDS_Shape& f) {
+                return f.IsSame(face);
+            });
+        };
+        if (ofOther.size() != 2 || !has(planar) || !has(endFace)
+            || awayFrom(other, vertex).Dot(away) <= 1 - angularTolerance) {
+            return false;
+        }
+        BRepAdaptor_Curve rim(other);
+        const double middle = (rim.FirstParameter() + rim.LastParameter()) / 2;
+        return gp_Vec(inwardInAny(endFace, other, middle)).Dot(gp_Vec(outwardNormal(planar, point)))
+            < -0.5;
+    });
+}
+
 /// 5.6, interface point 1: how the selected edge ends at the vertex
 VertexEnd classify(
     const Context& ctx,
@@ -3861,30 +3897,7 @@ VertexEnd classify(
             const TopoDS_Face& planar = data.faces[data.planeFace];
             end.stripCusp = !data.line && !data.ruled
                 && BRepAdaptor_Surface(planar, Standard_False).GetType() == GeomAbs_Plane
-                && std::any_of(edges.begin(), edges.end(), [&](const TopoDS_Shape& shape) {
-                       const TopoDS_Edge& other = TopoDS::Edge(shape);
-                       if (other.IsSame(data.edge) || ctx.selected.Contains(other)) {
-                           return false;
-                       }
-                       auto ofOther = ctx.list(ctx.edgeFaces, other);
-                       auto has = [&](const TopoDS_Face& face) {
-                           return std::any_of(ofOther.begin(), ofOther.end(), [&](const TopoDS_Shape& f) {
-                               return f.IsSame(face);
-                           });
-                       };
-                       if (ofOther.size() != 2 || !has(planar) || !has(endFace)
-                           || awayFrom(other, vertex).Dot(away) <= 1 - angularTolerance) {
-                           return false;
-                       }
-                       // The end face drops away from the floor along the rim (FGC-FM44 #152's
-                       // outer cylinder); a wall rising there (a pocket's) is not measured
-                       // (review of the cause B branch, note 1)
-                       BRepAdaptor_Curve rim(other);
-                       const double middle = (rim.FirstParameter() + rim.LastParameter()) / 2;
-                       return gp_Vec(inwardInAny(endFace, other, middle))
-                                  .Dot(gp_Vec(outwardNormal(planar, point)))
-                           < -0.5;
-                   });
+                && rimDropsAway(ctx, data, vertex, edges, endFace, planar, away);
         }
         else if (normal.Dot(away) > 0) {
             normal.Reverse();
@@ -3915,6 +3928,22 @@ VertexEnd classify(
         if (cusp && ctx.request.kind == Kind::Chamfer) {
             end.kind = VertexClass::CuspEnd;
             end.trims = {{point, away.Reversed()}};
+            return end;
+        }
+        // ops#898 cause P (New HNY Duo Heat Wire Clip #27; Onshape RB136): a concave arc on a plane
+        // floor whose end face is a plane tangent to it, the floor's rim running on from the vertex
+        // the arc's way and the end face dropping away below the floor along it (a round-nosed
+        // boss whose straight sides run on below the floor). Cause B's cusp end, as for a curved
+        // end face: the tool ends on the meridian plane at the vertex and the fill is kept over the
+        // narrowing floor (trimFusedToolOverFace). Only where OCCT failed (the arc's tool reads
+        // Request::widerScope); a chamfer there keeps the cusp rule above
+        const TopoDS_Face& planar = data.faces[data.planeFace];
+        if (cusp && ctx.request.kind == Kind::Fillet && !data.line && !data.ruled && !data.convex
+            && !data.varying() && BRepAdaptor_Surface(planar, Standard_False).GetType() == GeomAbs_Plane
+            && rimDropsAway(ctx, data, vertex, edges, endFace, planar, away)) {
+            end.kind = VertexClass::FreeEnd;
+            end.trims = {{point, away.Reversed()}};
+            end.stripCusp = true;
             return end;
         }
         end.reason = "an end face parallel to the edge";
@@ -8249,13 +8278,15 @@ Tool circleTool(const Context& ctx, const EdgeData& data, const VertexEnd ends[2
         // its strip runs off the narrowing face is the fill kept over the face
         // (trimFusedToolOverFace), as Onshape's (FGC-FM44 #152: area to 3e-6 mm2). Only where
         // OCCT failed; a convex round or a chamfer there is not known from Onshape
-        if (!ends[i].surfaceEnd.IsNull()
+        // (ops#898 cause P: a plane end face tangent to the arc takes the same rule)
+        if ((!ends[i].surfaceEnd.IsNull() || ends[i].stripCusp)
             && !(ends[i].stripCusp && ctx.request.widerScope && !data.convex
                  && ctx.request.kind == Kind::Fillet && ends[i].kind == VertexClass::FreeEnd
                  && ends[i].trims.size() == 1 && !missesAxis(ends[i].trims.front(), circle))) {
-            refuse("an arc that ends on a face that is not a plane");
+            refuse(ends[i].surfaceEnd.IsNull() ? "an end face parallel to the edge"
+                                               : "an arc that ends on a face that is not a plane");
         }
-        if (!ends[i].surfaceEnd.IsNull()) {
+        if (!ends[i].surfaceEnd.IsNull() || ends[i].stripCusp) {
             ctx.cuspLifted = true;
         }
         const TrimPlane& plane = ends[i].trims.front();
@@ -12962,6 +12993,8 @@ struct ReflexCorners
     }
 };
 
+std::optional<gp_Pnt> pointInFace(const TopoDS_Face& face);
+
 TopoDS_Shape constructShape(
     const TopoDS_Shape& baseShape,
     const std::vector<TopoDS_Shape>& edges,
@@ -13423,8 +13456,78 @@ TopoDS_Shape constructShape(
     // Rounds between two cylinders, or on a wall extruded along the edge (ops#1045), are built
     // wherever they fit, not only at the limit: OCCT's own are B-spline faces there
     // (preferConstruction())
+    // ops#898 cause L (Test_Tube_Feeder #10; Onshape RB138 L6): a straight edge's cut tool whose
+    // end section runs past its end face into material beyond it (a handle standing on the end
+    // face, its foot under part of the section), where neither of the edge's faces runs on past
+    // that end: Onshape's round is the plain one over the edge's own length, the material beyond
+    // keeping a flat in the end face's plane. That counts as a limit. Where a face of the edge runs
+    // on past the end (the handle flush with the top: RB138 L3-L5) Onshape runs the round on past
+    // it, and this does not apply; nor where the section leaves the end face into the air
+    bool endInMaterial = false;
+    for (const auto& tool : tools) {
+        // (A chamfer there is not known from Onshape: RB138 L5 is the flush handle's)
+        if (request.kind != Kind::Fillet || !tool.cut || tool.rolled || endInMaterial) {
+            continue;
+        }
+        const auto d = std::find_if(data.begin(), data.end(), [&](const EdgeData& e) {
+            return e.edge.IsSame(tool.source);
+        });
+        if (d == data.end() || !d->line || d->ruled) {
+            continue;
+        }
+        for (const auto& capShape : tool.capFaces) {
+            const TopoDS_Face& capFace = TopoDS::Face(capShape);
+            BRepAdaptor_Surface capSurface(capFace, Standard_True);
+            if (capSurface.GetType() != GeomAbs_Plane) {
+                continue;
+            }
+            const gp_Pln capPlane = capSurface.Plane();
+            const auto cap = std::find_if(tool.caps.begin(), tool.caps.end(), [&](const TrimPlane& c) {
+                return parallel(c.normal, capPlane.Axis().Direction())
+                    && capPlane.Distance(c.point) <= 1000 * linearTolerance;
+            });
+            if (cap == tool.caps.end()
+                || !whollyBeyond(d->faces[0], cap->point, cap->normal)
+                || !whollyBeyond(d->faces[1], cap->point, cap->normal)) {
+                continue;
+            }
+            // The base's faces in the cap's plane: what of the cap they don't cover lies off the
+            // end face
+            BRep_Builder builder;
+            TopoDS_Compound inPlane;
+            builder.MakeCompound(inPlane);
+            for (TopExp_Explorer it(base.getShape(), TopAbs_FACE); it.More(); it.Next()) {
+                BRepAdaptor_Surface surface(TopoDS::Face(it.Current()), Standard_True);
+                if (surface.GetType() == GeomAbs_Plane
+                    && parallel(surface.Plane().Axis().Direction(), cap->normal)
+                    && surface.Plane().Distance(cap->point) <= 1000 * linearTolerance) {
+                    builder.Add(inPlane, it.Current());
+                }
+            }
+            BRepAlgoAPI_Cut off(capFace, inPlane);
+            if (!off.IsDone() || off.HasErrors()) {
+                continue;
+            }
+            for (TopExp_Explorer it(off.Shape(), TopAbs_FACE); it.More() && !endInMaterial; it.Next()) {
+                const TopoDS_Face& piece = TopoDS::Face(it.Current());
+                if (std::abs(areaOf(piece)) <= areaToleranceOf(capFace)) {
+                    continue;
+                }
+                const std::optional<gp_Pnt> point = pointInFace(piece);
+                if (!point) {
+                    continue;
+                }
+                // Just beyond the end (a cap's normal points away from its tool): in the base's
+                // material
+                const gp_Pnt past = point->Translated(gp_Vec(cap->normal) * 1e-3);
+                BRepClass3d_SolidClassifier classifier(base.getShape(), past, linearTolerance);
+                endInMaterial = classifier.State() == TopAbs_IN;
+            }
+        }
+    }
     const bool limitOnly = request.limitOnly && !request.mitreOnly
-        && !(!data.empty() && std::all_of(data.begin(), data.end(), preferredRound)) && !notchEnds;
+        && !(!data.empty() && std::all_of(data.begin(), data.end(), preferredRound)) && !notchEnds
+        && !endInMaterial;
     std::vector<SurfaceWall> surfaceWalls;
     std::vector<std::pair<TopoDS_Shape, TopoDS_Shape>> overlapPairs;
     for (const auto& corner : overlapCorners) {

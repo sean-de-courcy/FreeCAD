@@ -342,3 +342,92 @@ class TestFilletVertexFolds(unittest.TestCase):
         expected = alone.fuse(Part.makeBox(4, 4, 5, V(8, -4, 4))).removeSplitter()
         self.assertSameBody(shape, expected)
         self.assertTrue(self.refuses(stepped_plate(width, second_x=1.0), corner, 2.0))
+
+
+# ops#898 causes L and P (sk898tlp's cases; Onshape RB136, RB138).
+# L: a block's two long top edges rounded, a handle r 7 standing on the end face x = 24 under part of the round's end
+#    section. Handle (b), the whole cylinder: neither of the edge's faces runs on past the end, and Onshape's round is
+#    the plain one over the edge's own length (RB138 L6), the handle keeping a flat in x = 24.
+# P: a stadium boss on a bar of its own width, each nose's foot arc ending tangent to the bar's sides, which drop below
+#    the floor: the plain revolved fill kept between the side planes (RB136: one torus per arc, nothing removed).
+
+
+def handle_block(flush=False):
+    """Block x 0..24, y 0..17, z 0..10; a handle r 7 along x through (y 8.5, z 10) on x = 24, 10 long. flush: only
+    its lower half, its top merged with the block's top."""
+    handle = Part.makeCylinder(7, 10, V(24, 8.5, 10), V(1, 0, 0))
+    if flush:
+        handle = handle.common(Part.makeBox(10, 14, 7, V(24, 1.5, 3)))
+    return Part.makeBox(24, 17, 10).fuse(handle).removeSplitter()
+
+
+def long_top(edge):
+    return on(edge, lambda p: abs(p.z - 10) < 1e-7 and (abs(p.y) < 1e-7 or abs(p.y - 17) < 1e-7) and p.x < 24 + 1e-7)
+
+
+def stadium_bar(front=12.0, channel=False):
+    """Bar x -3..3, y -front..front, z -6..0; a stadium boss z 0..4, sides x = -3 and 3, noses r 3 about (0, 5) and
+    (0, -5). channel: walls 2 high beside the bar (x -6..-3 and 3..6), so the side planes rise above the floor."""
+    boss = Part.makeBox(6, 10, 4, V(-3, -5, 0))
+    boss = boss.fuse(Part.makeCylinder(3, 4, V(0, 5, 0))).fuse(Part.makeCylinder(3, 4, V(0, -5, 0)))
+    shape = Part.makeBox(6, 2 * front, 6, V(-3, -front, -6)).fuse(boss)
+    if channel:
+        shape = shape.fuse(Part.makeBox(12, 2 * front, 6, V(-6, -front, -6)))
+        shape = shape.fuse(Part.makeBox(3, 2 * front, 2, V(-6, -front, 0))).fuse(Part.makeBox(3, 2 * front, 2, V(3, -front, 0)))
+    return shape.removeSplitter()
+
+
+def foot_arcs(edge):
+    return abs(edge.CenterOfMass.z) < 1e-7 and isinstance(edge.Curve, Part.Circle)
+
+
+class TestFilletEndsPastTheEndFace(unittest.TestCase):
+    setUp = TestFilletVertexEnds.setUp
+    tearDown = TestFilletVertexEnds.tearDown
+    dressUp = TestFilletVertexEnds.dressUp
+    refuses = TestFilletVertexFolds.refuses
+
+    def assertPlainRoundsOfTheTopEdges(self, base, shape, size):
+        """The plain round of each 24 long edge: (1 - pi/4) r^2 per unit length removed, nothing added."""
+        self.assertLess(shape.cut(base).Volume, 1e-6)
+        self.assertAlmostEqual(base.cut(shape).Volume, 2 * QUARTER * size * size * 24, delta=1e-5)
+
+    def testRoundIntoAHandleOnTheEndFace(self):
+        """Cause L, handle (b): r 3 and 5 reach into the handle (1.5 of the end face is free beside it), and the
+        round is the plain one; r 1.5 fits beside the handle, as before. sk898tlp L1-L3: dA -68.756040 at r 3,
+        -118.478885 at r 5, 2 cylinders more."""
+        base = handle_block()
+        for size, area in ((1.5, -32.834081), (3.0, -68.756040), (5.0, -118.478885)):
+            with self.subTest(size=size):
+                shape = self.dressUp(base, long_top, size)
+                self.assertPlainRoundsOfTheTopEdges(base, shape, size)
+                self.assertAlmostEqual(shape.Area - base.Area, area, delta=1e-5)
+                self.assertEqual(len(shape.Faces), len(base.Faces) + 2)
+
+    def testRoundIntoAFlushHandleOrAChamferStaysRefused(self):
+        """Cause L's limits: the handle flush with the top (Onshape runs the round on past the end, RB138 L3, L4),
+        and a chamfer on handle (b) (no Onshape fact) stay refused."""
+        self.assertTrue(self.refuses(handle_block(flush=True), long_top, 3.0))
+        self.assertTrue(self.refuses(handle_block(), long_top, 3.0, "Chamfer"))
+
+    def testFillsOfFootArcsEndingTangentToSidesBelowTheFloor(self):
+        """Cause P (New HNY Duo Heat Wire Clip #27): both arcs; per arc sk898tlp P1, P2 (RB136's rule: Onshape is
+        within 2.1e-5 of the closed form): r 0.4 +0.286808 dA -1.296938, r 0.75 +0.973232 -2.171134, r 1.5
+        +3.717486 -3.453686; one face per arc, nothing removed."""
+        base = stadium_bar()
+        for size, volume, area in ((0.4, 0.286808, -1.296938), (0.75, 0.973232, -2.171134), (1.5, 3.717486, -3.453686)):
+            with self.subTest(size=size):
+                shape = self.dressUp(base, foot_arcs, size)
+                self.assertLess(base.cut(shape).Volume, 1e-6)
+                self.assertAlmostEqual(shape.cut(base).Volume, 2 * volume, delta=2e-4)
+                self.assertAlmostEqual(shape.Area - base.Area, 2 * area, delta=1e-5)
+                self.assertEqual(len(shape.Faces), len(base.Faces) + 2)
+
+    def testFillsOfFootArcsWithTheBarsFrontInFront(self):
+        """Cause P with the bar's front 0.4 past the nose tips (sk898tlp P5): +0.959141 and dA -2.048973 per arc, the
+        floor in front of each nose left in two pieces."""
+        base = stadium_bar(front=8.4)
+        shape = self.dressUp(base, foot_arcs, 0.75)
+        self.assertLess(base.cut(shape).Volume, 1e-6)
+        self.assertAlmostEqual(shape.cut(base).Volume, 2 * 0.959141, delta=2e-4)
+        self.assertAlmostEqual(shape.Area - base.Area, 2 * -2.048973, delta=1e-5)
