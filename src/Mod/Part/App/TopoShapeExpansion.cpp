@@ -11714,6 +11714,22 @@ double splitLength(const TopoDS_Shape& profile, const TopoDS_Shape& upTo)
 // shape's unrelated faces, e.g. a whole base's) don't count: BRepFeat keeps building what it
 // built before. A single face always counts: BRepFeat chooses its own sense and gets the face
 // without its limits, larger than the face (PR 324 round 1 verification).
+// Whether every solid of `prism` touches `face` (ops#1039, review rv540 1)
+bool touchesEverySolid(const TopoDS_Shape& prism, const TopoDS_Shape& face)
+{
+    TopExp_Explorer solid(prism, TopAbs_SOLID);
+    if (!solid.More()) {
+        return false;
+    }
+    for (; solid.More(); solid.Next()) {
+        BRepExtrema_DistShapeShape distance(solid.Current(), face);
+        if (!distance.IsDone() || distance.Value() > 1e-4) {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool brepFeatReaches(const TopoDS_Shape& profile, const TopoDS_Shape& upTo, const gp_Dir& direction)
 {
     int faceCount = 0;
@@ -12985,6 +13001,15 @@ TopoShape& TopoShape::makeElementPrismUntil(
                 break;
             }
         }
+    }
+    // The retry on a base of its own (`checkBase`: the up-to face swept along the direction) can
+    // end a prism short of the face, valid: a pocket up to last along a tab with a full-round end
+    // stopped 44 mm short of it (review rv540 1's case, integration too), and a prism through a
+    // window of the face 1 mm short (review pr1039-r3). Every solid must touch the face; one
+    // that doesn't goes to the split, which reaches the face or refuses
+    if (checkBase && !bySplit && !flatLength && !fullTurn
+        && !touchesEverySolid(result.getShape(), _uptoface.getShape())) {
+        result = prismBySplit();
     }
     // As the split refuses it (ops#356). `result` is the profile's prisms alone here: each
     // face's prism is made with mode None
