@@ -328,10 +328,10 @@ class TestLoftConnectionsUnequal(ConnectionCase):
         loft = self.loft(self.sixEdges(), self.RECT(), [((-10, -6), (6, 4))])
         self.assertStops(loft, "connection")
 
-    def testEightEdgesToARectangleFourConnectionsStopsAtTangentJoints(self):
+    def testEightEdgesToARectangleFourConnections(self):
         # oracle 14 LC2: Onshape builds V 4751.303503, A 1799.865681, F 8: 6 side faces, the rounded corners' arc ends
         # (7, +-6) unmatched (a side face spans the arc and the line against the rectangle's top or bottom edge), the
-        # chamfer vertices (-10, +-4) to (-6, +-4/3). One edge against a tangent run stops until ops#729.
+        # chamfer vertices (-10, +-4) to (-6, +-4/3) (ops#1046: no plane beside the arc ends under the conditions).
         # 8 edges: a 20 x 12 rectangle with the right corners rounded r 3 and the left corners cut 2 x 2 (6 lines, 2 arcs)
         g = models.polyline([(7, 6), (-8, 6), (-10, 4), (-10, -4), (-8, -6), (7, -6)])
         g.append(Part.ArcOfCircle(Part.Circle(V(7, -3, 0), V(0, 0, 1), 3), -math.pi / 2, 0))
@@ -345,7 +345,11 @@ class TestLoftConnectionsUnequal(ConnectionCase):
             StartCondition="Normal to profile",
             EndCondition="Normal to profile",
         )
-        self.assertStops(loft, "tangent")
+        self.assertTrue(loft.isValid(), loft.getStatusString())
+        self.assertEqual(len(loft.Shape.Faces), 8)
+        self.assertNearOnshape(loft, 4751.303503, 1799.865681)
+        for a, b in pairs:
+            self.assertJoined(loft, a, b, straight=False)
 
     def testEightLinesToARectangleFourConnections(self):
         """LC2 with all four corners cut 2 x 2 (8 lines, sharp joints) and no end conditions: each chain's extra vertices
@@ -381,16 +385,21 @@ class TestLoftConnectionsUnequal(ConnectionCase):
     def testSlotToARoundedRectangleStopsAtTangentJoints(self):
         # oracle 14 LC3: Onshape builds this, leaving the tangent joints unmatched (V 5831.449304,
         # A 2131.481057, F 6; side edges (10, 5) -> (6, 4), (-10, -5) -> (-6, -4), (10, -5) -> (6, -4),
-        # (0, 5) -> (-6, 4)). Edge-to-edge pairing can't, so it stops (decision 150) until G1 runs merge.
+        # (0, 5) -> (-6, 4)). No chain-local rule gives that answer (ops#1046 D): a stop until the oracle rows land.
         slot, rounded = self.slotAndRoundedRectangle()
         loft = self.loft(slot, rounded, [((10, 5), (6, 4)), ((-10, -5), (-6, -4))])
         self.assertStops(loft, "tangent")
 
-    def testSlotToARoundedRectangleOneConnectionStops(self):
-        # oracle 14 LC3, one connection (10, 5) -> (6, 4): V 5923.449580, A 2149.140963, F 6 in Onshape
+    def testSlotToARoundedRectangleOneConnection(self):
+        # oracle 14 LC3, one connection (10, 5) -> (6, 4): V 5923.449580, A 2149.140963, F 6 in Onshape: the four
+        # edges where the flat sides end stay, each half circle's side is one face against arc, line, arc
         slot, rounded = self.slotAndRoundedRectangle()
         loft = self.loft(slot, rounded, [((10, 5), (6, 4))])
-        self.assertStops(loft, "tangent")
+        self.assertTrue(loft.isValid(), loft.getStatusString())
+        self.assertEqual(len(loft.Shape.Faces), 6)
+        self.assertNearOnshape(loft, 5923.449580, 2149.140963)
+        for a, b in (((10, 5), (6, 4)), ((-10, 5), (-6, 4)), ((-10, -5), (-6, -4)), ((10, -5), (6, -4))):
+            self.assertJoined(loft, a, b)
 
 
 class TestLoftConnectionsSplitLines(ConnectionCase):
@@ -432,6 +441,242 @@ class TestLoftConnectionsSplitLines(ConnectionCase):
         # between them isn't a plane and depends on which vertices Onshape matches (the open part of ops#729)
         loft = self.loft(self.bottom(split=(0, 5 + 1 / 3), end=(-10, 6)), self.top(), [((-10, -5), (-6, -4)), ((-10, 6), (-6, 4))])
         self.assertStops(loft, "tangent")
+
+
+class TestLoftTangentRuns(ConnectionCase):
+    """ops#1046: chains of different edge counts between connections, with tangent joints (sk1126's rows, Onshape's
+    answers RB44/RB47, notes/onshape-facts.md). Vertices match by arc-length fraction, leftovers by equal division; a
+    side edge with both ends smooth (a tangent joint or a new vertex inside an edge) stays only where a planar side face
+    ends on it, otherwise one side face spans the run and the new vertex is gone (notes/loft-tangent-joints-1046.md).
+
+    Profiles: A at z 0 from the left corner (-20, 10), B at z 30 from (-12, 6); a span from the left corner to the right
+    corner, then the right side down, the bottom and the left side (S3t: its right side runs (15, 0) to (20, -10))."""
+
+    C30 = math.cos(math.radians(30))
+
+    @staticmethod
+    def arc(c, r, a0, a1):
+        lo, hi = sorted((a0, a1))
+        return Part.ArcOfCircle(Part.Circle(V(c[0], c[1], 0), V(0, 0, 1), r), math.radians(lo), math.radians(hi))
+
+    def spanA(self, name):
+        """A's span: (geometry, right corner, the right side's bottom end)."""
+        if name == "S1":
+            return models.polyline([(-20, 10), (20, 10)]), (20, 10), (20, -10)
+        if name == "S2s":
+            return models.polyline([(-20, 10), (0, 14), (20, 10)]), (20, 10), (20, -10)
+        if name == "S2t":
+            e = (10 + 10 * self.C30, 5)
+            return models.polyline([(-20, 10), (10, 10)]) + [self.arc((10, 0), 10, 90, 30)], e, (e[0], -10)
+        if name == "S3s":
+            return models.polyline([(-20, 10), (-8, 14), (8, 14), (20, 10)]), (20, 10), (20, -10)
+        if name == "S3m":
+            e = (10 + 10 * self.C30, 9)
+            return models.polyline([(-20, 10), (-8, 14), (10, 14)]) + [self.arc((10, 4), 10, 90, 30)], e, (e[0], -10)
+        if name == "S3t":
+            g = models.polyline([(-20, 10), (10, 10)]) + [self.arc((10, 5), 5, 90, 0)] + models.polyline([(15, 5), (15, 0)])
+            return g, (15, 0), (20, -10)
+        raise ValueError(name)
+
+    def spanB(self, name):
+        if name == "S1":
+            return models.polyline([(-12, 6), (12, 6)]), (12, 6), (12, -6)
+        if name == "S2s":
+            return models.polyline([(-12, 6), (0, 9), (12, 6)]), (12, 6), (12, -6)
+        if name == "S2t":
+            e = (6 + 6 * self.C30, 3)
+            return models.polyline([(-12, 6), (6, 6)]) + [self.arc((6, 0), 6, 90, 30)], e, (e[0], -6)
+        raise ValueError(name)
+
+    def row(self, a, b, connections="2c", extra=(), **properties):
+        sa, ea, ba = self.spanA(a)
+        sb, eb, bb = self.spanB(b)
+        A = sa + models.polyline([ea, ba, (-20, -10), (-20, 10)])
+        B = sb + models.polyline([eb, bb, (-12, -6), (-12, 6)])
+        self.corners = [((-20, 10), (-12, 6)), (ea, eb), ((-20, -10), (-12, -6)), (ba, bb)]
+        pairs = [] if connections == "0c" else self.corners[:2] + (self.corners[2:] if connections == "4c" else [])
+        return self.loft(A, B, pairs + list(extra), **properties)
+
+    def sideEdges(self, loft, height=H):
+        res = []
+        for e in loft.Shape.Edges:
+            zs = sorted(v.Point.z for v in e.Vertexes)
+            if len(zs) == 2 and abs(zs[0]) < 1e-6 and abs(zs[1] - height) < 1e-6:
+                res.append(e)
+        return res
+
+    def assertRow(self, loft, faces, volume, area, extra, straight=True):
+        self.assertTrue(loft.isValid(), loft.getStatusString())
+        shape = loft.Shape
+        self.assertTrue(shape.isValid())
+        self.assertEqual(len(shape.Solids), 1)
+        self.assertEqual(len(shape.Faces), faces)
+        self.assertNearOnshape(loft, volume, area)
+        expected = self.corners + list(extra)
+        self.assertEqual(len(self.sideEdges(loft)), len(expected), [tuple(v.Point for v in e.Vertexes) for e in self.sideEdges(loft)])
+        for a, b in expected:
+            self.assertJoined(loft, a, b, straight=straight)
+
+    def assertNoVertexAt(self, loft, xy, z=H):
+        p = V(xy[0], xy[1], z)
+        for v in loft.Shape.Vertexes:
+            self.assertGreater((v.Point - p).Length, 1e-4, "a vertex at %s" % (xy,))
+
+    def assertRoundTrip(self, loft):
+        import os
+        import tempfile
+
+        before = (len(loft.Shape.Faces), loft.Shape.Volume)
+        path = os.path.join(tempfile.mkdtemp(), "tangent-runs.FCStd")
+        self.doc.saveAs(path)
+        App.closeDocument(self.doc.Name)
+        self.doc = App.openDocument(path)
+        loft = self.doc.getObject(loft.Name)
+        loft.touch()
+        self.doc.recompute()
+        self.assertTrue(loft.isValid(), loft.getStatusString())
+        self.assertEqual(len(loft.Shape.Faces), before[0])
+        self.assertAlmostEqual(loft.Shape.Volume, before[1], delta=1e-6 * before[1])
+
+    # rows A's group: the joints pair one to one or a sharp vertex takes a new partner; every side edge stays
+    def testRow1TangentJointsOnBothChains(self):
+        loft = self.row("S3m", "S2t")
+        self.assertRow(loft, 8, 16588.334755, 4043.865441, [((-8, 14), (-3, 6)), ((10, 14), (6, 6))])
+
+    def testRow3TangentJointOnTheShorterChain(self):
+        loft = self.row("S3s", "S2t")
+        self.assertRow(loft, 8, 16842.832261, 4103.876271, [((-8, 14), (-3, 6)), ((8, 14), (6, 6))])
+
+    def testRow7RoundedEndAgainstOneEdge(self):
+        loft = self.row("S2t", "S1")
+        self.assertRow(loft, 7, 15090.177832, 3874.203534, [((10, 10), (0, 6))])
+
+    def testRow18FourConnections(self):
+        loft = self.row("S3m", "S2t", "4c")
+        self.assertRow(loft, 8, 16588.33491, 4043.865475, [((-8, 14), (-3, 6)), ((10, 14), (6, 6))])
+
+    def testRow20NormalToProfileKeepsSharpToTangent(self):
+        loft = self.row("S3s", "S2t", StartCondition="Normal to profile", EndCondition="Normal to profile")
+        self.assertRow(loft, 8, 17059.789228, 4119.612117, [((-8, 14), (-3, 6)), ((8, 14), (6, 6))], straight=False)
+
+    def testRow21TangentJointsConnectedByHand(self):
+        loft = self.row("S3m", "S2t", extra=[((10, 14), (6, 6))])
+        self.assertRow(loft, 8, 16588.33491, 4043.865475, [((-8, 14), (-3, 6)), ((10, 14), (6, 6))])
+
+    def testRows15To17And23Unchanged(self):
+        for a, b, faces, volume, area, extra in (
+            ("S2t", "S2t", 7, 14908.015301, 3820.907058, [((10, 10), (6, 6))]),
+            ("S2t", "S2s", 7, 15758.561505, 3920.606202, [((10, 10), (0, 9))]),
+            ("S2s", "S2t", 7, 16391.309314, 4055.750412, [((0, 14), (6, 6))]),
+            ("S3s", "S1", 8, 17120.0, 4165.960772, [((-8, 14), (-4, 6)), ((8, 14), (4, 6))]),
+        ):
+            with self.subTest(a=a, b=b):
+                self.assertRow(self.row(a, b), faces, volume, area, extra)
+                self.tearDown()
+                self.setUp()
+
+    # rows B + C's group: a smooth-smooth side edge with no plane beside it goes, one face spans the run
+    def testRow5LeftoverTangentJointGetsNoEdge(self):
+        loft = self.row("S3m", "S2s")
+        self.assertRow(loft, 7, 17510.305981, 4142.190099, [((-8, 14), (0, 9))])
+        self.assertNoVertexAt(loft, (6, 7.5))
+        self.assertRoundTrip(loft)
+
+    def testRow8NormalToProfileDropsTheJoint(self):
+        loft = self.row("S2t", "S1", StartCondition="Normal to profile", EndCondition="Normal to profile")
+        self.assertRow(loft, 6, 15236.904857, 3885.03611, [], straight=False)
+        self.assertNoVertexAt(loft, (0, 6))
+
+    def testRow10RoundedCornerAgainstOneEdge(self):
+        loft = self.row("S3t", "S1")
+        self.assertRow(loft, 7, 14334.72272, 3782.144556, [((10, 10), (-4, 6))])
+        self.assertNoVertexAt(loft, (4, 6))
+
+    def testRow12TwoTangentJointsAgainstOneSharp(self):
+        loft = self.row("S3t", "S2s")
+        self.assertRow(loft, 7, 15087.551194, 3840.974099, [((10, 10), (0, 9))])
+        self.assertNoVertexAt(loft, (6, 7.5))
+
+    def testRow13TwoTangentJointsAgainstOne(self):
+        loft = self.row("S3t", "S2t")
+        self.assertRow(loft, 7, 14354.963591, 3755.351934, [((10, 10), (6, 6))])
+        mid = (6 + 6 * math.cos(math.radians(60)), 6 * math.sin(math.radians(60)))
+        self.assertNoVertexAt(loft, mid)
+        # a hole through the merged face
+        face = [f for f in loft.Shape.Faces if f.Surface.TypeId != "Part::GeomPlane" and len(f.Edges) > 4][0]
+        u0, u1, v0, v1 = face.ParameterRange
+        p = face.valueAt((u0 + u1) / 2, (v0 + v1) / 2)
+        n = face.normalAt((u0 + u1) / 2, (v0 + v1) / 2)
+        cut = loft.Shape.cut(Part.makeCylinder(1.0, 8.0, p - n * 4, n))
+        self.assertTrue(cut.isValid())
+        self.assertEqual(len(cut.Solids), 1)
+        self.assertRoundTrip(loft)
+
+    def testRow19NormalToProfileDropsTangentToTangent(self):
+        loft = self.row("S3m", "S2t", StartCondition="Normal to profile", EndCondition="Normal to profile")
+        self.assertRow(loft, 7, 16792.185449, 4058.176207, [((-8, 14), (-3, 6))], straight=False)
+
+    def testRow22SharpConnectedToTheTangentJoint(self):
+        loft = self.row("S3m", "S2t", extra=[((-8, 14), (6, 6))])
+        self.assertRow(loft, 7, 16462.892528, 4040.917779, [((-8, 14), (6, 6))])
+
+    def testAVerticalPlaneUnderConditionsKeepsItsEdge(self):
+        """sk1046 case 5: the face between the top lines lies in y = 10 (Normal to profile at both ends keeps it a
+        plane), so the smooth-smooth side edge (10, 10) > (6, 10) at its end stays."""
+        sa, ea, ba = self.spanA("S2t")
+        A = sa + models.polyline([ea, ba, (-20, -10), (-20, 10)])
+        e = (6 + 6 * self.C30, 7)
+        B = models.polyline([(-12, 10), (6, 10)]) + [self.arc((6, 4), 6, 90, 30)]
+        B += models.polyline([e, (e[0], -6), (-12, -6), (-12, 10)])
+        loft = self.loft(A, B, [((-20, 10), (-12, 10)), (ea, e)],
+                         StartCondition="Normal to profile", EndCondition="Normal to profile")
+        self.assertTrue(loft.isValid(), loft.getStatusString())
+        self.assertEqual(len(loft.Shape.Faces), 7)
+        self.assertJoined(loft, (10, 10), (6, 10), straight=False)
+        planes = [f for f in loft.Shape.Faces if f.Surface.TypeId == "Part::GeomPlane"
+                  and all(abs(v.Point.y - 10) < 1e-6 for v in f.Vertexes)]
+        self.assertEqual(len(planes), 1)
+
+    def testTheCensusShapeBuildsOneFacePerRun(self):
+        """The Well Drain class in designed form: a loop with two line, tangent arc, line chains and two single edges,
+        sharp at the four connections, to a rectangle in a vertical plane at 45 degrees below it: each long chain's
+        side face is one face (no plane anywhere), F 6."""
+        c = math.sqrt(0.5)
+        A = models.polyline([(0, 20), (0, 14), (10, 14)]) + [self.arc((10, 12), 2, 90, 0)]
+        A += models.polyline([(12, 12), (12, 0), (20, 0), (20, 10)]) + [self.arc((10, 10), 10, 0, 90)]
+        A += models.polyline([(10, 20), (0, 20)])
+        placement = App.Placement(App.Matrix(c, 0, -c, 10, -c, 0, -c, 10, 0, 1, 0, 0, 0, 0, 0, 1))
+        self.profile = models.sketch(self.doc, "Bottom", A, self.body)
+        self.section = models.sketch(self.doc, "Top", models.rectangle(-3, -4, 3, -2), self.body, placement=placement)
+        self.doc.recompute()
+        loft = self.body.newObject("PartDesign::AdditiveLoft", "Loft")
+        loft.Profile = self.profile
+        loft.Sections = [self.section]
+        self.connect(loft, [((0, 14), (-3, -2)), ((0, 20), (-3, -4)), ((12, 0), (3, -2)), ((20, 0), (3, -4))])
+        self.doc.recompute()
+        self.assertTrue(loft.isValid(), loft.getStatusString())
+        shape = loft.Shape
+        self.assertTrue(shape.isValid())
+        self.assertEqual(len(shape.Solids), 1)
+        self.assertEqual(len(shape.Faces), 6)
+
+    # refusals
+    def testEveryJointSmoothWithNoPlaneStops(self):
+        """sk1046 case 6: circle r 10 (vertices at 0 and 180 degrees) to circle r 6 (0, 90, 180, 270), one connection:
+        every side edge would go. Onshape builds one closed side face (the frustum); not yet here."""
+
+        def circle(r, degrees):
+            d = list(degrees) + [degrees[0] + 360]
+            return [self.arc((0, 0), r, a, b) for a, b in zip(d, d[1:])]
+
+        loft = self.loft(circle(10, [0, 180]), circle(6, [0, 90, 180, 270]), [((10, 0), (6, 0))])
+        self.assertStops(loft, "tangent")
+
+    def testUnmatchedTangentRunsWithTwoConnectionsStop(self):
+        """sk1046 change 1 (D): LC3 with two connections isn't reproduced by the rule; it stays a stop."""
+        slot, rounded = TestLoftConnectionsUnequal.slotAndRoundedRectangle(self)
+        loft = self.loft(slot, rounded, [((10, 5), (6, 4)), ((-10, -5), (-6, -4))])
+        self.assertStops(loft, "connection", "tangent")
 
 
 class TestLoftElbowPairing(unittest.TestCase):

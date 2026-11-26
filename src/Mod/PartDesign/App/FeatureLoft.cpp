@@ -24,6 +24,7 @@
 
 #include <algorithm>
 #include <array>
+#include <functional>
 #include <limits>
 #include <optional>
 #include <set>
@@ -46,7 +47,9 @@
 #include <GCPnts_AbscissaPoint.hxx>
 #include <GProp_GProps.hxx>
 #include <GeomAPI_PointsToBSpline.hxx>
+#include <GeomAPI_ProjectPointOnCurve.hxx>
 #include <GeomFill_Profiler.hxx>
+#include <GeomLib_IsPlanarSurface.hxx>
 #include <Geom_BSplineCurve.hxx>
 #include <Geom_BSplineSurface.hxx>
 #include <Geom_Curve.hxx>
@@ -905,11 +908,14 @@ std::vector<double> innerFractions(const std::vector<TopoDS_Edge>& chain, double
 }
 
 /// The chain with new vertices at the given fractions of its arc length (sorted, each strictly
-/// between two of its vertices).
+/// between two of its vertices). `origins` and `fresh`, when given, get each piece's chain edge and
+/// whether the piece starts at a new vertex.
 std::vector<TopoDS_Edge> chainWithVertices(
     const std::vector<TopoDS_Edge>& chain,
     const std::vector<double>& at,
-    Part::ShapeMapper& mapper
+    Part::ShapeMapper& mapper,
+    std::vector<TopoDS_Edge>* origins = nullptr,
+    std::vector<bool>* fresh = nullptr
 )
 {
     std::vector<double> lengths;
@@ -928,8 +934,16 @@ std::vector<TopoDS_Edge> chainWithVertices(
             local.push_back(std::clamp((at[next] * total - start) / lengths[k], 1e-9, 1 - 1e-9));
             ++next;
         }
+        bool first = true;
         for (const auto& piece : splitEdge(chain[k], local, mapper)) {
             result.push_back(piece);
+            if (origins) {
+                origins->push_back(chain[k]);
+            }
+            if (fresh) {
+                fresh->push_back(!first);
+            }
+            first = false;
         }
         start = end;
     }
@@ -940,9 +954,10 @@ std::vector<TopoDS_Edge> chainWithVertices(
 /// fewer side's inner vertices match the nearest of the other's in order (least total difference of
 /// arc-length fractions), and the unmatched vertices between two matched pairs get partners that
 /// divide the fewer side's span between those pairs into equal parts by count (Onshape, oracle 14
-/// LC1-LC2: thirds, midpoints). Returns the fewer side's new vertex fractions. Every fewer-side
-/// vertex is matched, so each such span is one fewer-side edge.
-std::vector<double> partnerFractions(const std::vector<double>& fewer, const std::vector<double>& more)
+/// LC1-LC2: thirds, midpoints). `partnersOf` gives each of the more side's inner vertices its partner
+/// on the fewer side, or -1; `partnerFractions` the fewer side's new vertex fractions. Every
+/// fewer-side vertex is matched, so each such span is one fewer-side edge.
+std::vector<int> partnersOf(const std::vector<double>& fewer, const std::vector<double>& more)
 {
     const size_t m = fewer.size();
     const size_t n = more.size();
@@ -967,6 +982,13 @@ std::vector<double> partnerFractions(const std::vector<double>& fewer, const std
             --j;
         }
     }
+    return partner;
+}
+
+std::vector<double> partnerFractions(const std::vector<double>& fewer, const std::vector<double>& more)
+{
+    const size_t n = more.size();
+    const std::vector<int> partner = partnersOf(fewer, more);
     std::vector<double> added;
     double g0 = 0;  // the fewer side's fraction at the last matched pair (the chain's start first)
     std::vector<size_t> gap;  // the unmatched vertices since then
@@ -1100,12 +1122,9 @@ bool tangentJoint(const TopoDS_Edge& in, const TopoDS_Edge& out)
     return a.Angle(b) < 1e-4;
 }
 
-/// Onshape leaves some tangent (G1) joints unmatched, a side face spanning several edges: a slot to a
-/// rounded rectangle (oracle 14 LC3, the shorter chain has a tangent joint), and a rounded corner's
-/// arc and line against one rectangle edge between two connections (LC2, the shorter chain is one
-/// edge). It matches them when the shorter chain's joints are sharp (LC1). Edge i must pair with
-/// edge i here, so a chain pair that needs new vertices stops in the first two cases (decision 150;
-/// merging such runs into one edge is ops#729).
+/// Whether a chain pair of different edge counts has a tangent joint where ops#729's exact part
+/// applies (the shorter chain's inner joints, or the longer's when the shorter is one edge): the
+/// gate for `splitLinesMatch`, whose results stay as they were (ops#1046 A).
 bool tangentJointsBlock(const std::vector<TopoDS_Edge>& shorter, const std::vector<TopoDS_Edge>& longer)
 {
     const auto& inner = shorter.size() > 1 ? shorter : longer;
@@ -1117,15 +1136,35 @@ bool tangentJointsBlock(const std::vector<TopoDS_Edge>& shorter, const std::vect
     return false;
 }
 
-void tangentJointsStop(const std::vector<TopoDS_Edge>& shorter, const std::vector<TopoDS_Edge>& longer)
+/// ops#1046 D: the case the matching rule doesn't reproduce (oracle 14 LC3 with two connections:
+/// Onshape's answer isn't half-turn symmetric, so no rule that decides a chain from that chain alone
+/// gives it). 2+ connections on the loop, the shorter chain of a pair has inner joints and all are
+/// tangent, and 2+ tangent joints of the longer chain stay unmatched: a stop until the oracle rows
+/// settle it (notes/loft-tangent-joints-1046.md).
+bool tangentRunUnmatched(
+    const std::vector<TopoDS_Edge>& shorter,
+    const std::vector<TopoDS_Edge>& longer,
+    const std::vector<double>& shorterFractions,
+    const std::vector<double>& longerFractions,
+    size_t connections
+)
 {
-    if (tangentJointsBlock(shorter, longer)) {
-        throw Base::CADKernelError(QT_TRANSLATE_NOOP(
-            "Exception",
-            "Loft: between two connections the profiles have different edge counts and a tangent "
-            "joint; connections can't match tangent joints yet"
-        ));
+    if (connections < 2 || shorter.size() < 2) {
+        return false;
     }
+    for (size_t k = 1; k < shorter.size(); ++k) {
+        if (!tangentJoint(shorter[k - 1], shorter[k])) {
+            return false;
+        }
+    }
+    const std::vector<int> partner = partnersOf(shorterFractions, longerFractions);
+    int unmatched = 0;
+    for (size_t j = 0; j < partner.size(); ++j) {
+        if (partner[j] < 0 && tangentJoint(longer[j], longer[j + 1])) {
+            ++unmatched;
+        }
+    }
+    return unmatched >= 2;
 }
 
 bool isLine(const TopoDS_Edge& edge)
@@ -1149,7 +1188,11 @@ bool splitLinesMatch(
     std::vector<TopoDS_Edge>& chainA,
     std::vector<TopoDS_Edge>& chainB,
     Part::ShapeMapper& mapperA,
-    Part::ShapeMapper& mapperB
+    Part::ShapeMapper& mapperB,
+    std::vector<TopoDS_Edge>& originsA,
+    std::vector<TopoDS_Edge>& originsB,
+    std::vector<bool>& freshA,
+    std::vector<bool>& freshB
 )
 {
     auto runsOf = [](const std::vector<TopoDS_Edge>& chain) {
@@ -1192,13 +1235,18 @@ bool splitLinesMatch(
             return false;
         }
     }
-    std::vector<TopoDS_Edge> edgesA, edgesB;
+    std::vector<TopoDS_Edge> edgesA, edgesB, oA, oB;
+    std::vector<bool> fA, fB;
     for (size_t k = 0; k < runsA.size(); ++k) {
         const auto& ra = runsA[k];
         const auto& rb = runsB[k];
         if (ra.size() == 1 && rb.size() == 1) {
             edgesA.push_back(ra.front());
             edgesB.push_back(rb.front());
+            oA.push_back(ra.front());
+            oB.push_back(rb.front());
+            fA.push_back(false);
+            fB.push_back(false);
             continue;
         }
         double lengthA = 0, lengthB = 0;
@@ -1214,10 +1262,10 @@ bool splitLinesMatch(
             }
             return added;
         };
-        for (const auto& edge : chainWithVertices(ra, lacking(fa, fb), mapperA)) {
+        for (const auto& edge : chainWithVertices(ra, lacking(fa, fb), mapperA, &oA, &fA)) {
             edgesA.push_back(edge);
         }
-        for (const auto& edge : chainWithVertices(rb, lacking(fb, fa), mapperB)) {
+        for (const auto& edge : chainWithVertices(rb, lacking(fb, fa), mapperB, &oB, &fB)) {
             edgesB.push_back(edge);
         }
     }
@@ -1226,6 +1274,10 @@ bool splitLinesMatch(
     }
     chainA = std::move(edgesA);
     chainB = std::move(edgesB);
+    originsA = std::move(oA);
+    originsB = std::move(oB);
+    freshA = std::move(fA);
+    freshB = std::move(fB);
     return true;
 }
 
@@ -1328,10 +1380,22 @@ Part::TopoShape loopWire(
     return result;
 }
 
+/// Two loops matched for the connections: edge i of one pairs with edge i of the other, and side
+/// edge i joins their start vertices. Each edge's origin is the profile edge it is a piece of
+/// (itself when not split), and `fresh` says whether its start vertex is a new one.
+struct LoopMatch
+{
+    Part::TopoShape wireA, wireB;
+    std::vector<TopoDS_Edge> edgesA, edgesB, originA, originB;
+    std::vector<bool> freshA, freshB;
+    Part::ShapeMapper mapperA, mapperB;
+    Part::TopoShape profile, section;
+};
+
 /// The two loops matched for the connections (points in the loops' frame, profile first): the
 /// section runs the profile's way round, both start at a connection, and between consecutive
 /// connections both have the same number of edges. Edge i of one pairs with edge i of the other.
-std::pair<Part::TopoShape, Part::TopoShape> connectedLoops(
+LoopMatch connectedLoops(
     const Part::TopoShape& profile,
     const Part::TopoShape& section,
     std::vector<std::pair<gp_Pnt, gp_Pnt>> connections
@@ -1400,46 +1464,642 @@ std::pair<Part::TopoShape, Part::TopoShape> connectedLoops(
     cutsB.push_back(nb0);
 
     // chain by chain, the same number of edges
-    Part::ShapeMapper mapperA, mapperB;
-    std::vector<TopoDS_Edge> edgesA, edgesB;
+    LoopMatch match;
+    match.profile = profile;
+    match.section = section;
     for (size_t k = 0; k + 1 < cutsA.size(); ++k) {
         std::vector<TopoDS_Edge> chainA(a.begin() + cutsA[k], a.begin() + cutsA[k + 1]);
         std::vector<TopoDS_Edge> chainB(b.begin() + cutsB[k], b.begin() + cutsB[k + 1]);
+        std::vector<TopoDS_Edge> originsA = chainA, originsB = chainB;
+        std::vector<bool> freshA(chainA.size(), false), freshB(chainB.size(), false);
         const bool blocked = chainA.size() != chainB.size()
             && (chainA.size() < chainB.size() ? tangentJointsBlock(chainA, chainB)
                                               : tangentJointsBlock(chainB, chainA));
-        if (blocked && splitLinesMatch(chainA, chainB, mapperA, mapperB)) {
+        if (blocked
+            && splitLinesMatch(
+                chainA, chainB, match.mapperA, match.mapperB, originsA, originsB, freshA, freshB
+            )) {
             // ops#729: split straight lines matched; edge i pairs with edge i
         }
         else if (chainA.size() != chainB.size()) {
             double lengthA = 0, lengthB = 0;
             const auto fa = innerFractions(chainA, lengthA);
             const auto fb = innerFractions(chainB, lengthB);
-            if (chainA.size() < chainB.size()) {
-                tangentJointsStop(chainA, chainB);
+            const bool aShorter = chainA.size() < chainB.size();
+            if (aShorter ? tangentRunUnmatched(chainA, chainB, fa, fb, connections.size())
+                         : tangentRunUnmatched(chainB, chainA, fb, fa, connections.size())) {
+                throw Base::CADKernelError(QT_TRANSLATE_NOOP(
+                    "Exception",
+                    "Loft: between two connections a run of tangent joints faces one with more "
+                    "tangent joints; connections can't match these as Onshape does yet"
+                ));
+            }
+            // ops#1046 A: the vertices match by arc-length fraction whatever the joints (Onshape,
+            // RB44/RB47); which side edges stay is decided after the loft (`mergeSmoothRuns`)
+            if (aShorter) {
+                originsA.clear();
+                freshA.clear();
+                chainA = chainWithVertices(chainA, partnerFractions(fa, fb), match.mapperA, &originsA, &freshA);
             }
             else {
-                tangentJointsStop(chainB, chainA);
-            }
-            if (chainA.size() < chainB.size()) {
-                chainA = chainWithVertices(chainA, partnerFractions(fa, fb), mapperA);
-            }
-            else {
-                chainB = chainWithVertices(chainB, partnerFractions(fb, fa), mapperB);
+                originsB.clear();
+                freshB.clear();
+                chainB = chainWithVertices(chainB, partnerFractions(fb, fa), match.mapperB, &originsB, &freshB);
             }
         }
-        edgesA.insert(edgesA.end(), chainA.begin(), chainA.end());
-        edgesB.insert(edgesB.end(), chainB.begin(), chainB.end());
+        match.edgesA.insert(match.edgesA.end(), chainA.begin(), chainA.end());
+        match.edgesB.insert(match.edgesB.end(), chainB.begin(), chainB.end());
+        match.originA.insert(match.originA.end(), originsA.begin(), originsA.end());
+        match.originB.insert(match.originB.end(), originsB.begin(), originsB.end());
+        match.freshA.insert(match.freshA.end(), freshA.begin(), freshA.end());
+        match.freshB.insert(match.freshB.end(), freshB.begin(), freshB.end());
     }
 
-    if (turnsThroughItself(edgesA, edgesB, na, nb, sense)) {
+    if (turnsThroughItself(match.edgesA, match.edgesB, na, nb, sense)) {
         throw Base::CADKernelError(QT_TRANSLATE_NOOP(
             "Exception",
             "Loft: the connections turn the loft through itself (a half turn, or crossed connections)"
         ));
     }
 
-    return {loopWire(edgesA, mapperA, profile), loopWire(edgesB, mapperB, section)};
+    match.wireA = loopWire(match.edgesA, match.mapperA, profile);
+    match.wireB = loopWire(match.edgesB, match.mapperB, section);
+    return match;
+}
+
+// ops#1046 B + C (notes/loft-tangent-joints-1046.md): Onshape keeps a side edge whose ends are both
+// smooth (a tangent joint, or a new vertex inside an edge) only where a planar side face ends on it;
+// elsewhere one side face spans the run, and a new vertex there doesn't survive (RB44, RB47). The
+// merged face is C1 along the profile: each rail is fitted piece by piece and joined with a knot at
+// each joint, and the two runs pair through a C1 monotone map through the matched joints (the spike,
+// scripts/spike_1046_c1.py: Onshape's F, V within 0.005 %).
+
+constexpr int railDegree = 6;
+
+/// The point at fraction t of the edge's arc length from where its traversal starts.
+gp_Pnt pointAtFraction(const TopoDS_Edge& edge, double t)
+{
+    BRepAdaptor_Curve curve(edge);
+    const bool reversed = edge.Orientation() == TopAbs_REVERSED;
+    const double length = GCPnts_AbscissaPoint::Length(curve);
+    t = std::clamp(t, 0.0, 1.0);
+    const double from = reversed ? curve.LastParameter() : curve.FirstParameter();
+    GCPnts_AbscissaPoint at(curve, reversed ? -t * length : t * length, from);
+    if (!at.IsDone()) {
+        throw Base::CADKernelError("Loft: a profile edge could not be measured");
+    }
+    return curve.Value(at.Parameter());
+}
+
+/// A C1 monotone cubic (Fritsch-Carlson, Fritsch-Butland slopes) through (xs, ys), both increasing.
+struct MonotoneCubic
+{
+    std::vector<double> xs, ys, slopes;
+
+    MonotoneCubic(std::vector<double> x, std::vector<double> y)
+        : xs(std::move(x))
+        , ys(std::move(y))
+    {
+        const size_t n = xs.size();
+        std::vector<double> d(n - 1);
+        for (size_t i = 0; i + 1 < n; ++i) {
+            d[i] = (ys[i + 1] - ys[i]) / (xs[i + 1] - xs[i]);
+        }
+        slopes.assign(n, 0.0);
+        slopes.front() = d.front();
+        slopes.back() = d.back();
+        for (size_t i = 1; i + 1 < n; ++i) {
+            if (d[i - 1] * d[i] > 0) {
+                slopes[i] = 3 * (d[i - 1] + d[i])
+                    / ((2 * d[i] + d[i - 1]) / d[i - 1] + (d[i] + 2 * d[i - 1]) / d[i]);
+            }
+        }
+    }
+
+    double operator()(double x) const
+    {
+        size_t i = 0;
+        while (i + 2 < xs.size() && x > xs[i + 1]) {
+            ++i;
+        }
+        const double h = xs[i + 1] - xs[i];
+        const double s = (x - xs[i]) / h;
+        const double s2 = s * s;
+        const double s3 = s2 * s;
+        return (2 * s3 - 3 * s2 + 1) * ys[i] + (s3 - 2 * s2 + s) * h * slopes[i]
+            + (-2 * s3 + 3 * s2) * ys[i + 1] + (s3 - s2) * h * slopes[i + 1];
+    }
+};
+
+/// One piece of a rail: `at` on [u0, u1] fitted C2 (it is smooth there), raised to `railDegree`.
+/// `error` gets the largest distance from `at` between the samples.
+Handle(Geom_BSplineCurve) fitRailPiece(
+    const std::function<gp_Pnt(double)>& at,
+    double u0,
+    double u1,
+    double& error
+)
+{
+    constexpr int count = 41;
+    TColgp_Array1OfPnt points(1, count);
+    TColStd_Array1OfReal params(1, count);
+    for (int i = 0; i < count; ++i) {
+        const double u = u0 + (u1 - u0) * i / (count - 1);
+        points(i + 1) = at(u);
+        params(i + 1) = u;
+    }
+    GeomAPI_PointsToBSpline approx(points, params, 3, railDegree, GeomAbs_C2, 1e-9);
+    if (!approx.IsDone()) {
+        throw Base::CADKernelError("Loft: failed to fit a side face over tangent joints");
+    }
+    Handle(Geom_BSplineCurve) curve = approx.Curve();
+    curve->IncreaseDegree(railDegree);
+    for (int i = 0; i + 1 < count; ++i) {
+        const double u = u0 + (u1 - u0) * (i + 0.5) / (count - 1);
+        error = std::max(error, curve->Value(u).Distance(at(u)));
+    }
+    return curve;
+}
+
+/// The pieces joined into one rail, with a knot at each joint, made C1 there where the pieces'
+/// derivatives agree (they do: both runs are walked C1 through a tangent joint).
+Handle(Geom_BSplineCurve) joinRail(const std::vector<Handle(Geom_BSplineCurve)>& pieces)
+{
+    const int degree = railDegree;
+    std::vector<gp_Pnt> poles;
+    std::vector<double> knots;
+    std::vector<int> mults;
+    std::vector<int> joints;
+    for (size_t i = 0; i < pieces.size(); ++i) {
+        const auto& c = pieces[i];
+        if (i > 0) {
+            mults.back() = degree;
+            joints.push_back(static_cast<int>(knots.size()));
+        }
+        for (int j = (i == 0 ? 1 : 2); j <= c->NbPoles(); ++j) {
+            poles.push_back(c->Pole(j));
+        }
+        for (int j = (i == 0 ? 1 : 2); j <= c->NbKnots(); ++j) {
+            knots.push_back(c->Knot(j));
+            mults.push_back(c->Multiplicity(j));
+        }
+    }
+    TColgp_Array1OfPnt p(1, static_cast<int>(poles.size()));
+    for (size_t i = 0; i < poles.size(); ++i) {
+        p(static_cast<int>(i) + 1) = poles[i];
+    }
+    TColStd_Array1OfReal k(1, static_cast<int>(knots.size()));
+    TColStd_Array1OfInteger m(1, static_cast<int>(mults.size()));
+    for (size_t i = 0; i < knots.size(); ++i) {
+        k(static_cast<int>(i) + 1) = knots[i];
+        m(static_cast<int>(i) + 1) = mults[i];
+    }
+    Handle(Geom_BSplineCurve) rail = new Geom_BSplineCurve(p, k, m, degree);
+    for (int joint : joints) {
+        rail->RemoveKnot(joint, degree - 1, 1e-7);
+    }
+    return rail;
+}
+
+/// The two rails on one knot vector (union of both, each knot at its larger multiplicity).
+void makeRailsCompatible(Handle(Geom_BSplineCurve)& a, Handle(Geom_BSplineCurve)& b)
+{
+    const int degree = std::max(a->Degree(), b->Degree());
+    a->IncreaseDegree(degree);
+    b->IncreaseDegree(degree);
+    std::vector<std::pair<double, int>> target;
+    for (const auto* c : {&a, &b}) {
+        for (int j = 2; j < (*c)->NbKnots(); ++j) {
+            const double u = (*c)->Knot(j);
+            const int mult = (*c)->Multiplicity(j);
+            auto it = std::ranges::find_if(target, [u](const auto& t) { return std::abs(t.first - u) < 1e-10; });
+            if (it == target.end()) {
+                target.emplace_back(u, mult);
+            }
+            else {
+                it->second = std::max(it->second, mult);
+            }
+        }
+    }
+    for (auto* c : {&a, &b}) {
+        for (const auto& [u, mult] : target) {
+            (*c)->InsertKnot(u, mult, 1e-10, Standard_False);
+        }
+    }
+    if (a->NbPoles() != b->NbPoles() || a->NbKnots() != b->NbKnots()) {
+        throw Base::CADKernelError("Loft: failed to fit a side face over tangent joints");
+    }
+}
+
+/// The profiles' normals, each turned towards the other profile (as `withProfileConditions`).
+void profileNormals(const TopoDS_Shape& first, const TopoDS_Shape& last, gp_Dir& normal0, gp_Dir& normal1)
+{
+    gp_Pln plane0;
+    gp_Pln plane1;
+    if (!Part::TopoShape(first).findPlane(plane0) || !Part::TopoShape(last).findPlane(plane1)) {
+        throw Base::CADKernelError(
+            QT_TRANSLATE_NOOP("Exception", "Loft: Normal to profile needs planar profiles")
+        );
+    }
+    const gp_Vec across(wireCentre(first), wireCentre(last));
+    normal0 = plane0.Axis().Direction();
+    normal1 = plane1.Axis().Direction();
+    if (across.Dot(normal0) < 0) {
+        normal0.Reverse();
+    }
+    if (across.Dot(normal1) < 0) {
+        normal1.Reverse();
+    }
+}
+
+struct SideConditions
+{
+    bool start = false;
+    double startMagnitude = 0;
+    bool end = false;
+    double endMagnitude = 0;
+    gp_Dir normal0;
+    gp_Dir normal1;
+};
+
+/// One side face over the paired runs `ea` (first profile) and `eb` (last profile), edge i with
+/// edge i: u is the arc-length fraction along `ea`, `eb` is walked at t = f(u), f the monotone cubic
+/// through the runs' joints. In the loft's direction it is linear, or the conditions' cubic.
+TopoDS_Face mergedSideFace(
+    const std::vector<TopoDS_Edge>& ea,
+    const std::vector<TopoDS_Edge>& eb,
+    const SideConditions& conditions
+)
+{
+    const size_t count = ea.size();
+    std::vector<double> us {0.0};
+    std::vector<double> ts {0.0};
+    double totalA = 0;
+    double totalB = 0;
+    std::vector<double> lengthsA, lengthsB;
+    for (size_t i = 0; i < count; ++i) {
+        lengthsA.push_back(edgeLength(ea[i]));
+        lengthsB.push_back(edgeLength(eb[i]));
+        totalA += lengthsA.back();
+        totalB += lengthsB.back();
+    }
+    for (size_t i = 0; i < count; ++i) {
+        us.push_back(i + 1 == count ? 1.0 : us.back() + lengthsA[i] / totalA);
+        ts.push_back(i + 1 == count ? 1.0 : ts.back() + lengthsB[i] / totalB);
+    }
+    const MonotoneCubic f(us, ts);
+    double error = 0;
+    std::vector<Handle(Geom_BSplineCurve)> piecesA, piecesB;
+    for (size_t i = 0; i < count; ++i) {
+        const double u0 = us[i], u1 = us[i + 1], t0 = ts[i], t1 = ts[i + 1];
+        const TopoDS_Edge& a = ea[i];
+        const TopoDS_Edge& b = eb[i];
+        piecesA.push_back(fitRailPiece(
+            [&](double u) { return pointAtFraction(a, (u - u0) / (u1 - u0)); }, u0, u1, error));
+        piecesB.push_back(fitRailPiece(
+            [&](double u) { return pointAtFraction(b, (f(u) - t0) / (t1 - t0)); }, u0, u1, error));
+    }
+    if (error > 1e-7) {
+        throw Base::CADKernelError(QT_TRANSLATE_NOOP(
+            "Exception",
+            "Loft: the side face over tangent joints could not be fitted to the profiles"
+        ));
+    }
+    Handle(Geom_BSplineCurve) railA = joinRail(piecesA);
+    Handle(Geom_BSplineCurve) railB = joinRail(piecesB);
+    makeRailsCompatible(railA, railB);
+
+    const int degree = railA->Degree();
+    const int poles = railA->NbPoles();
+    std::vector<double> flat;
+    for (int i = 1; i <= railA->NbKnots(); ++i) {
+        flat.insert(flat.end(), railA->Multiplicity(i), railA->Knot(i));
+    }
+    const gp_Pnt a0 = railA->Value(0.0), a1 = railA->Value(1.0);
+    const gp_Pnt b0 = railB->Value(0.0), b1 = railB->Value(1.0);
+    const double startA = conditions.startMagnitude * tangentLength(a0, b0, conditions.normal0);
+    const double startB = conditions.startMagnitude * tangentLength(a1, b1, conditions.normal0);
+    const double endA = conditions.endMagnitude * tangentLength(a0, b0, conditions.normal1);
+    const double endB = conditions.endMagnitude * tangentLength(a1, b1, conditions.normal1);
+    TColgp_Array2OfPnt net(1, poles, 1, 4);
+    for (int j = 1; j <= poles; ++j) {
+        double greville = 0;
+        for (int i = j; i < j + degree; ++i) {
+            greville += flat[i];
+        }
+        const double fraction = greville / degree;
+        const gp_XYZ p0 = railA->Pole(j).XYZ();
+        const gp_XYZ p3 = railB->Pole(j).XYZ();
+        gp_XYZ p1 = p0 + (p3 - p0) / 3;
+        gp_XYZ p2 = p0 + (p3 - p0) * 2 / 3;
+        const gp_XYZ tangent0 = gp_Vec(conditions.normal0).XYZ() * (startA + (startB - startA) * fraction);
+        const gp_XYZ tangent1 = gp_Vec(conditions.normal1).XYZ() * (endA + (endB - endA) * fraction);
+        if (conditions.start && conditions.end) {
+            p1 = p0 + tangent0 / 3;
+            p2 = p3 - tangent1 / 3;
+        }
+        else if (conditions.start) {
+            p1 = p0 + tangent0 / 3;
+            p2 = (p1 + p3) / 2;
+        }
+        else if (conditions.end) {
+            p2 = p3 - tangent1 / 3;
+            p1 = (p0 + p2) / 2;
+        }
+        net(j, 1) = gp_Pnt(p0);
+        net(j, 2) = gp_Pnt(p1);
+        net(j, 3) = gp_Pnt(p2);
+        net(j, 4) = gp_Pnt(p3);
+    }
+    TColStd_Array1OfReal uKnots(1, railA->NbKnots());
+    TColStd_Array1OfInteger uMults(1, railA->NbKnots());
+    railA->Knots(uKnots);
+    railA->Multiplicities(uMults);
+    TColStd_Array1OfReal vKnots(1, 2);
+    TColStd_Array1OfInteger vMults(1, 2);
+    vKnots(1) = 0;
+    vKnots(2) = 1;
+    vMults(1) = 4;
+    vMults(2) = 4;
+    Handle(Geom_BSplineSurface) surface
+        = new Geom_BSplineSurface(net, uKnots, vKnots, uMults, vMults, degree, 3);
+    BRepBuilderAPI_MakeFace maker(surface, Precision::Confusion());
+    if (!maker.IsDone()) {
+        throw Base::CADKernelError("Loft: failed to make a side face over tangent joints");
+    }
+    return maker.Face();
+}
+
+/// The part of the profile edge `origin` from the start vertex of `from` to the end vertex of `to`
+/// (pieces of it, in traversal order), oriented as traversed; recorded as modified from `origin`.
+TopoDS_Edge edgeBetween(
+    const TopoDS_Edge& origin,
+    const TopoDS_Edge& from,
+    const TopoDS_Edge& to,
+    Part::ShapeMapper& mapper
+)
+{
+    const auto forward = TopoDS::Edge(origin.Oriented(TopAbs_FORWARD));
+    double first = 0;
+    double last = 0;
+    const Handle(Geom_Curve) curve = BRep_Tool::Curve(forward, first, last);
+    const TopoDS_Vertex v0 = TopExp::FirstVertex(from, Standard_True);
+    const TopoDS_Vertex v1 = TopExp::LastVertex(to, Standard_True);
+    GeomAPI_ProjectPointOnCurve p0(BRep_Tool::Pnt(v0), curve, first, last);
+    GeomAPI_ProjectPointOnCurve p1(BRep_Tool::Pnt(v1), curve, first, last);
+    if (p0.NbPoints() == 0 || p1.NbPoints() == 0) {
+        throw Base::CADKernelError("Loft: a profile edge could not be joined again");
+    }
+    const double u0 = p0.LowerDistanceParameter();
+    const double u1 = p1.LowerDistanceParameter();
+    TopoDS_Edge edge;
+    if (u0 < u1) {
+        BRepBuilderAPI_MakeEdge make(curve, v0, v1, u0, u1);
+        if (!make.IsDone()) {
+            throw Base::CADKernelError("Loft: a profile edge could not be joined again");
+        }
+        edge = make.Edge();
+    }
+    else {
+        BRepBuilderAPI_MakeEdge make(curve, v1, v0, u1, u0);
+        if (!make.IsDone()) {
+            throw Base::CADKernelError("Loft: a profile edge could not be joined again");
+        }
+        edge = TopoDS::Edge(make.Edge().Reversed());
+    }
+    mapper.insert(Part::MappingStatus::Modified, origin, edge);
+    return edge;
+}
+
+bool isFlat(const TopoDS_Face& face)
+{
+    BRepAdaptor_Surface adaptor(face);
+    if (adaptor.GetType() == GeomAbs_Plane) {
+        return true;
+    }
+    return GeomLib_IsPlanarSurface(BRep_Tool::Surface(face), 1e-7).IsPlanar();
+}
+
+/// Whether the face has an edge through the point.
+bool hasEdgeThrough(const TopoDS_Face& face, const gp_Pnt& point)
+{
+    for (TopExp_Explorer x(face, TopAbs_EDGE); x.More(); x.Next()) {
+        const TopoDS_Edge& edge = TopoDS::Edge(x.Current());
+        if (BRep_Tool::Degenerated(edge)) {
+            continue;
+        }
+        double first = 0;
+        double last = 0;
+        const Handle(Geom_Curve) curve = BRep_Tool::Curve(edge, first, last);
+        if (curve.IsNull()) {
+            continue;
+        }
+        GeomAPI_ProjectPointOnCurve projection(point, curve, first, last);
+        if (projection.NbPoints() > 0 && projection.LowerDistance() < 1e-6) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// The loft `shell` of a connected loop pair (its side faces) with Onshape's side edges: a side
+/// edge whose ends are smooth on both profiles goes where neither side face beside it is flat, and
+/// the faces it separated become one. A new vertex whose side edge goes is joined back into its
+/// profile edge in `match`'s wires. Unchanged when every side edge stays.
+Part::TopoShape mergeSmoothRuns(Part::TopoShape shell, LoopMatch& match, SideConditions conditions)
+{
+    const size_t n = match.edgesA.size();
+    if (n < 2 || match.edgesB.size() != n) {
+        return shell;
+    }
+    TopTools_IndexedMapOfShape shellFaces;
+    TopExp::MapShapes(shell.getShape(), TopAbs_FACE, shellFaces);
+    std::vector<TopoDS_Face> faces(n);
+    std::vector<bool> flat(n);
+    for (size_t k = 0; k < n; ++k) {
+        const gp_Pnt pa = pointAtFraction(match.edgesA[k], 0.5);
+        const gp_Pnt pb = pointAtFraction(match.edgesB[k], 0.5);
+        for (int i = 1; i <= shellFaces.Extent() && faces[k].IsNull(); ++i) {
+            const TopoDS_Face& face = TopoDS::Face(shellFaces(i));
+            if (hasEdgeThrough(face, pa) && hasEdgeThrough(face, pb)) {
+                faces[k] = face;
+            }
+        }
+        if (faces[k].IsNull()) {
+            return shell;  // not the side faces this match describes: the loft as built
+        }
+        flat[k] = isFlat(faces[k]);
+    }
+    std::vector<bool> drop(n);
+    size_t dropped = 0;
+    for (size_t k = 0; k < n; ++k) {
+        const size_t prev = (k + n - 1) % n;
+        drop[k] = tangentJoint(match.edgesA[prev], match.edgesA[k])
+            && tangentJoint(match.edgesB[prev], match.edgesB[k]) && !flat[prev] && !flat[k];
+        dropped += drop[k] ? 1 : 0;
+    }
+    if (dropped == 0) {
+        return shell;
+    }
+    if (dropped == n) {
+        // Onshape: one closed side face with the first connection's edge as its seam (rule 5)
+        throw Base::CADKernelError(QT_TRANSLATE_NOOP(
+            "Exception",
+            "Loft: every side joint of the connected loop is tangent with no flat side beside it; "
+            "that single side face can't be built yet"
+        ));
+    }
+
+    // the runs between the side edges that stay, from the first that stays
+    size_t k0 = 0;
+    while (drop[k0]) {
+        ++k0;
+    }
+    std::vector<std::vector<size_t>> groups {{k0}};
+    for (size_t step = 1; step < n; ++step) {
+        const size_t k = (k0 + step) % n;
+        if (drop[k]) {
+            groups.back().push_back(k);
+        }
+        else {
+            groups.push_back({k});
+        }
+    }
+    if (conditions.start || conditions.end) {
+        profileNormals(match.wireA.getShape(), match.wireB.getShape(), conditions.normal0, conditions.normal1);
+    }
+
+    BRepBuilderAPI_Sewing sewer(1e-6);
+    std::vector<TopoDS_Face> kept;
+    std::vector<std::pair<std::vector<TopoDS_Face>, TopoDS_Face>> merged;
+    for (const auto& group : groups) {
+        if (group.size() == 1) {
+            kept.push_back(faces[group.front()]);
+            sewer.Add(kept.back());
+            continue;
+        }
+        std::vector<TopoDS_Edge> ea, eb;
+        std::vector<TopoDS_Face> old;
+        for (size_t k : group) {
+            ea.push_back(match.edgesA[k]);
+            eb.push_back(match.edgesB[k]);
+            old.push_back(faces[k]);
+        }
+        merged.emplace_back(old, mergedSideFace(ea, eb, conditions));
+        sewer.Add(merged.back().second);
+    }
+    sewer.Perform();
+    const TopoDS_Shape sewn = sewer.SewedShape();
+
+    // the names: the merged faces from the faces they replace, the rest as they were
+    Handle(BRepTools_History) history = new BRepTools_History;
+    for (const auto& face : kept) {
+        const TopoDS_Shape now = sewer.Modified(face);
+        if (!now.IsNull() && !now.IsSame(face)) {
+            history->AddModified(face, now);
+        }
+    }
+    for (const auto& [old, face] : merged) {
+        TopoDS_Shape now = sewer.Modified(face);
+        if (now.IsNull()) {
+            now = face;
+        }
+        for (const auto& o : old) {
+            history->AddModified(o, now);
+        }
+    }
+    auto ends = [](const TopoDS_Edge& edge) {
+        BRepAdaptor_Curve curve(edge);
+        return std::array<gp_Pnt, 3> {
+            curve.Value(curve.FirstParameter()),
+            curve.Value(curve.LastParameter()),
+            curve.Value((curve.FirstParameter() + curve.LastParameter()) / 2)
+        };
+    };
+    TopTools_IndexedMapOfShape newEdges;
+    TopExp::MapShapes(sewn, TopAbs_EDGE, newEdges);
+    TopTools_IndexedMapOfShape oldEdges;
+    TopExp::MapShapes(shell.getShape(), TopAbs_EDGE, oldEdges);
+    for (int i = 1; i <= oldEdges.Extent(); ++i) {
+        const TopoDS_Edge& oldEdge = TopoDS::Edge(oldEdges(i));
+        if (BRep_Tool::Degenerated(oldEdge) || newEdges.Contains(oldEdge)) {
+            continue;
+        }
+        const auto o = ends(oldEdge);
+        int best = 0;
+        double bestMiddle = 0;
+        for (int j = 1; j <= newEdges.Extent(); ++j) {
+            const TopoDS_Edge& newEdge = TopoDS::Edge(newEdges(j));
+            if (BRep_Tool::Degenerated(newEdge)) {
+                continue;
+            }
+            const auto e = ends(newEdge);
+            const bool same = (o[0].Distance(e[0]) < 1e-6 && o[1].Distance(e[1]) < 1e-6)
+                || (o[0].Distance(e[1]) < 1e-6 && o[1].Distance(e[0]) < 1e-6);
+            if (!same) {
+                continue;
+            }
+            const double middle = o[2].Distance(e[2]);
+            if (!best || middle < bestMiddle) {
+                best = j;
+                bestMiddle = middle;
+            }
+        }
+        if (best) {
+            history->AddModified(oldEdge, newEdges(best));
+        }
+    }
+    TopTools_IndexedMapOfShape newVertices;
+    TopExp::MapShapes(sewn, TopAbs_VERTEX, newVertices);
+    TopTools_IndexedMapOfShape oldVertices;
+    TopExp::MapShapes(shell.getShape(), TopAbs_VERTEX, oldVertices);
+    for (int i = 1; i <= oldVertices.Extent(); ++i) {
+        if (newVertices.Contains(oldVertices(i))) {
+            continue;
+        }
+        const gp_Pnt point = BRep_Tool::Pnt(TopoDS::Vertex(oldVertices(i)));
+        for (int j = 1; j <= newVertices.Extent(); ++j) {
+            if (BRep_Tool::Pnt(TopoDS::Vertex(newVertices(j))).Distance(point) < 1e-6) {
+                history->AddModified(oldVertices(i), newVertices(j));
+                break;
+            }
+        }
+    }
+    Part::TopoShape result(shell.Tag, shell.Hasher);
+    result.makeShapeWithElementMap(sewn, Part::MapperHistory(history), {shell});
+
+    // a new vertex whose side edge went is joined back into its profile edge (Onshape has none)
+    auto rejoin = [&](const std::vector<TopoDS_Edge>& edges,
+                      const std::vector<TopoDS_Edge>& origins,
+                      const std::vector<bool>& fresh,
+                      Part::ShapeMapper& mapper,
+                      const Part::TopoShape& source,
+                      Part::TopoShape& wire) {
+        std::vector<TopoDS_Edge> joined;
+        bool changed = false;
+        for (size_t k = 0; k < n;) {
+            size_t e = k;
+            while (e + 1 < n && drop[e + 1] && fresh[e + 1] && origins[e + 1].IsSame(origins[k])) {
+                ++e;
+            }
+            if (e == k) {
+                joined.push_back(edges[k]);
+                ++k;
+                continue;
+            }
+            changed = true;
+            const bool whole = !fresh[k]
+                && (e + 1 == n || !fresh[e + 1] || !origins[e + 1].IsSame(origins[k]));
+            joined.push_back(whole ? origins[k] : edgeBetween(origins[k], edges[k], edges[e], mapper));
+            k = e + 1;
+        }
+        if (changed) {
+            wire = loopWire(joined, mapper, source);
+        }
+    };
+    rejoin(match.edgesA, match.originA, match.freshA, match.mapperA, match.profile, match.wireA);
+    rejoin(match.edgesB, match.originB, match.freshB, match.mapperB, match.section, match.wireB);
+    return result;
 }
 
 /// ops#933: two polygon loops lofted without connections pair as ThruSections' compatibility step
@@ -1987,10 +2647,11 @@ App::DocumentObjectExecReturn* Loft::execute()
                 }
             }
             const bool connected = !loopConnections.empty();
+            std::optional<LoopMatch> match;
             if (connected) {
-                auto matched = connectedLoops(sectionWires.front(), sectionWires.back(), loopConnections);
-                sectionWires.front() = matched.first;
-                sectionWires.back() = matched.second;
+                match = connectedLoops(sectionWires.front(), sectionWires.back(), loopConnections);
+                sectionWires.front() = match->wireA;
+                sectionWires.back() = match->wireB;
             }
             // ops#655: vertices pair up as Onshape's. Only where the surface stays the same: two
             // profiles, or ruled; a smooth loft through 3+ sections would move (deferred issue)
@@ -2055,6 +2716,19 @@ App::DocumentObjectExecReturn* Loft::execute()
                 // again, as makeElementLoft left it and as Onshape's is, so refine merges it with
                 // the faces in its plane (a circular pattern's copies of it)
                 Part::makeLoftCanonical(shell);
+            }
+            // ops#1046 B + C: Onshape's side edges between smooth joints (fork-1.0.0's Legacy
+            // conditions stay as they were)
+            if (match && !legacy && !closed) {
+                SideConditions sides;
+                sides.start = startSet;
+                sides.startMagnitude = StartMagnitude.getValue();
+                sides.end = endSet;
+                sides.endMagnitude = EndMagnitude.getValue();
+                shell = mergeSmoothRuns(shell, *match, sides);
+                sectionWires.front() = match->wireA;
+                sectionWires.back() = match->wireB;
+                frontReseamed = frontReseamed || !unseamed.IsSame(sectionWires.front().getShape());
             }
             shells.push_back(shell);
         }
