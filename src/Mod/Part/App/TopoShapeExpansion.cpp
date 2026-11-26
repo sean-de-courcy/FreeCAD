@@ -8813,10 +8813,11 @@ std::shared_ptr<DressUpOutcome> buildDressUp(
                 }
                 // (ops#1053: without the further, fuzzy tries under an overhang: where it refuses,
                 // OCCT's result stood before)
+                const bool fuzzyPreferred = request.overhangFuzzy;
                 request.overhangFuzzy = false;
                 out.preferred
                     = FilletFallback::construct(base, edges, request, out.construction, &out.reason);
-                request.overhangFuzzy = true;
+                request.overhangFuzzy = fuzzyPreferred;
                 if (out.preferred) {
                     out.constructed = true;
                     return;
@@ -8899,8 +8900,18 @@ std::shared_ptr<DressUpOutcome> buildDressUp(
                 // A cut tool past both its faces (ops#888 A1): only where OCCT built nothing
                 // usable, so that no result OCCT builds today moves
                 request.pastBothFaces = out.failed || out.thin;
+                // ops#1053 (review pr1053-r2 T6): where the wider scope below may be asked, the
+                // further, fuzzy tries under an overhang come after it, so that a result the wider
+                // scope built before still stands
+                const bool widerLater = (out.reflexFirst
+                                         || (out.invalid && !out.mitreAsked
+                                             && request.kind == FilletFallback::Kind::Fillet))
+                    && !request.widerScope;
+                const bool fuzzyBefore = request.overhangFuzzy;
+                request.overhangFuzzy = fuzzyBefore && !widerLater;
                 out.constructed
                     = FilletFallback::construct(base, edges, request, out.construction, &out.reason);
+                request.overhangFuzzy = fuzzyBefore;
                 // ops#883 C: at a reflex corner with a circle OCCT's valid result is refused
                 // anyway, so where the construction refused, once more with the wider scope
                 // (concave fills that meet along their intersection, a fill kept over its wall
@@ -8926,12 +8937,31 @@ std::shared_ptr<DressUpOutcome> buildDressUp(
                         out.construction,
                         &out.reason
                     );
-                    request.overhangFuzzy = true;
+                    request.overhangFuzzy = fuzzyBefore;
                     if (!out.constructed) {
                         out.reason = firstReason + " (with the wider scope: " + out.reason + ")";
                     }
                     else if (!out.reflexFirst) {
                         out.widerAfterInvalid = true;
+                    }
+                    // ... and then the first scope with the further, fuzzy tries (ops#1053, T6)
+                    if (!out.constructed && fuzzyBefore) {
+                        const std::string widerReason = out.reason;
+                        request.widerScope = false;
+                        out.constructed = FilletFallback::construct(
+                            base,
+                            edges,
+                            request,
+                            out.construction,
+                            &out.reason
+                        );
+                        if (!out.constructed || !out.construction.fuzzy) {
+                            // (Only a fuzzy try can build what refused before: else the reasons
+                            // stand as they were)
+                            out.constructed = false;
+                            out.construction = FilletFallback::Construction();
+                            out.reason = widerReason;
+                        }
                     }
                 }
                 // ops#1053: built only by a further, fuzzy try under an overhang: where OCCT's
@@ -10849,9 +10879,27 @@ TopoShape& TopoShape::makeElementFillet(
             && roundMitreRunOns(*this, shape, edges, radius1, op)) {
             return *this;
         }
-        if (outcome->failed && edges.size() > 1 && radius1 == radius2
-            && roundCoveredFirst(*this, shape, edges, input, inputEdges, radius1, op, request)) {
-            return *this;
+        if (outcome->failed && edges.size() > 1 && radius1 == radius2) {
+            // Where a fuzzy result follows (review pr1053-r2 T5), what a refused attempt by
+            // coverage recorded or noted is dropped, as for the mitre run-ons: it would skip the
+            // feature's lost-material check on the result that stands
+            std::optional<FilletFallback::Recorder> attempt;
+            bool notedBefore = true;
+            if (fuzzyLast) {
+                attempt.emplace();
+                std::string note = FilletFallback::takeNamingOrder();
+                FilletFallback::noteNamingOrder(note);
+                notedBefore = !note.empty();
+            }
+            if (roundCoveredFirst(*this, shape, edges, input, inputEdges, radius1, op, request)) {
+                if (attempt) {
+                    attempt->passOn();
+                }
+                return *this;
+            }
+            if (!notedBefore) {
+                FilletFallback::takeNamingOrder();
+            }
         }
         if (fuzzyLast && finishConstruction(*this, *outcome, input, op)) {
             return *this;
