@@ -13479,31 +13479,51 @@ TopoDS_Shape constructShape(
         };
         const double middle = (edge->first + edge->last) / 2;
         const gp_Pnt atMiddle = onLine(middle);
-        std::vector<std::pair<double, const SurfaceWall*>> ordered;
+        struct Ranked
+        {
+            double away;
+            double tolerance;
+            const SurfaceWall* wall;
+        };
+        std::vector<Ranked> ordered;
         for (const SurfaceWall* at : mine) {
             double footTolerance = BRep_Tool::Tolerance(at->foot);
             for (TopExp_Explorer it(at->foot, TopAbs_VERTEX); it.More(); it.Next()) {
                 footTolerance
                     = std::max(footTolerance, BRep_Tool::Tolerance(TopoDS::Vertex(it.Current())));
             }
+            const double tolerance = footTolerance + 1000 * linearTolerance;
             double away = distance(atMiddle, at->foot);
-            if (away <= footTolerance + 1000 * linearTolerance) {
+            if (away <= tolerance) {
                 away = 0.0;
             }
-            ordered.push_back({away, at});
+            ordered.push_back({away, tolerance, at});
         }
-        std::stable_sort(ordered.begin(), ordered.end(), [](const auto& a, const auto& b) {
-            return a.first < b.first;
+        std::stable_sort(ordered.begin(), ordered.end(), [](const Ranked& a, const Ranked& b) {
+            return a.away < b.away;
         });
-        for (size_t k = 1; k < ordered.size() && ordered[k].first == 0.0; ++k) {
-            if (!sameDomain(ordered[k].second->wall, ordered[0].second->wall)) {
-                refuse("a dress-up past walls on one foot line that meet at its edge's middle");
-            }
-        }
+        // The cutter must be the one wall at its distance: another wall on another surface as far
+        // from the middle (feet meeting at the middle, or the two walls either side of a middle
+        // wall that misses the circle) would be picked by the order the faces come in, and the
+        // same solid built another way would give another row silently (reviews pr541-r2f, r3).
+        // No oracle says which Onshape takes there: refuse (ruling c816)
+        auto tied = [&](const Ranked& cut) {
+            return std::any_of(ordered.begin(), ordered.end(), [&](const Ranked& other) {
+                return other.wall != cut.wall
+                    && std::abs(other.away - cut.away)
+                    <= std::max(other.tolerance, cut.tolerance)
+                    && !sameDomain(other.wall->wall, cut.wall->wall);
+            });
+        };
         const SurfaceWall* cutter = nullptr;
-        for (const auto& [key, at] : ordered) {
+        for (const Ranked& ranked : ordered) {
+            const SurfaceWall* at = ranked.wall;
             if (!cutter) {
                 if (!trimOne(*at, true)) {
+                    if (tied(ranked)) {
+                        refuse("a dress-up past walls on one foot line, two of them as near its "
+                               "edge's middle");
+                    }
                     cutter = at;
                 }
             }

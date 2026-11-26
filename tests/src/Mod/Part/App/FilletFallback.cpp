@@ -4921,6 +4921,10 @@ TEST_F(FilletFallbackTest, roundPastAStripUnderTwoWallsIsCutByTheMiddleWall)
         {"4a W11|W6|W11", {{11, 0, 10}, {6, 10, 20}, {11, 20, 30}}, true, 2.0, w6[1]},
         {"4b W6|W11|W6", {{6, 0, 10}, {11, 10, 20}, {6, 20, 30}}, true, 1.5, w11},
         {"4b W6|W11|W6", {{6, 0, 10}, {11, 10, 20}, {6, 20, 30}}, true, 2.0, w6[1]},
+        // The middle wall misses the circle and the two either side are as far from the middle:
+        // no oracle, the fork refuses (review pr541-r3)
+        {"W11|W16|W6", {{11, 0, 10}, {16, 10, 20}, {6, 20, 30}}, true, 1.5, fails},
+        {"W6|W16|W11", {{6, 0, 10}, {16, 10, 20}, {11, 20, 30}}, true, 1.5, fails},
         // Where it must refuse, or still builds (RB35 5a, 5b, 5c)
         {"5a W6", {{6, 0, 30}}, true, 2.5, w6[2]},
         {"5a W6", {{6, 0, 30}}, true, 2.6, w6[3]},
