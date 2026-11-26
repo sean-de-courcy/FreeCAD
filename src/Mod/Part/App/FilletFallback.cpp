@@ -13442,8 +13442,9 @@ TopoDS_Shape constructShape(
             refuse("a corner piece's strip runs off its face into a wall");
         }
         // Each foot's distance from the edge's middle, both taken onto the foot line; where two
-        // feet meet there (RB35: stretches over x 0..15 and 15..30), the one on past it along the
-        // edge counts (the stretch over 15..30). The edge's direction stands for Onshape's there
+        // feet meet there (RB35: stretches over x 0..15 and 15..30), the one before it along the
+        // edge counts: the stretch over 15..30, the RB7 model's top edge running from x 30 to x 0
+        // as built here. Onshape's own edge direction isn't seen; that tie is fitted to RB35
         const gp_Lin line = BRepAdaptor_Curve(first.foot).Line();
         auto onLine = [&](double parameter) {
             const gp_Pnt point = sectionAt(ctx, *edge, parameter).corner;
@@ -13461,7 +13462,7 @@ TopoDS_Shape constructShape(
         };
         const double middle = (edge->first + edge->last) / 2;
         const gp_Pnt atMiddle = onLine(middle);
-        const gp_Pnt pastMiddle = onLine(middle + 1e-3 * (edge->last - edge->first));
+        const gp_Pnt beforeMiddle = onLine(middle - 1e-3 * (edge->last - edge->first));
         std::vector<std::pair<std::pair<double, double>, const SurfaceWall*>> ordered;
         for (const SurfaceWall* at : mine) {
             double footTolerance = BRep_Tool::Tolerance(at->foot);
@@ -13473,7 +13474,7 @@ TopoDS_Shape constructShape(
             if (away <= footTolerance + 1000 * linearTolerance) {
                 away = 0.0;
             }
-            ordered.push_back({{away, distance(pastMiddle, at->foot)}, at});
+            ordered.push_back({{away, distance(beforeMiddle, at->foot)}, at});
         }
         std::stable_sort(ordered.begin(), ordered.end(), [](const auto& a, const auto& b) {
             return a.first < b.first;
