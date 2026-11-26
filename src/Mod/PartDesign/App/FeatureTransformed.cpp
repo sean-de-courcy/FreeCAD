@@ -265,51 +265,13 @@ bool inAnotherBody(App::DocumentObject* original, const Body* body)
 
 /// ops#1079: @p original took all of its own part (PartEnded, ops#1065: valid, not suppressed)
 /// and is in another Body than @p body. Read from the original itself, never through its Body's
-/// bar. Onshape (RB50): a FEATURE pattern of such a Remove re-runs it where its copies reach
-/// another part, and fails with Reapply off or where they reach none
+/// bar. Onshape (RB50, RB122): a FEATURE pattern of such a Remove re-runs it at each instance on
+/// what the pattern's part holds there, and fails with Reapply off
 bool isEndedOriginal(App::DocumentObject* original, const Body* body)
 {
     auto feature = freecad_cast<PartDesign::Feature*>(original);
     return feature && inAnotherBody(original, body) && feature->PartEnded.getValue()
         && !feature->Suppressed.getValue() && !feature->isError();
-}
-
-/// Whether a pattern's result changes nothing of its base (ops#1079): the same volume, within
-/// 1e-9 relative (a copy that reaches the part removes or adds some volume)
-bool changesNothing(const Part::TopoShape& before, const Part::TopoShape& after)
-{
-    if (before.isNull() || after.isNull()) {
-        return before.isNull() == after.isNull();
-    }
-    GProp_GProps a;
-    GProp_GProps b;
-    BRepGProp::VolumeProperties(before.getShape(), a);
-    BRepGProp::VolumeProperties(after.getShape(), b);
-    return std::abs(a.Mass() - b.Mass()) <= 1e-9 * std::max(std::abs(a.Mass()), 1.0);
-}
-
-/** ops#1079: whether cutting @p before with @p tool leaves each of its solids whole or removes it
- * whole. Onshape re-runs the ended Remove at each instance on the piece the instance's copy of the
- * Remove that split the part splits off (the scope follows the instance), so its copy never cuts
- * into the rest of the part: the fork's copy, which cuts the pattern's part, matches Onshape only
- * where it takes whole solids. False where a solid is cut in part, or a cut fails */
-bool cutsWholeSolidsOnly(const Part::TopoShape& before, const TopoDS_Shape& tool)
-{
-    for (const Part::TopoShape& solid : before.getSubTopoShapes(TopAbs_SOLID)) {
-        GProp_GProps whole;
-        BRepGProp::VolumeProperties(solid.getShape(), whole);
-        FCBRepAlgoAPI_Cut cut(solid.getShape(), tool);
-        if (!cut.IsDone()) {
-            return false;
-        }
-        GProp_GProps left;
-        BRepGProp::VolumeProperties(cut.Shape(), left);
-        const double tol = 1e-7 * std::max(std::abs(whole.Mass()), 1.0);
-        if (std::abs(left.Mass() - whole.Mass()) > tol && std::abs(left.Mass()) > tol) {
-            return false;
-        }
-    }
-    return true;
 }
 
 /** The step an owner picked as an original maps to in the pattern's part, or why it can't be
@@ -2241,10 +2203,10 @@ App::DocumentObjectExecReturn* Transformed::execute()
     };
 
     // FreeCAD-CH ops#1079 (notes/pattern-after-part-end-1079.md): originals in another Body, and
-    // those of them that took all of their own part. Onshape re-runs such a Remove where its copies
-    // reach another part (Reapply on), and fails with Reapply off (PATTERN_NO_GEOM_FROM_FEATURES)
-    // or where no copy reaches a part (PATTERN_FEATURE_FAILED)
-    std::vector<const App::DocumentObject*> endedOriginals;
+    // those of them that took all of their own part. Onshape (RB122) re-runs such a Remove at each
+    // instance on what the pattern's part holds there (the piece its sibling's copy splits off, or
+    // the part itself), changing nothing where it reaches nothing; Reapply off fails
+    // (PATTERN_SWITCH_TO_PER_INSTANCE)
     if (mode == Mode::Features) {
         Body* body = getFeatureBody();
         for (auto original : originals) {
@@ -2264,34 +2226,15 @@ App::DocumentObjectExecReturn* Transformed::execute()
                     this
                 );
             }
-            if (!isEndedOriginal(original, body)) {
-                continue;
-            }
-            if (!Reapply.getValue()) {
+            if (isEndedOriginal(original, body) && !Reapply.getValue()) {
                 return new App::DocumentObjectExecReturn(
                     quoted(original) + " took all of " + quoted(own)
                         + ": a pattern of it can only re-run it (Reapply on)",
                     this
                 );
             }
-            endedOriginals.push_back(original);
         }
     }
-    const auto isEnded = [&endedOriginals](const App::DocumentObject* obj) {
-        return obj && std::ranges::find(endedOriginals, obj) != endedOriginals.end();
-    };
-    // ops#1079: a copy of an ended original that cuts into a solid instead of taking it whole (see
-    // cutsWholeSolidsOnly())
-    const auto cutsInto = [this](const App::DocumentObject* original, const std::string& where) {
-        return new App::DocumentObjectExecReturn(
-            "A copy of " + quoted(original) + where + " cuts into "
-                + (getFeatureBody() ? quoted(getFeatureBody()) : std::string("the part"))
-                + " instead of taking whole the piece another copy splits off: Onshape's copy acts "
-                  "on that piece only",
-            this
-        );
-    };
-    const Part::TopoShape patternBase = supportShape;
 
     switch (mode) {
         case Mode::Features: {
@@ -2566,10 +2509,6 @@ App::DocumentObjectExecReturn* Transformed::execute()
                                         numbers[position]
                                     );
                                 }
-                                if (!item.additive && isEnded(item.named)
-                                    && !cutsWholeSolidsOnly(supportShape, placed.getShape())) {
-                                    return cutsInto(item.named, " at " + instance);
-                                }
                                 const int before = countSolids(supportShape.getShape());
                                 Part::TopoShape result = makeResultShape(supportShape);
                                 result.makeElementBoolean(
@@ -2762,13 +2701,6 @@ App::DocumentObjectExecReturn* Transformed::execute()
                     copiesTried += shapes.size() - 1;
                     copiesMade += shapes.size() - 1;
                     endCopies.insert(endCopies.end(), shapes.begin() + 1, shapes.end());
-                    if (isEnded(feature)) {
-                        for (auto copy = shapes.begin() + 1; copy != shapes.end(); ++copy) {
-                            if (!cutsWholeSolidsOnly(supportShape, copy->getShape())) {
-                                return cutsInto(feature, std::string());
-                            }
-                        }
-                    }
                     const Part::TopoShape before = supportShape;
                     auto cutCopies = [&]() {
                         return makeResultShape(before).makeElementBoolean(
@@ -2868,17 +2800,6 @@ App::DocumentObjectExecReturn* Transformed::execute()
             );
             break;
         }
-    }
-
-    // ops#1079: no copy reached the part (Onshape: PATTERN_FEATURE_FAILED). Checked here, after
-    // both the re-run and the copy paths
-    if (!endedOriginals.empty() && changesNothing(patternBase, supportShape)) {
-        Body* body = getFeatureBody();
-        return new App::DocumentObjectExecReturn(
-            "No copy of the pattern reaches " + (body ? quoted(body) : std::string("the part"))
-                + ": " + quoted(endedOriginals.front()) + " took all of its own part",
-            this
-        );
     }
 
     supportShape = refineShapeIfActive((supportShape));
