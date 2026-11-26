@@ -522,6 +522,19 @@ bool sameDomain(const TopoDS_Face& face, const TopoDS_Face& other)
     if (a.GetType() != b.GetType()) {
         return false;
     }
+    if (a.GetType() == GeomAbs_SurfaceOfExtrusion) {
+        // One surface under a trim (ops#1045: a round's tool on its extruded wall, built on the
+        // wall's surface without the trim)
+        auto untrimmed = [](const TopoDS_Face& f, TopLoc_Location& location) {
+            Handle(Geom_Surface) surface = BRep_Tool::Surface(f, location);
+            if (auto trimmed = Handle(Geom_RectangularTrimmedSurface)::DownCast(surface)) {
+                surface = trimmed->BasisSurface();
+            }
+            return surface;
+        };
+        return untrimmed(face, faceLocation) == untrimmed(other, otherLocation)
+            && faceLocation.IsEqual(otherLocation);
+    }
     if (a.GetType() == GeomAbs_Plane) {
         gp_Pln pa = a.Plane();
         gp_Pln pb = b.Plane();
@@ -1584,6 +1597,10 @@ struct EdgeData
     /// A straight edge with a cylinder parallel to it among its faces (a curved wall's end,
     /// ops#640, #150): its round is a plane fillet of the faces' traces, swept along the edge
     bool ruled = false;
+    /// ruled, where one of the faces is a wall extruded along the edge (a pad's curved side, the
+    /// basis curve in a plane square to the edge; ops#1045) instead of a cylinder: its trace is
+    /// that curve (RuledTrace::curve)
+    bool extruded = false;
     /// A closed ellipse between a plane and a cylinder it is not square to (ops#942; analysed
     /// only where Request::varyingAngle is set): line is false, circle is not set
     bool ellipse = false;
@@ -1688,6 +1705,84 @@ struct Context
 
 bool equalDistances(const Request& request);
 
+/** ops#1045: a face on a surface of linear extrusion along a straight edge of it, whose basis curve
+ * lies in a plane square to the edge over the face's range (a pad's curved side): in every plane
+ * square to the edge the face's trace is that curve, moved along the edge, exactly
+ */
+struct ExtrudedWall
+{
+    /// The face's surface as the face holds it, and in its own frame without a trim
+    Handle(Geom_Surface) held;
+    Handle(Geom_SurfaceOfLinearExtrusion) own;
+    TopLoc_Location location;
+    /// The surface in place (the face's location applied)
+    Handle(BRepAdaptor_Surface) surface;
+    /// The generators' direction, in place
+    gp_Dir direction;
+    /// The edge's parameter on the basis curve, and the face's other bound there
+    double uCorner = 0.0;
+    double uFar = 0.0;
+    bool reversed = false;
+    /// +1 where the face runs from the edge toward greater parameters
+    double sense() const
+    {
+        return uFar > uCorner ? 1.0 : -1.0;
+    }
+};
+
+/// The face as an ExtrudedWall along the edge, a generator of it; refused where it isn't one
+ExtrudedWall extrudedWall(const TopoDS_Face& face, const TopoDS_Edge& edge)
+{
+    ExtrudedWall wall;
+    wall.held = BRep_Tool::Surface(face, wall.location);
+    Handle(Geom_Surface) unwrapped = wall.held;
+    if (auto trimmed = Handle(Geom_RectangularTrimmedSurface)::DownCast(unwrapped)) {
+        unwrapped = trimmed->BasisSurface();
+    }
+    wall.own = Handle(Geom_SurfaceOfLinearExtrusion)::DownCast(unwrapped);
+    if (wall.own.IsNull()) {
+        refuse("an extruded wall that is not a surface of linear extrusion");
+    }
+    wall.surface = new BRepAdaptor_Surface(face, Standard_False);
+    wall.direction = wall.surface->Direction();
+    wall.reversed = face.Orientation() == TopAbs_REVERSED;
+    // The edge's parameter on the basis curve: u of its curve on the face, one value
+    double f = 0.0;
+    double l = 0.0;
+    Handle(Geom2d_Curve) onFace = BRep_Tool::CurveOnSurface(edge, face, f, l);
+    if (onFace.IsNull()) {
+        refuse("an edge without its curve on an extruded wall");
+    }
+    const gp_Pnt2d a = onFace->Value(f);
+    const gp_Pnt2d b = onFace->Value(l);
+    double u0 = 0.0;
+    double u1 = 0.0;
+    double v0 = 0.0;
+    double v1 = 0.0;
+    BRepTools::UVBounds(face, u0, u1, v0, v1);
+    const double span = u1 - u0;
+    if (std::abs(a.X() - b.X()) > 1e-9 * std::max(1.0, span)) {
+        refuse("an edge that is not a generator of its extruded wall");
+    }
+    wall.uCorner = (a.X() + b.X()) / 2;
+    // The face lies on one side of the edge, which is one of its bounds on the basis curve
+    const bool atStart = std::abs(wall.uCorner - u0) < std::abs(wall.uCorner - u1);
+    if (std::abs(wall.uCorner - (atStart ? u0 : u1)) > 1e-7 * std::max(1.0, span)
+        || span <= 1e-9) {
+        refuse("an edge inside its extruded wall's range");
+    }
+    wall.uFar = atStart ? u1 : u0;
+    // The basis curve square to the edge over the face's range: every point at one height
+    const gp_Pnt base = wall.surface->Value(wall.uCorner, 0.0);
+    for (int k = 1; k <= 64; ++k) {
+        const gp_Pnt p = wall.surface->Value(wall.uCorner + (wall.uFar - wall.uCorner) * k / 64, 0.0);
+        if (std::abs(gp_Vec(base, p).Dot(gp_Vec(wall.direction))) > linearTolerance) {
+            refuse("an extruded wall whose basis curve is not square to the edge");
+        }
+    }
+    return wall;
+}
+
 EdgeData analyse(const Context& ctx, const TopoDS_Edge& edge)
 {
     EdgeData data;
@@ -1739,6 +1834,15 @@ EdgeData analyse(const Context& ctx, const TopoDS_Edge& edge)
             if (surface.GetType() == GeomAbs_Plane) {
                 return true;
             }
+            // ops#1045: a wall extruded along the edge (extrudedWall() checks the rest)
+            if (surface.GetType() == GeomAbs_SurfaceOfExtrusion) {
+                if (!parallel(surface.Direction(), along)) {
+                    return false;
+                }
+                data.ruled = true;
+                data.extruded = true;
+                return true;
+            }
             if (surface.GetType() != GeomAbs_Cylinder
                 || !parallel(surface.Cylinder().Axis().Direction(), along)) {
                 return false;
@@ -1750,6 +1854,19 @@ EdgeData analyse(const Context& ctx, const TopoDS_Edge& edge)
         both = parallelFace(s1) && both;
         if (!both) {
             refuse("a straight edge between faces that are not planes or cylinders along it");
+        }
+        if (data.extruded) {
+            // ops#1045: only a round between such a wall and a plane or a cylinder along the edge
+            // has a tool (ruledTool()); Onshape's round there is a cylinder along the edge (RB45,
+            // RB48). A chamfer, and two such walls, are not measured: OCCT's, or its error
+            if (s0.GetType() == GeomAbs_SurfaceOfExtrusion
+                && s1.GetType() == GeomAbs_SurfaceOfExtrusion) {
+                refuse("a straight edge between two extruded walls");
+            }
+            if (ctx.request.kind != Kind::Fillet) {
+                refuse("a chamfer of a straight edge on an extruded wall");
+            }
+            extrudedWall(data.faces[s0.GetType() == GeomAbs_SurfaceOfExtrusion ? 0 : 1], edge);
         }
         // ops#987: a chamfer by equal distances between a plane and a cylinder along the edge
         // has a tool (ruledChamfer()); any other chamfer of such an edge has none
@@ -1886,15 +2003,23 @@ EdgeData analyse(const Context& ctx, const TopoDS_Edge& edge)
     // Convex when the second face turns away from the first's outward normal
     double middle = (data.first + data.last) / 2;
     gp_Pnt point = curve.Value(middle);
-    gp_Dir inward1 = inwardIn(data.faces[1], edge, middle);
-    data.convex = inward1.Dot(outwardNormal(data.faces[0], point)) < 0;
+    // On an extruded wall (ops#1045) the normals on any surface: on planes and cylinders the same
+    auto inwardOf = [&](const TopoDS_Face& face, double at) {
+        return data.extruded ? inwardInAny(face, edge, at) : inwardIn(face, edge, at);
+    };
+    gp_Dir inward1 = inwardOf(data.faces[1], middle);
+    data.convex = inward1.Dot(
+                      data.extruded ? outwardNormalAny(data.faces[0], point)
+                                    : outwardNormal(data.faces[0], point)
+                  )
+        < 0;
     // A smooth edge (its faces tangent along it, as where a Boolean leaves a wall tangent to a
     // corner cylinder): no ball is tangent to both faces at a radius other than the corner's own,
     // and OCCT refuses it ("There are no suitable edges"). The tool would roll on over the next
     // edge and silently re-round the corner (review pr999-r2, T-A), so it stays refused
     for (double at : {data.first, middle, data.last}) {
         const double turn = std::acos(std::clamp(
-            inwardIn(data.faces[0], edge, at).Dot(inwardIn(data.faces[1], edge, at)), -1.0, 1.0));
+            inwardOf(data.faces[0], at).Dot(inwardOf(data.faces[1], at)), -1.0, 1.0));
         if (pi - turn < smoothEdgeAngle) {
             refuse("a smooth edge (its faces are tangent along it)");
         }
@@ -1919,6 +2044,22 @@ bool betweenCylinders(const EdgeData& data)
         return BRepAdaptor_Surface(face, Standard_False).GetType() == GeomAbs_Cylinder;
     };
     return data.ruled && onCylinder(data.faces[0]) && onCylinder(data.faces[1]);
+}
+
+/** ops#1045: a straight edge with a wall extruded along it among its faces (EdgeData::extruded).
+ * OCCT's round there is a B-spline face; Onshape's, and the construction's (extrudedTool()), is a
+ * cylinder along the edge (RB45, RB48). Only this kind: a plane and a cylinder stay OCCT's, whose
+ * round there is a cylinder already
+ */
+bool betweenPrisms(const EdgeData& data)
+{
+    return data.extruded;
+}
+
+/// Rounds the construction builds wherever they fit, not only at the limit
+bool preferredRound(const EdgeData& data)
+{
+    return betweenCylinders(data) || betweenPrisms(data);
 }
 
 /// The direction along the edge away from the vertex, and the vertex's parameter
@@ -3675,6 +3816,13 @@ constexpr double tangentTolerance = 1e-6;
 struct RuledTrace
 {
     bool circle = false;
+    /// ops#1045: the trace of an extruded wall (ExtrudedWall): a plane curve, the basis curve moved
+    /// into the section plane through `plane`. The sites that know only lines and circles refuse
+    /// it; extrudedTool() builds its round
+    bool curve = false;
+    ExtrudedWall wall;  // curve
+    gp_Pnt plane;       // curve: a point of the section plane
+    double ballSide = 1.0;  // curve: the ball lies along the outward normal (+1) or against it (-1)
     gp_Pnt origin;      // a point of the trace: where it starts
     gp_Dir inward;      // along the face, away from where it starts
     gp_Dir toCentre;    // line: the normal toward the ball's centre
@@ -3702,8 +3850,20 @@ RuledTrace ruledTrace(
     RuledTrace t;
     t.origin = at;
     t.inward = inward;
-    gp_Dir outward = outwardNormal(face, at);
     BRepAdaptor_Surface surface(face, Standard_False);
+    if (surface.GetType() == GeomAbs_SurfaceOfExtrusion && data.extruded) {
+        // ops#1045: only from the corner (a ball rolled on onto such a wall has no tool)
+        if (at.Distance(corner) > linearTolerance) {
+            refuse("a round rolled on onto an extruded wall");
+        }
+        t.curve = true;
+        t.wall = extrudedWall(face, data.edge);
+        t.plane = corner;
+        // The ball is in the material at a convex edge, in the air at a concave one
+        t.ballSide = data.convex ? -1.0 : 1.0;
+        return t;
+    }
+    gp_Dir outward = outwardNormal(face, at);
     if (surface.GetType() == GeomAbs_Cylinder) {
         gp_Cylinder cylinder = surface.Cylinder();
         const gp_Pnt& a = cylinder.Location();
@@ -3728,6 +3888,9 @@ RuledTrace ruledTrace(
 /// The centres of the balls of radius r tangent to both traces, on the ball's side of each
 std::vector<gp_Pnt> ruledCentres(const RuledTrace& a, const RuledTrace& b, const gp_Dir& direction, double r)
 {
+    if (a.curve || b.curve) {
+        refuse("a round between traces that are not lines or circles");
+    }
     std::vector<gp_Pnt> found;
     if (a.tooSmall || b.tooSmall) {
         return found;
@@ -3789,6 +3952,9 @@ std::vector<gp_Pnt> ruledCentres(const RuledTrace& a, const RuledTrace& b, const
 /// Where the ball about the centre touches the trace
 gp_Pnt ruledTouch(const RuledTrace& t, const gp_Pnt& centre)
 {
+    if (t.curve) {
+        refuse("a touch on a trace that is not a line or a circle");
+    }
     if (t.circle) {
         gp_Vec radial(t.centre, centre);
         if (radial.Magnitude() <= linearTolerance) {
@@ -3803,6 +3969,9 @@ gp_Pnt ruledTouch(const RuledTrace& t, const gp_Pnt& centre)
 /// The ball touches the trace past its start, on the face's side
 bool ruledTouches(const RuledTrace& t, const gp_Pnt& touch, const gp_Pnt& centre, double r)
 {
+    if (t.curve) {
+        refuse("a touch on a trace that is not a line or a circle");
+    }
     return gp_Vec(t.origin, touch).Dot(gp_Vec(t.inward)) > linearTolerance
         && std::abs(touch.Distance(centre) - r) <= linearTolerance;
 }
@@ -3835,6 +4004,9 @@ double turnedAngle(const gp_Vec& a, const gp_Vec& b, const gp_Vec& axis, double 
 /// The trace's piece from its start to the point, along the face
 RuledPiece tracePiece(const RuledTrace& t, const gp_Pnt& to, const gp_Vec& z)
 {
+    if (t.curve) {
+        refuse("a piece of a trace that is not a line or a circle");
+    }
     RuledPiece piece;
     piece.from = t.origin;
     piece.to = to;
@@ -3928,6 +4100,9 @@ struct Rolled
 /// How far along the trace from its start the point lies: a length on a line, an angle on a circle
 double traceTravel(const RuledTrace& t, const gp_Pnt& point, const gp_Vec& z)
 {
+    if (t.curve) {
+        refuse("travel along a trace that is not a line or a circle");
+    }
     if (t.circle) {
         return std::abs(tracePiece(t, point, z).angle);
     }
@@ -3955,6 +4130,9 @@ std::optional<Rolled> tangentEdgeOf(
     const TopoDS_Face& face = data.faces[k];
     const RuledTrace& mine = traces[k];
     std::optional<Rolled> rolled;
+    if (mine.curve) {
+        refuse("a round rolled on over an extruded wall");
+    }
     double travel = std::numeric_limits<double>::infinity();
     for (TopExp_Explorer it(face, TopAbs_EDGE); it.More(); it.Next()) {
         const TopoDS_Edge& edge = TopoDS::Edge(it.Current());
@@ -4042,6 +4220,9 @@ std::optional<Rolled> rollOn(
     const TopoDS_Face& face = data.faces[k];
     const RuledTrace& mine = traces[k];
     const RuledTrace& other = traces[1 - k];
+    if (mine.curve || other.curve) {
+        refuse("a round rolled on over an extruded wall");
+    }
     std::optional<Rolled> rolled = tangentEdgeOf(ctx, data, traces, k);
     if (!rolled) {
         return std::nullopt;
@@ -4210,6 +4391,9 @@ Tool ruledChamfer(
     double w
 )
 {
+    if (traces[0].curve || traces[1].curve) {
+        refuse("a chamfer of a straight edge on an extruded wall");
+    }
     if (!data.convex) {
         refuse("a chamfer of a concave straight edge on a cylinder");
     }
@@ -4301,6 +4485,411 @@ Tool ruledChamfer(
     return tool;
 }
 
+/// The wall's trace at the basis curve's parameter u: in the section plane
+gp_Pnt wallPoint(const RuledTrace& t, double u)
+{
+    const gp_Pnt p = t.wall.surface->Value(u, 0.0);
+    const gp_Vec d(t.wall.direction);
+    return p.Translated(d * gp_Vec(p, t.plane).Dot(d));
+}
+
+/** The wall's trace at u: its point, its derivative in u, the unit normal toward the ball's side,
+ * and its curvature toward that side (positive where it bends toward the ball)
+ */
+struct WallFrame
+{
+    gp_Pnt point;
+    gp_Vec derivative;
+    gp_Vec towardBall;
+    double curvature = 0.0;
+};
+
+WallFrame wallFrame(const RuledTrace& t, double u)
+{
+    WallFrame frame;
+    gp_Pnt p;
+    gp_Vec du;
+    gp_Vec dv;
+    gp_Vec duu;
+    gp_Vec dvv;
+    gp_Vec duv;
+    t.wall.surface->D2(u, 0.0, p, du, dv, duu, dvv, duv);
+    const gp_Vec d(t.wall.direction);
+    du -= d * du.Dot(d);
+    duu -= d * duu.Dot(d);
+    gp_Vec outward = du.Crossed(dv);
+    if (outward.Magnitude() < linearTolerance || du.Magnitude() < linearTolerance) {
+        refuse("an extruded wall with a degenerate normal");
+    }
+    if (t.wall.reversed) {
+        outward.Reverse();
+    }
+    frame.point = p.Translated(d * gp_Vec(p, t.plane).Dot(d));
+    frame.derivative = du;
+    frame.towardBall = outward.Normalized() * t.ballSide;
+    frame.curvature = duu.Dot(frame.towardBall) / du.SquareMagnitude();
+    return frame;
+}
+
+/// The parameters from the corner to the far side of the wall, in pieces of its continuity
+std::vector<double> wallSamples(const RuledTrace& t, double from, double to, int perPiece)
+{
+    std::vector<double> breaks {from, to};
+    const int count = t.wall.surface->NbUIntervals(GeomAbs_C2);
+    if (count > 1) {
+        TColStd_Array1OfReal knots(1, count + 1);
+        t.wall.surface->UIntervals(knots, GeomAbs_C2);
+        for (int i = knots.Lower(); i <= knots.Upper(); ++i) {
+            if ((knots(i) - from) * (knots(i) - to) < 0) {
+                breaks.push_back(knots(i));
+            }
+        }
+    }
+    std::sort(breaks.begin(), breaks.end());
+    if (to < from) {
+        std::reverse(breaks.begin(), breaks.end());
+    }
+    std::vector<double> samples;
+    for (size_t i = 0; i + 1 < breaks.size(); ++i) {
+        for (int k = 0; k < perPiece; ++k) {
+            samples.push_back(breaks[i] + (breaks[i + 1] - breaks[i]) * k / perPiece);
+        }
+    }
+    samples.push_back(to);
+    return samples;
+}
+
+/// The least distance from the point to the wall's trace over the face's whole range, ends included
+double wallClearance(const RuledTrace& t, const gp_Pnt& point)
+{
+    const std::vector<double> us = wallSamples(t, t.wall.uCorner, t.wall.uFar, 128);
+    std::vector<double> distances;
+    for (double u : us) {
+        distances.push_back(point.Distance(wallPoint(t, u)));
+    }
+    double least = *std::min_element(distances.begin(), distances.end());
+    // Each sampled local minimum refined by golden sections between its neighbours
+    for (size_t i = 1; i + 1 < us.size(); ++i) {
+        if (distances[i] > distances[i - 1] || distances[i] > distances[i + 1]) {
+            continue;
+        }
+        double a = us[i - 1];
+        double b = us[i + 1];
+        const double g = (std::sqrt(5.0) - 1) / 2;
+        double c = b - g * (b - a);
+        double e = a + g * (b - a);
+        double fc = point.Distance(wallPoint(t, c));
+        double fe = point.Distance(wallPoint(t, e));
+        for (int k = 0; k < 80 && std::abs(b - a) > 1e-15 * std::max(1.0, std::abs(a)); ++k) {
+            if (fc < fe) {
+                b = e;
+                e = c;
+                fe = fc;
+                c = b - g * (b - a);
+                fc = point.Distance(wallPoint(t, c));
+            }
+            else {
+                a = c;
+                c = e;
+                fc = fe;
+                e = a + g * (b - a);
+                fe = point.Distance(wallPoint(t, e));
+            }
+        }
+        least = std::min({least, fc, fe});
+    }
+    return least;
+}
+
+/** The parameters u on the wall where the ball of radius r tangent to the wall at u, on its side, is
+ * tangent to the other trace (a line or a circle) on its side: the roots over the face's range of
+ * the centre's offset from the other trace's locus of centres, bracketed by sampling and bisected
+ */
+std::vector<double> wallRoots(const RuledTrace& wall, const RuledTrace& other, double r)
+{
+    auto residual = [&](double u) {
+        const WallFrame frame = wallFrame(wall, u);
+        const gp_Pnt centre = frame.point.Translated(frame.towardBall * r);
+        if (other.circle) {
+            return centre.Distance(other.centre) - other.offset;
+        }
+        return gp_Vec(other.origin, centre).Dot(gp_Vec(other.toCentre)) - r;
+    };
+    const std::vector<double> us = wallSamples(wall, wall.wall.uCorner, wall.wall.uFar, 64);
+    std::vector<double> roots;
+    double previous = residual(us.front());
+    for (size_t i = 1; i < us.size(); ++i) {
+        const double here = residual(us[i]);
+        if (here == 0.0) {
+            roots.push_back(us[i]);
+        }
+        else if (previous != 0.0 && (previous < 0) != (here < 0)) {
+            double a = us[i - 1];
+            double b = us[i];
+            double fa = previous;
+            for (int k = 0; k < 200 && a != b; ++k) {
+                const double m = (a + b) / 2;
+                if (m == a || m == b) {
+                    break;
+                }
+                const double fm = residual(m);
+                if ((fm < 0) == (fa < 0)) {
+                    a = m;
+                    fa = fm;
+                }
+                else {
+                    b = m;
+                }
+            }
+            roots.push_back((a + b) / 2);
+        }
+        previous = here;
+    }
+    return roots;
+}
+
+/** ops#1045: the round of a straight edge between a wall extruded along it (traces[w], a plane
+ * curve) and a plane or a cylinder along it (a line or a circle), as Onshape's (RB45, RB48): one
+ * cylinder of radius r along the edge, its axis r from both faces' traces on the ball's side. Of
+ * the centres that touch both faces past the corner, inside the wall's range, with no point of the
+ * wall's trace nearer than r, the one nearest the corner; refused where the wall bends toward the
+ * ball tighter than r between the corner and the touch (the ball would bridge it: not measured
+ * against Onshape, sk1045 O1), and where the round would leave the wall's face or roll on. The
+ * tool is the region between the corner, the traces and the arc, swept along the edge, its wall
+ * face on the wall's own surface (so that it is found as the strip's contact and merges in the
+ * Booleans); its area by the boundary integral, the curve's piece by Gauss quadrature
+ */
+Tool extrudedTool(
+    const Context& ctx,
+    const EdgeData& data,
+    const VertexEnd ends[2],
+    const RuledTrace traces[2],
+    double r
+)
+{
+    const int w = traces[0].curve ? 0 : 1;
+    const RuledTrace& wall = traces[w];
+    const RuledTrace& other = traces[1 - w];
+    if (other.curve) {
+        refuse("a straight edge between two extruded walls");
+    }
+    if (other.tooSmall) {
+        refuse(tooSmallReason);
+    }
+    const gp_Dir direction(gp_Vec(data.start, data.end));
+    const gp_Vec z(direction);
+    const double length = data.start.Distance(data.end);
+    const gp_Pnt& corner = data.start;
+    const double sense = wall.wall.sense();
+    std::optional<double> best;
+    gp_Pnt centre;
+    for (double u : wallRoots(wall, other, r)) {
+        const WallFrame frame = wallFrame(wall, u);
+        const gp_Pnt c = frame.point.Translated(frame.towardBall * r);
+        if ((u - wall.wall.uCorner) * sense <= 0 || frame.point.Distance(corner) <= linearTolerance) {
+            continue;
+        }
+        if (!ruledTouches(other, ruledTouch(other, c), c, r)) {
+            continue;
+        }
+        // On the parallel curve's swallowtail, past where it crosses itself, a centre is nearer
+        // than r to the wall elsewhere (sk1045 change 4, case N1)
+        if (wallClearance(wall, c) < r - 1e-9 * r - linearTolerance) {
+            continue;
+        }
+        if (!best || c.Distance(corner) < centre.Distance(corner)) {
+            best = u;
+            centre = c;
+        }
+    }
+    if (!best) {
+        refuse("no round of the radius fits between a straight edge's faces");
+    }
+    for (double u : wallSamples(wall, wall.wall.uCorner, *best, 128)) {
+        if (wallFrame(wall, u).curvature * r > 1 + 1e-9) {
+            refuse("a round larger than its extruded wall's curvature");
+        }
+    }
+    gp_Pnt touches[2];
+    touches[w] = wallPoint(wall, *best);
+    touches[1 - w] = ruledTouch(other, centre);
+    if (!onFace(data.faces[w], touches[w].Translated(z * (length / 2)))) {
+        refuse("a round of a straight edge on an extruded wall that runs off the wall");
+    }
+    if (!onFace(data.faces[1 - w], touches[1 - w].Translated(z * (length / 2)))) {
+        // Past a tangent edge the ball would roll on (rollOn), which has no tool here; past any
+        // other end of the face the run-off rules decide, as for a plane or a cylinder
+        auto tangent = tangentEdgeOf(ctx, data, traces, 1 - w, false);
+        if (tangent && tangent->travel <= traceTravel(other, touches[1 - w], z)) {
+            refuse("a round on an extruded wall that would roll on over its other face's tangent edge");
+        }
+    }
+    auto side = [&](const gp_Pnt& a, const gp_Pnt& b, const gp_Pnt& p) {
+        return gp_Vec(a, b).Crossed(gp_Vec(a, p)).Dot(z);
+    };
+    const gp_Pnt arcMiddle = centre.Translated(gp_Vec(centre, corner).Normalized() * r);
+    if (side(touches[0], touches[1], arcMiddle) * side(touches[0], touches[1], corner) <= 0) {
+        refuse("a round of a straight edge on an extruded wall that bulges away from its corner");
+    }
+    // The section's signed area by the boundary integral (1/2) of (p - corner) x dp along the
+    // other face's trace from the corner, the round's arc, and the wall's trace back to the corner
+    const gp_Pnt& touchOther = touches[1 - w];
+    const gp_Pnt& touchWall = touches[w];
+    double twice = 0.0;
+    TopoDS_Edge otherEdge;
+    if (other.circle) {
+        const RuledPiece piece = tracePiece(other, touchOther, z);
+        twice += gp_Vec(corner, other.centre).Crossed(gp_Vec(corner, touchOther)).Dot(z)
+            + other.radius * other.radius * piece.angle;
+        otherEdge = BRepBuilderAPI_MakeEdge(
+                        GC_MakeArcOfCircle(corner, pieceMiddle(piece, z), touchOther).Value()
+        )
+                        .Edge();
+    }
+    else {
+        otherEdge = BRepBuilderAPI_MakeEdge(corner, touchOther).Edge();
+    }
+    const gp_Vec toOther(centre, touchOther);
+    const gp_Vec toWall(centre, touchWall);
+    const double phi = std::atan2(toOther.Crossed(toWall).Dot(z), toOther.Dot(toWall));
+    twice += gp_Vec(corner, centre).Crossed(gp_Vec(touchOther, touchWall)).Dot(z) + r * r * phi;
+    // The wall's piece, from the corner to the touch, by 10-point Gauss-Legendre on each of the
+    // pieces of its continuity, cut in 16
+    static const double nodes[5] = {0.1488743389816312, 0.4333953941292472, 0.6794095682990244,
+                                    0.8650633666889845, 0.9739065285171717};
+    static const double weights[5] = {0.2955242247147529, 0.2692667193099963, 0.2190863625159820,
+                                      0.1494513491505806, 0.0666713443086881};
+    double curvePiece = 0.0;
+    const std::vector<double> us = wallSamples(wall, wall.wall.uCorner, *best, 16);
+    for (size_t i = 0; i + 1 < us.size(); ++i) {
+        const double half = (us[i + 1] - us[i]) / 2;
+        const double mid = (us[i + 1] + us[i]) / 2;
+        for (int k = 0; k < 5; ++k) {
+            for (double s : {-1.0, 1.0}) {
+                const WallFrame frame = wallFrame(wall, mid + s * half * nodes[k]);
+                curvePiece += weights[k] * half
+                    * gp_Vec(corner, frame.point).Crossed(frame.derivative).Dot(z);
+            }
+        }
+    }
+    twice -= curvePiece;
+    const double area = std::abs(twice) / 2;
+    if (area <= linearTolerance * r) {
+        refuse("a round of a straight edge on an extruded wall has no section");
+    }
+    // The tool's faces: the wall's piece on the wall's own surface, the sides swept from the other
+    // trace's piece and the arc, and the two ends, sewn
+    const ExtrudedWall& ew = wall.wall;
+    const gp_Trsf toOwn = ew.location.Transformation().Inverted();
+    const gp_Pnt basis = ew.own->Value(ew.uCorner, 0.0);
+    const gp_Vec along(ew.own->Direction());
+    const double va = gp_Vec(basis, data.start.Transformed(toOwn)).Dot(along);
+    const double vb = gp_Vec(basis, data.end.Transformed(toOwn)).Dot(along);
+    BRepBuilderAPI_MakeFace wallMaker(
+        ew.own,
+        std::min(ew.uCorner, *best),
+        std::max(ew.uCorner, *best),
+        std::min(va, vb),
+        std::max(va, vb),
+        Precision::Confusion()
+    );
+    if (!wallMaker.IsDone()) {
+        refuse("building a round's wall on an extruded wall failed");
+    }
+    const TopoDS_Face wallFace = TopoDS::Face(wallMaker.Face().Located(ew.location));
+    const TopoDS_Edge roundEdge
+        = BRepBuilderAPI_MakeEdge(GC_MakeArcOfCircle(touchOther, arcMiddle, touchWall).Value()).Edge();
+    BRepBuilderAPI_MakeWire open(otherEdge, roundEdge);
+    if (!open.IsDone()) {
+        refuse("building a round's section failed");
+    }
+    BRepPrimAPI_MakePrism sides(open.Wire(), z * length, Standard_True);
+    if (!sides.IsDone()) {
+        refuse("building a round's sides failed");
+    }
+    BRepBuilderAPI_Sewing sewing(1e-6);
+    for (TopExp_Explorer it(sides.Shape(), TopAbs_FACE); it.More(); it.Next()) {
+        sewing.Add(it.Current());
+    }
+    sewing.Add(wallFace);
+    for (const TopoDS_Shape& level : {sides.FirstShape(), sides.LastShape()}) {
+        // The wall face's edge at this end: not along the edge, in the end's plane
+        TopExp_Explorer first(level, TopAbs_EDGE);
+        if (!first.More()) {
+            refuse("building a round's sides failed");
+        }
+        const double height
+            = gp_Vec(corner, BRep_Tool::Pnt(TopExp::FirstVertex(TopoDS::Edge(first.Current())))).Dot(z);
+        TopoDS_Edge wallEdge;
+        for (TopExp_Explorer it(wallFace, TopAbs_EDGE); it.More(); it.Next()) {
+            const TopoDS_Edge& edge = TopoDS::Edge(it.Current());
+            BRepAdaptor_Curve curve(edge);
+            const gp_Pnt middle = curve.Value((curve.FirstParameter() + curve.LastParameter()) / 2);
+            const gp_Pnt a = curve.Value(curve.FirstParameter());
+            if (std::abs(gp_Vec(corner, middle).Dot(z) - height) < 1e-6
+                && std::abs(gp_Vec(corner, a).Dot(z) - height) < 1e-6) {
+                wallEdge = edge;
+            }
+        }
+        if (wallEdge.IsNull()) {
+            refuse("a round's wall on an extruded wall has no end edge");
+        }
+        BRepBuilderAPI_MakeWire capWire;
+        for (TopExp_Explorer it(level, TopAbs_EDGE); it.More(); it.Next()) {
+            capWire.Add(TopoDS::Edge(it.Current()));
+        }
+        capWire.Add(wallEdge);
+        if (!capWire.IsDone()) {
+            refuse("building a round's end on an extruded wall failed");
+        }
+        BRepBuilderAPI_MakeFace cap(capWire.Wire(), Standard_True);
+        if (!cap.IsDone()) {
+            refuse("building a round's end on an extruded wall failed");
+        }
+        sewing.Add(cap.Face());
+    }
+    sewing.Perform();
+    TopoDS_Shell shell;
+    int shells = 0;
+    for (TopExp_Explorer it(sewing.SewedShape(), TopAbs_SHELL); it.More(); it.Next()) {
+        shell = TopoDS::Shell(it.Current());
+        ++shells;
+    }
+    if (shells != 1 || !BRep_Tool::IsClosed(shell)) {
+        refuse("a round's tool on an extruded wall is not closed");
+    }
+    BRepBuilderAPI_MakeSolid solidMaker(shell);
+    if (!solidMaker.IsDone()) {
+        refuse("a round's tool on an extruded wall is not a solid");
+    }
+    TopoDS_Solid solid = solidMaker.Solid();
+    BRepLib::OrientClosedSolid(solid);
+    // Its wall face kept the wall's surface
+    bool onWall = false;
+    for (TopExp_Explorer it(solid, TopAbs_FACE); it.More() && !onWall; it.Next()) {
+        onWall = sameDomain(TopoDS::Face(it.Current()), data.faces[w]);
+    }
+    if (!onWall) {
+        refuse("a round's tool on an extruded wall left the wall's surface");
+    }
+    Tool tool;
+    tool.source = data.edge;
+    tool.cut = data.convex;
+    tool.volume = area * length;
+    tool.solid = solid;
+    tool.strips.resize(2);
+    for (int k = 0; k < 2; ++k) {
+        tool.strips[k].face = data.faces[k];
+        tool.strips[k].width = corner.Distance(touches[k]);
+        tool.strips[k].farSide.valid = true;
+        tool.strips[k].farSide.lin = gp_Lin(touches[k], direction);
+    }
+    for (int i = 0; i < 2; ++i) {
+        tool.caps.push_back(ends[i].trims.front());
+    }
+    return tool;
+}
+
 Tool ruledTool(const Context& ctx, const EdgeData& data, const VertexEnd ends[2], double r)
 {
     gp_Dir direction(gp_Vec(data.start, data.end));
@@ -4325,12 +4914,16 @@ Tool ruledTool(const Context& ctx, const EdgeData& data, const VertexEnd ends[2]
             data.faces[k],
             corner,
             corner,
-            inwardIn(data.faces[k], data.edge, data.first),
+            data.extruded ? inwardInAny(data.faces[k], data.edge, data.first)
+                          : inwardIn(data.faces[k], data.edge, data.first),
             r
         );
     }
     if (ctx.request.kind == Kind::Chamfer) {
         return ruledChamfer(data, ends, traces, direction, length, r);
+    }
+    if (traces[0].curve || traces[1].curve) {
+        return extrudedTool(ctx, data, ends, traces, r);
     }
     // The arc's centre: on the line, or the circle, offset by r from each trace; of the two
     // solutions the one nearer the corner
@@ -12663,10 +13256,11 @@ TopoDS_Shape constructShape(
     // The faces beyond the tools kept over their faces (trimFusedToolOverFace), among wallFaces
     std::vector<TopoDS_Face> faceWalls;
     std::vector<FusedRun> fusedRuns;
-    // Rounds between two cylinders are built wherever they fit, not only at the limit: OCCT's own
-    // are B-spline faces there (preferConstruction())
+    // Rounds between two cylinders, or on a wall extruded along the edge (ops#1045), are built
+    // wherever they fit, not only at the limit: OCCT's own are B-spline faces there
+    // (preferConstruction())
     const bool limitOnly = request.limitOnly && !request.mitreOnly
-        && !(!data.empty() && std::all_of(data.begin(), data.end(), betweenCylinders)) && !notchEnds;
+        && !(!data.empty() && std::all_of(data.begin(), data.end(), preferredRound)) && !notchEnds;
     std::vector<SurfaceWall> surfaceWalls;
     std::vector<std::pair<TopoDS_Shape, TopoDS_Shape>> overlapPairs;
     for (const auto& corner : overlapCorners) {
@@ -22061,8 +22655,9 @@ bool preferConstruction(
     try {
         const TopoShape base(baseShape);
         Context ctx(base, request);
-        // Every selected edge straight between two cylinders along it (betweenCylinders()): the
-        // construction builds the round as a cylinder, below the limit too (constructShape())
+        // Every selected edge straight between two cylinders along it (betweenCylinders()), or on a
+        // wall extruded along it (betweenPrisms(), ops#1045): the construction builds the round as
+        // a cylinder, below the limit too (constructShape()). A refusal falls back to OCCT
         int picked = 0;
         int ruledOnCylinders = 0;
         for (const auto& edge : edges) {
@@ -22075,7 +22670,7 @@ bool preferConstruction(
                 if (tightArc(ctx, data)) {
                     return true;
                 }
-                if (betweenCylinders(data)) {
+                if (preferredRound(data)) {
                     ++ruledOnCylinders;
                 }
             }
@@ -22095,7 +22690,8 @@ bool preferConstruction(
 std::vector<bool> coveredEdges(
     const TopoDS_Shape& baseShape,
     const std::vector<TopoDS_Shape>& edges,
-    const Request& request
+    const Request& request,
+    bool extrudedCovered
 )
 {
     std::vector<bool> covered(edges.size(), false);
@@ -22108,8 +22704,7 @@ std::vector<bool> coveredEdges(
                 continue;
             }
             try {
-                analyse(ctx, TopoDS::Edge(edge));
-                covered[i] = true;
+                covered[i] = analyse(ctx, TopoDS::Edge(edge)).extruded ? extrudedCovered : true;
             }
             catch (const Refusal&) {
             }

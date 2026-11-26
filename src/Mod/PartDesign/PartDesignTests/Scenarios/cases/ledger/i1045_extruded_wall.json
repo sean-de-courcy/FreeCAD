@@ -1,0 +1,11 @@
+{
+"entries": {
+"NoseRoundBeforeTheNose|binder_round|V2s": {"axes": ["M1", "E1"], "classes": ["none"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr1045-r1", "issue": "ops#1045", "tier": "F"},
+"NoseRoundBeforeTheNose|fillet_edge|V2s": {"axes": ["M1", "E1"], "classes": ["none"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr1045-r1", "issue": "ops#1045", "tier": "F"},
+"NoseRoundPastTheNose|binder_round|V2s": {"axes": ["M1", "E1"], "classes": ["none"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr1045-r1", "issue": "ops#1045", "tier": "F"},
+"NoseRoundPastTheNose|fillet_edge|V2s": {"axes": ["M1", "E1"], "classes": ["none"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr1045-r1", "issue": "ops#1045", "tier": "F"},
+"NoseRoundSameSide|binder_round|V2s": {"axes": ["M1", "E1"], "classes": ["none"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr1045-r1", "issue": "ops#1045", "tier": "F"},
+"NoseRoundSameSide|fillet_edge|V2s": {"axes": ["M1", "E1"], "classes": ["none"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr1045-r1", "issue": "ops#1045", "tier": "F"},
+"RibRoundWallEdgeAndRim|fillet_edges|V2s": {"axes": ["M1", "E5"], "classes": ["none"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr1045-r1", "issue": "ops#1045", "tier": "F"}
+}
+}

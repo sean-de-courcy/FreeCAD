@@ -10132,6 +10132,15 @@ thread_local bool inRimSplitRest = false;
  * changes on the base alone, so the order of the two can't show. Else false: the feature's error
  * stands
  */
+bool roundCoveredSplit(
+    TopoShape& result,
+    const TopoShape& shape,
+    const std::vector<TopoShape>& edges,
+    const std::vector<bool>& covered,
+    double radius,
+    const char* op
+);
+
 bool roundCoveredFirst(
     TopoShape& result,
     const TopoShape& shape,
@@ -10152,6 +10161,30 @@ bool roundCoveredFirst(
     FilletFallback::Request single = request;
     single.contour.clear();
     const std::vector<bool> covered = FilletFallback::coveredEdges(input.getShape(), plain, single);
+    // A line on an extruded wall counted as the rest, as before ops#1045 covered it (sk1045
+    // change 7): asked alone where everything counted as covered (the construction refused the
+    // whole, asked only once it has), and again where the split with it covered fails: the groups
+    // then meet at the wall's edge, as with its rim picked too, where the old split built (review
+    // pr1045-r1, L1)
+    const std::vector<bool> asBefore
+        = FilletFallback::coveredEdges(input.getShape(), plain, single, false);
+    if (!std::all_of(covered.begin(), covered.end(), [](bool c) { return c; })
+        && roundCoveredSplit(result, shape, edges, covered, radius, op)) {
+        return true;
+    }
+    return asBefore != covered && roundCoveredSplit(result, shape, edges, asBefore, radius, op);
+}
+
+/// roundCoveredFirst() with the selection's coverage given: the covered group first, then the rest
+bool roundCoveredSplit(
+    TopoShape& result,
+    const TopoShape& shape,
+    const std::vector<TopoShape>& edges,
+    const std::vector<bool>& covered,
+    double radius,
+    const char* op
+)
+{
     if (covered.size() != edges.size()) {
         return false;
     }

@@ -8629,6 +8629,7 @@ class MixedCoverageTest(unittest.TestCase):
             body.makeFillet(self.R, edges + along)
 
 
+
 class NotchEndFilletTest(unittest.TestCase):
     """ops#962, designed (notes fillet-notch-end-962): a stepped block (floor z 4, wall y 15, a rim
     behind it up to z 10) with a U-shaped channel (a half circle of radius RC under two flat sides)
