@@ -10589,6 +10589,91 @@ bool onOneFootLine(const TopoDS_Edge& foot, const TopoDS_Edge& other)
     return true;
 }
 
+/** A round past a strip that ends under walls on one foot line, of two planes or more, cut by
+ * one wall's continuation (cutter, RB35): Onshape fails it (FILLET_FAILED, RB35 5c, RB42 c, RB43)
+ * where that continuation crosses the round's arc twice and some wall's continuation that crosses
+ * it twice does so the second time more than 30 deg from the arc's far end (on the other face),
+ * though each wall alone builds there. The bound lies between the facts: W 11 builds with its
+ * second crossing 28.3 deg from that end (r 1.55) and fails at 31.5 (r 1.6); W 16 builds at 28.3
+ * (r 1.1) and fails at 33.9 (r 1.2); W 6 builds at 25.0 (r 2.615). A continuation that crosses
+ * once (W 6 beside W 16 at r 1.4) or misses never fails it. A wall that is not a plane has no
+ * oracle: the join refuses. Read in the section at the edge's middle
+ */
+void joinedRoundFits(
+    const Section& middle,
+    const EdgeData& data,
+    const std::vector<const SurfaceWall*>& walls,
+    const SurfaceWall* cutter
+)
+{
+    if (!middle.fillet || middle.radius <= 0) {
+        return;
+    }
+    const gp_Vec first(middle.centre, middle.ends[0]);
+    const gp_Vec last(middle.centre, middle.ends[1]);
+    const gp_Vec across = first.Crossed(last);
+    if (across.Magnitude() <= linearTolerance * middle.radius) {
+        return;
+    }
+    const gp_Dir u(first);
+    const gp_Dir v = gp_Dir(across).Crossed(u);  // last lies at +spread from u
+    const double spread = first.Angle(last);
+    std::vector<gp_Pln> planes;
+    for (const SurfaceWall* wall : walls) {
+        BRepAdaptor_Surface surface(wall->wall, Standard_True);
+        if (surface.GetType() != GeomAbs_Plane) {
+            refuse("a dress-up past walls on one foot line, one of them curved");
+        }
+        const gp_Pln plane = surface.Plane();
+        if (std::none_of(planes.begin(), planes.end(), [&](const gp_Pln& known) {
+                return known.Axis().Direction().IsParallel(plane.Axis().Direction(), 1e-9)
+                    && known.Distance(plane.Location()) <= 1000 * linearTolerance;
+            })) {
+            planes.push_back(plane);
+        }
+    }
+    if (planes.size() < 2) {
+        return;  // one wall, in faces on one plane: its own rule (RB7)
+    }
+    // The far end: on the face the walls do not stand on
+    const int farEnd = data.faces[0].IsSame(cutter->face) ? 1 : 0;
+    // Where a wall's plane crosses the arc: the angles from the far end, nearest first
+    auto crossings = [&](const gp_Pln& plane) {
+        std::vector<double> fromFar;
+        const gp_Dir normal = plane.Axis().Direction();
+        const double a = gp_Vec(normal).Dot(gp_Vec(u));
+        const double b = gp_Vec(normal).Dot(gp_Vec(v));
+        const double d = gp_Vec(plane.Location(), middle.centre).Dot(gp_Vec(normal));
+        const double size = std::hypot(a, b);
+        if (size <= 1e-12 || std::abs(d) > size * middle.radius) {
+            return fromFar;
+        }
+        const double base = std::atan2(b, a);
+        const double spreadOff = std::acos(std::clamp(-d / (size * middle.radius), -1.0, 1.0));
+        for (double angle : {base - spreadOff, base + spreadOff}) {
+            angle = std::remainder(angle, 2 * std::numbers::pi);
+            if (angle < -1e-9 || angle > spread + 1e-9) {
+                continue;
+            }
+            fromFar.push_back(farEnd == 1 ? spread - angle : angle);
+        }
+        std::sort(fromFar.begin(), fromFar.end());
+        return fromFar;
+    };
+    BRepAdaptor_Surface own(cutter->wall, Standard_True);
+    if (crossings(own.Plane()).size() < 2) {
+        return;
+    }
+    const double bound = 30.0 * std::numbers::pi / 180.0;
+    for (const auto& plane : planes) {
+        const auto fromFar = crossings(plane);
+        if (fromFar.size() == 2 && fromFar[0] > bound) {
+            refuse("a round past walls on one foot line whose continuations cross its arc twice, "
+                   "far from its end");
+        }
+    }
+}
+
 /** A cut tool trimmed by a wall that does not run straight back from its strip's face (Case Base
  * #105: a round's strip on the underside runs off over a concave edge into #103's blend). Onshape
  * cuts the round off by the wall there, as by a wall straight back (Q-LEDGE): the wall's face
@@ -13393,19 +13478,24 @@ TopoDS_Shape constructShape(
         std::stable_sort(ordered.begin(), ordered.end(), [](const auto& a, const auto& b) {
             return a.first < b.first;
         });
-        bool edgeCut = false;
+        const SurfaceWall* cutter = nullptr;
         for (const auto& [key, at] : ordered) {
-            if (!edgeCut) {
-                edgeCut = !trimOne(*at, true);
+            if (!cutter) {
+                if (!trimOne(*at, true)) {
+                    cutter = at;
+                }
             }
             else {
                 // The edge is cut already: nothing runs past this foot any more
                 trimOne(*at, false);
             }
         }
-        if (!edgeCut) {
+        if (!cutter) {
             // Every wall's continuation misses the round's circle (RB35 5c at r 1.75)
             refuse("a wall's surface cuts a dress-up off on its other face");
+        }
+        if (request.kind == Kind::Fillet) {
+            joinedRoundFits(sectionAt(ctx, *edge, middle), *edge, mine, cutter);
         }
     }
     // Onshape, oracle 9e (ops#640, K1): CHAMFER/FILLET_OVERLAPS_EDGE_LOOP. Where two selected
