@@ -138,6 +138,7 @@ from PartDesignTests.TestFillet import TestFillet
 from PartDesignTests.TestFillet import TestSmoothEdgePicks  # FreeCAD-CH, ops#1005
 from PartDesignTests.TestFilletPropagation import TestFilletPropagation  # FreeCAD-CH, ops#655
 from PartDesignTests.TestFilletVertexEnds import TestFilletVertexEnds  # FreeCAD-CH, ops#1040
+from PartDesignTests.TestFilletVertexEnds import TestFilletVertexFolds  # FreeCAD-CH, ops#1040 K2
 from PartDesignTests.TestFilletFailureText import (  # FreeCAD-CH, ops#640 F2, ops#701
     TestFilletFailureText,
     TestMultiPartWarning,

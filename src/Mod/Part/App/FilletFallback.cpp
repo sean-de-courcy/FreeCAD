@@ -2231,6 +2231,73 @@ bool whollyBeyond(const TopoDS_Face& face, const gp_Pnt& point, const gp_Dir& to
     return z[1] <= linearTolerance + box.GetGap();
 }
 
+/// Whether an edge through the point lies wholly on the far side of the plane there, as
+/// whollyBeyond for a face, and leaves it: its far end lies beyond the plane by more than the
+/// tolerance (an edge in the plane is not one)
+bool edgeWhollyBeyond(const TopoDS_Edge& edge, const gp_Pnt& point, const gp_Dir& toward)
+{
+    gp_Trsf frame;
+    frame.SetTransformation(gp_Ax3(point, toward));
+    const TopoDS_Edge local = TopoDS::Edge(edge.Moved(TopLoc_Location(frame)));
+    Bnd_Box box;
+    BRepBndLib::Add(local, box, Standard_False);
+    if (box.IsVoid() || box.IsOpen()) {
+        return false;
+    }
+    double x[2];
+    double y[2];
+    double z[2];
+    box.Get(x[0], y[0], z[0], x[1], y[1], z[1]);
+    if (z[1] > linearTolerance + box.GetGap()) {
+        return false;
+    }
+    const gp_Pln plane(point, toward);
+    for (TopExp_Explorer it(edge, TopAbs_VERTEX); it.More(); it.Next()) {
+        if (plane.Distance(BRep_Tool::Pnt(TopoDS::Vertex(it.Current()))) > 10 * linearTolerance) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Whether the part of the face within the reach of the point lies wholly on the far side of the
+/// plane there (whollyBeyond): the face is cut by a box of that half-size about the point, square
+/// to the plane, and each piece is bounded. A face that rises past the plane farther away than
+/// the reach (a wall merged by refine with the face behind the plane, ops#1040 cause D) passes.
+/// Any failure of the cut counts as not beyond
+bool beyondWithin(const TopoDS_Face& face, const gp_Pnt& point, const gp_Dir& toward, double reach)
+{
+    if (whollyBeyond(face, point, toward)) {
+        return true;
+    }
+    if (!(reach > linearTolerance)) {
+        return false;
+    }
+    gp_Ax3 frame(point, toward);
+    gp_Pnt corner = point.Translated(gp_Vec(frame.XDirection()) * -reach
+                                     + gp_Vec(frame.YDirection()) * -reach
+                                     + gp_Vec(toward) * -reach);
+    gp_Ax2 axes(corner, toward, frame.XDirection());
+    try {
+        BRepPrimAPI_MakeBox makeBox(axes, 2 * reach, 2 * reach, 2 * reach);
+        BRepAlgoAPI_Common common(face, makeBox.Shape());
+        if (!common.IsDone()) {
+            return false;
+        }
+        int pieces = 0;
+        for (TopExp_Explorer it(common.Shape(), TopAbs_FACE); it.More(); it.Next()) {
+            if (!whollyBeyond(TopoDS::Face(it.Current()), point, toward)) {
+                return false;
+            }
+            ++pieces;
+        }
+        return pieces > 0;
+    }
+    catch (const Standard_Failure&) {
+        return false;
+    }
+}
+
 /// ops#640, the replica's #150 (a round at the end of a wall that stands flush on a chamfered
 /// rim): besides the selected edge's two faces and one plane P, the vertex has faces that lie
 /// wholly beyond P from the selected edge and meet the vertex only through edges in P. The tool,
@@ -2304,8 +2371,18 @@ void foldFarFaces(const Context& ctx,
                 keptEdges.push_back(edge);
                 continue;
             }
-            if (edge.IsSame(data.edge) || ctx.selected.Contains(edge)
-                || !edgeInPlane(TopoDS::Edge(edge), plane)) {
+            if (edge.IsSame(data.edge) || ctx.selected.Contains(edge)) {
+                holds = false;
+                break;
+            }
+            if (!edgeInPlane(TopoDS::Edge(edge), plane)) {
+                // ops#1040 cause C: an edge that leaves the vertex wholly behind the plane (an own
+                // face running on below the floor into a face beyond it, a scallop in the base's
+                // outline at the wall's corner). The tool, bounded by the plane, never reaches it:
+                // left out, as foldFloorPieces leaves out the edges behind its floor
+                if (edgeWhollyBeyond(TopoDS::Edge(edge), point, toward)) {
+                    continue;
+                }
                 holds = false;
                 break;
             }
@@ -2335,6 +2412,8 @@ void foldFarFaces(const Context& ctx,
 /// edges in the plane or behind it among them, and the floor counts as one face. The edge's faces
 /// must each meet the floor in one edge at the vertex, which are kept; anything else stays
 /// refused. Called only for a vertex that would be refused
+Section sectionAt(const Context& ctx, const EdgeData& data, double parameter);
+
 void foldFloorPieces(const Context& ctx,
                      const EdgeData& data,
                      const TopoDS_Vertex& vertex,
@@ -2353,7 +2432,8 @@ void foldFloorPieces(const Context& ctx,
         }
     }
     gp_Pnt point = BRep_Tool::Pnt(vertex);
-    gp_Dir away = awayFrom(data.edge, vertex);
+    double atVertex = 0.0;
+    gp_Dir away = awayFrom(data.edge, vertex, &atVertex);
     auto ownIndex = [&](const TopoDS_Shape& face) {
         return face.IsSame(data.faces[0]) ? 0 : face.IsSame(data.faces[1]) ? 1 : -1;
     };
@@ -2392,12 +2472,18 @@ void foldFloorPieces(const Context& ctx,
     if (floor.size() < 2) {
         return;
     }
+    // ops#1040 cause D: a face behind the floor may be merged by refine with a coplanar face that
+    // rises past the floor farther away (HNY Honeypot #10). The tool, bounded by the floor's plane,
+    // reaches no further from the vertex than its section: only the face's part within twice the
+    // section's extent is bounded
+    const Section section = sectionAt(ctx, data, atVertex);
+    const double reach = 2 * (section.length[0] + section.length[1]);
     std::vector<TopoDS_Shape> behind;
     for (const auto& face : faces) {
         if (ownIndex(face) >= 0 || among(face, floor)) {
             continue;
         }
-        if (!whollyBeyond(TopoDS::Face(face), point, toward)) {
+        if (!beyondWithin(TopoDS::Face(face), point, toward, reach)) {
             return;
         }
         behind.push_back(face);
@@ -3474,10 +3560,36 @@ void foldBehindOwn(const Context& ctx,
     auto ownIndex = [&](const TopoDS_Shape& face) {
         return face.IsSame(data.faces[0]) ? 0 : face.IsSame(data.faces[1]) ? 1 : -1;
     };
+    // ops#1040 cause A: another piece of an own face's surface through the vertex (the wall under a
+    // U-groove whose axis is at the wall's top: two cusp faces of one plane touching only at the
+    // vertex, with no edge between them for foldSplits), and which own face it continues
+    std::vector<std::pair<TopoDS_Shape, int>> twins;
+    for (const auto& face : faces) {
+        if (ownIndex(face) >= 0) {
+            continue;
+        }
+        for (int k = 0; k < 2; ++k) {
+            if (oneSurface(TopoDS::Face(face), data.faces[k], point)) {
+                twins.emplace_back(face, k);
+                break;
+            }
+        }
+    }
+    auto twinIndex = [&](const TopoDS_Shape& face) {
+        for (const auto& [f, k] : twins) {
+            if (f.IsSame(face)) {
+                return k;
+            }
+        }
+        return -1;
+    };
+    if (twins.size() > 1) {
+        return;
+    }
     // Each other face: wholly behind one own face's plane, and that face's index
     std::vector<std::pair<TopoDS_Shape, int>> behind;
     for (const auto& face : faces) {
-        if (ownIndex(face) >= 0) {
+        if (ownIndex(face) >= 0 || twinIndex(face) >= 0) {
             continue;
         }
         int which = -1;
@@ -3491,7 +3603,7 @@ void foldBehindOwn(const Context& ctx,
         }
         behind.emplace_back(face, which);
     }
-    if (behind.empty() || faces.size() != behind.size() + 2) {
+    if (behind.empty() || faces.size() != behind.size() + twins.size() + 2) {
         return;
     }
     auto behindIndex = [&](const TopoDS_Shape& face) {
@@ -3513,8 +3625,34 @@ void foldBehindOwn(const Context& ctx,
         if (ofEdge.size() != 2) {
             return;
         }
-        const int a = ownIndex(ofEdge[0]);
-        const int b = ownIndex(ofEdge[1]);
+        int a = ownIndex(ofEdge[0]);
+        int b = ownIndex(ofEdge[1]);
+        // An own face and the other own face's twin (cause A): the foot line's other piece lies
+        // on the floor and the other cusp, and counts as on the same two faces
+        if (a >= 0 && b < 0 && twinIndex(ofEdge[1]) == 1 - a) {
+            b = 1 - a;
+        }
+        else if (b >= 0 && a < 0 && twinIndex(ofEdge[0]) == 1 - b) {
+            a = 1 - b;
+        }
+        else if (a < 0 && b < 0) {
+            // A twin's edge with a face behind the plane of the own face it continues counts as
+            // that own face's edge
+            const int ta = twinIndex(ofEdge[0]);
+            const int tb = twinIndex(ofEdge[1]);
+            if (ta >= 0 && tb >= 0) {
+                return;
+            }
+            if (ta >= 0) {
+                a = ta;
+            }
+            else if (tb >= 0) {
+                b = tb;
+            }
+        }
+        else if (twinIndex(ofEdge[0]) >= 0 || twinIndex(ofEdge[1]) >= 0) {
+            return;  // an own face against its own twin or the other's, not along the foot line
+        }
         if (a >= 0 && b >= 0) {
             // The foot line's other piece, straight on through the vertex
             BRepAdaptor_Curve curve(TopoDS::Edge(edge));
@@ -3600,7 +3738,12 @@ VertexEnd classify(
         if (auto overflow = overflowEnd(ctx, data, vertex, edges, faces, why)) {
             return *overflow;
         }
-        foldBehindFace(ctx, data, vertex, edges, faces);
+        // ops#1040 cause A: the foot line through a U-groove with the wall in two cusp faces
+        foldBehindOwn(ctx, data, vertex, edges, faces);
+        insideCurve = edges.size() == 2 && faces.size() == 2;
+        if (!insideCurve) {
+            foldBehindFace(ctx, data, vertex, edges, faces);
+        }
         if (edges.size() == 4) {
             end.reason = "a vertex where 4 edges meet (" + why + ")";
             return end;
