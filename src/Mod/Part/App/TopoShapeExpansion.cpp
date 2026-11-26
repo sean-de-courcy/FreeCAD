@@ -12826,8 +12826,12 @@ TopoShape& TopoShape::makeElementPrismUntil(
     // split gives each point its first crossing and refuses a profile that partly misses the
     // surface. Nothing when the face covers the profile and is its first crossing (BRepFeat's
     // case), or the profile touches the surface: the first error stands
+    // Up to a picked face only: up to first or last the face is the part's, and the full turn
+    // would end the prism on a part of the surface that isn't there (review rv540-3 F1: a pad up
+    // to first into a cradle with a profile taller than it, every point stopped short of the
+    // cradle by the fallbacks below; integration refuses it, and so does this now)
     auto byFullTurn = [&]() -> std::optional<TopoShape> {
-        if (!mayExtend || __uptoface.shapeType(true) != TopAbs_FACE
+        if (!mayExtend || !picked || __uptoface.shapeType(true) != TopAbs_FACE
             || !profile.hasSubShape(TopAbs_FACE) || KernelBudget::pastDeadline()) {
             return std::nullopt;
         }

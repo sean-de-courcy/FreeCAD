@@ -6265,3 +6265,25 @@ class TestUpToFirstLastRoundFace(unittest.TestCase):
         self.assertAlmostEqual(
             pad.Shape.Volume, solid.Volume + expected, delta=PRISM_VOLUME_RELATIVE * expected
         )
+
+    def testPadUpToFirstIntoACradleTallerProfileIsRefused(self):
+        # The cradle above, the rectangle y -2..2, z 1..6 on the plane x = 60 (2 mm taller than
+        # the cradle), padded towards -x up to first: the part's face doesn't take the part of the
+        # profile above it, and up to first never ends on the face's surface extended around
+        # (review rv540-3 F1: every point stopped at x = +sqrt(25 - y^2), the cradle left empty,
+        # Valid). Refused with a message, as on integration
+        V = FreeCAD.Vector
+        solid = Part.makeBox(10, 20, 4, V(-10, -10, 0)).cut(Part.makeCylinder(5, 4))
+        base = self.Doc.addObject("Part::Feature", "Cradle")
+        base.Shape = solid
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        body.BaseFeature = base
+        pad = body.newObject("PartDesign::Pad", "Pad")
+        pad.Profile = rectangleOnX(body, 60, -2, 2, 1, 6)
+        pad.Type = "UpToFirst"
+        pad.UseCustomVector = True
+        pad.AlongSketchNormal = False
+        pad.Direction = V(-1, 0, 0)
+        self.Doc.recompute()
+        self.assertFalse(pad.isValid())
+        self.assertNotEqual(pad.getStatusString().strip(), "")
