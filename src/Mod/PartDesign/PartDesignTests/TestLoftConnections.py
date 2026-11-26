@@ -1457,3 +1457,65 @@ class TestLoftUnconnected(ConnectionCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestLoftSolidForward(ConnectionCase):
+    """ops#1073: a first-feature loft or pipe whose shell faced inward was flagged Reversed as a solid, and OCCT's fillet
+    of such a solid is an invalid shape (`Shape.makeFillet` on the feature's shape failed for every side edge). The
+    solid is now rebuilt from the reversed shell: Forward, the same faces, edges and volume."""
+
+    def sideEdge(self, shape, height):
+        return [e for e in shape.Edges if abs(abs(e.Vertexes[0].Point.z - e.Vertexes[-1].Point.z) - height) < 1e-6]
+
+    def assertForwardAndFillets(self, feature, height):
+        self.assertTrue(feature.isValid(), feature.getStatusString())
+        shape = feature.Shape
+        self.assertEqual(len(shape.Solids), 1)
+        solid = shape.Solids[0]
+        self.assertEqual(solid.Orientation, "Forward")
+        self.assertGreater(solid.Volume, 0)
+        edges = self.sideEdge(shape, height)
+        self.assertTrue(edges)
+        for e in edges:
+            rounded = shape.makeFillet(0.5, [e])
+            self.assertTrue(rounded.isValid())
+            self.assertEqual(len(rounded.Faces), len(shape.Faces) + 1)
+
+    def testFrustumLoftEitherWayRound(self):
+        # the profile drawn both ways round: one of the two used to give an inward shell
+        bottom = [(-10, -10), (10, -10), (10, 10), (-10, 10)]
+        for label, points in (("ccw", bottom), ("cw", bottom[::-1])):
+            with self.subTest(profile=label):
+                try:
+                    profile = models.sketch(self.doc, "Bottom", models.polygon(points), self.body)
+                    section = models.sketch(self.doc, "Top", models.rectangle(-6, -6, 6, 6), self.body, z=H)
+                    self.doc.recompute()
+                    loft = self.body.newObject("PartDesign::AdditiveLoft", "Loft")
+                    loft.Profile = profile
+                    loft.Sections = [section]
+                    self.doc.recompute()
+                    self.assertForwardAndFillets(loft, H)
+                    self.assertAlmostEqual(loft.Shape.Volume, H / 3 * (400 + 144 + 240), delta=1e-6)
+                finally:
+                    self.tearDown()
+                    self.setUp()
+
+    def testStraightPipeEitherWayRound(self):
+        square = [(-5, -5), (5, -5), (5, 5), (-5, 5)]
+        for label, points in (("ccw", square), ("cw", square[::-1])):
+            with self.subTest(profile=label):
+                try:
+                    profile = models.sketch(self.doc, "Profile", models.polygon(points), self.body)
+                    spine = self.body.newObject("Sketcher::SketchObject", "Spine")
+                    spine.Placement = FreeCAD.Placement(FreeCAD.Vector(), FreeCAD.Rotation(FreeCAD.Vector(1, 0, 0), 90))
+                    spine.addGeometry(Part.LineSegment(FreeCAD.Vector(0, 0, 0), FreeCAD.Vector(0, H, 0)))
+                    self.doc.recompute()
+                    pipe = self.body.newObject("PartDesign::AdditivePipe", "Pipe")
+                    pipe.Profile = profile
+                    pipe.Spine = spine
+                    self.doc.recompute()
+                    self.assertForwardAndFillets(pipe, H)
+                    self.assertAlmostEqual(pipe.Shape.Volume, 100 * H, delta=1e-6)
+                finally:
+                    self.tearDown()
+                    self.setUp()

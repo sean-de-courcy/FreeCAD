@@ -133,6 +133,8 @@
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopoDS.hxx>
+#include <TopoDS_Solid.hxx>
+#include <TopoDS_Iterator.hxx>
 #include <TopoDS_Compound.hxx>
 #include <TopoDS_Wire.hxx>
 #include <TopTools_DataMapOfShapeInteger.hxx>
@@ -168,6 +170,26 @@ using namespace PartDesign;
 
 namespace
 {
+
+/// The solid made Forward, its shells facing out (ops#1073): OCCT's fillet of a solid flagged
+/// Reversed gives an invalid shape, and makeElementSolid flags it so (orientClosedSolid) when the
+/// sewn shell faced inward, as the old `Reversed()` here did. Rebuilt from its shells as the solid
+/// sees them, each reversed when `inward` (the classifier found the material outside). Same
+/// faces, edges and vertices in the same order, so the element map holds.
+TopoDS_Shape outwardSolid(const TopoDS_Shape& shape, bool inward)
+{
+    if (!inward && shape.Orientation() == TopAbs_FORWARD) {
+        return shape;
+    }
+    TopoDS_Solid solid;
+    BRep_Builder builder;
+    builder.MakeSolid(solid);
+    for (TopoDS_Iterator it(shape); it.More(); it.Next()) {
+        builder.Add(solid, inward ? it.Value().Reversed() : it.Value());
+    }
+    return solid;
+}
+
 // The pipe shell's history, plus the wires where it starts and ends (ops#351). MakePipeShell
 // reports the side faces and edges that the sections' edges and vertices generate, but nothing
 // for its end wires, so those were named `UPP` from the side faces, and a start edge's name had
@@ -4059,9 +4081,7 @@ Part::TopoShape sweepPiecesAndFuse(
             solid = solid.makeElementSolid();
             BRepClass3d_SolidClassifier classifier(solid.getShape());
             classifier.PerformInfinitePoint(Precision::Confusion());
-            if (classifier.State() == TopAbs_IN) {
-                solid.setShape(solid.getShape().Reversed(), false);
-            }
+            solid.setShape(outwardSolid(solid.getShape(), classifier.State() == TopAbs_IN), false);
             if (!isValidSolid(solid)) {
                 return {};
             }
@@ -9753,9 +9773,7 @@ App::DocumentObjectExecReturn* Pipe::execute()
                 SC.PerformInfinitePoint(Precision::Confusion());
                 inward = SC.State() == TopAbs_IN;
             }
-            if (inward) {
-                s.setShape(s.getShape().Reversed(), false);
-            }
+            s.setShape(outwardSolid(s.getShape(), inward), false);
             // Before any check reads them: the same verdicts on every platform (ops#667)
             raiseTightEdgeTolerances(s);
         }

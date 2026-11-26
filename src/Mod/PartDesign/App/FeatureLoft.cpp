@@ -66,6 +66,8 @@
 #include <TopExp_Explorer.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
 #include <TopoDS.hxx>
+#include <TopoDS_Solid.hxx>
+#include <TopoDS_Iterator.hxx>
 #include <TopoDS_Edge.hxx>
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Vertex.hxx>
@@ -99,6 +101,26 @@ PartExport void makeLoftCanonical(TopoShape& loft);
 
 namespace
 {
+
+/// The solid made Forward, its shells facing out (ops#1073): OCCT's fillet of a solid flagged
+/// Reversed gives an invalid shape, and makeElementSolid flags it so (orientClosedSolid) when the
+/// sewn shell faced inward, as the old `Reversed()` here did. Rebuilt from its shells as the solid
+/// sees them, each reversed when `inward` (the classifier found the material outside). Same
+/// faces, edges and vertices in the same order, so the element map holds.
+TopoDS_Shape outwardSolid(const TopoDS_Shape& shape, bool inward)
+{
+    if (!inward && shape.Orientation() == TopAbs_FORWARD) {
+        return shape;
+    }
+    TopoDS_Solid solid;
+    BRep_Builder builder;
+    builder.MakeSolid(solid);
+    for (TopoDS_Iterator it(shape); it.More(); it.Next()) {
+        builder.Add(solid, inward ? it.Value().Reversed() : it.Value());
+    }
+    return solid;
+}
+
 // ops#655: Onshape's loft start and end condition "Normal to profile" (notes/loft-options.md)
 
 /// Onshape's tangent length per unit magnitude at one corner rail of a side face, from its point p
@@ -3435,9 +3457,7 @@ App::DocumentObjectExecReturn* Loft::executeLoft(
             s = s.makeElementSolid();
             BRepClass3d_SolidClassifier SC(s.getShape());
             SC.PerformInfinitePoint(Precision::Confusion());
-            if (SC.State() == TopAbs_IN) {
-                s.setShape(s.getShape().Reversed(), false);
-            }
+            s.setShape(outwardSolid(s.getShape(), SC.State() == TopAbs_IN), false);
             if ((startSet || endSet) && !legacy  // fork-1.0.0 built these
                 && crossesACap(
                     s.getShape(),
