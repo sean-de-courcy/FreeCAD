@@ -643,5 +643,207 @@ class TestPartEndsStudio(unittest.TestCase):
         self.assertTrue(b.Shape.isNull())
 
 
+class TestPatternAfterEnd(unittest.TestCase):
+    """ops#1079 (notes/pattern-after-part-end-1079.md): a FEATURE pattern of a Remove that split
+    its part and of the Remove that then took one piece whole, placed in the other piece. Onshape
+    (RB50, RB122): Reapply on, each instance re-runs both, the second on the piece the first's copy
+    splits off, or on the part itself where there is none; nothing changes where nothing is
+    reached; Reapply off fails, PATTERN_SWITCH_TO_PER_INSTANCE.
+
+    Designed model: a block x 0..10, y 0..10 with tabs x 10..14 and x -4..0, y 4..6, all 2 thick
+    (volume 232). Cut1, through all over x 11..12, y 3..7, splits off the right tab's end; the
+    pieces become parts A (volume 220) and B (x 12..14, volume 8). Cut2 in B over x 11.5..15,
+    y 3..7 takes all of B. The pattern: 2 instances over 360 degrees about a z line through (5, 5):
+    Cut1's copy (x -2..-1) splits the left tab's end (x -4..-2, volume 8) off, and Cut2's copy
+    (x -5..-1.5) takes that piece whole: A keeps 220 - 4 - 8 = 208, one solid."""
+
+    def setUp(self):
+        self.doc = App.newDocument("TestPatternAfterEnd")
+        self.doc.UndoMode = 1
+
+    def tearDown(self):
+        for doc in list(App.listDocuments().values()):
+            if doc.Name.startswith("TestPatternAfterEnd"):
+                App.closeDocument(doc.Name)
+
+    def build(self, blind=False, notch=False):
+        source = self.doc.addObject("PartDesign::Body", "Source")
+        outline = source.newObject("Sketcher::SketchObject", "Outline")
+        outline.AttachmentSupport = [(source.Origin.OriginFeatures[3], "")]
+        outline.MapMode = "FlatFace"
+        points = [V(0, 0, 0), V(10, 0, 0), V(10, 4, 0), V(14, 4, 0), V(14, 6, 0), V(10, 6, 0),
+                  V(10, 10, 0), V(0, 10, 0), V(0, 6, 0), V(-4, 6, 0), V(-4, 4, 0), V(0, 4, 0)]
+        for i, point in enumerate(points):
+            outline.addGeometry(Part.LineSegment(point, points[(i + 1) % len(points)]))
+        for i in range(len(points)):
+            outline.addConstraint(
+                Sketcher.Constraint("Coincident", i, 2, (i + 1) % len(points), 1)
+            )
+        block = source.newObject("PartDesign::Pad", "Block")
+        block.Profile = outline
+        block.Length = 2
+        cut1Sketch = sketch(source, "Cut1Sketch", (11, 3, 12, 7), z=2)
+        self.cut1 = source.newObject("PartDesign::Pocket", "Cut1")
+        self.cut1.Profile = cut1Sketch
+        self.cut1.Type = "ThroughAll"
+        self.doc.recompute()
+        self.assertAlmostEqual(block.Shape.Volume, 232, places=6)
+        self.assertEqual(len(self.cut1.Shape.Solids), 2)
+        if PartDesign.studioList(None, False) is None:
+            PartDesign.studioList(None, True)
+        pieces = list(PartDesign.studioMakePieces(self.cut1))
+        self.doc.recompute()
+        self.a = [b for b in pieces if b.Shape.BoundBox.XMin < -1][0]
+        self.b = [b for b in pieces if b.Shape.BoundBox.XMin > 11][0]
+        self.assertAlmostEqual(self.a.Shape.Volume, 220, places=6)
+        self.assertAlmostEqual(self.b.Shape.Volume, 8, places=6)
+        self.notch = None
+        if notch:
+            notchSketch = sketch(self.b, "NotchSketch", (13, 4.5, 13.5, 5.5), z=2)
+            self.notch = self.b.newObject("PartDesign::Pocket", "Notch")
+            self.notch.Profile = notchSketch
+            self.notch.Type = "ThroughAll"
+        cut2Sketch = sketch(self.b, "Cut2Sketch", (11.5, 3, 15, 7), z=2)
+        self.cut2 = self.b.newObject("PartDesign::Pocket", "Cut2")
+        self.cut2.Profile = cut2Sketch
+        if blind:
+            self.cut2.Length = 5
+        else:
+            self.cut2.Type = "ThroughAll"
+        self.doc.recompute()
+        self.assertTrue(ended(self.cut2), self.cut2.getStatusString())
+
+    def pattern(self, body, originals, x=5, reapply=True):
+        axis = body.newObject("PartDesign::Line", "Axis")
+        axis.MapMode = "Deactivated"
+        axis.Placement = App.Placement(V(x, 5, 0), App.Rotation())
+        pattern = self.doc.addObject("PartDesign::PolarPattern", "Pattern")
+        pattern.Originals = originals
+        pattern.Axis = (axis, [""])
+        pattern.Angle = 360
+        pattern.Occurrences = 2
+        pattern.Reapply = reapply
+        body.addObject(pattern)
+        self.doc.recompute()
+        return pattern
+
+    def assertReached(self, pattern):
+        self.assertTrue(pattern.isValid(), pattern.getStatusString())
+        self.assertEqual(self.a.Tip, pattern)
+        self.assertEqual(len(self.a.Shape.Solids), 1)
+        self.assertAlmostEqual(self.a.Shape.Volume, 208, places=6)
+        self.assertLess(abs(self.a.Shape.BoundBox.XMin + 1), 1e-6)
+
+    def assertRefused(self, pattern, words):
+        self.assertFalse(pattern.isValid())
+        self.assertIn(words, pattern.getStatusString())
+
+    def testCopiesTakeThePieceTheirSiblingSplitsOff(self):
+        """In A, Reapply on: Valid, A keeps 208 in one solid; the same after a save and reopen."""
+        self.build()
+        pattern = self.pattern(self.a, [self.cut1, self.cut2])
+        self.assertReached(pattern)
+        path = os.path.join(tempfile.mkdtemp(), "patternAfterEnd.FCStd")
+        self.doc.saveAs(path)
+        App.closeDocument(self.doc.Name)
+        self.doc = App.openDocument(path)
+        self.doc.recompute()
+        pattern = self.doc.getObject("Pattern")
+        self.assertTrue(pattern.isValid(), pattern.getStatusString())
+        self.assertAlmostEqual(pattern.getParentGeoFeatureGroup().Shape.Volume, 208, places=6)
+
+    def testBlindEnderTheSame(self):
+        """Cut2 blind 5 (deeper than the part): the same 208."""
+        self.build(blind=True)
+        self.assertReached(self.pattern(self.a, [self.cut1, self.cut2]))
+
+    def testEnderCopyWithNoPieceCutsThePart(self):
+        """About (8, 5) Cut1's copy is a slot in A (x 4..5, y 3..7: 8) and splits nothing, and
+        Cut2's copy (x 1..4.5, y 3..7: 28, 4 of it in the slot) acts on A itself, as Onshape's
+        (RB122 Q2): Valid, A 220 - 32 = 188 in one solid."""
+        self.build()
+        pattern = self.pattern(self.a, [self.cut1, self.cut2], x=8)
+        self.assertTrue(pattern.isValid(), pattern.getStatusString())
+        self.assertEqual(len(self.a.Shape.Solids), 1)
+        self.assertAlmostEqual(self.a.Shape.Volume, 188, places=6)
+
+    def testEnderCopyReachingNothing(self):
+        """About (3.6, 5) Cut1's copy (x -4.8..-3.8) shaves 0.2 off the left tab's end and splits
+        nothing, and Cut2's copy (x -7.8..-4.3) reaches nothing, as Onshape's (RB122 Q7): Valid,
+        A 220 - 0.8 = 219.2."""
+        self.build()
+        pattern = self.pattern(self.a, [self.cut1, self.cut2], x=3.6)
+        self.assertTrue(pattern.isValid(), pattern.getStatusString())
+        self.assertEqual(len(self.a.Shape.Solids), 1)
+        self.assertAlmostEqual(self.a.Shape.Volume, 219.2, places=6)
+
+    def testOrderListedIsKept(self):
+        """Cut2 listed first: at the instance its copy (x -5..-1.5) cuts the left tab before
+        Cut1's (x -2..-1) does, so no piece is split off and A ends as with the listed order
+        reversed: 208 in one solid, the same on every run (originals outside A keep their order)."""
+        self.build()
+        self.assertReached(self.pattern(self.a, [self.cut2, self.cut1]))
+
+    def testNoCopyReachesAPart(self):
+        """The axis at x 30: no copy reaches A: Valid, A unchanged, as Onshape's (RB122 Q3)."""
+        self.build()
+        pattern = self.pattern(self.a, [self.cut1, self.cut2], x=30)
+        self.assertTrue(pattern.isValid(), pattern.getStatusString())
+        self.assertEqual(len(self.a.Shape.Solids), 1)
+        self.assertAlmostEqual(self.a.Shape.Volume, 220, places=6)
+
+    def testReapplyOffIsRefused(self):
+        """Reapply off: refused (Onshape PATTERN_SWITCH_TO_PER_INSTANCE, RB122 Q4)."""
+        self.build()
+        self.assertRefused(
+            self.pattern(self.a, [self.cut1, self.cut2], reapply=False), "(Reapply on)"
+        )
+
+    def testInTheEndedPieceIsLocked(self):
+        """In B, after Cut2: the lock, with where the pattern goes."""
+        self.build()
+        pattern = self.pattern(self.b, [self.cut2])
+        self.assertRefused(pattern, LOCK)
+        self.assertIn("goes in the part its copies reach", pattern.getStatusString())
+
+    def testOriginalBeforeTheEnderIsLocked(self):
+        """A feature of B before Cut2 patterned in A: B ended before the pattern: refused."""
+        self.build(notch=True)
+        pattern = self.pattern(self.a, [self.cut1, self.notch])
+        self.assertFalse(pattern.isValid())
+
+    def testPlacedDifferentlyIsRefused(self):
+        """B moved: its tool would be copied in the wrong frame: refused."""
+        self.build()
+        self.b.Placement = App.Placement(V(0, 0, 1), App.Rotation())
+        self.doc.recompute()
+        self.assertRefused(self.pattern(self.a, [self.cut1, self.cut2]), "placed differently")
+
+    def testEnderSuppressedThenBack(self):
+        """Cut2 suppressed: no longer an ended original, and the pattern no longer gives A the 208
+        of one solid; unsuppressed: 208 again."""
+        self.build()
+        pattern = self.pattern(self.a, [self.cut1, self.cut2])
+        self.assertReached(pattern)
+        self.cut2.Suppressed = True
+        self.doc.recompute()
+        self.assertFalse(self.cut2.PartEnded and self.cut2.isValid() and not self.cut2.Suppressed)
+        self.assertFalse(
+            pattern.isValid()
+            and len(self.a.Shape.Solids) == 1
+            and abs(self.a.Shape.Volume - 208) < 1e-6
+        )
+        self.cut2.Suppressed = False
+        self.doc.recompute()
+        self.assertReached(pattern)
+
+    def testWithoutTheEnderUnchanged(self):
+        """Control: Cut1 alone with no copy reaching A keeps the rule of before: Valid, A
+        unchanged (a copy that cuts nothing changes nothing)."""
+        self.build()
+        pattern = self.pattern(self.a, [self.cut1], x=30)
+        self.assertTrue(pattern.isValid(), pattern.getStatusString())
+        self.assertAlmostEqual(self.a.Shape.Volume, 220, places=6)
+
 if __name__ == "__main__":
     unittest.main()

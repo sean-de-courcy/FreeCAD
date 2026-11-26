@@ -84,6 +84,7 @@
 #include "FeatureRevolved.h"
 #include "FeatureMirrored.h"
 #include "FeatureCurvePattern.h"
+#include "FeatureDeletePart.h"
 #include "FeatureLinearPattern.h"
 #include "FeaturePolarPattern.h"
 #include "FeatureSketchBased.h"
@@ -249,6 +250,28 @@ App::DocumentObject* studioOwnerOfOriginal(App::DocumentObject* obj)
         return feature ? feature->StudioOwner.getValue() : nullptr;
     }
     return nullptr;
+}
+
+/// FreeCAD-CH ops#1079 (notes/pattern-after-part-end-1079.md): a plain original (taken as
+/// itself, not through a studio owner's step) in another Body than @p body
+bool inAnotherBody(App::DocumentObject* original, const Body* body)
+{
+    if (!original || studioOwnerOfOriginal(original)) {
+        return false;
+    }
+    Body* own = Body::findBodyOf(original);
+    return own && own != body;
+}
+
+/// ops#1079: @p original took all of its own part (PartEnded, ops#1065: valid, not suppressed)
+/// and is in another Body than @p body. Read from the original itself, never through its Body's
+/// bar. Onshape (RB50, RB122): a FEATURE pattern of such a Remove re-runs it at each instance on
+/// what the pattern's part holds there, and fails with Reapply off
+bool isEndedOriginal(App::DocumentObject* original, const Body* body)
+{
+    auto feature = freecad_cast<PartDesign::Feature*>(original);
+    return feature && inAnotherBody(original, body) && feature->PartEnded.getValue()
+        && !feature->Suppressed.getValue() && !feature->isError();
 }
 
 /** The step an owner picked as an original maps to in the pattern's part, or why it can't be
@@ -1487,7 +1510,8 @@ std::vector<App::DocumentObject*> Transformed::getSortedOriginals() const
             }
             return obj;
         };
-        std::ranges::sort(originals, [&indexMap, &inBody](DocumentObject* a, DocumentObject* b) {
+        // Stable: originals outside the Body (ops#1079) keep the order they are listed in
+        std::ranges::stable_sort(originals, [&indexMap, &inBody](DocumentObject* a, DocumentObject* b) {
             auto itA = indexMap.find(inBody(a));
             auto itB = indexMap.find(inBody(b));
             size_t idxA = (itA != indexMap.end()) ? itA->second : std::numeric_limits<size_t>::max();
@@ -2177,6 +2201,40 @@ App::DocumentObjectExecReturn* Transformed::execute()
         }
         return shapes;
     };
+
+    // FreeCAD-CH ops#1079 (notes/pattern-after-part-end-1079.md): originals in another Body, and
+    // those of them that took all of their own part. Onshape (RB122) re-runs such a Remove at each
+    // instance on what the pattern's part holds there (the piece its sibling's copy splits off, or
+    // the part itself), changing nothing where it reaches nothing; Reapply off fails
+    // (PATTERN_SWITCH_TO_PER_INSTANCE)
+    if (mode == Mode::Features) {
+        Body* body = getFeatureBody();
+        for (auto original : originals) {
+            if (!body || !inAnotherBody(original, body)) {
+                continue;
+            }
+            Body* own = Body::findBodyOf(original);
+            // Its tool is read in its own Body's frame as if it were the pattern's: one placed
+            // differently would be copied to the wrong place
+            if (!App::GeoFeature::getGlobalPlacement(own).isSame(
+                    App::GeoFeature::getGlobalPlacement(body),
+                    Precision::Confusion()
+                )) {
+                return new App::DocumentObjectExecReturn(
+                    quoted(original) + " is in " + quoted(own) + ", which is placed differently from "
+                        + quoted(body) + ": a pattern of it there isn't done yet",
+                    this
+                );
+            }
+            if (isEndedOriginal(original, body) && !Reapply.getValue()) {
+                return new App::DocumentObjectExecReturn(
+                    quoted(original) + " took all of " + quoted(own)
+                        + ": a pattern of it can only re-run it (Reapply on)",
+                    this
+                );
+            }
+        }
+    }
 
     switch (mode) {
         case Mode::Features: {
