@@ -942,5 +942,518 @@ class TestLoftElbowPairing(unittest.TestCase):
         self.assertAlmostEqual(loft.Shape.Volume, 1960, delta=1e-6)
 
 
+class TestLoftUnconnected(ConnectionCase):
+    """ops#1071: two profiles with different vertex counts and no connections pair as Onshape's, one chain from a start
+    pair (notes/loft-unconnected-design-1071.md), where OCCT's compatibility step cast polar rays. The start keeps the
+    corners' positions (each vertex taken from its own loop's centre), then the least arc-length mismatch of the chain;
+    the loft is then a connected one (ops#1046's merge of smooth runs). Profiles and Onshape's answers: RB44, RB47,
+    RB54, RB124, RB130 (notes/onshape-facts.md), TestLoftTangentRuns' rows, z 30."""
+
+    C30 = TestLoftTangentRuns.C30
+    arc = staticmethod(TestLoftTangentRuns.arc)
+    spanA = TestLoftTangentRuns.spanA
+    spanB = TestLoftTangentRuns.spanB
+    sideEdges = TestLoftTangentRuns.sideEdges
+    assertRoundTrip = TestLoftTangentRuns.assertRoundTrip
+
+    ROW11 = [((-20, 10), (-12, 6)), ((-20, -10), (-12, -6)), ((20, -10), (12, -6)), ((10, 10), (0, 6)),
+             ((15, 5), (12, 6)), ((15, 0), (12, 0))]
+
+    def profiles(self, a, b):
+        sa, ea, ba = self.spanA(a)
+        sb, eb, bb = self.spanB(b)
+        A = sa + models.polyline([ea, ba, (-20, -10), (-20, 10)])
+        B = sb + models.polyline([eb, bb, (-12, -6), (-12, 6)])
+        corners = [((-20, 10), (-12, 6)), (ea, eb), ((-20, -10), (-12, -6)), (ba, bb)]
+        return A, B, corners
+
+    def build(self, bottom, top, connections=(), placement=None, **properties):
+        self.profile = models.sketch(self.doc, "Bottom", bottom, self.body)
+        self.section = models.sketch(self.doc, "Top", top, self.body, z=H, placement=placement)
+        self.doc.recompute()
+        loft = self.body.newObject("PartDesign::AdditiveLoft", "Loft")
+        loft.Profile = self.profile
+        loft.Sections = [self.section]
+        self.connect(loft, connections)
+        for name, value in properties.items():
+            setattr(loft, name, value)
+        self.doc.recompute()
+        return loft
+
+    def fresh(self):
+        self.tearDown()
+        self.setUp()
+
+    def assertValid(self, loft):
+        self.assertTrue(loft.isValid(), loft.getStatusString())
+        self.assertTrue(loft.Shape.isValid())
+        self.assertEqual(len(loft.Shape.Solids), 1)
+
+    def sideSet(self, loft, height=H):
+        out = []
+        for e in self.sideEdges(loft, height):
+            p, q = sorted((v.Point for v in e.Vertexes), key=lambda v: v.z)
+            out.append((round(p.x, 3) + 0.0, round(p.y, 3) + 0.0, round(q.x, 3) + 0.0, round(q.y, 3) + 0.0))
+        return sorted(out)
+
+    def assertSides(self, loft, expected, height=H, straight=False):
+        sides = self.sideEdges(loft, height)
+        self.assertEqual(len(sides), len(expected), self.sideSet(loft, height))
+        for a, b in expected:
+            self.assertJoined(loft, a, b, height=height, straight=straight)
+
+    def assertOnshape(self, loft, faces, volume, area, sides):
+        self.assertValid(loft)
+        self.assertEqual(len(loft.Shape.Faces), faces, self.sideSet(loft))
+        self.assertSides(loft, sides)
+        self.assertNearOnshape(loft, volume, area)
+
+    # 1. Onshape's rows without connections (RB44, RB47)
+    def testRowsAsOnshape(self):
+        rows = [
+            ("S3m", "S2t", 8, 16588.334751, 4043.865437, [((-8, 14), (-3, 6)), ((10, 14), (6, 6))]),
+            ("S3s", "S2t", 8, 16842.835636, 4103.876478, [((-8, 14), (-3, 6)), ((8, 14), (6, 6))]),
+            ("S3m", "S2s", 7, 17510.305193, 4142.189963, [((-8, 14), (0, 9))]),
+            ("S2t", "S1", 7, 15090.175489, 3874.203271, [((10, 10), (0, 6))]),
+            ("S3t", "S2t", 7, 14354.964919, 3755.352199, [((10, 10), (6, 6))]),
+        ]
+        for a, b, faces, volume, area, extra in rows:
+            with self.subTest(row=(a, b)):
+                A, B, corners = self.profiles(a, b)
+                loft = self.build(A, B)
+                self.assertOnshape(loft, faces, volume, area, corners + extra)
+                self.fresh()
+
+    def testRow11AsOnshape(self):
+        A, B, _ = self.profiles("S3t", "S1")
+        loft = self.build(A, B)
+        self.assertOnshape(loft, 8, 14525.982671, 3811.844551, self.ROW11)
+        self.assertEqual(loft.PairingRule, "chain")
+        self.assertNotIn("pairing", loft.getStatusString())
+        self.assertRoundTrip(loft)
+
+    # 2. the same bodies as the rows' two-connection builds
+    def testSameAsTwoConnections(self):
+        for a, b in (("S3m", "S2t"), ("S3s", "S2t"), ("S3m", "S2s"), ("S2t", "S1")):
+            with self.subTest(row=(a, b)):
+                A, B, corners = self.profiles(a, b)
+                two = self.build(A, B, corners[:2])
+                expected = (len(two.Shape.Faces), two.Shape.Volume, self.sideSet(two))
+                self.fresh()
+                loft = self.build(A, B)
+                self.assertValid(loft)
+                self.assertEqual((len(loft.Shape.Faces), self.sideSet(loft)), (expected[0], expected[2]))
+                self.assertAlmostEqual(loft.Shape.Volume, expected[1], delta=1e-6 * expected[1])
+                self.fresh()
+
+    # 3. the sketches' vertex order and direction don't matter
+    def testRow11WhicheverWayTheSketchesRun(self):
+        A, B, _ = self.profiles("S3t", "S1")
+        rect = [(-12, 6), (12, 6), (12, -6), (-12, -6)]
+
+        def flipped(geometry):
+            out = []
+            for g in reversed(geometry):
+                if isinstance(g, Part.LineSegment):
+                    out.append(Part.LineSegment(g.EndPoint, g.StartPoint))
+                else:
+                    out.append(g)
+            return out
+
+        variants = []
+        for k in range(4):
+            q = rect[k:] + rect[:k]
+            variants.append(("B from %d" % k, A, models.polygon(q)))
+            variants.append(("B back from %d" % k, A, models.polygon([q[0]] + q[:0:-1])))
+        for k in range(len(A)):
+            rotated = A[k:] + A[:k]
+            variants.append(("A from %d" % k, rotated, B))
+            variants.append(("A back from %d" % k, flipped(rotated), B))
+        reference = None
+        for label, bottom, top in variants:
+            with self.subTest(variant=label):
+                loft = self.build(bottom, top)
+                self.assertValid(loft)
+                got = (self.sideSet(loft), round(loft.Shape.Volume, 6))
+                if reference is None:
+                    reference = got
+                self.assertEqual(got, reference)
+                self.fresh()
+
+    # 4. B moved: the pairing moves with it (RB54)
+    def testRow11WithBMoved(self):
+        A, B, _ = self.profiles("S3t", "S1")
+        volume = self.build(A, B).Shape.Volume
+        self.fresh()
+        moved = models.rectangle(-4, -6, 20, 6)
+        loft = self.build(A, moved)
+        self.assertValid(loft)
+        self.assertSides(loft, [((-20, 10), (-4, 6)), ((10, 10), (8, 6)), ((15, 5), (20, 6)), ((15, 0), (20, 0)),
+                                ((20, -10), (20, -6)), ((-20, -10), (-4, -6))])
+        self.assertAlmostEqual(loft.Shape.Volume, volume, delta=1e-4 * volume)
+
+    # 5. row 11's start is a smooth vertex of A
+    def testRow11StartsAtTheTangentJoint(self):
+        A, B, _ = self.profiles("S3t", "S1")
+        loft = self.build(A, B, [((15, 5), (12, 6))])
+        self.assertOnshape(loft, 8, 14525.982671, 3811.844551, self.ROW11)
+        connected = (self.sideSet(loft), loft.Shape.Volume)
+        self.fresh()
+        loft = self.build(A, B)
+        self.assertEqual(self.sideSet(loft), connected[0])
+        self.assertAlmostEqual(loft.Shape.Volume, connected[1], delta=1e-9 * connected[1])
+
+    # 6. row 14's near-tied starts give one body and one set of names
+    def testRow14NearTiedStartsAgree(self):
+        A, B, corners = self.profiles("S3t", "S2t")
+
+        def names(loft):
+            s = loft.Shape
+            return sorted(s.getElementMappedName("Face%d" % (k + 1))[0] for k in range(len(s.Faces)))
+
+        loft = self.build(A, B)
+        reference = (self.sideSet(loft), names(loft))
+        for pair in (corners[0], corners[2], ((10, 10), (6, 6))):
+            with self.subTest(start=pair):
+                self.fresh()
+                loft = self.build(A, B, [pair])
+                self.assertValid(loft)
+                self.assertEqual(self.sideSet(loft), reference[0])
+                self.assertEqual(names(loft), reference[1])
+
+    # 7. WD, the census class (RB124): B nearly upright under A's corner
+    def wd(self, tilt):
+        A = models.polyline([(0, 20), (0, 14), (10, 14)]) + [self.arc((10, 12), 2, 0, 90)]
+        A += models.polyline([(12, 12), (12, 0), (20, 0), (20, 10)]) + [self.arc((10, 10), 10, 0, 90)]
+        A += models.polyline([(10, 20), (0, 20)])
+        B = models.rectangle(-3, -4, 3, -2)
+        c = math.sqrt(0.5)
+        upright = App.Placement(App.Matrix(c, 0, -c, 10, -c, 0, -c, 10, 0, 1, 0, 0, 0, 0, 0, 1))
+        placement = upright.multiply(App.Placement(V(0, 0, 0), App.Rotation(V(1, 0, 0), tilt), V(0, -3, 0)))
+        self.profile = models.sketch(self.doc, "Bottom", A, self.body)
+        self.section = models.sketch(self.doc, "Top", B, self.body, placement=placement)
+        self.doc.recompute()
+        loft = self.body.newObject("PartDesign::AdditiveLoft", "Loft")
+        loft.Profile = self.profile
+        loft.Sections = [self.section]
+        self.doc.recompute()
+        return loft
+
+    def assertJoined3(self, loft, a, b, tol=2e-3):
+        p = V(a[0], a[1], 0)
+        q = V(*b)
+        for edge in loft.Shape.Edges:
+            ends = [v.Point for v in edge.Vertexes]
+            if len(ends) == 2 and min((ends[0] - p).Length + (ends[1] - q).Length,
+                                      (ends[1] - p).Length + (ends[0] - q).Length) < tol:
+                return
+        self.fail("no side edge joins %s to %s" % (a, b))
+
+    def testWdTiltedAsOnshape(self):
+        loft = self.wd(1.0)
+        self.assertValid(loft)
+        self.assertEqual(len(loft.Shape.Faces), 7)
+        for a, b in (((0, 20), (7.866, 12.109, -2)), ((10, 20), (7.891, 12.134, -4)), ((12, 0), (12.109, 7.866, -2)),
+                     ((20, 0), (12.134, 7.891, -4)), ((0, 14), (8.927, 11.048, -2))):
+            self.assertJoined3(loft, a, b, tol=5e-3)
+        self.assertNearOnshape(loft, 282.703425, 529.762623)
+
+    def testWdUprightBuilds(self):
+        loft = self.wd(0.0)
+        self.assertValid(loft)
+        self.assertEqual(len(loft.Shape.Faces), 7)
+        self.assertJoined3(loft, (0, 14), (10 - 1.5 * math.sqrt(0.5), 10 + 1.5 * math.sqrt(0.5), -2), tol=5e-3)
+
+    # 8. B turned (RB130); the -90 and 180 rows are the rule's own result, not Onshape's
+    def turned(self, degrees):
+        _, B, _ = self.profiles("S3t", "S2t")
+        m = App.Matrix()
+        m.rotateZ(math.radians(degrees))
+        out = []
+        for g in B:
+            g = g.copy()
+            g.transform(m)
+            out.append(g)
+        return out
+
+    def testRow14TurnedQuarterAsOnshape(self):
+        A, _, _ = self.profiles("S3t", "S2t")
+        loft = self.build(A, self.turned(90))
+        r = 6 * self.C30 + 6
+        self.assertOnshape(loft, 8, 14907.39392, 3776.386277,
+                           [((-20, 10), (-6, 6)), ((10, 10), (-3, r)), ((15, 5), (6, r)), ((15, 0), (6, (r - 12) / 2)),
+                            ((20, -10), (6, -12)), ((-20, -10), (-6, -12))])
+
+    def testRow14TurnedOtherWaysBuild(self):
+        """Not Onshape's answer (RB130, a known miss of ops#1071): in the -90 row (Onshape V 13457.953355) and the 180 row
+        (13575.396286) Onshape inserts B's missing vertex at its longest edge's midpoint and pairs one to one from A's
+        top-left corner; the rule's arc-length chain puts it elsewhere (+12.3 % and +0.5 % in V). Asserted to the rule's
+        own result, one valid solid."""
+        A, _, _ = self.profiles("S3t", "S2t")
+        r = 6 * self.C30 + 6
+        for degrees, volume, sides in (
+            (-90, 15118.504743, [((-20, 10), (-6, 12)), ((10, 10), (6, 12)), ((15, 5), (6, 3)), ((15, 0), (6, -6)),
+                                 ((20, -10), (3, -r)), ((-20, -10), (-6, -r))]),
+            (180, 13642.056751, [((10, 10), (12, 6)), ((15, 5), (12, 0)), ((15, 0), (12, -6)), ((20, -10), (-6, -6)),
+                                 ((-20, -10), (-r, -3)), ((-20, 10), (-r, 6))]),
+        ):
+            with self.subTest(degrees=degrees):
+                try:
+                    loft = self.build(A, self.turned(degrees))
+                    self.assertValid(loft)
+                    self.assertEqual(len(loft.Shape.Faces), 8)
+                    self.assertSides(loft, sides)
+                    self.assertAlmostEqual(loft.Shape.Volume, volume, delta=1e-6 * volume)
+                finally:
+                    self.fresh()
+
+    # ties in mismatch: a rectangle to its copy with one corner chamfered gives two chains of exactly equal
+    # mismatch (both sums telescope), and the starts' own matchings tie too; no geometric key may be replaced by
+    # B's place or the sketches' order (round 1 of the review: a move of 0.001 mm switched bodies). Onshape's
+    # answer for this pair is not measured (RB54's chamfer row has row 14's profiles), so only the invariance is
+    # asserted.
+    CHAMFERED = [(-20, 10), (20, 10), (20, -7), (17, -10), (-20, -10)]
+
+    def shifted(self, loft, dx):
+        return sorted((p[0], p[1], round(p[2] - dx, 3) + 0.0, p[3]) for p in self.sideSet(loft))
+
+    def testChamferedRectangleWithBMoved(self):
+        reference = None
+        for dx in (0, 0.001, -0.001, 5, -5, 8):
+            with self.subTest(dx=dx):
+                try:
+                    loft = self.build(models.polygon(self.CHAMFERED), models.rectangle(-12 + dx, -6, 12 + dx, 6))
+                    self.assertValid(loft)
+                    got = (len(loft.Shape.Faces), self.shifted(loft, dx))
+                    if reference is None:
+                        reference = (got, loft.Shape.Volume)
+                    self.assertEqual(got, reference[0])
+                    self.assertAlmostEqual(loft.Shape.Volume, reference[1], delta=1e-6 * reference[1])
+                finally:
+                    self.fresh()
+
+    def testChamferedRectangleWhicheverWayTheSketchesRun(self):
+        A = self.CHAMFERED
+        rect = [(-12, 6), (12, 6), (12, -6), (-12, -6)]
+        variants = []
+        for k in range(len(A)):
+            q = A[k:] + A[:k]
+            variants.append(("A from %d" % k, q, rect))
+            variants.append(("A back from %d" % k, [q[0]] + q[:0:-1], rect))
+        for k in range(4):
+            q = rect[k:] + rect[:k]
+            variants.append(("B from %d" % k, A, q))
+            variants.append(("B back from %d" % k, A, [q[0]] + q[:0:-1]))
+        reference = None
+        for label, bottom, top in variants:
+            with self.subTest(variant=label):
+                try:
+                    loft = self.build(models.polygon(bottom), models.polygon(top))
+                    self.assertValid(loft)
+                    got = (self.sideSet(loft), round(loft.Shape.Volume, 6))
+                    if reference is None:
+                        reference = got
+                    self.assertEqual(got, reference)
+                finally:
+                    self.fresh()
+
+    def testRectangleToChamferedCopyWithBMoved(self):
+        # the other way up: B is the chamfered copy x 0.6 (the review's RectToChamferTopMoved); Onshape's pairing
+        # here is not measured, so only that it translates with B is asserted
+        reference = None
+        for dx in (0, 0.001, -0.001, 5):
+            with self.subTest(dx=dx):
+                try:
+                    top = [(0.6 * x + dx, 0.6 * y) for x, y in self.CHAMFERED]
+                    loft = self.build(models.rectangle(-20, -10, 20, 10), models.polygon(top))
+                    self.assertValid(loft)
+                    got = sorted((p[0], p[1], round(p[2] - dx, 3) + 0.0, p[3]) for p in self.sideSet(loft))
+                    self.assertEqual(len(got), 5, got)
+                    if reference is None:
+                        reference = (got, loft.Shape.Volume)
+                    self.assertEqual(got, reference[0])
+                    self.assertAlmostEqual(loft.Shape.Volume, reference[1], delta=1e-6 * reference[1])
+                finally:
+                    self.fresh()
+
+    # a pair with a common mirror line: a chain and its mirror image tie on every geometric key, so neither is
+    # picked by position (round 2 of the review: global coordinates gave the mirror body once the model was
+    # turned past 90 deg); the loft keeps the old pairing, which turns with the sketches
+    def assertTurnsWithTheSketches(self, bottom, top, angles=(0, 45, 91, 180, 270)):
+        reference = None
+        for degrees in angles:
+            with self.subTest(degrees=degrees):
+                try:
+                    c, s_ = math.cos(math.radians(degrees)), math.sin(math.radians(degrees))
+                    turn = lambda pts: [(c * x - s_ * y, s_ * x + c * y) for x, y in pts]
+                    loft = self.build(models.polygon(turn(bottom)), models.polygon(turn(top)))
+                    self.assertValid(loft)
+                    back = []
+                    for p in self.sideSet(loft):
+                        q = [(c * x + s_ * y, -s_ * x + c * y) for x, y in ((p[0], p[1]), (p[2], p[3]))]
+                        back.append(tuple(round(v, 2) + 0.0 for xy in q for v in xy))
+                    got = (sorted(back), round(loft.Shape.Volume, 4))
+                    if reference is None:
+                        reference = got
+                    self.assertEqual(got, reference)
+                finally:
+                    self.fresh()
+
+    def testSymmetricPairTurnedGivesTheTurnedBody(self):
+        self.assertTurnsWithTheSketches([(-20, -10), (20, -10), (20, 10), (-20, 10)], [(-12, -5), (12, -5), (0, 10)])
+        self.assertTurnsWithTheSketches([(-20, -12), (20, -12), (0, 13)], [(-12, -6), (12, -6), (12, 6), (-12, 6)])
+
+    def testTwoChamferRectangleTurned(self):
+        bottom = [(-17, -10), (17, -10), (20, -7), (20, 10), (-20, 10), (-20, -7)]
+        self.assertTurnsWithTheSketches(bottom, [(-12, -6), (12, -6), (12, 6), (-12, 6)])
+
+    # c827's ruling: the pairing a loft took is kept (PairingRule) and a recompute that changes it warns, so an
+    # edit onto a tied profile pair is not silent; the first recompute and a reopened file don't warn
+    APEX_TRIANGLE = staticmethod(lambda dx: [(-12, -5), (12, -5), (dx, 10)])
+
+    def testAnEditOntoATieWarnsOnce(self):
+        rect = models.polygon([(-20, -10), (20, -10), (20, 10), (-20, 10)])
+        loft = self.build(rect, models.polygon(self.APEX_TRIANGLE(0.5)))
+        self.assertValid(loft)
+        self.assertEqual(loft.PairingRule, "chain")
+        self.assertNotIn("pairing", loft.getStatusString())
+        self.section.Geometry = models.polygon(self.APEX_TRIANGLE(0))
+        self.doc.recompute()
+        self.assertValid(loft)
+        self.assertEqual(loft.PairingRule, "old-tie")
+        self.assertIn("pairing rule changed at this value (chain -> old-tie)", loft.getStatusString())
+        loft.touch()
+        self.doc.recompute()
+        self.assertNotIn("pairing", loft.getStatusString())
+        self.section.Geometry = models.polygon(self.APEX_TRIANGLE(0.5))
+        self.doc.recompute()
+        self.assertEqual(loft.PairingRule, "chain")
+        self.assertIn("(old-tie -> chain)", loft.getStatusString())
+
+    def testATiedLoftReopensQuietly(self):
+        import os
+        import tempfile
+
+        rect = models.polygon([(-20, -10), (20, -10), (20, 10), (-20, 10)])
+        loft = self.build(rect, models.polygon(self.APEX_TRIANGLE(0)))
+        self.assertValid(loft)
+        self.assertEqual(loft.PairingRule, "old-tie")
+        self.assertNotIn("pairing", loft.getStatusString())
+        expected = (self.sideSet(loft), round(loft.Shape.Volume, 6))
+        path = os.path.join(tempfile.mkdtemp(), "tied_loft.FCStd")
+        self.doc.saveAs(path)
+        name = self.doc.Name
+        FreeCAD.closeDocument(name)
+        self.doc = FreeCAD.openDocument(path)
+        loft = self.doc.getObject("Loft")
+        self.assertEqual(loft.PairingRule, "old-tie")
+        loft.touch()
+        self.doc.recompute()
+        self.assertTrue(loft.isValid(), loft.getStatusString())
+        self.assertNotIn("pairing", loft.getStatusString())
+        self.assertEqual((self.sideSet(loft), round(loft.Shape.Volume, 6)), expected)
+
+    def testEqualCountsHaveNoPairingRule(self):
+        loft = self.build(models.rectangle(-20, -10, 20, 10), models.rectangle(-12, -6, 12, 6))
+        self.assertEqual(loft.PairingRule, "")
+
+    def testHexagonToSquareEveryOrder(self):
+        hexagon = [(10 * math.cos(math.radians(60 * k)), 10 * math.sin(math.radians(60 * k))) for k in range(6)]
+        square = [(5, 5), (-5, 5), (-5, -5), (5, -5)]
+        bodies = set()
+        for k in range(6):
+            for back in (False, True):
+                q = hexagon[k:] + hexagon[:k]
+                if back:
+                    q = [q[0]] + q[:0:-1]
+                with self.subTest(start=k, back=back):
+                    loft = self.build(models.polygon(q), models.polygon(square))
+                    self.assertValid(loft)
+                    bodies.add((tuple(self.sideSet(loft)), round(loft.Shape.Volume, 6)))
+                    self.fresh()
+        print("ops#1071 hexagon to square: %d distinct bodies over 12 orders" % len(bodies))
+
+    # 9. what must not move
+    def testEqualCountsUnchanged(self):
+        loft = self.build(models.rectangle(-20, -10, 20, 10), models.rectangle(-12, -6, 12, 6))
+        self.assertValid(loft)
+        self.assertAlmostEqual(loft.Shape.Volume, 15680, delta=1e-6)
+
+    def testCircleToSquareUnchanged(self):
+        loft = self.build(models.circle(0, 0, 10), models.rectangle(-5, -5, 5, 5))
+        self.assertValid(loft)
+        self.assertEqual(self.sideSet(loft), self.sideSet(loft))
+        circle = self.sideSet(loft), loft.Shape.Volume
+        self.fresh()
+        import os
+
+        os.environ["FREECAD_CH_LOFT_START_TEST"] = "throw"
+        try:
+            loft = self.build(models.circle(0, 0, 10), models.rectangle(-5, -5, 5, 5))
+        finally:
+            del os.environ["FREECAD_CH_LOFT_START_TEST"]
+        self.assertEqual((self.sideSet(loft), loft.Shape.Volume), circle)
+
+    def testLegacyAndTheFallbackKeepTheOldPairing(self):
+        import os
+
+        A, B, _ = self.profiles("S2t", "S1")
+        legacy = self.build(A, B, TangentRule="Legacy")
+        self.assertValid(legacy)
+        old = (len(legacy.Shape.Faces), self.sideSet(legacy), legacy.Shape.Volume)
+        self.fresh()
+        os.environ["FREECAD_CH_LOFT_START_TEST"] = "throw"
+        try:
+            loft = self.build(A, B)
+        finally:
+            del os.environ["FREECAD_CH_LOFT_START_TEST"]
+        self.assertValid(loft)
+        self.assertEqual((len(loft.Shape.Faces), self.sideSet(loft)), old[:2])
+        self.assertAlmostEqual(loft.Shape.Volume, old[2], delta=1e-9 * old[2])
+        self.assertIn("old way", loft.getStatusString())
+        self.fresh()
+        loft = self.build(A, B)
+        self.assertNotEqual(self.sideSet(loft), old[1])
+
+    def testThreeSectionsUnchanged(self):
+        A, B, _ = self.profiles("S2t", "S1")
+        self.profile = models.sketch(self.doc, "Bottom", A, self.body)
+        mid = models.sketch(self.doc, "Mid", B, self.body, z=15)
+        top = models.sketch(self.doc, "Top", models.rectangle(-6, -3, 6, 3), self.body, z=30)
+        self.doc.recompute()
+        loft = self.body.newObject("PartDesign::AdditiveLoft", "Loft")
+        loft.Profile = self.profile
+        loft.Sections = [mid, top]
+        self.doc.recompute()
+        self.assertTrue(loft.isValid(), loft.getStatusString())
+
+    # 10. other options through the new path
+    def testRow9WithOptions(self):
+        A, B, _ = self.profiles("S2t", "S1")
+        # Normal to profile: Onshape's row 8 (two connections, the same pairing): F 6, the tangent joint's edge gone
+        normal = {"StartCondition": "Normal to profile", "EndCondition": "Normal to profile"}
+        for props, faces, volume, joint in ((normal, 6, 15236.904857, False), ({"Ruled": True}, 7, None, True)):
+            with self.subTest(props=props):
+                try:
+                    loft = self.build(A, B, **props)
+                    self.assertValid(loft)
+                    self.assertEqual(len(loft.Shape.Faces), faces)
+                    self.assertEqual(any(s[:4] == (10.0, 10.0, 0.0, 6.0) for s in self.sideSet(loft)), joint)
+                    if volume:
+                        self.assertAlmostEqual(loft.Shape.Volume, volume, delta=ONSHAPE_SURFACE * volume)
+                finally:
+                    self.fresh()
+
+    def testProfilesWithHoles(self):
+        outerA = models.rectangle(-20, -10, 20, 10)
+        holeA = models.polygon([(-5, -4), (5, -4), (8, 0), (5, 4), (-5, 4), (-8, 0)])
+        outerB = models.polygon([(-12, -6), (12, -6), (14, 0), (12, 6), (-12, 6)])
+        holeB = models.rectangle(-4, -2, 4, 2)
+        loft = self.build(outerA + holeA, outerB + holeB)
+        self.assertValid(loft)
+        hollow = loft.Shape.Volume
+        self.assertGreater(hollow, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -548,7 +548,8 @@ names it.
 | `fix/i1065-part-ends` | fix | ops#1065 | - | `integration` `8388e5e747` | `126ae57d81` (fork PR 548), 2026-11-26 | never (fork fix): a removing feature that takes its whole part ends it (PartEnded, shared with Delete part), confirmed by point classification; a feature that loses its part unconfirmed fails with the kernel's error |
 | `fix/i1046-loft-tangent-runs` | fix | ops#1046 | - | open | `58861baeba` (fork PR 549), 2026-11-26 | never (fork fix): connected lofts with tangent joints match and merge as Onshape's |
 | `fix/i1053-scoop-rim` | fix | ops#1053 | - | open | `0096eaa7c0` (fork PR 550), 2026-11-26 | drop when upstream's round under an overhang builds a free-form rim near a tangent line without fuzzy Booleans |
-| `fix/i1079-pattern-after-end` | fix | ops#1079 | - | open | (fork PR 555) | dropped if upstream gains cross-Body patterns after a part end |
+| `fix/i1079-pattern-after-end` | fix | ops#1079 | - | open | `8398037544` (fork PR 555), 2026-11-26 | dropped if upstream gains cross-Body patterns after a part end |
+| `fix/i1071-loft-pairing` | fix | ops#1071 | - | open | (fork PR 556) | never (fork fix): unconnected lofts with unequal vertex counts pair from Onshape's start pair |
 
 ## Fork-only commits in carried topics
 

@@ -53,6 +53,12 @@ public:
     /// fork-1.0.1 (fork PR 468), or "Legacy", fork-1.0.0's k * distance, which a loft read from a
     /// file without this property (saved by ForkRelease 12 or older) keeps. Hidden.
     App::PropertyEnumeration TangentRule;
+    /// The vertex pairing each unconnected loop pair with different vertex counts took on the last
+    /// recompute (ops#1071): "chain" (Onshape's, by corner position), "old-tie" (OCCT's polar
+    /// method: two pairings fit equally), "tie-picked" (two fit equally and OCCT's failed: the first
+    /// in a fixed order), "old-failure" (OCCT's: the chain didn't build), comma
+    /// separated; empty where none applies. A recompute that changes it warns. Hidden output.
+    App::PropertyString PairingRule;
 
     /** @name methods override feature */
     //@{
@@ -83,6 +89,19 @@ protected:
     ) override;
 
 private:
+    /// The loft, with Onshape's automatic start pairs for unconnected profiles or without them
+    /// (ops#1071); `automaticUsed` says whether one was taken, `rules` gets each unconnected loop
+    /// pair's pairing (`PairingRule`'s words); `pickTies` takes a tied pair's first chain instead of
+    /// the old pairing.
+    App::DocumentObjectExecReturn* executeLoft(
+        bool automaticStarts,
+        bool& automaticUsed,
+        std::vector<std::string>& rules,
+        bool pickTies = false
+    );
+    /// Stores the pairing of this recompute in `PairingRule`, with a warning when it changed.
+    void notePairing(const std::vector<std::string>& rules);
+
     static const char* ConditionEnums[];
     static const char* TangentRuleEnums[];
     // static const char* TypeEnums[];
