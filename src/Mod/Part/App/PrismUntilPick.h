@@ -18,7 +18,7 @@
 namespace Part
 {
 
-/** Whether the face TopoShape::makeElementPrismUntil() goes up to was picked (ops#1039, review rv540).
+/** Whether the face TopoShape::makeElementPrismUntil() goes up to was picked (ops#1039, rv540).
  *
  * Up to a picked face (Onshape's "up to face", a Pad's UpToFace or one-face UpToShape) Onshape
  * extends a cylinder, cone or sphere face to its whole surface and stops each point at its first

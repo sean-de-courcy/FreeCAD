@@ -11896,8 +11896,9 @@ bool faceIsFirstCrossing(const TopoDS_Face& face, const TopoDS_Shape& profile, c
             side = sign;
         }
     }
-    // Every region of the profile on that side (review pr1039-r1 T1): every vertex. A region
-    // that crosses the surface has vertices on both sides or touches it, which fullTurnSurface() refuses
+    // Every region of the profile on that side (review pr1039-r1 T1), tested at its vertices only.
+    // A region can cross the surface with every vertex on one side (a square whose middle enters a
+    // sphere, a circle's one vertex: review rv540 4); then BRepFeat decides, as on integration
     TopExp_Explorer vertex(profile, TopAbs_VERTEX);
     if (!vertex.More()) {
         return false;
@@ -12787,14 +12788,17 @@ TopoShape& TopoShape::makeElementPrismUntil(
         const TopoDS_Face face = TopoDS::Face(__uptoface.getShape());
         // The test above that decides whether the face's limits are removed: a profile face's
         // outer wire that projects onto the face as no closed wire, or a hole of the face in
-        // the profile's way
-        bool covers = true;
-        for (auto& sketchface : profile.getSubTopoShapes(TopAbs_FACE)) {
-            TopoShape outerWire = sketchface.splitWires();
-            BRepProj_Projection proj(TopoDS::Wire(outerWire.getShape()), face, direction);
-            if (!proj.More() || !proj.Current().Closed()) {
-                covers = false;
-                break;
+        // the profile's way. `notFirst` decides alone: the projections are per region (review
+        // rv540 7)
+        bool covers = !notFirst;
+        if (covers) {
+            for (auto& sketchface : profile.getSubTopoShapes(TopAbs_FACE)) {
+                TopoShape outerWire = sketchface.splitWires();
+                BRepProj_Projection proj(TopoDS::Wire(outerWire.getShape()), face, direction);
+                if (!proj.More() || !proj.Current().Closed()) {
+                    covers = false;
+                    break;
+                }
             }
         }
         if (covers) {
