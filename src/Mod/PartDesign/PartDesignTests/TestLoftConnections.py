@@ -1028,6 +1028,8 @@ class TestLoftUnconnected(ConnectionCase):
         A, B, _ = self.profiles("S3t", "S1")
         loft = self.build(A, B)
         self.assertOnshape(loft, 8, 14525.982671, 3811.844551, self.ROW11)
+        self.assertEqual(loft.PairingRule, "chain")
+        self.assertNotIn("pairing", loft.getStatusString())
         self.assertRoundTrip(loft)
 
     # 2. the same bodies as the rows' two-connection builds
@@ -1304,6 +1306,56 @@ class TestLoftUnconnected(ConnectionCase):
     def testTwoChamferRectangleTurned(self):
         bottom = [(-17, -10), (17, -10), (20, -7), (20, 10), (-20, 10), (-20, -7)]
         self.assertTurnsWithTheSketches(bottom, [(-12, -6), (12, -6), (12, 6), (-12, 6)])
+
+    # c827's ruling: the pairing a loft took is kept (PairingRule) and a recompute that changes it warns, so an
+    # edit onto a tied profile pair is not silent; the first recompute and a reopened file don't warn
+    APEX_TRIANGLE = staticmethod(lambda dx: [(-12, -5), (12, -5), (dx, 10)])
+
+    def testAnEditOntoATieWarnsOnce(self):
+        rect = models.polygon([(-20, -10), (20, -10), (20, 10), (-20, 10)])
+        loft = self.build(rect, models.polygon(self.APEX_TRIANGLE(0.5)))
+        self.assertValid(loft)
+        self.assertEqual(loft.PairingRule, "chain")
+        self.assertNotIn("pairing", loft.getStatusString())
+        self.section.Geometry = models.polygon(self.APEX_TRIANGLE(0))
+        self.doc.recompute()
+        self.assertValid(loft)
+        self.assertEqual(loft.PairingRule, "old-tie")
+        self.assertIn("pairing rule changed at this value (chain -> old-tie)", loft.getStatusString())
+        loft.touch()
+        self.doc.recompute()
+        self.assertNotIn("pairing", loft.getStatusString())
+        self.section.Geometry = models.polygon(self.APEX_TRIANGLE(0.5))
+        self.doc.recompute()
+        self.assertEqual(loft.PairingRule, "chain")
+        self.assertIn("(old-tie -> chain)", loft.getStatusString())
+
+    def testATiedLoftReopensQuietly(self):
+        import os
+        import tempfile
+
+        rect = models.polygon([(-20, -10), (20, -10), (20, 10), (-20, 10)])
+        loft = self.build(rect, models.polygon(self.APEX_TRIANGLE(0)))
+        self.assertValid(loft)
+        self.assertEqual(loft.PairingRule, "old-tie")
+        self.assertNotIn("pairing", loft.getStatusString())
+        expected = (self.sideSet(loft), round(loft.Shape.Volume, 6))
+        path = os.path.join(tempfile.mkdtemp(), "tied_loft.FCStd")
+        self.doc.saveAs(path)
+        name = self.doc.Name
+        FreeCAD.closeDocument(name)
+        self.doc = FreeCAD.openDocument(path)
+        loft = self.doc.getObject("Loft")
+        self.assertEqual(loft.PairingRule, "old-tie")
+        loft.touch()
+        self.doc.recompute()
+        self.assertTrue(loft.isValid(), loft.getStatusString())
+        self.assertNotIn("pairing", loft.getStatusString())
+        self.assertEqual((self.sideSet(loft), round(loft.Shape.Volume, 6)), expected)
+
+    def testEqualCountsHaveNoPairingRule(self):
+        loft = self.build(models.rectangle(-20, -10, 20, 10), models.rectangle(-12, -6, 12, 6))
+        self.assertEqual(loft.PairingRule, "")
 
     def testHexagonToSquareEveryOrder(self):
         hexagon = [(10 * math.cos(math.radians(60 * k)), 10 * math.sin(math.radians(60 * k))) for k in range(6)]

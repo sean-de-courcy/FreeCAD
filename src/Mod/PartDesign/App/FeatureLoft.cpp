@@ -1599,20 +1599,53 @@ gp_Pnt loopCentre(const std::vector<TopoDS_Edge>& edges)
     return gp_Pnt(mass > 0 ? sum / mass : sum);
 }
 
+/// Which pairing an unconnected loop pair took (`Loft::PairingRule`, c827's ruling on ops#1071).
+enum class Pairing
+{
+    None,        // the automatic path doesn't apply (equal vertex counts, a circle)
+    Chain,       // Onshape's: one chain from a start pair
+    OldTie,      // the old pairing: two chains fit equally
+    OldFailure,  // the old pairing: no chain could be measured or built
+    TiePicked,   // two chains fit equally and the old pairing failed: the first in a fixed order
+};
+
+const char* pairingWord(Pairing pairing)
+{
+    switch (pairing) {
+        case Pairing::Chain:
+            return "chain";
+        case Pairing::OldTie:
+            return "old-tie";
+        case Pairing::OldFailure:
+            return "old-failure";
+        case Pairing::TiePicked:
+            return "tie-picked";
+        default:
+            return "";
+    }
+}
+
 /// The start pairs to try for an unconnected loop pair, best first, one per distinct chain and at
 /// most `limit`: (profile vertex, section vertex) in the loops' frame, for `connectedLoops`. Empty
-/// when the loops can't be told the same way round, or the best chains tie.
+/// when the automatic path doesn't apply, the loops can't be told the same way round, or the best
+/// chains tie; `why` says which (Chain with a list that isn't empty). `pickTies` orders tied
+/// chains instead, by the start pair's distance and then the loops' vertex indices (only where the
+/// old pairing failed: a pick between twins, which may follow the sketches' order).
 std::vector<std::pair<gp_Pnt, gp_Pnt>> unconnectedStarts(
     const Part::TopoShape& profile,
     const Part::TopoShape& section,
-    size_t limit
+    size_t limit,
+    Pairing& why,
+    bool pickTies = false
 )
 {
+    why = Pairing::None;
     auto a = loopEdges(profile.getShape());
     auto b = loopEdges(section.getShape());
     if (a.size() < 2 || b.size() < 2 || a.size() == b.size()) {
         return {};
     }
+    why = Pairing::OldFailure;
     const auto samplesA = loopSamples(a);
     const auto samplesB = loopSamples(b);
     const gp_Vec na = areaVector(samplesA);
@@ -1702,13 +1735,23 @@ std::vector<std::pair<gp_Pnt, gp_Pnt>> unconnectedStarts(
                 misfit += apart(ia, jb);
             }
             c.keys = {mismatch, misfit, apart(i, j)};
+            if (pickTies) {
+                c.keys.insert(
+                    c.keys.end(),
+                    {startPoint(a[i]).Distance(startPoint(b[j])), double(i), double(j)}
+                );
+            }
             candidates.push_back(std::move(c));
         }
     }
     // Sort key by key, each into groups of equal value (mismatch within 1e-9, lengths within
     // 1e-7 of the loops' size), so no comparator uses a tolerance.
-    for (size_t key = 0; key < 3; ++key) {
-        const double tolerance = key == 0 ? 1e-9 : (key == 1 ? 1e-7 * size * (na0 + nb0) : 1e-7 * size);
+    const size_t keys = pickTies ? 6 : 3;
+    for (size_t key = 0; key < keys; ++key) {
+        const double tolerance = key == 0 ? 1e-9
+            : key == 1                    ? 1e-7 * size * (na0 + nb0)
+            : key <= 3                    ? 1e-7 * size
+                                          : 0.0;
         std::ranges::sort(candidates, [key](const Candidate& x, const Candidate& y) {
             return std::tie(x.group, x.keys[key]) < std::tie(y.group, y.keys[key]);
         });
@@ -1726,8 +1769,9 @@ std::vector<std::pair<gp_Pnt, gp_Pnt>> unconnectedStarts(
         // A start whose own matching ties among the least mismatch: which chain it builds is
         // rounding's, and so is its misfit (and its group), differently each way round. Mismatch
         // and the tie itself don't depend on the sketches' order, so this test doesn't either.
-        if (key == 0
+        if (key == 0 && !pickTies
             && std::ranges::any_of(candidates, [](const Candidate& c) { return c.group == 0 && c.tied; })) {
+            why = Pairing::OldTie;
             return {};
         }
     }
@@ -1745,8 +1789,9 @@ std::vector<std::pair<gp_Pnt, gp_Pnt>> unconnectedStarts(
         while (end < candidates.size() && candidates[end].group == candidates[k].group) {
             ++end;
         }
-        for (size_t m = k; m < end; ++m) {
+        for (size_t m = k; m < end && !pickTies; ++m) {
             if (candidates[m].tied || candidates[m].chain != candidates[k].chain) {
+                why = starts.empty() ? Pairing::OldTie : Pairing::Chain;
                 return starts;
             }
         }
@@ -1757,6 +1802,7 @@ std::vector<std::pair<gp_Pnt, gp_Pnt>> unconnectedStarts(
         }
         k = end;
     }
+    why = starts.empty() ? Pairing::OldFailure : Pairing::Chain;
     return starts;
 }
 
@@ -1779,18 +1825,37 @@ bool startTestHook()
 }
 
 /// The loops of an unconnected loft matched from the first start pair whose chain builds
-/// (`unconnectedStarts`), or nothing.
-std::optional<LoopMatch> unconnectedMatch(const Part::TopoShape& profile, const Part::TopoShape& section)
+/// (`unconnectedStarts`), or nothing; `why` says which pairing the loop pair takes. `pickTies`:
+/// a tie takes its first chain in a fixed order instead of the old pairing.
+std::optional<LoopMatch> unconnectedMatch(
+    const Part::TopoShape& profile,
+    const Part::TopoShape& section,
+    Pairing& why,
+    bool pickTies
+)
 {
     constexpr size_t maxChains = 12;
-    for (const auto& start : unconnectedStarts(profile, section, maxChains)) {
+    auto starts = unconnectedStarts(profile, section, maxChains, why);
+    bool picked = false;
+    if (why == Pairing::OldTie && pickTies) {
+        starts = unconnectedStarts(profile, section, maxChains, why, true);
+        picked = true;
+    }
+    for (const auto& start : starts) {
         try {
-            return connectedLoops(profile, section, {start});
+            auto match = connectedLoops(profile, section, {start});
+            if (picked) {
+                why = Pairing::TiePicked;
+            }
+            return match;
         }
         catch (const Base::Exception&) {
         }
         catch (const Standard_Failure&) {
         }
+    }
+    if (why == Pairing::Chain) {
+        why = Pairing::OldFailure;  // none of the chains built
     }
     return std::nullopt;
 }
@@ -2749,6 +2814,14 @@ Loft::Loft()
     );
     Connections.setValue(nullptr);
     ADD_PROPERTY_TYPE(
+        PairingRule,
+        (""),
+        "Loft",
+        App::PropertyType(App::Prop_Output | App::Prop_Hidden),
+        "The vertex pairing of each unconnected loop pair with different vertex counts on the last "
+        "recompute: chain, old-tie, old-failure"
+    );
+    ADD_PROPERTY_TYPE(
         TangentRule,
         (0L),
         "Loft",
@@ -2959,15 +3032,43 @@ App::DocumentObjectExecReturn* Loft::execute()
     // the solid) gives way to the old pairing, OCCT's, with a warning; never for a loft with
     // connections (they turn the automatic path off)
     bool automaticUsed = false;
-    App::DocumentObjectExecReturn* ret = executeLoft(true, automaticUsed);
+    std::vector<std::string> rules;
+    App::DocumentObjectExecReturn* ret = executeLoft(true, automaticUsed, rules);
+    // A tie kept the old pairing and the loft failed: the first tied chain in a fixed order instead
+    // (a census drain loft, mirror-symmetric, whose old pairing fails on integration too); where the
+    // old pairing builds, it stays (c827's ruling on ops#1071)
+    if (ret && std::ranges::find(rules, std::string("old-tie")) != rules.end()) {
+        bool pickedUsed = false;
+        std::vector<std::string> pickedRules;
+        App::DocumentObjectExecReturn* picked = executeLoft(true, pickedUsed, pickedRules, true);
+        if (!picked) {
+            delete ret;
+            ret = nullptr;
+            automaticUsed = pickedUsed;
+            rules = pickedRules;
+        }
+        else {
+            delete picked;
+        }
+    }
+    if (!ret) {
+        notePairing(rules);
+    }
     if (!ret || !automaticUsed) {
         return ret;
     }
     std::string why = ret->Why;
     delete ret;
     bool unused = false;
-    ret = executeLoft(false, unused);
+    std::vector<std::string> oldRules;
+    ret = executeLoft(false, unused, oldRules);
     if (!ret) {
+        for (auto& rule : rules) {
+            if (rule == "chain") {
+                rule = "old-failure";
+            }
+        }
+        notePairing(rules);
         if (auto doc = getDocument()) {
             std::string lower = why;
             std::ranges::transform(lower, lower.begin(), [](unsigned char ch) { return std::tolower(ch); });
@@ -2983,9 +3084,40 @@ App::DocumentObjectExecReturn* Loft::execute()
     return ret;
 }
 
-App::DocumentObjectExecReturn* Loft::executeLoft(bool automaticStarts, bool& automaticUsed)
+void Loft::notePairing(const std::vector<std::string>& rules)
+{
+    std::string now;
+    for (const auto& rule : rules) {
+        now += (now.empty() ? "" : ",") + rule;
+    }
+    const std::string before = PairingRule.getValue();
+    if (now == before) {
+        return;
+    }
+    // c827's ruling on ops#1071: an edit onto a profile pair whose pairings tie (a common mirror
+    // line, regular polygons) moves the side faces between Onshape's pairing and OCCT's, and the
+    // naming can't mark a side face that became two; so the change is said. Not on the first
+    // recompute or after a restore (the property is saved), nor when no pairing applies any more.
+    if (!before.empty() && !now.empty()) {
+        if (auto doc = getDocument()) {
+            const std::string text = "Loft: the vertex pairing rule changed at this value (" + before
+                + " -> " + now + "); check references to this loft's side faces";
+            const char* previous = doc->getWarningDescription(this);
+            doc->setWarning(this, previous && *previous ? std::string(previous) + "\n" + text : text);
+        }
+    }
+    PairingRule.setValue(now);
+}
+
+App::DocumentObjectExecReturn* Loft::executeLoft(
+    bool automaticStarts,
+    bool& automaticUsed,
+    std::vector<std::string>& rules,
+    bool pickTies
+)
 {
     automaticUsed = false;
+    rules.clear();
     if (onlyHaveRefined()) {
         return App::DocumentObject::StdReturn;
     }
@@ -3105,7 +3237,11 @@ App::DocumentObjectExecReturn* Loft::executeLoft(bool automaticStarts, bool& aut
                      && sectionWires.back().shapeType() == TopAbs_WIRE
                      && BRep_Tool::IsClosed(sectionWires.front().getShape())
                      && BRep_Tool::IsClosed(sectionWires.back().getShape())) {
-                match = unconnectedMatch(sectionWires.front(), sectionWires.back());
+                Pairing why = Pairing::None;
+                match = unconnectedMatch(sectionWires.front(), sectionWires.back(), why, pickTies);
+                if (why != Pairing::None) {
+                    rules.emplace_back(pairingWord(why));
+                }
                 if (match) {
                     automaticUsed = true;
                     if (startTestHook()) {
