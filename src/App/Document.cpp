@@ -211,7 +211,9 @@ namespace
 // 22: ops#1060, a repair (TopoShape::fix) names a source's pieces in the repaired shape's order,
 // not ShapeFix's history order, which isn't repeatable: the two arcs of a hole rim a repaired
 // fillet splits keep their 0of2/1of2 names at every recompute.
-constexpr int ForkNamingRevision = 22;
+// 23: ops#1044, a refine that merges several groups whose faces sewing then changes names each
+// merged face from its own group (it was named as generated from its edges, all but the first).
+constexpr int ForkNamingRevision = 23;
 
 // The `.N<n>` of the element map version: the form interned names are saved in (ops#6). 2: the
 // references are indices into the file's table (NamingFormat 2).

@@ -3,7 +3,7 @@
 # existing dump changes and the revision doesn't: a change of existing names needs a new revision,
 # which makes files saved before it re-derive their references from geometry once. A new or
 # removed dump only needs recording again.
-revision 22
+revision 23
 digest CompoundCopies.V2.txt 4f4fe665c70b8117fdecfbb2dd40c396a60299e5794b7c959a4eb5aa455aab44
 digest CompoundCut.V2.txt 37e1920268e5b309eaff29ab40d9f4a2c9e8b51c2bf8187282f1c6b0cc312035
 digest CutSplit.V2.txt 44b0e24de77cbcd8b83bb99731e627546165cf04142d148c4d47afa557310ee4
