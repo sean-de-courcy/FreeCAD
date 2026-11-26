@@ -2340,6 +2340,7 @@ void foldFarFaces(const Context& ctx,
     std::vector<TopoDS_Shape> foldedEdges;
     std::vector<TopoDS_Shape> foldedFaces;
     int found = 0;
+    bool runsOn = false;
     for (const auto& candidate : faces) {
         if (own(candidate)) {
             continue;
@@ -2394,11 +2395,14 @@ void foldFarFaces(const Context& ctx,
                 // An own face's edge is left out only where it carries the corner's line straight
                 // on (the own face ends there below the floor): where it turns into the own face
                 // (a slope beside the corner), Onshape runs the round on down that face (RB149),
-                // which the fold's construction does not do
-                if (edgeWhollyBeyond(TopoDS::Edge(edge), point, toward)
-                    && (!touches(edge, {data.faces[0], data.faces[1]})
-                        || carriesLineOn(TopoDS::Edge(edge), vertex, away))) {
-                    continue;
+                // which the fold's construction does not do. Such an edge ends the whole fold, so
+                // that no other plane is taken alone in its place (review r2 T2)
+                if (edgeWhollyBeyond(TopoDS::Edge(edge), point, toward)) {
+                    if (!touches(edge, {data.faces[0], data.faces[1]})
+                        || carriesLineOn(TopoDS::Edge(edge), vertex, away)) {
+                        continue;
+                    }
+                    runsOn = true;
                 }
                 holds = false;
                 break;
@@ -2415,7 +2419,7 @@ void foldFarFaces(const Context& ctx,
         foldedEdges = std::move(keptEdges);
         foldedFaces = std::move(keptFaces);
     }
-    if (found == 1) {
+    if (found == 1 && !runsOn) {
         edges = std::move(foldedEdges);
         faces = std::move(foldedFaces);
     }
