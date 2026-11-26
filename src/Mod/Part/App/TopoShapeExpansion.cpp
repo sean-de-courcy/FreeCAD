@@ -11871,14 +11871,20 @@ bool faceIsFirstCrossing(const TopoDS_Face& face, const TopoDS_Shape& profile, c
     // points alone are tested: a sign that holds there holds over the whole range
     double uMin, uMax, vMin, vMax;
     BRepTools::UVBounds(face, uMin, uMax, vMin, vMax);
-    // A full turn (a sphere: whole in v too) holds every crossing of its surface within its axis
-    // range: the face as it is gives the first crossing to a profile wholly outside or wholly
-    // inside, and BRepFeat keeps the names it gives on integration (review rv540 3: the split
-    // named a Pad's end edges up to a full cylinder by duplicate counters)
+    const gp_Vec d(direction);
+    const double dX = d.Dot(gp_Vec(round->frame.XDirection()));
+    const double dY = d.Dot(gp_Vec(round->frame.YDirection()));
+    const double dZ = d.Dot(gp_Vec(round->frame.Direction()));
+    // A full turn across its axis (a sphere: whole in v too, any direction) holds every crossing
+    // of its surface that a line keeping its height meets: the face as it is gives the first
+    // crossing to a profile wholly outside or wholly inside, and BRepFeat keeps the names it gives
+    // on integration (review rv540 3: the split named a Pad's end edges up to a full cylinder by
+    // duplicate counters). Not along an oblique direction: a line can cross the surface first
+    // above or below the face, then meet the face on the far side (review rv540-2 F1)
     const double wholeTurn = 2 * std::numbers::pi;
     if (uMax - uMin >= wholeTurn - Precision::Angular()
-        && (round->type != GeomAbs_Sphere
-            || vMax - vMin >= std::numbers::pi - Precision::Angular())) {
+        && (round->type == GeomAbs_Sphere ? vMax - vMin >= std::numbers::pi - Precision::Angular()
+                                          : std::abs(dZ) <= Precision::Angular())) {
         int region = 0;
         for (TopExp_Explorer vertex(profile, TopAbs_VERTEX); vertex.More(); vertex.Next()) {
             bool inside = false;
@@ -11891,10 +11897,6 @@ bool faceIsFirstCrossing(const TopoDS_Face& face, const TopoDS_Shape& profile, c
         }
         return region != 0;
     }
-    const gp_Vec d(direction);
-    const double dX = d.Dot(gp_Vec(round->frame.XDirection()));
-    const double dY = d.Dot(gp_Vec(round->frame.YDirection()));
-    const double dZ = d.Dot(gp_Vec(round->frame.Direction()));
     const double across = std::hypot(dX, dY);
     std::vector<double> us {uMin, uMax};
     if (across > Precision::Angular()) {
@@ -13033,10 +13035,13 @@ TopoShape& TopoShape::makeElementPrismUntil(
     // The retry on a base of its own (`checkBase`: the up-to face swept along the direction) can
     // end a prism short of the face, valid: a pocket up to last along a tab with a full-round end
     // stopped 44 mm short of it (review rv540 1's case, integration too), and a prism through a
-    // window of the face 1 mm short (review pr1039-r3). Every solid must touch the face; one
-    // that doesn't goes to the split, which reaches the face or refuses
+    // window of the face 1 mm short (review pr1039-r3). Every solid must touch the face (or the
+    // face without its limits, which the retry went up to: review rv540-2 F2); one that doesn't
+    // goes to the split, which reaches the face or refuses
     if (checkBase && !bySplit && !flatLength && !fullTurn
-        && !touchesEverySolid(result.getShape(), _uptoface.getShape())) {
+        && !touchesEverySolid(result.getShape(), _uptoface.getShape())
+        && (uptofaceCopy.isSame(_uptoface)
+            || !touchesEverySolid(result.getShape(), uptofaceCopy.getShape()))) {
         result = prismBySplit();
     }
     // As the split refuses it (ops#356). `result` is the profile's prisms alone here: each

@@ -6157,6 +6157,32 @@ class TestUpToACurvedFace(unittest.TestCase):
         self.Doc.recompute()
         self.checkSolids(pad, 2 * cylinderReach(40, 4, 6, 4, 6), 2)
 
+    def testPadUpToAFullCylinderObliqueAboveIt(self):
+        # The side face of the whole cylinder r 20, z 0..10, the rectangle y -2..2, z 15..17 on the
+        # plane x = 40, along (-1, 0, -0.2): the lines cross the surface first at x = +20, z
+        # 11..13, above the face, and meet the face only on the far side. Onshape stops each
+        # point at its first crossing of the whole surface (orc1125c, RB34): the near side, the
+        # volume of cylinderReach() (a shear along the axis). Review rv540-2 F1: BRepFeat went
+        # to the far side, 479.73 (integration too)
+        V = FreeCAD.Vector
+        wall = self.Doc.addObject("Part::Feature", "Wall")
+        wall.Shape = Part.makeCylinder(20, 10)
+        names = [
+            "Face%d" % (i + 1)
+            for i, face in enumerate(wall.Shape.Faces)
+            if face.Surface.TypeId == "Part::GeomCylinder"
+        ]
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        pad = body.newObject("PartDesign::Pad", "Pad")
+        pad.Profile = rectangleOnX(body, 40, -2, 2, 15, 17)
+        pad.Type = "UpToFace"
+        pad.UpToFace = (wall, names)
+        pad.UseCustomVector = True
+        pad.AlongSketchNormal = False
+        pad.Direction = V(-1, 0, -0.2)
+        self.Doc.recompute()
+        self.check(pad, cylinderReach(40, -2, 2, 15, 17))
+
 
 def roundEndReach(x, y0, y1, z0, z1, r=5.0):
     """The volume over the rectangle y y0..y1, z z0..z1 of the plane at `x`, along -x to the far
