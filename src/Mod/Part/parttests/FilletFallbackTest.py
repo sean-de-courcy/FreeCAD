@@ -4375,6 +4375,82 @@ class RoundUnderALipTest(unittest.TestCase):
             self.assertAlmostEqual(base.Volume - shape.Volume, expected, delta=2e-3)
 
 
+class ScoopRimUnderALipTest(unittest.TestCase):
+    """ops#1053: a round along a scoop's rim that ends under a lip, a strip's width from the corner
+    cylinder's tangent line (sk1126's SR model, Onshape RB46). The route under the overhang
+    misclassified near-coincident faces in its Booleans by the base's own tolerances (what the
+    round removes came out with most of the piece in it); its second try with fuzzy Booleans
+    builds it, and the result must not depend on the base's edge tolerances."""
+
+    def model(self, s, lip=1.0):
+        # SR(s, L): block x -40..12, y -12..40, z 0..22 + lip, its vertical edge at (12, -12)
+        # rounded r 12 about the z axis; a unit sphere scaled (a, a, 14) about (6, -6, 22), cut below
+        # z 22 only, its rim ending on the cylinder an arc length s from each tangent line; a
+        # cylinder of radius a - 0.4 about (6, -6) through the lip
+        t = s / 12.0
+        a = math.hypot(12 * math.sin(t) - 6, 6 - 12 * math.cos(t))
+        top = 22 + lip
+        block = Part.makeBox(52, 52, top, V(-40, -12, 0))
+        block = block.cut(Part.makeBox(12, 12, top, V(0, -12, 0)).cut(Part.makeCylinder(12, top)))
+        m = FreeCAD.Matrix()
+        m.scale(a, a, 14)
+        m.move(V(6, -6, 22))
+        scoop = Part.makeSphere(1).transformGeometry(m).common(Part.makeBox(200, 200, 72, V(-100, -100, -50)))
+        base = block.cut(scoop).cut(Part.makeCylinder(a - 0.4, lip + 1, V(6, -6, 22), V(0, 0, 1)))
+        base = base.removeSplitter()
+
+        def kinds(e):
+            return [f.Surface.TypeId for f in base.ancestorsOfType(e, Part.Face)]
+
+        rim = [
+            e
+            for e in base.Edges
+            if "Part::GeomCylinder" in kinds(e)
+            and any(k not in ("Part::GeomPlane", "Part::GeomCylinder") for k in kinds(e))
+        ]
+        # The rim's ends on the cylinder at (12 sin t, -12 cos t, 22) and its mirror
+        ends = [V(12 * math.sin(t), -12 * math.cos(t), 22), V(12 * math.cos(t), -12 * math.sin(t), 22)]
+        for end in ends:
+            self.assertTrue(any((v.Point - end).Length < 1e-6 for e in rim for v in e.Vertexes))
+        return base, rim
+
+    @staticmethod
+    def lip_underside(shape):
+        # The planar faces at z 22 facing down: the lip's underside
+        return sum(
+            f.Area
+            for f in shape.Faces
+            if f.Surface.TypeId == "Part::GeomPlane"
+            and abs(f.CenterOfMass.z - 22) < 1e-7
+            and f.normalAt(*f.Surface.parameter(f.CenterOfMass)).z < -0.999
+        )
+
+    def testStripUnderHalfTheRadius(self):
+        # RB46 row 4 (L): s 0.3, r 0.8. Onshape: dV -20.466719, the lip underside +1.223935. OCCT's
+        # blend on these spline walls is within 0.5 % of Onshape's (LP0: 0.09 % in area; the fork's
+        # dV here 0.21 %)
+        base, rim = self.model(0.3)
+        at = [i for i, e in enumerate(base.Edges) if any(e.isSame(r) for r in rim)]
+        results = []
+        for tolerance in (None, 1e-6, 3e-6, 7e-6, 1e-5, 3e-5):
+            shape = base.copy()
+            if tolerance:
+                shape.fixTolerance(tolerance, Part.Edge)
+            edges = [shape.Edges[i] for i in at]
+            with self.subTest(tolerance=tolerance):
+                out = shape.makeFillet(0.8, edges)
+                self.assertTrue(out.isValid())
+                self.assertEqual(len(out.Solids), 1)
+                dV = out.Volume - shape.Volume
+                self.assertAlmostEqual(dV, -20.466719, delta=0.005 * 20.466719)
+                grow = self.lip_underside(out) - self.lip_underside(shape)
+                self.assertAlmostEqual(grow, 1.223935, delta=0.005 * 1.223935)
+                results.append(out.Volume)
+        # The result does not depend on the base's edge tolerances
+        for volume in results[1:]:
+            self.assertAlmostEqual(volume, results[0], delta=1e-6 * results[0])
+
+
 class CurvedWallEndTest(unittest.TestCase):
     """A full round of a curved wall's flat end (ops#640, the native replica's #150; Onshape's FR1,
     exact): the end's two straight edges lie between the end face and a cylinder, and rounds of

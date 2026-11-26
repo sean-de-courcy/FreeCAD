@@ -135,6 +135,10 @@ struct Request
     /// refusal before any Boolean unless every selected edge ends at two corners of
     /// mitreCircleCorner() (closed loops of that corner kind)
     bool mitreOnly = false;
+    /// The route under an overhang tries once more with fuzzy Booleans where it refused (ops#1053).
+    /// Off where OCCT's result comes after the construction's refusal and stood before: the
+    /// preferred construction, tried before OCCT's maker
+    bool overhangFuzzy = true;
     /// A chamfer by equal distances whose every edge is a closed contour of its own, one of them
     /// of varying angle (variesAlongLoneEdge()): the construction takes a closed ellipse between
     /// a plane and a cylinder (ops#942). Set by makeElementChamfer only for the construction it
@@ -378,6 +382,9 @@ struct PartExport Construction
     /// came after the construction's refusal builds the dress-up, it did so before, and its
     /// result stands (review of PR 484, S5)
     bool newRule {false};
+    /// Built under an overhang only by a further try, with fuzzy Booleans (ops#1053); newRule is
+    /// set too. Where OCCT's result was invalid, the reverse order's valid result still comes first
+    bool fuzzy {false};
 };
 
 /** build() in two steps, so that the long one can run on a worker thread (KernelBudget::run()):
