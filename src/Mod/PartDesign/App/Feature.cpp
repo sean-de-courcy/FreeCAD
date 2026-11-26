@@ -24,7 +24,18 @@
 
 
 #include <BRep_Tool.hxx>
+#include <BRepAdaptor_Curve.hxx>
+#include <BRepAdaptor_Surface.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
+#include <BRepClass3d_SolidClassifier.hxx>
+#include <BRepLProp_SLProps.hxx>
+#include <BRepTools.hxx>
+#include <BRepTopAdaptor_FClass2d.hxx>
+#include <gp_Dir.hxx>
+#include <gp_Pnt2d.hxx>
+#include <gp_Vec.hxx>
+#include <IntCurvesFace_ShapeIntersector.hxx>
+#include <gp_Lin.hxx>
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepCheck_Shell.hxx>
 #include <BRepCheck_Solid.hxx>
@@ -192,6 +203,12 @@ Feature::Feature()
                       (App::PropertyType)(App::Prop_Hidden | App::Prop_ReadOnly | App::Prop_Output
                                           | App::Prop_NoRecompute),
                       "The output is the base, passed through after the last recompute failed");
+    ADD_PROPERTY_TYPE(PartEnded,
+                      (false),
+                      "Base",
+                      (App::PropertyType)(App::Prop_Hidden | App::Prop_ReadOnly | App::Prop_Output
+                                          | App::Prop_NoRecompute),
+                      "The part ends here: this feature's tool took all of it (ops#1065)");
     // FreeCAD-CH ops#654: studio features (StudioList.h)
     ADD_PROPERTY_TYPE(StudioScope,
                       (),
@@ -570,6 +587,304 @@ std::string number(double value)
 
 const char* notBuilt = ": the feature is not built";
 
+// ------------------------------------------------------------------------------------------------
+// A part ended by its feature's tool (ops#1065, notes/part-ends-1065-design.md 2): the geometry
+// says the tools hold the part, by point classification, never a second boolean (the same kernel
+// on the same inputs that just returned nothing)
+
+/// What an empty result of feature can mean (design 2's table)
+enum class EndKind
+{
+    None,    // never an end: an empty result is the kernel's error
+    Remove,  // ends where the tools hold the base
+    Common   // ends where the tools miss the base
+};
+
+EndKind endKindOf(Feature& feature)
+{
+    if (feature.isDerivedFrom<DressUp>()) {
+        return EndKind::None;
+    }
+    if (auto addSub = freecad_cast<FeatureAddSub*>(&feature)) {
+        // A feature-level Intersect keeps the base (FeatureExtrude) or its own refusal (a step's
+        // "leaves nothing of"): no end (sk1065 2)
+        return addSub->getBooleanOperation() == FeatureAddSub::BooleanOperation::Subtraction
+            ? EndKind::Remove
+            : EndKind::None;
+    }
+    if (auto boolean = freecad_cast<Boolean*>(&feature)) {
+        const char* type = boolean->Type.getValueAsString();
+        if (strcmp(type, "Cut") == 0) {
+            return EndKind::Remove;
+        }
+        return strcmp(type, "Common") == 0 ? EndKind::Common : EndKind::None;
+    }
+    if (freecad_cast<Transformed*>(&feature)) {
+        return directionOf(feature) == Direction::Shrinks ? EndKind::Remove : EndKind::None;
+    }
+    return EndKind::None;
+}
+
+/// The solids of shape, each once
+std::vector<TopoDS_Shape> solidsOf(const TopoDS_Shape& shape)
+{
+    std::vector<TopoDS_Shape> out;
+    if (shape.IsNull()) {
+        return out;
+    }
+    TopTools_IndexedMapOfShape map;
+    TopExp::MapShapes(shape, TopAbs_SOLID, map);
+    for (int i = 1; i <= map.Extent(); ++i) {
+        out.push_back(map(i));
+    }
+    return out;
+}
+
+/// A 3 x 3 grid of a face's parameter box, each point kept where the face's own classifier puts
+/// it on the face (a hole or a trimmed corner drops it)
+std::vector<gp_Pnt2d> faceGrid(const TopoDS_Face& face)
+{
+    std::vector<gp_Pnt2d> out;
+    double u0 = 0;
+    double u1 = 0;
+    double v0 = 0;
+    double v1 = 0;
+    BRepTools::UVBounds(face, u0, u1, v0, v1);
+    BRepTopAdaptor_FClass2d onFace(face, Precision::PConfusion());
+    for (int i = 1; i <= 3; ++i) {
+        for (int j = 1; j <= 3; ++j) {
+            const gp_Pnt2d uv(u0 + (u1 - u0) * i / 4.0, v0 + (v1 - v0) * j / 4.0);
+            if (onFace.Perform(uv) != TopAbs_OUT) {
+                out.push_back(uv);
+            }
+        }
+    }
+    return out;
+}
+
+/// Points on the boundary of shape's solids: every vertex, every edge's midpoint and each face's
+/// grid (sk1065 4: one point per face is too few on a curved face)
+std::vector<gp_Pnt> surfacePoints(const TopoDS_Shape& shape)
+{
+    std::vector<gp_Pnt> out;
+    TopTools_IndexedMapOfShape vertices;
+    TopTools_IndexedMapOfShape edges;
+    TopTools_IndexedMapOfShape faces;
+    for (const TopoDS_Shape& solid : solidsOf(shape)) {
+        TopExp::MapShapes(solid, TopAbs_VERTEX, vertices);
+        TopExp::MapShapes(solid, TopAbs_EDGE, edges);
+        TopExp::MapShapes(solid, TopAbs_FACE, faces);
+    }
+    for (int i = 1; i <= vertices.Extent(); ++i) {
+        out.push_back(BRep_Tool::Pnt(TopoDS::Vertex(vertices(i))));
+    }
+    for (int i = 1; i <= edges.Extent(); ++i) {
+        const TopoDS_Edge& edge = TopoDS::Edge(edges(i));
+        if (BRep_Tool::Degenerated(edge)) {
+            continue;
+        }
+        BRepAdaptor_Curve curve(edge);
+        out.push_back(curve.Value((curve.FirstParameter() + curve.LastParameter()) / 2.0));
+    }
+    for (int i = 1; i <= faces.Extent(); ++i) {
+        const TopoDS_Face& face = TopoDS::Face(faces(i));
+        BRepAdaptor_Surface surface(face);
+        for (const gp_Pnt2d& uv : faceGrid(face)) {
+            out.push_back(surface.Value(uv.X(), uv.Y()));
+        }
+    }
+    return out;
+}
+
+/// A point strictly inside solid: the midpoint between a face's point and the first hit along
+/// its inward normal (sk1065 4: any thickness; on the boundary is not inside). False where no
+/// face gives one
+bool innerPoint(const TopoDS_Shape& solid, double tolerance, gp_Pnt& out)
+{
+    IntCurvesFace_ShapeIntersector rays;
+    rays.Load(solid, tolerance);
+    BRepClass3d_SolidClassifier inside(solid);
+    for (TopExp_Explorer it(solid, TopAbs_FACE); it.More(); it.Next()) {
+        const TopoDS_Face& face = TopoDS::Face(it.Current());
+        BRepAdaptor_Surface surface(face);
+        for (const gp_Pnt2d& uv : faceGrid(face)) {
+            BRepLProp_SLProps props(surface, uv.X(), uv.Y(), 1, Precision::Confusion());
+            if (!props.IsNormalDefined()) {
+                continue;
+            }
+            gp_Dir inward = props.Normal();
+            if (face.Orientation() != TopAbs_REVERSED) {
+                inward.Reverse();
+            }
+            const gp_Pnt start = props.Value();
+            // Past the face it starts on
+            rays.Perform(gp_Lin(start, inward), 10.0 * Precision::Confusion(), Precision::Infinite());
+            if (!rays.IsDone() || rays.NbPnt() == 0) {
+                continue;
+            }
+            double nearest = Precision::Infinite();
+            for (int i = 1; i <= rays.NbPnt(); ++i) {
+                nearest = std::min(nearest, rays.WParameter(i));
+            }
+            const gp_Pnt mid = start.Translated(gp_Vec(inward) * (nearest / 2.0));
+            inside.Perform(mid, tolerance);
+            if (inside.State() == TopAbs_IN) {
+                out = mid;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+/// One classifier per solid of shapes
+struct Classifiers
+{
+    std::vector<std::unique_ptr<BRepClass3d_SolidClassifier>> solids;
+    double tolerance {Precision::Confusion()};
+
+    Classifiers(const std::vector<TopoDS_Shape>& shapes, double tol)
+        : tolerance(tol)
+    {
+        for (const TopoDS_Shape& shape : shapes) {
+            for (const TopoDS_Shape& solid : solidsOf(shape)) {
+                solids.push_back(std::make_unique<BRepClass3d_SolidClassifier>(solid));
+            }
+        }
+    }
+    /// IN or ON one of them; with strictly, IN one of them
+    bool holds(const gp_Pnt& point, bool strictly = false) const
+    {
+        for (const auto& solid : solids) {
+            solid->Perform(point, tolerance);
+            const TopAbs_State state = solid->State();
+            if (state == TopAbs_IN || (!strictly && state == TopAbs_ON)) {
+                return true;
+            }
+        }
+        return false;
+    }
+};
+
+Bnd_Box tightBox(const std::vector<TopoDS_Shape>& shapes)
+{
+    Bnd_Box box;
+    for (const TopoDS_Shape& shape : shapes) {
+        BRepBndLib::AddOptimal(shape, box, Standard_False, Standard_False);
+    }
+    return box;
+}
+
+/// Whether tools hold every bit of base (design 2, sk1065 4): base's box in the tools' joint box,
+/// every boundary sample IN or ON a tool, and one inner point of each base solid IN or ON one
+bool toolsHoldBase(const TopoDS_Shape& base, const std::vector<TopoDS_Shape>& tools, double tolerance)
+{
+    const std::vector<TopoDS_Shape> baseSolids = solidsOf(base);
+    const Bnd_Box baseBox = tightBox({base});
+    const Bnd_Box toolBox = tightBox(tools);
+    if (baseSolids.empty() || baseBox.IsVoid() || toolBox.IsVoid()) {
+        return false;
+    }
+    double b[6];
+    double t[6];
+    baseBox.Get(b[0], b[1], b[2], b[3], b[4], b[5]);
+    toolBox.Get(t[0], t[1], t[2], t[3], t[4], t[5]);
+    const double slack = tolerance + 1e-9 * std::sqrt(baseBox.SquareExtent());
+    for (int axis = 0; axis < 3; ++axis) {
+        if (b[axis] < t[axis] - slack || b[axis + 3] > t[axis + 3] + slack) {
+            return false;
+        }
+    }
+    const Classifiers holders(tools, tolerance);
+    if (holders.solids.empty()) {
+        return false;
+    }
+    for (const gp_Pnt& point : surfacePoints(base)) {
+        if (!holders.holds(point)) {
+            return false;
+        }
+    }
+    for (const TopoDS_Shape& solid : baseSolids) {
+        gp_Pnt inner;
+        if (!innerPoint(solid, tolerance, inner) || !holders.holds(inner)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// Whether tools miss base (an Intersect that leaves nothing; sk1065 3, both ways): apart boxes,
+/// or no sample of either strictly inside the other and no inner point of either in the other
+bool toolsMissBase(const TopoDS_Shape& base, const std::vector<TopoDS_Shape>& tools, double tolerance)
+{
+    Bnd_Box baseBox = tightBox({base});
+    Bnd_Box toolBox = tightBox(tools);
+    if (baseBox.IsVoid() || toolBox.IsVoid()) {
+        return false;
+    }
+    baseBox.Enlarge(tolerance);
+    if (baseBox.IsOut(toolBox)) {
+        return true;
+    }
+    const Classifiers toolSolids(tools, tolerance);
+    const Classifiers baseSolids({base}, tolerance);
+    if (toolSolids.solids.empty() || baseSolids.solids.empty()) {
+        return false;
+    }
+    for (const gp_Pnt& point : surfacePoints(base)) {
+        if (toolSolids.holds(point, /*strictly=*/true)) {
+            return false;
+        }
+    }
+    for (const TopoDS_Shape& tool : tools) {
+        for (const gp_Pnt& point : surfacePoints(tool)) {
+            if (baseSolids.holds(point, /*strictly=*/true)) {
+                return false;
+            }
+        }
+    }
+    auto innerIn = [tolerance](const TopoDS_Shape& shape, const Classifiers& other) {
+        for (const TopoDS_Shape& solid : solidsOf(shape)) {
+            gp_Pnt inner;
+            if (!innerPoint(solid, tolerance, inner) || other.holds(inner)) {
+                return true;
+            }
+        }
+        return false;
+    };
+    if (innerIn(base, toolSolids)) {
+        return false;
+    }
+    return std::ranges::none_of(tools, [&](const TopoDS_Shape& tool) {
+        return innerIn(tool, baseSolids);
+    });
+}
+
+/// The confirmation's tolerance: the feature's fuzzy value where set, else the base's largest
+/// vertex tolerance, never below Precision::Confusion() (sk1065 4)
+double endTolerance(const Feature& feature, const TopoDS_Shape& base)
+{
+    double tolerance = Precision::Confusion();
+    if (auto fuzzy = dynamic_cast<App::PropertyFloat*>(feature.getPropertyByName("FuzzyTolerance"));
+        fuzzy && fuzzy->getValue() > 0.0) {
+        return std::max(tolerance, fuzzy->getValue());
+    }
+    for (TopExp_Explorer it(base, TopAbs_VERTEX); it.More(); it.Next()) {
+        tolerance = std::max(tolerance, BRep_Tool::Tolerance(TopoDS::Vertex(it.Current())));
+    }
+    return tolerance;
+}
+
+// The features whose results the test hook empties (ops#1065 tests); by address only
+std::mutex emptiedMutex;
+std::unordered_set<const App::DocumentObject*> emptied;
+
+bool emptiedByTest(const App::DocumentObject* feature)
+{
+    std::scoped_lock guard(emptiedMutex);
+    return !emptied.empty() && emptied.count(feature) != 0;
+}
+
 /// Empty when the result passes, else what is wrong. \a lastVouched: the result this feature's
 /// last recompute vouched for; the same result again needs no check.  whole: set when it passes
 /// with every face of the result checked (a feature with no base, kernel-9)
@@ -584,16 +899,8 @@ std::string checkResult(
     whole = false;
     TopoDS_Shape result = feature.Shape.getShape().getShape();
     if (result.IsNull() || TopExp_Explorer(result, TopAbs_SOLID).More() == Standard_False) {
-        // An additive feature never takes the part away: OCCT's fuse can return an empty
-        // compound without an error (a groove's end wall revolved about its own edge, kernel-10)
-        auto addSub = dynamic_cast<FeatureAddSub*>(&feature);
-        if (addSub && addSub->getAddSubType() == FeatureAddSub::Type::Additive) {
-            TopoDS_Shape base = feature.getBaseTopoShape(true).getShape();
-            if (!base.IsNull() && TopExp_Explorer(base, TopAbs_SOLID).More()) {
-                return std::string("The geometry kernel lost the part: the result has no solid")
-                    + notBuilt;
-            }
-        }
+        // Judged before this, whatever CheckResults says: an ended part, or a base with no solid
+        // (Feature::settleNoSolid(), ops#1065)
         return {};
     }
     if (inputsValid && !lastVouched.IsNull() && result.IsEqual(lastVouched)) {
@@ -860,6 +1167,12 @@ App::DocumentObjectExecReturn* Feature::recompute()
     // The result this recompute may find again: then its check has nothing new to read
     const TopoDS_Shape lastVouched = vouchedShape;
     vouchedShape.Nullify();
+    // Set only where this recompute ends the part, below: every other path, its stops and
+    // failures included, leaves the part to the features after it (ops#1065, sk1065 1)
+    if (PartEnded.getValue()) {
+        PartEnded.setValue(false);
+    }
+    forgetRemovalOperands();
     // Held by the Body's roll-back bar (ops#127): not run on any path (also obj.recompute()); it
     // stays touched and runs when the bar passes it
     if (auto body = getFeatureBody(); body && body->holds(this)) {
@@ -897,6 +1210,17 @@ App::DocumentObjectExecReturn* Feature::recompute()
     // (a command, Python, a reorder, undo) ends here
     if (std::string why = Boolean::mergeLock(this); !why.empty()) {
         return new App::DocumentObjectExecReturn(why, this);
+    }
+    // A Merge-with-all step in a part that ended before it (ops#1065, sk1065 5): Onshape's Merge
+    // with all takes the parts that exist. Valid, with nothing of its own; the Body stays empty
+    const bool skipped = DeletePart::mergeAllSkip(this);
+    DeletePart::setSkipped(this, skipped);
+    if (skipped) {
+        if (!Shape.getShape().isNull()) {
+            Base::ObjectStatusLocker<App::ObjectStatus, App::DocumentObject> exe(App::Recompute, this);
+            Shape.setValue(TopoShape());
+        }
+        return App::DocumentObject::StdReturn;
     }
     // After a Delete part in its Body, or reading a part deleted before it (ops#635)
     std::string lock = DeletePart::deleteLock(this);
@@ -939,10 +1263,37 @@ App::DocumentObjectExecReturn* Feature::recompute()
     Part::KernelBudget::Scope budget;
     auto ret = Part::Feature::recompute();
     bool checkedWhole = false;
+    // An empty result of a feature whose base has a solid (ops#1065): the part ends, or the kernel
+    // lost it. Whatever CheckResults says: nothing with no solid stays Valid with a shape
+    bool ends = false;
+    if (ret == App::DocumentObject::StdReturn && getFeatureBody() && Body::isSolidFeature(this)
+        && !isDerivedFrom<FeatureBase>() && !isDerivedFrom<DeletePart>()) {
+        std::string why;
+        try {
+            if (emptiedByTest(this)) {
+                TopoDS_Compound empty;
+                BRep_Builder builder;
+                builder.MakeCompound(empty);
+                Base::ObjectStatusLocker<App::ObjectStatus, App::DocumentObject> exe(App::Recompute, this);
+                Shape.setValue(makeTopoShape(empty));
+            }
+            why = settleNoSolid(ends);
+        }
+        catch (const Base::Exception& e) {
+            why = e.what();
+        }
+        catch (const Standard_Failure& e) {
+            why = std::string("The check of the result failed: ") + e.GetMessageString();
+        }
+        if (!why.empty()) {
+            ends = false;
+            ret = new App::DocumentObjectExecReturn(why, this);
+        }
+    }
     // FreeCAD-CH kernel safety S2: a result the kernel got wrong fails here, at its feature. A
     // BaseFeature builds nothing: the first feature on it checks the base it passes on
-    if (ret == App::DocumentObject::StdReturn && getFeatureBody() && Body::isSolidFeature(this)
-        && !isDerivedFrom<FeatureBase>() && checkingResults()) {
+    if (ret == App::DocumentObject::StdReturn && !ends && getFeatureBody()
+        && Body::isSolidFeature(this) && !isDerivedFrom<FeatureBase>() && checkingResults()) {
         std::string why;
         PostCondition::Observed observed;
         try {
@@ -982,7 +1333,84 @@ App::DocumentObjectExecReturn* Feature::recompute()
         // studio owner too (ops#654 S2)
         purgeTouched();
     }
+    if (ret == App::DocumentObject::StdReturn && ends) {
+        PartEnded.setValue(true);
+    }
     return ret;
+}
+
+bool Feature::removalOperands(TopoShape& base, std::vector<TopoShape>& tools) const
+{
+    if (!removalTools.empty()) {
+        base = removalBase;
+        tools = removalTools;
+        return !base.isNull();
+    }
+    // A FeatureAddSub's boolean: its base moved into its own frame and its tool, as its preview
+    // takes them (FeatureAddSub::updatePreviewShape())
+    auto addSub = freecad_cast<const FeatureAddSub*>(this);
+    if (!addSub || addSub->AddSubShape.getShape().isNull()) {
+        return false;
+    }
+    base = getBaseTopoShape(/*silent=*/true);
+    if (base.isNull()) {
+        return false;
+    }
+    base.move(getInverseLocation(base));
+    tools = {addSub->AddSubShape.getShape()};
+    return true;
+}
+
+void Feature::setTestEmptyResult(const App::DocumentObject* feature, bool on)
+{
+    std::scoped_lock guard(emptiedMutex);
+    if (on) {
+        emptied.insert(feature);
+    }
+    else {
+        emptied.erase(feature);
+    }
+}
+
+std::string Feature::settleNoSolid(bool& ends)
+{
+    ends = false;
+    const TopoDS_Shape result = Shape.getShape().getShape();
+    if (!result.IsNull() && TopExp_Explorer(result, TopAbs_SOLID).More()) {
+        return {};
+    }
+    TopoShape base;
+    std::vector<TopoShape> tools;
+    const bool known = removalOperands(base, tools);
+    if (!known) {
+        base = getBaseTopoShape(/*silent=*/true);
+    }
+    // The first feature, or a base passed through from a failed one: nothing to lose
+    if (base.isNull() || !TopExp_Explorer(base.getShape(), TopAbs_SOLID).More()) {
+        return {};
+    }
+    const EndKind kind = endKindOf(*this);
+    if (known && kind != EndKind::None && !tools.empty()) {
+        std::vector<TopoDS_Shape> toolShapes;
+        for (const TopoShape& tool : tools) {
+            if (!tool.isNull()) {
+                toolShapes.push_back(tool.getShape());
+            }
+        }
+        const double tolerance = endTolerance(*this, base.getShape());
+        const bool confirmed = !toolShapes.empty()
+            && (kind == EndKind::Remove ? toolsHoldBase(base.getShape(), toolShapes, tolerance)
+                                        : toolsMissBase(base.getShape(), toolShapes, tolerance));
+        if (confirmed) {
+            // Inside the Recompute status, as execute() writes it (Body::writeStoppedShape(),
+            // sk1065 7): nothing stays touched, and the empty shape doesn't move the Placement
+            ends = true;
+            Base::ObjectStatusLocker<App::ObjectStatus, App::DocumentObject> exe(App::Recompute, this);
+            Shape.setValue(TopoShape());
+            return {};
+        }
+    }
+    return std::string("The geometry kernel lost the part: the result has no solid") + notBuilt;
 }
 
 App::DocumentObjectExecReturn* Feature::recomputePreview()
@@ -1069,7 +1497,9 @@ short Feature::mustExecute() const
             if (!body || body->holds(this)) {
                 return false;
             }
-            return DeletePart::deleteLock(this).empty() == (DeletePart::wasLocked(this) && isError());
+            // A Merge-with-all step skipped in an ended part, or no longer (ops#1065)
+            return DeletePart::deleteLock(this).empty() == (DeletePart::wasLocked(this) && isError())
+                || DeletePart::mergeAllSkip(this) != DeletePart::wasSkipped(this);
         };
         bool run = false;
         if (App::isRecomputingOnThisThread() || App::isRecomputeWorkerThread()) {
@@ -1091,6 +1521,8 @@ void Feature::onDocumentRestored()
     const char* why = isError() ? getDocument()->getErrorDescription(this) : nullptr;
     failedElsewhere = why && std::strstr(why, placedElsewhere);
     DeletePart::setLocked(this, DeletePart::isDeleteLock(why));
+    // Every property is restored by now, the enders' PartEnded included (ops#1065)
+    DeletePart::setSkipped(this, !isError() && DeletePart::mergeAllSkip(this));
     Part::Feature::onDocumentRestored();
 }
 
@@ -1482,8 +1914,20 @@ bool Feature::relinkToMatchingSubelements(
     return true;
 }
 
+Feature::~Feature()
+{
+    if (countedEnded) {
+        DeletePart::noteEnded(-1);
+    }
+}
+
 void Feature::onChanged(const App::Property* prop)
 {
+    // Restore and undo set it too: the count follows the property, whoever sets it (ops#1065)
+    if (prop == &PartEnded && PartEnded.getValue() != countedEnded) {
+        countedEnded = PartEnded.getValue();
+        DeletePart::noteEnded(countedEnded ? 1 : -1);
+    }
     if (!this->isRestoring() && this->getDocument()
         && !this->getDocument()->isPerformingTransaction()) {
         // Setting BaseFeature doesn't reorder the Body (ops#77). Upstream had a reorder here that

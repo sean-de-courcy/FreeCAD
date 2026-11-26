@@ -22,6 +22,7 @@
 #include <Base/Tools.h>
 
 #include "Body.h"
+#include "FeatureDeletePart.h"
 #include "Feature.h"
 #include "FeatureAddSub.h"
 #include "FeatureApply.h"
@@ -2196,8 +2197,22 @@ std::vector<Body*> PartDesign::studioLivePartsAt(const StudioList* list, int ind
     const auto positions = positionsOf(entries);
     const Consumed consumed =
         consumedBy(entries, bodies, positions, std::min(list->barIndex(), size));
+    // A part a feature before index ended, a Delete part's or a Remove's that took all of it
+    // (ops#1065, sk1065 5): no pick offers it. Computed state, so the picks only: reconcile keeps
+    // the structural liveAt()
+    auto endedBefore = [&](const Body* body) {
+        const Feature* ender = DeletePart::enderOf(body);
+        if (!ender) {
+            return false;
+        }
+        auto at = positions.find(ender);
+        if (at == positions.end()) {
+            at = positions.find(ender->StudioOwner.getValue());
+        }
+        return at == positions.end() || at->second < index;
+    };
     for (auto body : bodies) {
-        if (liveAt(body, index, positions, consumed, /*before=*/true)) {
+        if (liveAt(body, index, positions, consumed, /*before=*/true) && !endedBefore(body)) {
             out.push_back(body);
         }
     }

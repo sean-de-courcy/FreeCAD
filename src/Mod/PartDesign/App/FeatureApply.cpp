@@ -468,6 +468,10 @@ App::DocumentObjectExecReturn* FeatureApply::execute()
             try {
                 std::vector<Part::TopoShape> operands {base, tool};
                 operands.insert(operands.end(), merged.begin(), merged.end());
+                // A Remove that leaves nothing ends the part where its tool holds it (ops#1065)
+                if (getBooleanOperation() == BooleanOperation::Subtraction && merged.empty()) {
+                    setRemovalOperands(base, {tool});
+                }
                 result.makeElementBoolean(
                     getBooleanMaker(),
                     operands,
@@ -490,6 +494,12 @@ App::DocumentObjectExecReturn* FeatureApply::execute()
 
         // A Body never goes on with two solids (requirement 2, until pieces become parts, P6p)
         const int solids = result.isNull() ? 0 : countSolids(result.getShape());
+        if (solids == 0 && getBooleanOperation() == BooleanOperation::Subtraction) {
+            // Onshape's Remove that takes all of its part: the part ends, where the tool provably
+            // holds it, else the kernel lost it (Feature::settleNoSolid(), ops#1065)
+            Shape.setValue(Part::TopoShape());
+            return App::DocumentObject::StdReturn;
+        }
         if (solids == 0) {
             return new App::DocumentObjectExecReturn(
                 "Applying '" + std::string(owner->Label.getValue()) + "' leaves nothing of " + part,

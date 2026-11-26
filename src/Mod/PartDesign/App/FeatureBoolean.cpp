@@ -528,6 +528,10 @@ App::DocumentObjectExecReturn* Boolean::execute()
     // rules (ops#325)
     const bool plain = !isMerge();
     const bool hadTools = !tools.empty();
+    // A Subtract that leaves nothing ends the part where its tools hold it (ops#1065)
+    if (plain && hadTools && type == "Cut") {
+        setRemovalOperands(shapes.front(), std::vector<TopoShape>(shapes.begin() + 1, shapes.end()));
+    }
     std::vector<App::DocumentObject*> separate;
     if (plain && type == "Fuse" && hadTools) {
         // A Union fuses what touches the base, directly or through another tool it fuses; a tool
@@ -630,13 +634,12 @@ App::DocumentObjectExecReturn* Boolean::execute()
     if (plain && hadTools) {
         std::vector<TopoShape> toolShapes(shapes.begin() + 1, shapes.end());
         if (type == "Common" && (apart || result.countSubShapes(TopAbs_SOLID) == 0)) {
-            // An Intersect that misses leaves nothing, with no message (hands-on A-2' c); with Keep
-            // tools, the part as it was
+            // An Intersect that misses leaves nothing, with no message (hands-on A-2' c): the part
+            // ends where the tools provably miss it, else the kernel lost it
+            // (Feature::settleNoSolid(), ops#1065); with Keep tools, the part as it was
             if (!KeepTools.getValue()) {
-                TopoDS_Compound empty;
-                BRep_Builder builder;
-                builder.MakeCompound(empty);
-                this->Shape.setValue(makeTopoShape(empty));
+                setRemovalOperands(baseTopShape, toolShapes);
+                this->Shape.setValue(TopoShape());
                 return StdReturn;
             }
             result = baseTopShape;
