@@ -528,8 +528,12 @@ App::DocumentObjectExecReturn* Boolean::execute()
     // rules (ops#325)
     const bool plain = !isMerge();
     const bool hadTools = !tools.empty();
+    // Only a part the Body already holds can end: with no base feature, the base is a tool, and the
+    // Boolean is the Body's first feature, untouched (ops#1065, design: "no solid in its base")
+    const bool ownPart = baseFeature
+        && TopExp_Explorer(baseTopShape.getShape(), TopAbs_SOLID).More();
     // A Subtract that leaves nothing ends the part where its tools hold it (ops#1065)
-    if (plain && hadTools && type == "Cut") {
+    if (plain && hadTools && ownPart && type == "Cut") {
         setRemovalOperands(shapes.front(), std::vector<TopoShape>(shapes.begin() + 1, shapes.end()));
     }
     std::vector<App::DocumentObject*> separate;
@@ -637,9 +641,16 @@ App::DocumentObjectExecReturn* Boolean::execute()
             // An Intersect that misses leaves nothing, with no message (hands-on A-2' c): the part
             // ends where the tools provably miss it, else the kernel lost it
             // (Feature::settleNoSolid(), ops#1065); with Keep tools, the part as it was
-            if (!KeepTools.getValue()) {
+            if (!KeepTools.getValue() && ownPart) {
                 setRemovalOperands(baseTopShape, toolShapes);
                 this->Shape.setValue(TopoShape());
+                return StdReturn;
+            }
+            if (!KeepTools.getValue()) {
+                TopoDS_Compound empty;
+                BRep_Builder builder;
+                builder.MakeCompound(empty);
+                this->Shape.setValue(makeTopoShape(empty));
                 return StdReturn;
             }
             result = baseTopShape;

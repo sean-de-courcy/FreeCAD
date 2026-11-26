@@ -478,6 +478,26 @@ class TestPartEnds(unittest.TestCase):
         self.assertAlmostEqual(body.Shape.Volume, 200, places=6)
         self.assertAlmostEqual(tool.Shape.Volume, 125, places=6)
 
+    def testFirstFeatureIntersectOfToolsIsNotAnEnd(self):
+        """A Boolean Intersect as the Body's first feature, of two disjoint tool Bodies: the Body
+        held no part (its base is a tool), so nothing ends: Valid on no solid, and a Pad after it
+        builds (design: a feature with no solid in its base is untouched; Tier F
+        DisjointCommonLeadExprOnFailedGauge)."""
+        a = self.booleanTool("ToolA", Part.makeBox(5, 5, 5, V(50, 0, 0)))
+        b = self.booleanTool("ToolB", Part.makeBox(5, 5, 5, V(80, 0, 0)))
+        body = self.doc.addObject("PartDesign::Body", "Body")
+        common = body.newObject("PartDesign::Boolean", "Common")
+        common.Type = "Common"
+        common.addObjects([a, b])
+        self.doc.recompute()
+        self.assertTrue(common.isValid(), common.getStatusString())
+        self.assertFalse(common.PartEnded)
+        self.assertFalse(common.Shape.isNull())
+        self.assertEqual(len(common.Shape.Solids), 0)
+        pad = self.padAfter(body)
+        self.assertTrue(pad.isValid(), pad.getStatusString())
+        self.assertAlmostEqual(body.Shape.Volume, 4, places=6)
+
     def testIntersectToolInsideIsNotAnEnd(self):
         """I: a Boolean Intersect with a 2^3 tool inside a 10^3 base, emptied: the kernel's error
         (the mirror test both ways)."""
