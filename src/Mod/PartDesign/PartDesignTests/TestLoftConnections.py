@@ -723,8 +723,78 @@ class TestLoftTangentRuns(ConnectionCase):
         return [self.arc((0, 0), r, th, 360 - th)] + models.polyline([(t[0], -t[1]), (d, 0), t])
 
     def testAWideArcInARunFits(self):
-        """Review r1f finding 3: a 240 degree arc inside a merged run needs more than 41 samples to fit."""
-        loft = self.loft(self.teardrop(20, 10), self.teardrop(10, 5), [((20, 0), (10, 0))])
+        """Review r1f finding 3 (and r2f T3): a teardrop to a blunter one merges a run over a 240 degree arc, which
+        needs more than 41 samples to fit; rule 3 leaves one side face (F 3)."""
+        loft = self.loft(self.teardrop(20, 10), self.teardrop(8, 2), [((20, 0), (8, 0))])
+        self.assertTrue(loft.isValid(), loft.getStatusString())
+        self.assertTrue(loft.Shape.isValid())
+        self.assertEqual(len(loft.Shape.Solids), 1)
+        self.assertEqual(len(loft.Shape.Faces), 3)
+
+    @staticmethod
+    def straightSpline(p, q):
+        """A straight edge that isn't a line: a B-spline of degree 1 with two poles."""
+        curve = Part.BSplineCurve()
+        curve.buildFromPolesMultsKnots([V(p[0], p[1], 0), V(q[0], q[1], 0)], [2, 2], [0.0, 1.0], False, 1)
+        return curve
+
+    def testAStraightSplineSideKeepsItsEdge(self):
+        """Review r2f T1: row 15 with each top line drawn as a straight B-spline: the side between them is still a
+        plane, so its side edge (10,10)>(6,6) stays (F 7, as with lines)."""
+        ea, eb = (10 + 10 * self.C30, 5), (6 + 6 * self.C30, 3)
+        A = [self.straightSpline((-20, 10), (10, 10)), self.arc((10, 0), 10, 90, 30)]
+        A += models.polyline([ea, (ea[0], -10), (-20, -10), (-20, 10)])
+        B = [self.straightSpline((-12, 6), (6, 6)), self.arc((6, 0), 6, 90, 30)]
+        B += models.polyline([eb, (eb[0], -6), (-12, -6), (-12, 6)])
+        loft = self.loft(A, B, [((-20, 10), (-12, 6)), (ea, eb)])
+        self.assertTrue(loft.isValid(), loft.getStatusString())
+        self.assertEqual(len(loft.Shape.Faces), 7)
+        self.assertTrue(any(e.Vertexes[0].Point.distanceToPoint(V(10, 10, 0)) < 1e-6
+                            and e.Vertexes[-1].Point.distanceToPoint(V(6, 6, H)) < 1e-6
+                            or e.Vertexes[-1].Point.distanceToPoint(V(10, 10, 0)) < 1e-6
+                            and e.Vertexes[0].Point.distanceToPoint(V(6, 6, H)) < 1e-6 for e in loft.Shape.Edges))
+
+    def testASplitLineEveryJointTangentWithConditionsBuildsAsBefore(self):
+        """Review r2 T1, r2f T2: a slot whose bottom line is split (ops#729) to a smaller slot, one connection, Normal
+        to profile: every joint tangent and no side flat. The split vertex isn't matched by fraction, so the loft
+        builds as before ops#1046 (F 7), at both ends and the start only."""
+        split = models.polyline([(-10, -5), (0, -5), (10, -5)]) + [self.arc((10, 0), 5, -90, 90)]
+        split += models.polyline([(10, 5), (-10, 5)]) + [self.arc((-10, 0), 5, 90, 270)]
+        for properties in ({"StartCondition": "Normal to profile", "EndCondition": "Normal to profile"},
+                           {"StartCondition": "Normal to profile"}):
+            with self.subTest(**properties):
+                loft = self.loft(split, self.slot(6, 3), [((10, -5), (6, -3))], **properties)
+                self.assertTrue(loft.isValid(), loft.getStatusString())
+                self.assertTrue(loft.Shape.isValid())
+                self.assertEqual(len(loft.Shape.Faces), 7)
+                self.tearDown()
+                self.setUp()
+
+    def testASplineCornerFitsAtSize(self):
+        """Review r2 T2: a rectangle 600 x 300 whose corner is a sketch B-spline (cubic through the quarter circle)
+        to a smaller one, one connection, the top turned 8 degrees: the run over line, B-spline, line merges and
+        fits (arc length measured tightly, limits relative to the run's length)."""
+        scale = 15
+
+        def corner(x, y, r):
+            c = (x - r, -y + r)
+            points = [V((c[0] + r * math.cos(math.radians(270 + 90 * i / 8))) * scale,
+                        (c[1] + r * math.sin(math.radians(270 + 90 * i / 8))) * scale, 0) for i in range(9)]
+            curve = Part.BSplineCurve()
+            curve.interpolate(Points=points, InitialTangent=V(1, 0, 0), FinalTangent=V(0, 1, 0))
+            s = lambda ps: [(px * scale, py * scale) for px, py in ps]
+            return models.polyline(s([(-x, y), (-x, -y), (x - r, -y)])) + [curve] + models.polyline(
+                s([(x, -y + r), (x, y), (-x, y)]))
+
+        self.profile = models.sketch(self.doc, "Bottom", corner(20, 10, 6), self.body)
+        turned = App.Placement(V(0, 0, H * scale), App.Rotation(V(0, 0, 1), 8))
+        self.section = models.sketch(self.doc, "Top", corner(12, 6, 3), self.body, placement=turned)
+        self.doc.recompute()
+        loft = self.body.newObject("PartDesign::AdditiveLoft", "Loft")
+        loft.Profile = self.profile
+        loft.Sections = [self.section]
+        self.connect(loft, [((-20 * scale, 10 * scale), (-12 * scale, 6 * scale))])
+        self.doc.recompute()
         self.assertTrue(loft.isValid(), loft.getStatusString())
         self.assertTrue(loft.Shape.isValid())
         self.assertEqual(len(loft.Shape.Solids), 1)

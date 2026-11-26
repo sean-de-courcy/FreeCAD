@@ -50,6 +50,8 @@
 #include <GeomAPI_ProjectPointOnCurve.hxx>
 #include <GeomFill_Profiler.hxx>
 #include <Geom_BSplineCurve.hxx>
+#include <gp_Lin.hxx>
+#include <Geom_BezierCurve.hxx>
 #include <Geom_BSplineSurface.hxx>
 #include <Geom_Curve.hxx>
 #include <Geom_Surface.hxx>
@@ -1171,6 +1173,44 @@ bool isLine(const TopoDS_Edge& edge)
     return BRepAdaptor_Curve(edge).GetType() == GeomAbs_Line;
 }
 
+/// Whether the edge is straight whatever its curve type: a line, or a B-spline or Bezier whose
+/// poles all lie on the line through the edge's ends (relative to its length). The curve lies in
+/// its poles' hull, so collinear poles bound it to that line.
+bool isStraight(const TopoDS_Edge& edge)
+{
+    BRepAdaptor_Curve curve(edge);
+    std::vector<gp_Pnt> poles;
+    switch (curve.GetType()) {
+        case GeomAbs_Line:
+            return true;
+        case GeomAbs_BSplineCurve: {
+            const Handle(Geom_BSplineCurve) spline = curve.BSpline();
+            for (int i = 1; i <= spline->NbPoles(); ++i) {
+                poles.push_back(spline->Pole(i));
+            }
+            break;
+        }
+        case GeomAbs_BezierCurve: {
+            const Handle(Geom_BezierCurve) bezier = curve.Bezier();
+            for (int i = 1; i <= bezier->NbPoles(); ++i) {
+                poles.push_back(bezier->Pole(i));
+            }
+            break;
+        }
+        default:
+            return false;
+    }
+    const gp_Pnt p0 = BRep_Tool::Pnt(TopExp::FirstVertex(edge));
+    const gp_Pnt p1 = BRep_Tool::Pnt(TopExp::LastVertex(edge));
+    const double length = p0.Distance(p1);
+    if (length < Precision::Confusion()) {
+        return false;
+    }
+    const gp_Lin line(p0, gp_Dir(gp_Vec(p0, p1)));
+    const double tolerance = std::max(Precision::Confusion(), 1e-9 * length);
+    return std::ranges::all_of(poles, [&](const gp_Pnt& pole) { return line.Distance(pole) <= tolerance; });
+}
+
 gp_Pnt endPoint(const TopoDS_Edge& edge)
 {
     return BRep_Tool::Pnt(TopExp::LastVertex(edge, Standard_True));
@@ -1387,6 +1427,7 @@ struct LoopMatch
     Part::TopoShape wireA, wireB;
     std::vector<TopoDS_Edge> edgesA, edgesB, originA, originB;
     std::vector<bool> freshA, freshB;
+    bool fractionVertices = false;  // vertices added by arc-length fraction (ops#1046 A)
     Part::ShapeMapper mapperA, mapperB;
     Part::TopoShape profile, section;
 };
@@ -1505,6 +1546,8 @@ LoopMatch connectedLoops(
                 freshB.clear();
                 chainB = chainWithVertices(chainB, partnerFractions(fb, fa), match.mapperB, &originsB, &freshB);
             }
+            match.fractionVertices = match.fractionVertices
+                || std::ranges::find(aShorter ? freshA : freshB, true) != (aShorter ? freshA : freshB).end();
         }
         match.edgesA.insert(match.edgesA.end(), chainA.begin(), chainA.end());
         match.edgesB.insert(match.edgesB.end(), chainB.begin(), chainB.end());
@@ -1535,19 +1578,63 @@ LoopMatch connectedLoops(
 
 constexpr int railDegree = 6;
 
+/// An edge measured by arc length from where its traversal starts, to a tight tolerance (the
+/// default one leaves a B-spline's samples too noisy to fit a rail through).
+class ArcLength
+{
+public:
+    explicit ArcLength(const TopoDS_Edge& edge)
+        : curve(edge)
+        , reversed(edge.Orientation() == TopAbs_REVERSED)
+    {
+        length = GCPnts_AbscissaPoint::Length(curve, tolerance);
+        from = reversed ? curve.LastParameter() : curve.FirstParameter();
+    }
+    /// The point at fraction t of the arc length.
+    gp_Pnt at(double t) const
+    {
+        t = std::clamp(t, 0.0, 1.0);
+        GCPnts_AbscissaPoint point(tolerance, curve, reversed ? -t * length : t * length, from);
+        if (!point.IsDone()) {
+            throw Base::CADKernelError("Loft: a profile edge could not be measured");
+        }
+        return curve.Value(point.Parameter());
+    }
+    /// The arc-length fractions, ascending, where the curve's third derivative may jump (a
+    /// B-spline's knots): a rail fitted across one oscillates, so the fit breaks there.
+    std::vector<double> breaks() const
+    {
+        std::vector<double> fractions;
+        const int n = curve.NbIntervals(GeomAbs_C3);
+        if (n < 2 || length <= 0) {
+            return fractions;
+        }
+        TColStd_Array1OfReal params(1, n + 1);
+        curve.Intervals(params, GeomAbs_C3);
+        for (int i = 2; i <= n; ++i) {
+            double t = GCPnts_AbscissaPoint::Length(curve, curve.FirstParameter(), params(i), tolerance)
+                / length;
+            t = reversed ? 1 - t : t;
+            if (t > 1e-9 && t < 1 - 1e-9) {
+                fractions.push_back(t);
+            }
+        }
+        std::ranges::sort(fractions);
+        return fractions;
+    }
+
+private:
+    static constexpr double tolerance = 1e-12;
+    BRepAdaptor_Curve curve;
+    bool reversed;
+    double length = 0;
+    double from = 0;
+};
+
 /// The point at fraction t of the edge's arc length from where its traversal starts.
 gp_Pnt pointAtFraction(const TopoDS_Edge& edge, double t)
 {
-    BRepAdaptor_Curve curve(edge);
-    const bool reversed = edge.Orientation() == TopAbs_REVERSED;
-    const double length = GCPnts_AbscissaPoint::Length(curve);
-    t = std::clamp(t, 0.0, 1.0);
-    const double from = reversed ? curve.LastParameter() : curve.FirstParameter();
-    GCPnts_AbscissaPoint at(curve, reversed ? -t * length : t * length, from);
-    if (!at.IsDone()) {
-        throw Base::CADKernelError("Loft: a profile edge could not be measured");
-    }
-    return curve.Value(at.Parameter());
+    return ArcLength(edge).at(t);
 }
 
 /// A C1 monotone cubic (Fritsch-Carlson, Fritsch-Butland slopes) through (xs, ys), both increasing.
@@ -1591,12 +1678,13 @@ struct MonotoneCubic
 };
 
 /// One piece of a rail: `at` on [u0, u1] fitted C2 (it is smooth there), raised to `railDegree`.
-/// The samples double (41 to 1281) until the fit is within 1e-8 of `at` at three points between
-/// each two samples (a wide arc needs more than 41); `error` gets the largest distance found.
+/// The samples double (41 to 1281) until the fit is within `target` of `at` at three points
+/// between each two samples (a wide arc needs more than 41); `error` gets the largest distance.
 Handle(Geom_BSplineCurve) fitRailPiece(
     const std::function<gp_Pnt(double)>& at,
     double u0,
     double u1,
+    double target,
     double& error
 )
 {
@@ -1622,7 +1710,7 @@ Handle(Geom_BSplineCurve) fitRailPiece(
                 worst = std::max(worst, curve->Value(u).Distance(at(u)));
             }
         }
-        if (worst < 1e-8) {
+        if (worst < target) {
             break;
         }
     }
@@ -1761,18 +1849,53 @@ TopoDS_Face mergedSideFace(
         ts.push_back(i + 1 == count ? 1.0 : ts.back() + lengthsB[i] / totalB);
     }
     const MonotoneCubic f(us, ts);
+    // the fit's target and limit relative to the run's length (a model's size doesn't change them)
+    const double size = std::max(totalA, totalB);
+    const double target = std::max(1e-8, 1e-10 * size);
+    const double limit = std::max(1e-7, 1e-9 * size);
     double error = 0;
     std::vector<Handle(Geom_BSplineCurve)> piecesA, piecesB;
+    // u where f reaches t, inside [lo, hi] (f is monotone)
+    const auto inverse = [&f](double t, double lo, double hi) {
+        for (int k = 0; k < 100 && hi - lo > 1e-15; ++k) {
+            const double mid = (lo + hi) / 2;
+            (f(mid) < t ? lo : hi) = mid;
+        }
+        return (lo + hi) / 2;
+    };
+    // a piece is fitted span by span between its curve's breaks; `joinRail` joins the spans C1
+    const auto fitSpans = [&](const std::function<gp_Pnt(double)>& at, std::vector<double> cuts,
+                              std::vector<Handle(Geom_BSplineCurve)>& pieces) {
+        for (size_t k = 0; k + 1 < cuts.size(); ++k) {
+            pieces.push_back(fitRailPiece(at, cuts[k], cuts[k + 1], target, error));
+        }
+    };
     for (size_t i = 0; i < count; ++i) {
         const double u0 = us[i], u1 = us[i + 1], t0 = ts[i], t1 = ts[i + 1];
-        const TopoDS_Edge& a = ea[i];
-        const TopoDS_Edge& b = eb[i];
-        piecesA.push_back(fitRailPiece(
-            [&](double u) { return pointAtFraction(a, (u - u0) / (u1 - u0)); }, u0, u1, error));
-        piecesB.push_back(fitRailPiece(
-            [&](double u) { return pointAtFraction(b, (f(u) - t0) / (t1 - t0)); }, u0, u1, error));
+        const ArcLength a(ea[i]);
+        const ArcLength b(eb[i]);
+        std::vector<double> cutsA {u0}, cutsB {u0};
+        for (double t : a.breaks()) {
+            cutsA.push_back(u0 + t * (u1 - u0));
+        }
+        for (double t : b.breaks()) {
+            cutsB.push_back(inverse(t0 + t * (t1 - t0), u0, u1));
+        }
+        for (auto* cuts : {&cutsA, &cutsB}) {
+            // no span shorter than 1e-9 of the run (a break at a piece's end)
+            std::vector<double> kept {u0};
+            for (size_t k = 1; k < cuts->size(); ++k) {
+                if ((*cuts)[k] > kept.back() + 1e-9 && (*cuts)[k] < u1 - 1e-9) {
+                    kept.push_back((*cuts)[k]);
+                }
+            }
+            kept.push_back(u1);
+            *cuts = std::move(kept);
+        }
+        fitSpans([&](double u) { return a.at((u - u0) / (u1 - u0)); }, cutsA, piecesA);
+        fitSpans([&](double u) { return b.at((f(u) - t0) / (t1 - t0)); }, cutsB, piecesB);
     }
-    if (error > 1e-7) {
+    if (error > limit) {
         throw Base::CADKernelError(QT_TRANSLATE_NOOP(
             "Exception",
             "Loft: the side face over tangent joints could not be fitted to the profiles"
@@ -1886,7 +2009,7 @@ TopoDS_Edge edgeBetween(
 /// and that plane holds the normal of each profile that has a condition.
 bool flatSide(const TopoDS_Edge& a, const TopoDS_Edge& b, const SideConditions& conditions)
 {
-    if (!isLine(a) || !isLine(b)) {
+    if (!isStraight(a) || !isStraight(b)) {
         return false;
     }
     const gp_Pnt p0 = startPoint(a);
@@ -1981,11 +2104,9 @@ Part::TopoShape mergeSmoothRuns(Part::TopoShape shell, LoopMatch& match, SideCon
     }
     if (dropped == n) {
         // Onshape: one closed side face with the first connection's edge as its seam (rule 5). Without
-        // new vertices the loft builds as it did before ops#1046, with every side edge (debt);
-        // with them it stops
-        const bool split = std::ranges::find(match.freshA, true) != match.freshA.end()
-            || std::ranges::find(match.freshB, true) != match.freshB.end();
-        if (!split) {
+        // vertices matched by fraction the loft builds as it did before ops#1046, with every side
+        // edge (debt; ops#729's split-line vertices included); with them it stops
+        if (!match.fractionVertices) {
             return shell;
         }
         throw Base::CADKernelError(QT_TRANSLATE_NOOP(
