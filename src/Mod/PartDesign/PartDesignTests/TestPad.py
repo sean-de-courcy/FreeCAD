@@ -6470,7 +6470,8 @@ class TestPadColumnThroughElbow(unittest.TestCase):
         shape = pad.Shape
         self.assertEqual(len(shape.Solids), 1)
         self.assertTrue(shape.isValid())
-        self.assertAlmostEqual(shape.Volume - base.Volume, dV, delta=1e-3)
+        if dV is not None:
+            self.assertAlmostEqual(shape.Volume - base.Volume, dV, delta=1e-3)
         self.assertEqual(self.wrongPoints(shape, zlo, zhi, frame), 0)
         if wallArea is not None:
             walls = self.wallFaces(shape, frame(FreeCAD.Vector(0, 0, 0)), axis)
@@ -6515,6 +6516,25 @@ class TestPadColumnThroughElbow(unittest.TestCase):
         # body
         base, _, _, pad = self.hornPad("UpToFace")
         self.assertColumn(pad, base, 152.218317, wallArea=256.708475)
+
+    def testHornElbowUpToTheSlabBottom(self):
+        # C3, ops#1101: up to the slab's bottom (Onshape RB150's control): test 1's body. The one
+        # fuse is Valid and adds nothing (fork-1.0.8)
+        base = self.elbowBase(5.0, 9.0)
+        body, feature = self.bodyOn(base)
+        cap = self.faceAt(base, FreeCAD.Vector(0, 0, 12), FreeCAD.Vector(0, 0, 1))
+        bottom = self.faceAt(base, FreeCAD.Vector(30, 20, -6), FreeCAD.Vector(0, 0, 1), 1000)
+        pad = self.pad(body, feature, cap, "UpToFace", upTo=bottom, name="PadToBottom")
+        self.assertColumn(pad, base, 152.218317, zlo=-6.0)
+
+    def testHornElbowColumnIntoTheSlab(self):
+        # C4, ops#1101 (the one fuse adds nothing): Length 15 ends inside the slab, coplanar with nothing: test 1's body. C5: Length 20
+        # leaves the slab's bottom by 2: 50 pi more below it
+        base, _, _, pad = self.hornPad(length=15.0)
+        self.assertColumn(pad, base, 152.218317, zlo=-3.0, loudAllowed=True)
+        self.Doc.removeObject(pad.Name)
+        base, _, _, pad = self.hornPad(length=20.0)
+        self.assertColumn(pad, base, 152.218317 + 50 * math.pi, zlo=-8.0, loudAllowed=True)
 
     def testHornElbowMovedAndTurned(self):
         # C6: the model moved by (37, -21, 13) and turned 30 degrees about z, then 20 about x:
@@ -6567,6 +6587,98 @@ class TestPadColumnThroughElbow(unittest.TestCase):
         base, _, _, pad = self.hornPad(voids=(away,))
         if self.assertColumn(pad, base, 152.218317, loudAllowed=True):
             self.assertFalse(pad.Shape.isInside(FreeCAD.Vector(25, 15, -3), 1e-7, True))
+
+    def testVoidUnderTheColumn(self):
+        # C11, ops#1101 (the one fuse loses part of the column): a void under the column, Length
+        # 15: the column fills the void's upper half where the leg doesn't already (the leg passes
+        # through it): between test 1's dV and 36 more, by the sample rule
+        under = (-3, -3, -4, 3, 3, -2)
+        base, _, _, pad = self.hornPad(length=15.0, voids=(under,))
+        if self.assertColumn(pad, base, None, zlo=-3.0, loudAllowed=True):
+            dV = pad.Shape.Volume - base.Volume
+            self.assertGreater(dV, 152.218317)
+            self.assertLess(dV, 188.218317)
+            self.assertTrue(pad.Shape.isInside(FreeCAD.Vector(0, 0, -2.5), 1e-7, False))
+            self.assertFalse(pad.Shape.isInside(FreeCAD.Vector(0, 0, -3.5), 1e-7, True))
+
+    def testColumnEndingInTheAir(self):
+        # C12, ops#1101 (the one fuse adds nothing; Onshape RB155 W3): blind 9 ends under the elbow
+        # (dV 44.104332), blind 6 inside it with a sliver out (dV 5.234209). Recorded, not
+        # asserted: Onshape's 13 and 11 faces (the fork leaves one more on blind 9)
+        for length, dV in ((9.0, 44.104332), (6.0, 5.234209)):
+            with self.subTest(length=length):
+                base, _, _, pad = self.hornPad(length=length)
+                self.assertColumn(pad, base, dV, zlo=12 - length, loudAllowed=True)
+
+    def testHornElbowUpToFirst(self):
+        # U1: up to first from the cap is Onshape's up to next (RB150): test 1's body (the tool
+        # goes to the slab's bottom here, inside the slab below z = 0), never Valid adding nothing
+        # (fork-1.0.8: Valid, dV 0)
+        base, _, _, pad = self.hornPad("UpToFirst")
+        self.assertColumn(pad, base, 152.218317, zlo=-6.0, loudAllowed=True)
+
+    def testTorusElbowUpToFirst(self):
+        # U2: RB129's model, up to first: test 2's body, or today's refusal
+        base = self.elbowBase(12.0, 14.0)
+        body, feature = self.bodyOn(base)
+        cap = self.faceAt(base, FreeCAD.Vector(0, 0, 17), FreeCAD.Vector(0, 0, 1))
+        pad = self.pad(body, feature, cap, "UpToFirst")
+        if pad.isValid():
+            self.assertColumn(pad, base, 309.457114, zlo=pad.AddSubShape.BoundBox.ZMin, zhi=17.0)
+        else:
+            self.assertIn("doesn't meet", pad.getStatusString())
+
+    def testHornElbowUpToFirstUnderAShelf(self):
+        # U5 (Onshape RB155 W2): a shelf x -8..8, y -8..8, z 2..3 under the elbow; Onshape's up to
+        # next equals blind 12 (dV 125.037386, the air under the shelf filled)
+        V = FreeCAD.Vector
+        base = self.elbowBase(5.0, 9.0).fuse(Part.makeBox(16, 16, 1, V(-8, -8, 2))).removeSplitter()
+        body, feature = self.bodyOn(base)
+        cap = self.faceAt(base, V(0, 0, 12), V(0, 0, 1))
+        pad = self.pad(body, feature, cap, "UpToFirst")
+        if pad.isValid():
+            self.assertAlmostEqual(pad.Shape.Volume - base.Volume, 125.037386, delta=1e-3)
+            self.assertTrue(pad.Shape.isInside(V(0, 4, 1), 1e-7, False))
+        else:
+            self.assertNotEqual(pad.getStatusString().strip(), "")
+
+    def testPadsThatRightlyAddNothing(self):
+        # U4 (Onshape RB155 W1): a solid post r 5, z 0..12, on the slab, its cap padded down into
+        # it: up to first, blind 5 and blind 12 add nothing and stay Valid (Onshape: OK, no-op)
+        V = FreeCAD.Vector
+        base = Part.makeBox(80, 80, 6, V(-40, -55, -6)).fuse(Part.makeCylinder(5, 12)).removeSplitter()
+        for mode, length in (("UpToFirst", 0.0), ("Length", 5.0), ("Length", 12.0)):
+            with self.subTest(mode=mode, length=length):
+                body, feature = self.bodyOn(base)
+                cap = self.faceAt(base, V(0, 0, 12), V(0, 0, 1))
+                pad = self.pad(body, feature, cap, mode, length)
+                self.assertTrue(pad.isValid(), pad.getStatusString())
+                self.assertAlmostEqual(pad.Shape.Volume, base.Volume, delta=1e-6)
+                for name in (pad.Name, body.Name, feature.Name):
+                    self.Doc.removeObject(name)
+                self.Doc.recompute()
+
+    def testPlainBossUpToFirst(self):
+        # U8: a circle r 5 at the origin on a plane at z 12 over the slab alone, up to first down:
+        # the boss z 0..12, 300 pi. U7: the circle on the slab's edge, half over nothing: Onshape
+        # refuses it (RB29); the fork builds the whole boss, as before the retry (better is fine)
+        V = FreeCAD.Vector
+        for centre, builds in ((V(0, 0, 0), True), (V(40, 0, 0), True)):
+            with self.subTest(centre=centre):
+                base = Part.makeBox(80, 80, 6, V(-40, -55, -6))
+                body, feature = self.bodyOn(base)
+                sketch = body.newObject("Sketcher::SketchObject", "Circle")
+                sketch.MapMode = "Deactivated"
+                sketch.Placement = FreeCAD.Placement(V(0, 0, 12), FreeCAD.Rotation())
+                sketch.addGeometry(Part.Circle(centre, V(0, 0, 1), 5))
+                self.Doc.recompute()
+                pad = self.pad(body, feature, (sketch, [""]), "UpToFirst")
+                self.assertEqual(pad.isValid(), builds, pad.getStatusString())
+                if builds:
+                    self.assertAlmostEqual(pad.Shape.Volume - base.Volume, 300 * math.pi, delta=1e-6)
+                for name in (pad.Name, sketch.Name, body.Name, feature.Name):
+                    self.Doc.removeObject(name)
+                self.Doc.recompute()
 
     def testColumnOffTheTubeSize(self):
         # C14 (Onshape RB155 W5): a sketch circle r 3 / r 7 on the cap's plane, blind 12 down:

@@ -1655,11 +1655,10 @@ std::vector<TopoShape> sectorsOf(
     return sectors;
 }
 
+/// Negative for a shell oriented inwards; adaptive where a face needs it (Part::MassProperties)
 double signedVolume(const TopoDS_Shape& shape)
 {
-    GProp_GProps props;
-    BRepGProp::VolumeProperties(shape, props);
-    return props.Mass();
+    return Part::MassProperties::volume(shape);
 }
 
 TopoDS_Shape firstSolid(const TopoDS_Shape& shape)
@@ -1718,6 +1717,91 @@ bool samplesAgree(const TopoDS_Shape& base, const TopoDS_Shape& result, const Pl
         }
     }
     return true;
+}
+
+/// V(result) - V(base) from the faces that differ only (the faces both hold cancel), as
+/// checkResult() integrates it: costs what the feature changed, not the whole part. \a precise:
+/// the adaptive integration (checkResult()'s preciseChange()), for a value a decision hangs on
+double addedVolume(const TopoDS_Shape& base, const TopoDS_Shape& result, bool precise)
+{
+    TopTools_IndexedMapOfShape baseFaces;
+    TopTools_IndexedMapOfShape resultFaces;
+    TopExp::MapShapes(base, TopAbs_FACE, baseFaces);
+    TopExp::MapShapes(result, TopAbs_FACE, resultFaces);
+    BRep_Builder builder;
+    TopoDS_Compound cycle;
+    builder.MakeCompound(cycle);
+    for (int i = 1; i <= resultFaces.Extent(); ++i) {
+        if (!baseFaces.Contains(resultFaces(i))) {
+            builder.Add(cycle, resultFaces(i));
+        }
+    }
+    for (int i = 1; i <= baseFaces.Extent(); ++i) {
+        if (!resultFaces.Contains(baseFaces(i))) {
+            builder.Add(cycle, baseFaces(i).Reversed());
+        }
+    }
+    return Part::MassProperties::volume(cycle, precise);
+}
+
+/// Whether a face of \a base that is neither a plane nor a cylinder (an elbow's torus or surface of
+/// revolution, a sphere, a free-form face) comes near the tool: the neighbourhood where OCCT's fuse
+/// of the column was found to lose material (ops#1101)
+bool curvedFaceNearTool(const TopoDS_Shape& base, const TopoDS_Shape& tool, const PlainCylinder& c)
+{
+    Bnd_Box nearTool;
+    BRepBndLib::Add(tool, nearTool);
+    nearTool.Enlarge(0.1 * c.radius);
+    for (TopExp_Explorer it(base, TopAbs_FACE); it.More(); it.Next()) {
+        const TopoDS_Face& face = TopoDS::Face(it.Current());
+        Bnd_Box box;
+        BRepBndLib::Add(face, box);
+        if (box.IsOut(nearTool)) {
+            continue;
+        }
+        const GeomAbs_SurfaceType type = BRepAdaptor_Surface(face).GetType();
+        if (type != GeomAbs_Plane && type != GeomAbs_Cylinder) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// FreeCAD-CH ops#1101: whether the union's \a result (one solid) leaves out a point inside the
+/// cylinder (16 heights; the axis and 24 angles on 0.5, 0.9 and 0.99 of the radius, check c's
+/// inner points). A union holds its whole tool,
+/// so one point out is material the fuse lost: OCCT's fuse of a column through an elbow can be a
+/// valid solid that adds nothing, or part of the column (up to the slab's bottom, a column ending
+/// in the air under the elbow). Only the result is classified, never the base
+bool missesToolInterior(const TopoDS_Shape& result, const PlainCylinder& cylinder)
+{
+    if (solidCount(result) != 1) {
+        return false;
+    }
+    BRepClass3d_SolidClassifier inResult(firstSolid(result));
+    const gp_Vec x(cylinder.seam);
+    const gp_Vec y(cylinder.axis.Crossed(cylinder.seam));
+    const gp_Vec up(cylinder.axis);
+    auto out = [&](const gp_Pnt& p) {
+        inResult.Perform(p, 1e-7);
+        return inResult.State() == TopAbs_OUT;
+    };
+    for (int k = 1; k <= 16; ++k) {
+        const gp_Pnt centre = cylinder.origin.Translated(cylinder.height * (k - 0.5) / 16.0 * up);
+        if (out(centre)) {
+            return true;
+        }
+        for (double rho : {0.5, 0.9, 0.99}) {
+            for (int j = 0; j < 24; ++j) {
+                const double angle = (7.5 + 15.0 * j) * std::numbers::pi / 180.0;
+                const gp_Vec radial = rho * cylinder.radius * (std::cos(angle) * x + std::sin(angle) * y);
+                if (out(centre.Translated(radial))) {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
 }
 
 /// Check e of section 3: every face \a base lost and every face \a result gained lies near the tool
@@ -2530,7 +2614,9 @@ App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions opt
             // the same model moved or mirrored), is fused again in sectors, its seam turned first;
             // the first rung that passes the design's checks is kept. Otherwise the one fuse stays
             // and is refused as before. Only where checkResult() would refuse it, so a feature that
-            // builds today never takes the retry
+            // builds today never takes the retry. ops#1101: the same where the one fuse is a valid
+            // solid that lost part of the column (adding nothing at all, often); then, with no rung
+            // kept, the feature fails instead of passing silently
             if (booleanOperation == BooleanOperation::Union && !result.isNull()
                 && countSolids(base.getShape()) == 1) {
                 const SectorLadder ladder = sectorLadder();
@@ -2540,15 +2626,37 @@ App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions opt
                 const bool firstSolidOnly =
                     singleSolidRuleMode() == SingleSolidRuleMode::Enforced
                     && !StudioList::holding(this);
-                auto refused = [&]() {
+                enum class Why
+                {
+                    None,
+                    Refused,  // checkResult() refuses the one fuse
+                    Lost,     // the one fuse is a valid solid without part of the column
+                };
+                auto why = [&]() {
                     if (!newShellsSound(result.getShape(), base.getShape(), firstSolidOnly)) {
-                        return true;
+                        return Why::Refused;
                     }
                     // checkResult()'s volume rule: an add doesn't shrink the part (1e-5)
-                    const double was = signedVolume(base.getShape());
-                    return signedVolume(result.getShape()) < was - 1e-5 * std::abs(was);
+                    // (the default integration first; the adaptive one where it would decide)
+                    const double whole = std::abs(signedVolume(prism.getShape()));
+                    double added = addedVolume(base.getShape(), result.getShape(), false);
+                    if (added < whole * (1.0 - 1e-4)) {
+                        added = addedVolume(base.getShape(), result.getShape(), true);
+                    }
+                    if (added < 0.0
+                        && added < -1e-5 * std::abs(signedVolume(base.getShape()))) {
+                        return Why::Refused;
+                    }
+                    // ops#1101: a column that didn't add its whole volume, next to an elbow
+                    if (added < whole * (1.0 - 1e-4)
+                        && curvedFaceNearTool(base.getShape(), prism.getShape(), *cylinder)
+                        && missesToolInterior(result.getShape(), *cylinder)) {
+                        return Why::Lost;
+                    }
+                    return Why::None;
                 };
-                if (cylinder && resultWillBeChecked(*this) && refused()) {
+                const Why reason = cylinder && resultWillBeChecked(*this) ? why() : Why::None;
+                if (reason != Why::None) {
                     const bool oneFuseValid = booleanInputsValid;
                     std::size_t kept = 0;
                     for (std::size_t i = 0; i < ladder.rungs.size() && kept == 0; ++i) {
@@ -2590,19 +2698,29 @@ App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions opt
                             // an empty result, a lost tool: a refused rung
                         }
                     }
+                    const char* issue = reason == Why::Lost ? "ops#1101" : "ops#1086";
                     if (kept == 0) {
                         booleanInputsValid = oneFuseValid;
                         Base::Console().log(
-                            "%s: fused in sectors, refused (ops#1086)\n",
-                            getFullName().c_str()
+                            "%s: fused in sectors, refused (%s)\n",
+                            getFullName().c_str(),
+                            issue
                         );
+                        if (reason == Why::Lost) {
+                            return new App::DocumentObjectExecReturn(QT_TRANSLATE_NOOP(
+                                "Exception",
+                                "The geometry kernel's fusion lost part of the added material: "
+                                "the feature is not built"
+                            ));
+                        }
                     }
                     else {
                         // Counted by Tier F: none on a result that builds without it
                         Base::Console().log(
-                            "%s: fused in sectors, rung %d kept (ops#1086)\n",
+                            "%s: fused in sectors, rung %d kept (%s)\n",
                             getFullName().c_str(),
-                            static_cast<int>(kept)
+                            static_cast<int>(kept),
+                            issue
                         );
                     }
                 }
