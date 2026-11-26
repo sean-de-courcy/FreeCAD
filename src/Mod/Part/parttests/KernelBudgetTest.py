@@ -529,7 +529,116 @@ def grid_holes(n, side=100.0, r=1.0):
     return [circle_wire(step * (i + 0.5), step * (j + 0.5), r) for i in range(n) for j in range(n)]
 
 
-class KernelCheckTest(unittest.TestCase):
+STAGGER_PITCH = 10.0
+STAGGER_COLS = 36
+STAGGER_ROWS = 25
+
+
+def staggered_centres(cols=STAGGER_COLS, rows=STAGGER_ROWS, pitch=STAGGER_PITCH):
+    """Rows 0.8 pitch apart, every other one shifted half a pitch: with a radius of 0.45 pitch the
+    holes stay apart (diagonal neighbours 0.94 pitch apart) while their boxes overlap, and a row
+    of 36 holes spans two batches of 30, so neighbours in other batches make pair parts"""
+    return [
+        (pitch * (i + 1 + 0.5 * (j % 2)), pitch * (0.8 * j + 1))
+        for j in range(rows)
+        for i in range(cols)
+    ]
+
+
+def outline(edges, width, height, z=0.0):
+    """A width x height rectangle at z, each side in edges / 4 collinear segments"""
+    per = edges // 4
+    corners = [V(0, 0, z), V(width, 0, z), V(width, height, z), V(0, height, z)]
+    points = []
+    for k in range(4):
+        a, b = corners[k], corners[(k + 1) % 4]
+        points += [a + (b - a) * (s / per) for s in range(per)]
+    return Part.makePolygon(points + [points[0]])
+
+
+class PairPartsChecks:
+    """ops#1103: a face checked by parts (300 wires or more) checks each two holes of different
+    batches whose boxes overlap in a part of their own. That part held the face's outer wire too,
+    which OCCT checked again from nothing in every part, so the time went as (pairs) x (outline
+    edges): a plate of 900 staggered holes in a 1000-edge outline took 190 s. On a plane the pair
+    part now takes a rectangle around the two holes as its outer wire. Designed plates: 36 x 25
+    staggered holes (radius 0.45 pitch) in a rectangle drawn with 300 edges. The verdicts must stay
+    BRepCheck_Analyzer's. Mixed into KernelCheckTest, a class TestPartApp already runs."""
+
+    pair_width = STAGGER_PITCH * (STAGGER_COLS + 1.5)
+    pair_height = STAGGER_PITCH * (0.8 * (STAGGER_ROWS - 1) + 2)
+
+
+    def pair_plate(self, holes=None, z=0.0, edges=300):
+        if holes is None:
+            holes = [circle_wire(x, y, 0.45 * STAGGER_PITCH) for x, y in staggered_centres()]
+        if z:
+            holes = [h.translated(V(0, 0, z)) for h in holes]
+        surface = Part.Plane(V(0, 0, z), V(0, 0, 1))
+        return Part.Face(surface, [outline(edges, self.pair_width, self.pair_height, z)] + holes)
+
+    def pair_holes(self):
+        return [circle_wire(x, y, 0.45 * STAGGER_PITCH) for x, y in staggered_centres()]
+
+    def testPairPartsValidPlate(self):
+        self.assertEqual(self.verdicts(self.pair_plate()), (True, True))
+
+    def testPairPartsValidPlateAwayFromTheOrigin(self):
+        self.assertEqual(self.verdicts(self.pair_plate(z=7.0)), (True, True))
+
+    def testPairPartsValidSolidInSeconds(self):
+        """Its bottom plate face is reversed. Before: about 90 s for the two plate faces"""
+        solid = self.pair_plate().extrude(V(0, 0, 5))
+        start = time.time()
+        self.assertTrue(Part.kernelCheck(solid))
+        self.assertLess(time.time() - start, 20.0)
+
+    def testPairPartsValidSolidMovedAndTilted(self):
+        solid = self.pair_plate().extrude(V(0, 0, 5))
+        solid.Placement = FreeCAD.Placement(V(30, -20, 12), FreeCAD.Rotation(V(1, 2, 0), 35))
+        self.assertTrue(Part.kernelCheck(solid))
+
+    def testPairPartsCrossingHolesInOtherBatchesFail(self):
+        holes = self.pair_holes()
+        x, y = staggered_centres()[0]
+        # crosses the first hole and its diagonal neighbour in the next row; checked last, in
+        # the last batch
+        holes.append(circle_wire(x + 0.3 * STAGGER_PITCH, y + 0.5 * STAGGER_PITCH, 0.3 * STAGGER_PITCH))
+        self.assertEqual(self.verdicts(self.pair_plate(holes)), (False, False))
+
+    def testPairPartsCrossingDiagonalNeighboursFail(self):
+        holes = self.pair_holes()
+        # hole 29 (the first batch's last) grown until it crosses its diagonal neighbours in the
+        # next row (holes 65 and 66, the third batch)
+        x, y = staggered_centres()[29]
+        holes[29] = circle_wire(x, y, 0.49 * STAGGER_PITCH)
+        x, y = staggered_centres()[65]
+        holes[65] = circle_wire(x, y, 0.49 * STAGGER_PITCH)
+        self.assertEqual(self.verdicts(self.pair_plate(holes)), (False, False))
+
+    def testPairPartsNestedHoleInAnotherBatchFails(self):
+        holes = self.pair_holes()
+        x, y = staggered_centres()[0]
+        holes.append(circle_wire(x, y, 0.1 * STAGGER_PITCH))  # inside the first hole
+        self.assertEqual(self.verdicts(self.pair_plate(holes)), (False, False))
+
+    def testPairPartsHoleOutsideFails(self):
+        holes = self.pair_holes()
+        holes.append(circle_wire(self.pair_width + 20.0, self.pair_height / 2, 2.0))
+        self.assertEqual(self.verdicts(self.pair_plate(holes)), (False, False))
+
+    def testPairPartsHoleCrossingTheOutlineFails(self):
+        holes = self.pair_holes()
+        holes.append(circle_wire(self.pair_width, self.pair_height / 2, 2.0))
+        self.assertEqual(self.verdicts(self.pair_plate(holes)), (False, False))
+
+    def testPairPartsHoleTurnedTheWrongWayFails(self):
+        holes = self.pair_holes()
+        holes[500] = holes[500].reversed()
+        self.assertEqual(self.verdicts(self.pair_plate(holes)), (False, False))
+
+
+class KernelCheckTest(PairPartsChecks, unittest.TestCase):
     """Part.kernelCheck, the shape check of kernel safety (kernel-9, ops#640): BRepCheck_Analyzer's
     verdict, in time that grows with a face's holes and not with their square. OCCT 8.0.1 compares
     each two wires of a face: a plate with 3600 holes took about 25 s per face, and a Pocket of 25
