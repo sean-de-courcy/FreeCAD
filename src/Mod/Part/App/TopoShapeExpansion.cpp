@@ -8740,6 +8740,10 @@ struct DressUpOutcome
     /// past them (FilletFallback::endsInRing(), ops#888): OCCT's result, valid or not, is not
     /// Onshape's; the exact construction, or an error
     bool ring {false};
+    /// A fillet's concave arc ending where its floor's rim leaves tangentially against a face behind
+    /// the floor (FilletFallback::touchesRim(), ops#1040 cause B): OCCT's result, valid or not, is
+    /// not Onshape's; the exact construction with the wider scope, or an error
+    bool rim {false};
     /// OCCT's valid result changes the volume the wrong way (FilletFallback::wrongWay(), ops#762):
     /// the exact construction, or an error with this text
     std::string wrongWay;
@@ -8842,24 +8846,26 @@ std::shared_ptr<DressUpOutcome> buildDressUp(
             out.turns = !out.failed && !out.thin && !out.invalid
                 && FilletFallback::endsInOverflow(base, edges, request);
             out.ring = !out.failed && !out.thin && FilletFallback::endsInRing(base, edges, request);
+            out.rim = !out.failed && !out.thin && FilletFallback::touchesRim(base, edges, request);
             // At a reflex corner with a circle OCCT's valid result is wrong (fillet-tight-arc 8: a
             // patch, or a misplaced mitre): the construction builds it, below the limit too. (Where
             // the preferred construction above refused, its reason stands)
             out.reflexFirst = reflex && !out.failed && !out.thin && !out.invalid && !out.turns;
-            if (!out.failed && !out.thin && !out.invalid && !out.cusp && !out.turns && !out.ring) {
+            if (!out.failed && !out.thin && !out.invalid && !out.cusp && !out.turns && !out.ring
+                && !out.rim) {
                 out.wrongWay = FilletFallback::wrongWay(maker->Shape(), base, edges, request);
             }
             // ops#990: the feature refused OCCT's valid result on an earlier build
             out.refused = refusedScope && !out.failed && !out.thin && !out.invalid;
             if ((out.failed || out.thin || out.invalid || out.cusp || out.turns || out.reflexFirst
-                 || out.ring || !out.wrongWay.empty() || out.refused)
+                 || out.ring || out.rim || !out.wrongWay.empty() || out.refused)
                 && !prefer) {
                 // ops#941: OCCT's invalid result where its rounds meet in a mitre at a line's and
                 // an arc's corner (one of its narrow bands of radius): the mitre corners' scope
                 // first (it refuses before any Boolean unless the selection is closed loops of
                 // them), then the construction as below
                 std::vector<FilletFallback::MitreCorner> mitres;
-                if (out.invalid && !out.cusp && !out.turns && !out.ring
+                if (out.invalid && !out.cusp && !out.turns && !out.ring && !out.rim
                     && FilletFallback::mitreCircleCorner(base, edges, request, &mitres)) {
                     FilletFallback::Request mitreRequest = request;
                     mitreRequest.mitreOnly = true;
@@ -8891,12 +8897,12 @@ std::shared_ptr<DressUpOutcome> buildDressUp(
                 }
                 // Below the limit too: OCCT's result there is not Onshape's (a reflex corner with
                 // a circle; an arc's tool closing into a ring, ops#888)
-                if (reflex || out.ring) {
+                if (reflex || out.ring || out.rim) {
                     request.limitOnly = false;
                 }
                 // ops#888: the wider scope only where OCCT built nothing usable, or where its
                 // result is known not to be Onshape's (an arc's tool closing into a ring)
-                request.widerScope = out.failed || out.thin || out.ring || out.refused;
+                request.widerScope = out.failed || out.thin || out.ring || out.rim || out.refused;
                 // A cut tool past both its faces (ops#888 A1): only where OCCT built nothing
                 // usable, so that no result OCCT builds today moves
                 request.pastBothFaces = out.failed || out.thin;
@@ -10898,7 +10904,8 @@ TopoShape& TopoShape::makeElementFillet(
         outcome = buildDressUp(mkFillet, input, inputEdges, request, "The fillet", false, reflex);
     }
     if (outcome->failed || outcome->thin || outcome->invalid || outcome->turns
-        || outcome->reflexFirst || outcome->ring || !outcome->wrongWay.empty() || outcome->refused) {
+        || outcome->reflexFirst || outcome->ring || outcome->rim || !outcome->wrongWay.empty()
+        || outcome->refused) {
         // (Where the construction refuses OCCT's refused result, OCCT's is returned: the feature's
         // check refuses it as before, ops#990.) ops#1053: where OCCT failed outright and the
         // construction built it only by a further, fuzzy try under an overhang, the two routes
@@ -10957,6 +10964,16 @@ TopoShape& TopoShape::makeElementFillet(
         }
         if (outcome->ring) {
             raiseRingError("The fillet", outcome->reason);
+        }
+        if (outcome->rim) {
+            // OCCT's round there is valid and not Onshape's (ops#1040 cause B): never returned
+            FC_THROWM(
+                Base::CADKernelError,
+                "The fillet's arc ends where the floor's rim leaves it tangentially, over a face "
+                "behind the floor, where Onshape's round is cut at that face and OCCT's is not; its "
+                "exact construction refused: "
+                    << outcome->reason
+            );
         }
         if (outcome->reflexFirst) {
             // OCCT's rounds there are valid and not Onshape's: never returned silently (the

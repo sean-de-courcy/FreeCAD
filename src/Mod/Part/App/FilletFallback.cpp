@@ -3703,6 +3703,82 @@ void foldBehindOwn(const Context& ctx,
     faces = {data.faces[0], data.faces[1]};
 }
 
+/** ops#1040 cause B (case 2a: a wall's round end whose foot circle touches the floor's rim, Single
+ * FG #10): a concave arc between a plane F and a cylinder square to it carries on through the
+ * vertex in another arc on the same two faces, tangentially (the foot circle split where it
+ * touches the rim), and every other edge lies between F and a face wholly behind F's plane, or
+ * between two such faces (the rim and the base's side). The fill lies in front of F and never
+ * reaches those faces: they are left out with their edges, and the vertex is one inside the curve
+ * (2 edges, 2 faces). What the fill runs off past the rim is the wider scope's fill kept over the
+ * face (trimFusedToolOverFace), as Onshape's round on a longer plate cut at the side (RB36 2a). A
+ * fillet only (a chamfer there is not built: RB134 is debt). Called only for a vertex that would
+ * be refused
+ */
+void foldAtRimTouch(const Context& ctx,
+                    const EdgeData& data,
+                    const TopoDS_Vertex& vertex,
+                    std::vector<TopoDS_Shape>& edges,
+                    std::vector<TopoDS_Shape>& faces)
+{
+    if (ctx.request.kind != Kind::Fillet || data.line || data.convex || data.ruled || data.closed
+        || data.cone || data.varying()) {
+        return;
+    }
+    const TopoDS_Face& floor = data.faces[data.planeFace];
+    BRepAdaptor_Surface floorSurface(floor, Standard_False);
+    BRepAdaptor_Surface wallSurface(data.faces[1 - data.planeFace], Standard_False);
+    if (floorSurface.GetType() != GeomAbs_Plane || wallSurface.GetType() != GeomAbs_Cylinder
+        || !parallel(wallSurface.Cylinder().Axis().Direction(), floorSurface.Plane().Axis().Direction())) {
+        return;
+    }
+    const gp_Pnt point = BRep_Tool::Pnt(vertex);
+    const gp_Dir up = outwardNormal(floor, point);
+    auto own = [&](const TopoDS_Shape& face) {
+        return face.IsSame(data.faces[0]) || face.IsSame(data.faces[1]);
+    };
+    for (const auto& face : faces) {
+        if (!own(face) && !whollyBeyond(TopoDS::Face(face), point, up)) {
+            return;
+        }
+    }
+    const gp_Dir away = awayFrom(data.edge, vertex);
+    std::vector<TopoDS_Shape> keptEdges;
+    bool continuation = false;
+    for (const auto& edge : edges) {
+        if (edge.IsSame(data.edge)) {
+            keptEdges.push_back(edge);
+            continue;
+        }
+        auto ofEdge = ctx.list(ctx.edgeFaces, edge);
+        if (ofEdge.size() != 2) {
+            return;
+        }
+        const bool a = own(ofEdge[0]);
+        const bool b = own(ofEdge[1]);
+        if (a && b) {
+            // The foot circle's other piece, tangentially on through the vertex
+            if (continuation || BRepAdaptor_Curve(TopoDS::Edge(edge)).GetType() != GeomAbs_Circle
+                || awayFrom(TopoDS::Edge(edge), vertex).Dot(away) > -1 + angularTolerance) {
+                return;
+            }
+            continuation = true;
+            keptEdges.push_back(edge);
+            continue;
+        }
+        // The rim (the floor against a face behind it) or an edge between two faces behind: never
+        // an edge of the wall's cylinder (a nose that overhangs the side)
+        if (ctx.selected.Contains(edge) || (a && !ofEdge[0].IsSame(floor))
+            || (b && !ofEdge[1].IsSame(floor))) {
+            return;
+        }
+    }
+    if (!continuation) {
+        return;
+    }
+    edges = std::move(keptEdges);
+    faces = {data.faces[0], data.faces[1]};
+}
+
 /// 5.6, interface point 1: how the selected edge ends at the vertex
 VertexEnd classify(
     const Context& ctx,
@@ -3746,6 +3822,10 @@ VertexEnd classify(
         if (!(edges.size() == 2 && faces.size() == 2) && (edges.size() != 3 || faces.size() != 3)
             && (edges.size() != 4 || faces.size() != 4)) {
             foldBehindOwn(ctx, data, vertex, edges, faces);
+        }
+        if (!(edges.size() == 2 && faces.size() == 2) && (edges.size() != 3 || faces.size() != 3)
+            && (edges.size() != 4 || faces.size() != 4)) {
+            foldAtRimTouch(ctx, data, vertex, edges, faces);
         }
     }
     // A vertex inside a curve, between two edges on the same two faces (a circle split at its
@@ -16683,6 +16763,81 @@ bool endsInRing(
         }
         // Every chain of arcs that closes into a ring, a single arc too (ringChains)
         return !ringChains(ctx, data).empty();
+    }
+    catch (const Refusal&) {
+    }
+    catch (const Standard_Failure&) {
+    }
+    catch (const Base::Exception&) {
+    }
+    return false;
+}
+
+bool touchesRim(
+    const TopoDS_Shape& baseShape,
+    const std::vector<TopoDS_Shape>& edges,
+    const Request& request
+)
+{
+    if (request.kind != Kind::Fillet || request.size1 <= 0) {
+        return false;
+    }
+    try {
+        const TopoShape base(baseShape);
+        Context ctx(base, request);
+        for (const auto* list : {&edges, &request.contour}) {
+            for (const auto& edge : *list) {
+                if (!edge.IsNull() && edge.ShapeType() == TopAbs_EDGE) {
+                    ctx.selected.Add(edge);
+                }
+            }
+        }
+        for (int i = 1; i <= ctx.selected.Extent(); ++i) {
+            EdgeData data;
+            try {
+                data = analyse(ctx, TopoDS::Edge(ctx.selected(i)));
+            }
+            catch (const Refusal&) {
+                continue;
+            }
+            if (data.line || data.convex || data.closed || data.varying()) {
+                continue;
+            }
+            const TopoDS_Face& floor = data.faces[data.planeFace];
+            if (BRepAdaptor_Surface(floor, Standard_False).GetType() != GeomAbs_Plane) {
+                continue;
+            }
+            TopoDS_Vertex vertices[2];
+            TopExp::Vertices(data.edge, vertices[0], vertices[1]);
+            for (const auto& vertex : vertices) {
+                try {
+                    const gp_Pnt point = BRep_Tool::Pnt(vertex);
+                    const gp_Dir away = awayFrom(data.edge, vertex);
+                    const gp_Dir up = outwardNormal(floor, point);
+                    for (const auto& shape : ctx.list(ctx.vertexEdges, vertex)) {
+                        const TopoDS_Edge& other = TopoDS::Edge(shape);
+                        if (other.IsSame(data.edge) || ctx.selected.Contains(other)
+                            || BRep_Tool::Degenerated(other)) {
+                            continue;
+                        }
+                        auto ofOther = ctx.list(ctx.edgeFaces, other);
+                        if (ofOther.size() != 2) {
+                            continue;
+                        }
+                        const int k = ofOther[0].IsSame(floor) ? 1 : ofOther[1].IsSame(floor) ? 0 : -1;
+                        if (k < 0 || ofOther[k].IsSame(data.faces[0]) || ofOther[k].IsSame(data.faces[1])
+                            || !whollyBeyond(TopoDS::Face(ofOther[k]), point, up)) {
+                            continue;
+                        }
+                        if (std::abs(awayFrom(other, vertex).Dot(away)) > 1 - angularTolerance) {
+                            return true;
+                        }
+                    }
+                }
+                catch (const Refusal&) {
+                }
+            }
+        }
     }
     catch (const Refusal&) {
     }

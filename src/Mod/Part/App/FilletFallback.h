@@ -667,6 +667,20 @@ PartExport bool endsInRing(
     const Request& request
 );
 
+/** Whether one of a fillet's edges is a concave arc on a plane face F that ends at a vertex where
+ * an unselected edge of F leaves tangentially against a face wholly behind F's plane (ops#1040
+ * cause B, RB36 2a: a wall's round end whose foot circle touches the floor's rim). OCCT's round
+ * there is valid and not Onshape's (a B-spline face hung past the side: +9.263336 where Onshape
+ * adds +9.174153), and the same holds where the side is drafted, curved or rounded, so the exact
+ * construction builds it with the wider scope, or the fillet fails. Keyed on the tangency alone.
+ * The edges of OCCT's contours (request.contour) count with the selected ones.
+ */
+PartExport bool touchesRim(
+    const TopoDS_Shape& base,
+    const std::vector<TopoDS_Shape>& edges,
+    const Request& request
+);
+
 /** Why a fillet of equal radii must fail where its round overflows a strip of face narrower than
  * its setback (the narrow-strip test of the construction's error) while its chain turns round a
  * convex arc smaller than the radius: an arc on a plane face whose material lies on the arc's
