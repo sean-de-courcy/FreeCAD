@@ -56,6 +56,7 @@ class PartDesignExport Feature: public Part::Feature,
 
 public:
     Feature();
+    ~Feature() override;
 
     enum SingleSolidRuleMode
     {
@@ -79,6 +80,10 @@ public:
     /// runs, and that recompute's own shape solves the references to it). Saved with the shape,
     /// as the error is: an opened file judges by both.
     App::PropertyBool _FailurePassedThrough;
+    /// The part ends at this feature (ops#1065): its tool took all of the part, as Onshape's Remove
+    /// that leaves nothing. Valid, Shape null; DeletePart::enderOf() reads it as a Delete part.
+    /// Set only by a recompute that ends the part, cleared by every other (settleNoSolid())
+    App::PropertyBool PartEnded;
 
     /** @name Studio features (FreeCAD-CH ops#654, notes/parts-design.md 10.8,
      * notes/one-history-design.md 5 and 9). Hidden; read by name (StudioList.h), so that an
@@ -224,6 +229,18 @@ public:
 
     virtual void updatePreviewShape();
 
+    /**
+     * The operands of this feature's last boolean that may take all of its part (ops#1065), in
+     * the frame the boolean ran in: the base and the tools. False where they aren't known (the
+     * part is then never ended: an empty result is the kernel's error). By default those its
+     * execute recorded (setRemovalOperands()); a FeatureAddSub's base and AddSubShape otherwise
+     */
+    virtual bool removalOperands(TopoShape& base, std::vector<TopoShape>& tools) const;
+
+    /// Test hook (ops#1065 tests only): feature's next recomputes leave an empty compound after
+    /// its execute, as OCCT's boolean does when it loses a part
+    static void setTestEmptyResult(const App::DocumentObject* feature, bool on);
+
     PyObject* getPyObject() override;
 
     const char* getViewProviderName() const override
@@ -280,6 +297,22 @@ protected:
      */
     TopoShape makeResultShape(const TopoShape& base) const;
     static int countSolids(const TopoDS_Shape&, TopAbs_ShapeEnum type = TopAbs_SOLID);
+    /// Records the operands of the boolean that may take all of the part (removalOperands());
+    /// cleared before every execute
+    void setRemovalOperands(const TopoShape& base, std::vector<TopoShape> tools) const
+    {
+        removalBase = base;
+        removalTools = std::move(tools);
+    }
+    void addRemovalTool(const TopoShape& tool) const
+    {
+        removalTools.push_back(tool);
+    }
+    void forgetRemovalOperands() const
+    {
+        removalBase = TopoShape();
+        removalTools.clear();
+    }
     static bool relinkToMatchingSubelements(
         App::PropertyLinkSub& link,
         App::DocumentObject* oldBase,
@@ -322,6 +355,15 @@ private:
     // a pass-through) isn't the same TShape, and is checked again (ops#310)
     TopoDS_Shape vouchedShape;
     std::vector<const App::DocumentObject*> pendingMembers;
+    // The operands setRemovalOperands() recorded in the last execute (ops#1065)
+    mutable TopoShape removalBase;
+    mutable std::vector<TopoShape> removalTools;
+    // PartEnded counted in DeletePart's count of ended parts (the fast exit of deleteLock())
+    bool countedEnded = false;
+    /// An empty result of a feature whose base has a solid (ops#1065): ends the part where the
+    /// feature removes and its tools provably hold the part (ends set, Shape null), else the
+    /// kernel's error. Empty when the result has a solid, or the base has none
+    std::string settleNoSolid(bool& ends);
 };
 
 using FeaturePython = App::FeaturePythonT<Feature>;

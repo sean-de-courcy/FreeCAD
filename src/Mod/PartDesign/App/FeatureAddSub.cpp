@@ -51,6 +51,7 @@
 
 #include "Body.h"
 #include "FeatureAddSub.h"
+#include "FeatureDeletePart.h"
 #include "FeaturePy.h"
 #include "FeatureSketchBased.h"
 #include "Pieces.h"
@@ -216,6 +217,11 @@ App::DocumentObjectExecReturn* FeatureAddSub::recompute()
     const bool runs = !Suppressed.getValue() && !(body && body->holds(this));
     if (runs) {
         if (std::string why = outOfStep(); !why.empty()) {
+            // Failed before Feature::recompute(): the part it ended is no longer ended (ops#1065,
+            // review pr1065-r1 F1)
+            if (PartEnded.getValue()) {
+                PartEnded.setValue(false);
+            }
             return new App::DocumentObjectExecReturn(why, this);
         }
     }
@@ -265,7 +271,10 @@ App::DocumentObjectExecReturn* FeatureAddSub::recompute()
     // A piece step (P6p) has nothing before it by design: it takes its piece as is
     const bool pieceStep = body && isPieceBody(body)
         && body->StudioMadeBy.getValue() == StudioOwner.getValue();
+    // A Merge-with-all step in a part that ended before it has nothing to cut by design (ops#1065)
+    const bool skippedStep = DeletePart::wasSkipped(this);
     if ((result == StdReturn || (emptyAdd && nothingToReach)) && runs && !owner && !pieceStep
+        && !skippedStep
         && (addSubType == Type::Subtractive || emptyAdd) && getBaseTopoShape(true).isNull()) {
         if (result != StdReturn) {
             delete result;

@@ -727,7 +727,7 @@ bool ViewProviderBody::onDelete(const std::vector<std::string>&)
         return !obj || deleting.count(obj) != 0 || (step && step->isOutOfChain());
     });
     // A part deleted already, deleted again: the Body goes with its features (review s33e2 F2)
-    bool deleted = body && PartDesign::DeletePart::deleterOf(body);
+    bool deleted = body && PartDesign::DeletePart::enderOf(body);
     if (body && !forced && !everyMember && !deleted && Part::BodyBase::studioOf(body, studio)
         && body->Tip.getValue() && !PartDesign::Boolean::mergeOf(body)) {
         // Under the Onshape keymap, its dialog, prefilled with the part (with the other parts of

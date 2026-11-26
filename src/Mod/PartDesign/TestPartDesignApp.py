@@ -194,6 +194,7 @@ from PartDesignTests.TestStudioSequence import TestStudioSequence  # FreeCAD-CH,
 from PartDesignTests.TestStudioSequence import TestHistoryOrder  # FreeCAD-CH, ops#632
 from PartDesignTests.TestBarPlace import TestBarPlace  # FreeCAD-CH, ops#640 rank 34
 from PartDesignTests.TestDeletePart import TestDeletePart  # FreeCAD-CH, ops#635
+from PartDesignTests.TestPartEnds import TestPartEnds, TestPartEndsStudio  # FreeCAD-CH, ops#1065
 from PartDesignTests.TestRegenerate import (  # FreeCAD-CH, ops#640
     TestRegenerate,
     TestPatternWithoutOriginals,

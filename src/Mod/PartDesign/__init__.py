@@ -86,6 +86,7 @@ configReaderError = _PartDesign.configReaderError
 studioReconcile = _PartDesign.studioReconcile
 studioProject = _PartDesign.studioProject
 studioStepOf = _PartDesign.studioStepOf
+_testEmptyResult = _PartDesign._testEmptyResult  # ops#1065 tests only
 studioNewPart = _PartDesign.studioNewPart  # ops#654 S2
 # FreeCAD-CH (notes/derived-design.md, slice 1): Derived from another document
 isDerivedCopy = _PartDesign.isDerivedCopy

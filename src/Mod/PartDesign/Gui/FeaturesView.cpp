@@ -614,7 +614,7 @@ std::vector<App::DocumentObject*> studioParts(App::Document* doc, App::Part* stu
         if (list && std::ranges::find(live, body) == live.end()) {
             continue;
         }
-        if (body->Tip.getValue() && !PartDesign::DeletePart::deleterOf(body) && exists(body)) {
+        if (body->Tip.getValue() && !PartDesign::DeletePart::enderOf(body) && exists(body)) {
             parts.push_back(body);
         }
     }

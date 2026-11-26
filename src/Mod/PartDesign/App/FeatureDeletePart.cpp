@@ -43,7 +43,111 @@ std::atomic<int> alive {0};
 // dereferenced (an object deleted while in it costs at most one extra recompute of a new one)
 std::mutex lockedMutex;
 std::unordered_set<const App::DocumentObject*> locked;
+// The same for mergeAllSkip()'s verdict (ops#1065)
+std::unordered_set<const App::DocumentObject*> skippedSteps;
+
+// Features with PartEnded set, alive in any document (ops#1065): as alive, for the fast exit
+std::atomic<int> endedAlive {0};
+
+/// A feature that ends its part: an unsuppressed DeletePart, or one with PartEnded
+Feature* asEnder(App::DocumentObject* obj)
+{
+    auto feature = freecad_cast<Feature*>(obj);
+    if (!feature || feature->Suppressed.getValue()) {
+        return nullptr;
+    }
+    // A feature in error passes its base through and ends nothing, whatever its flag says
+    // (review pr1065-r1 F1)
+    if (feature->isDerivedFrom<DeletePart>() || (feature->PartEnded.getValue() && !feature->isError())) {
+        return feature;
+    }
+    return nullptr;
+}
+
+/// Whether any part may be ended in doc: a DeletePart in it, or a PartEnded anywhere
+bool anyEnds(const App::Document* doc)
+{
+    return doc
+        && ((alive.load() != 0 && doc->countObjectsOfType<DeletePart>() != 0)
+            || endedAlive.load() != 0);
+}
 }  // namespace
+
+void DeletePart::setSkipped(const App::DocumentObject* feature, bool on)
+{
+    std::scoped_lock guard(lockedMutex);
+    if (on) {
+        skippedSteps.insert(feature);
+    }
+    else {
+        skippedSteps.erase(feature);
+    }
+}
+
+bool DeletePart::wasSkipped(const App::DocumentObject* feature)
+{
+    std::scoped_lock guard(lockedMutex);
+    return skippedSteps.count(feature) != 0;
+}
+
+void DeletePart::noteEnded(int delta)
+{
+    endedAlive += delta;
+}
+
+Feature* DeletePart::enderOf(const Body* body)
+{
+    // Up to the bar, as deleterOf()
+    App::DocumentObject* tip = body ? body->Tip.getValue() : nullptr;
+    if (!tip) {
+        return nullptr;
+    }
+    const bool ends = endedAlive.load() != 0;
+    for (auto obj : body->Group.getValues()) {
+        if (auto ender = ends ? asEnder(obj) : freecad_cast<DeletePart*>(obj)) {
+            if (!ender->Suppressed.getValue()) {
+                return ender;
+            }
+        }
+        if (obj == tip) {
+            break;
+        }
+    }
+    return nullptr;
+}
+
+Feature* DeletePart::enderBefore(const App::DocumentObject* feature)
+{
+    if (!feature || !anyEnds(feature->getDocument())) {
+        return nullptr;
+    }
+    Body* body = Body::findBodyOf(feature);
+    if (!body) {
+        return nullptr;
+    }
+    for (auto obj : body->Group.getValues()) {
+        if (obj == feature) {
+            break;
+        }
+        if (auto ender = asEnder(obj)) {
+            return ender;
+        }
+    }
+    return nullptr;
+}
+
+bool DeletePart::mergeAllSkip(const App::DocumentObject* feature)
+{
+    auto step = freecad_cast<const Feature*>(feature);
+    if (!step || !anyEnds(feature->getDocument()) || !Body::isSolidFeature(feature)
+        || feature->isDerivedFrom<DeletePart>()) {
+        return false;
+    }
+    const App::DocumentObject* owner = step->StudioOwner.getValue();
+    auto all = owner ? freecad_cast<App::PropertyBool*>(owner->getPropertyByName("StudioMergeAll"))
+                     : nullptr;
+    return all && all->getValue() && enderBefore(feature);
+}
 
 void DeletePart::setLocked(const App::DocumentObject* feature, bool on)
 {
@@ -111,9 +215,9 @@ DeletePart* DeletePart::deletePart(Body* body)
     if (!body || !body->getDocument()) {
         throw Base::ValueError("Delete part: the object isn't a body");
     }
-    if (deleterOf(body)) {
+    if (Feature* ender = enderOf(body)) {
         throw Base::ValueError(
-            "Delete part: " + quoted(body) + " is deleted already, by " + quoted(body->Tip.getValue())
+            "Delete part: " + quoted(body) + " is deleted already, by " + quoted(ender)
         );
     }
     if (!body->Tip.getValue()) {
@@ -200,26 +304,23 @@ Body* DeletePart::removeEmptyPart(Body* body)
 std::string DeletePart::deleteLock(const App::DocumentObject* feature)
 {
     auto doc = feature ? feature->getDocument() : nullptr;
-    if (alive.load() == 0 || !doc || doc->countObjectsOfType<DeletePart>() == 0) {
+    if (!anyEnds(doc)) {
         return {};
     }
     Body* body = Body::findBodyOf(feature);
     if (!body) {
         return {};
     }
-    // After a DeletePart in its own Body: an Add to a part that no longer exists (Onshape errors;
-    // computing on the empty shape would bring the part back without a word)
-    if (Body::isSolidFeature(feature) && !feature->isDerivedFrom<DeletePart>()) {
-        for (auto obj : body->Group.getValues()) {
-            if (obj == feature) {
-                break;
-            }
-            auto deleter = freecad_cast<DeletePart*>(obj);
-            if (deleter && !deleter->Suppressed.getValue()) {
-                return quoted(body) + " was deleted by " + quoted(obj)
-                    + "; this feature comes after it. Move it before " + quoted(obj)
-                    + ", or delete " + quoted(obj);
-            }
+    // After a DeletePart in its own Body, or a feature that took all of the part (ops#1065): an
+    // Add to a part that no longer exists (Onshape errors; computing on the empty shape would
+    // bring the part back without a word). A Merge-with-all step there is skipped instead
+    if (Body::isSolidFeature(feature) && !feature->isDerivedFrom<DeletePart>()
+        && !mergeAllSkip(feature)) {
+        if (Feature* ender = enderBefore(feature)) {
+            // isDeleteLock()'s words (deletedBy), so a reopened file keeps the lock (sk1065 7)
+            return quoted(body) + " was deleted by " + quoted(ender)
+                + "; this feature comes after it. Move it before " + quoted(ender)
+                + ", or delete " + quoted(ender);
         }
     }
     // A part deleted before this feature in history (Onshape: the reference breaks)
@@ -251,8 +352,11 @@ std::string DeletePart::deleteLock(const App::DocumentObject* feature)
             }
             continue;
         }
-        DeletePart* deleter = deleterOf(other);
-        if (!deleter) {
+        Feature* deleter = enderOf(other);
+        // A feature that ended the part, read itself (a studio owner's base, StudioBases, is the
+        // part's solid before it): its state is the part ended, nothing of it is read (ops#1065).
+        // A Delete part read keeps its lock, as before (review pr1065-r1 T2)
+        if (!deleter || (read == deleter && !deleter->isDerivedFrom<DeletePart>())) {
             continue;
         }
         // The whole Body (a Boolean's tool, a binder, a link) is read at its end, which is empty

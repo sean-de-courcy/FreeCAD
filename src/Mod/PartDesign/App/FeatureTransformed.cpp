@@ -2562,11 +2562,17 @@ App::DocumentObjectExecReturn* Transformed::execute()
                     return new App::DocumentObjectExecReturn(why, this);
                 }
             }
+            // ops#1065: the copies that may take all of the part, with the part they cut (only
+            // where every tool removes: a pattern that adds too never ends its part)
+            const Part::TopoShape endBase = supportShape;
+            std::vector<Part::TopoShape> endCopies;
+            bool removesOnly = true;
             for (const PatternTool& tool : tools) {
                 Part::TopoShape fuseShape = tool.fuse;
                 Part::TopoShape cutShape = tool.cut;
                 auto feature = tool.seed;
                 if (!fuseShape.isNull()) {
+                    removesOnly = false;
                     auto shapes = getTransformedCompShape(supportShape, fuseShape);
                     if (Base::Sequencer().wasCanceled()) {
                         return new App::DocumentObjectExecReturn("User aborted");
@@ -2636,6 +2642,7 @@ App::DocumentObjectExecReturn* Transformed::execute()
                     // A copy that cuts nothing changes nothing: never dropped, it counts as made
                     copiesTried += shapes.size() - 1;
                     copiesMade += shapes.size() - 1;
+                    endCopies.insert(endCopies.end(), shapes.begin() + 1, shapes.end());
                     const Part::TopoShape before = supportShape;
                     auto cutCopies = [&]() {
                         return makeResultShape(before).makeElementBoolean(
@@ -2704,6 +2711,9 @@ App::DocumentObjectExecReturn* Transformed::execute()
                     }
                     inputCheck = ownResultCheck();
                 }
+            }
+            if (removesOnly && !endCopies.empty()) {
+                setRemovalOperands(endBase, std::move(endCopies));
             }
             // FreeCAD-CH (ops#640, A-2' d): no copy reached the part. Onshape's mirror of a
             // feature whose image is entirely off the part is red with this message (its second

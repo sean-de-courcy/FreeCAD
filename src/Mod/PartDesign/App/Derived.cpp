@@ -355,7 +355,7 @@ std::vector<Body*> derivableParts(App::Document* doc, App::Part* studio)
 {
     std::vector<Body*> parts;
     for (auto body : studioBodies(doc, studio)) {
-        if (!body->Shape.getShape().isNull() && !DeletePart::deleterOf(body)) {
+        if (!body->Shape.getShape().isNull() && !DeletePart::enderOf(body)) {
             parts.push_back(body);
         }
     }

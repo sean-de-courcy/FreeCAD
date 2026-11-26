@@ -111,6 +111,7 @@ set(PartDesign_TestScripts
     PartDesignTests/TestSketch.py
     PartDesignTests/TestSplit.py
     PartDesignTests/TestDeletePart.py
+    PartDesignTests/TestPartEnds.py
     PartDesignTests/TestStudio.py
     PartDesignTests/TestStudioSequence.py
     PartDesignTests/TestBarPlace.py

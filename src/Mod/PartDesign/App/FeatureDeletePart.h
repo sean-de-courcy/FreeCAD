@@ -49,6 +49,27 @@ public:
     /// deleted at the bar), or null
     static DeletePart* deleterOf(const Body* body);
 
+    /// The feature that ends @p body's part at the bar (ops#1065): the first, not suppressed, at
+    /// or before its Tip in its Group that is a DeletePart or has PartEnded; or null
+    static Feature* enderOf(const Body* body);
+
+    /// The feature that ends the part of @p feature's Body before @p feature in its Group (as
+    /// enderOf(), whatever the bar), or null
+    static Feature* enderBefore(const App::DocumentObject* feature);
+
+    /// @p feature is a studio step whose owner has Merge with all, in a part that ended before it
+    /// (ops#1065, sk1065 5): Valid with nothing of its own, where an explicitly scoped one fails
+    static bool mergeAllSkip(const App::DocumentObject* feature);
+
+    /// Whether @p feature's last recompute was mergeAllSkip()'s (kept as setLocked() keeps the
+    /// lock's verdict); set by Feature::recompute() and on restore
+    static void setSkipped(const App::DocumentObject* feature, bool skipped);
+    static bool wasSkipped(const App::DocumentObject* feature);
+
+    /// A feature's PartEnded came (+1) or went (-1), in any document: none, and the ends cost
+    /// deleteLock() nothing (Feature::onChanged(), ~Feature())
+    static void noteEnded(int delta);
+
     /// Why @p feature can't compute: it is a solid feature after a DeletePart in its Body, or it
     /// reads a part (a member of another Body, or that Body whole) that a DeletePart deleted
     /// before it in the studio's history. Empty when neither

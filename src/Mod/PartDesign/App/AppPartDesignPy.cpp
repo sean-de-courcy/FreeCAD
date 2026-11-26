@@ -181,6 +181,12 @@ public:
             "hidden. Returns the Merge; no recompute."
         );
         add_varargs_method(
+            "_testEmptyResult",
+            &Module::testEmptyResult,
+            "_testEmptyResult(feature, on) -- Tests only (ops#1065): the feature's next recomputes "
+            "leave an empty compound after its execute, as a boolean that lost the part."
+        );
+        add_varargs_method(
             "setMergeScope",
             &Module::setMergeScope,
             "setMergeScope(feature, bodies) -- The merge scope of the solid feature (Onshape's "
@@ -951,6 +957,18 @@ private:
             e.setPyException();
             throw Py::Exception();
         }
+    }
+
+    // FreeCAD-CH ops#1065: the test hook for a result the kernel emptied
+    Py::Object testEmptyResult(const Py::Tuple& args)
+    {
+        PyObject* pObj;
+        PyObject* on;
+        if (!PyArg_ParseTuple(args.ptr(), "O!O", &(App::DocumentObjectPy::Type), &pObj, &on)) {
+            throw Py::Exception();
+        }
+        Feature::setTestEmptyResult(objectArg(pObj), PyObject_IsTrue(on) == 1);
+        return Py::None();
     }
 
     // FreeCAD-CH (ops#640 rank 1): the merge scope

@@ -175,8 +175,9 @@ class TestBooleanRules(unittest.TestCase):
         tool, _ = self.part("Tool", 20)
         common = self.boolean("Common", [tool])
         self.assertNoteIs(common, None)
-        self.assertEqual(len(self.target.Shape.Solids), 0)
-        self.assertAlmostEqual(self.target.Shape.Volume, 0, places=6)
+        # ops#1065: Common that keeps nothing ends the part the way Onshape does (null shape)
+        self.assertTrue(common.PartEnded)
+        self.assertTrue(self.target.Shape.isNull())
         self.assertIs(PartDesign.consumerOf(tool), common)
 
     def testAnIntersectWithNoOverlapAndKeepToolsKeepsBoth(self):
@@ -197,8 +198,9 @@ class TestBooleanRules(unittest.TestCase):
         tool, _ = self.part("Tool", 10)
         common = self.boolean("Common", [tool])
         self.assertNoteIs(common, None)
-        self.assertEqual(len(self.target.Shape.Solids), 0)
-        self.assertAlmostEqual(self.target.Shape.Volume, 0, places=6)
+        # ops#1065: Common that keeps nothing ends the part the way Onshape does (null shape)
+        self.assertTrue(common.PartEnded)
+        self.assertTrue(self.target.Shape.isNull())
         self.assertIs(PartDesign.consumerOf(tool), common)
 
     def testAnIntersectSharingOnlyAnEdgeLeavesNothing(self):
