@@ -1587,14 +1587,34 @@ public:
         : curve(edge)
         , reversed(edge.Orientation() == TopAbs_REVERSED)
     {
-        length = GCPnts_AbscissaPoint::Length(curve, tolerance);
-        from = reversed ? curve.LastParameter() : curve.FirstParameter();
+        // the curve's C3 interval ends (a B-spline's knots) with the arc length up to each: a
+        // point is then measured from the end just before it, not from the curve's start
+        const int n = curve.NbIntervals(GeomAbs_C3);
+        TColStd_Array1OfReal ends(1, n + 1);
+        curve.Intervals(ends, GeomAbs_C3);
+        params.push_back(curve.FirstParameter());
+        lengths.push_back(0);
+        for (int i = 2; i <= n + 1; ++i) {
+            const double u = i == n + 1 ? curve.LastParameter() : ends(i);
+            if (u <= params.back()) {
+                continue;
+            }
+            lengths.push_back(lengths.back() + GCPnts_AbscissaPoint::Length(curve, params.back(), u, tolerance));
+            params.push_back(u);
+        }
+        length = lengths.back();
     }
-    /// The point at fraction t of the arc length.
+    /// The point at fraction t of the arc length from where the edge's traversal starts.
     gp_Pnt at(double t) const
     {
         t = std::clamp(t, 0.0, 1.0);
-        GCPnts_AbscissaPoint point(tolerance, curve, reversed ? -t * length : t * length, from);
+        const double d = reversed ? (1 - t) * length : t * length;  // from the curve's first parameter
+        const auto k = std::clamp<std::ptrdiff_t>(
+            std::upper_bound(lengths.begin(), lengths.end(), d) - lengths.begin() - 1,
+            0,
+            static_cast<std::ptrdiff_t>(lengths.size()) - 2
+        );
+        GCPnts_AbscissaPoint point(tolerance, curve, d - lengths[k], params[k]);
         if (!point.IsDone()) {
             throw Base::CADKernelError("Loft: a profile edge could not be measured");
         }
@@ -1605,16 +1625,11 @@ public:
     std::vector<double> breaks() const
     {
         std::vector<double> fractions;
-        const int n = curve.NbIntervals(GeomAbs_C3);
-        if (n < 2 || length <= 0) {
+        if (length <= 0) {
             return fractions;
         }
-        TColStd_Array1OfReal params(1, n + 1);
-        curve.Intervals(params, GeomAbs_C3);
-        for (int i = 2; i <= n; ++i) {
-            double t = GCPnts_AbscissaPoint::Length(curve, curve.FirstParameter(), params(i), tolerance)
-                / length;
-            t = reversed ? 1 - t : t;
+        for (size_t i = 1; i + 1 < lengths.size(); ++i) {
+            const double t = reversed ? 1 - lengths[i] / length : lengths[i] / length;
             if (t > 1e-9 && t < 1 - 1e-9) {
                 fractions.push_back(t);
             }
@@ -1627,14 +1642,25 @@ private:
     static constexpr double tolerance = 1e-12;
     BRepAdaptor_Curve curve;
     bool reversed;
+    std::vector<double> params;   // ascending curve parameters: first, interval ends, last
+    std::vector<double> lengths;  // arc length from the first parameter to each
     double length = 0;
-    double from = 0;
 };
 
-/// The point at fraction t of the edge's arc length from where its traversal starts.
+/// The point at fraction t of the edge's arc length from where its traversal starts (OCCT's
+/// default precision: enough to find a face by its edge's midpoint).
 gp_Pnt pointAtFraction(const TopoDS_Edge& edge, double t)
 {
-    return ArcLength(edge).at(t);
+    BRepAdaptor_Curve curve(edge);
+    const bool reversed = edge.Orientation() == TopAbs_REVERSED;
+    const double length = GCPnts_AbscissaPoint::Length(curve);
+    t = std::clamp(t, 0.0, 1.0);
+    const double from = reversed ? curve.LastParameter() : curve.FirstParameter();
+    GCPnts_AbscissaPoint at(curve, reversed ? -t * length : t * length, from);
+    if (!at.IsDone()) {
+        throw Base::CADKernelError("Loft: a profile edge could not be measured");
+    }
+    return curve.Value(at.Parameter());
 }
 
 /// A C1 monotone cubic (Fritsch-Carlson, Fritsch-Butland slopes) through (xs, ys), both increasing.
@@ -1678,19 +1704,21 @@ struct MonotoneCubic
 };
 
 /// One piece of a rail: `at` on [u0, u1] fitted C2 (it is smooth there), raised to `railDegree`.
-/// The samples double (41 to 1281) until the fit is within `target` of `at` at three points
-/// between each two samples (a wide arc needs more than 41); `error` gets the largest distance.
+/// The samples double (from `first`, up to 1281) until the fit is within `target` of `at` at three
+/// points between each two samples (a wide arc needs more than 41; a span between a B-spline's
+/// knots needs few); `error` gets the largest distance.
 Handle(Geom_BSplineCurve) fitRailPiece(
     const std::function<gp_Pnt(double)>& at,
     double u0,
     double u1,
     double target,
+    int first,
     double& error
 )
 {
     Handle(Geom_BSplineCurve) curve;
     double worst = 0;
-    for (int count = 41; count <= 1281; count = 2 * count - 1) {
+    for (int count = first; count <= 1281; count = 2 * count - 1) {
         TColgp_Array1OfPnt points(1, count);
         TColStd_Array1OfReal params(1, count);
         for (int i = 0; i < count; ++i) {
@@ -1724,7 +1752,7 @@ Handle(Geom_BSplineCurve) fitRailPiece(
 
 /// The pieces joined into one rail, with a knot at each joint, made C1 there where the pieces'
 /// derivatives agree (they do: both runs are walked C1 through a tangent joint).
-Handle(Geom_BSplineCurve) joinRail(const std::vector<Handle(Geom_BSplineCurve)>& pieces)
+Handle(Geom_BSplineCurve) joinRail(const std::vector<Handle(Geom_BSplineCurve)>& pieces, double tolerance)
 {
     const int degree = railDegree;
     std::vector<gp_Pnt> poles;
@@ -1757,7 +1785,7 @@ Handle(Geom_BSplineCurve) joinRail(const std::vector<Handle(Geom_BSplineCurve)>&
     }
     Handle(Geom_BSplineCurve) rail = new Geom_BSplineCurve(p, k, m, degree);
     for (int joint : joints) {
-        rail->RemoveKnot(joint, degree - 1, 1e-7);
+        rail->RemoveKnot(joint, degree - 1, tolerance);
     }
     return rail;
 }
@@ -1867,7 +1895,8 @@ TopoDS_Face mergedSideFace(
     const auto fitSpans = [&](const std::function<gp_Pnt(double)>& at, std::vector<double> cuts,
                               std::vector<Handle(Geom_BSplineCurve)>& pieces) {
         for (size_t k = 0; k + 1 < cuts.size(); ++k) {
-            pieces.push_back(fitRailPiece(at, cuts[k], cuts[k + 1], target, error));
+            const int first = cuts.size() > 2 ? 9 : 41;
+            pieces.push_back(fitRailPiece(at, cuts[k], cuts[k + 1], target, first, error));
         }
     };
     for (size_t i = 0; i < count; ++i) {
@@ -1901,8 +1930,8 @@ TopoDS_Face mergedSideFace(
             "Loft: the side face over tangent joints could not be fitted to the profiles"
         ));
     }
-    Handle(Geom_BSplineCurve) railA = joinRail(piecesA);
-    Handle(Geom_BSplineCurve) railB = joinRail(piecesB);
+    Handle(Geom_BSplineCurve) railA = joinRail(piecesA, 1e-7);
+    Handle(Geom_BSplineCurve) railB = joinRail(piecesB, 1e-7);
     makeRailsCompatible(railA, railB);
 
     const int degree = railA->Degree();

@@ -624,6 +624,27 @@ class TestLoftTangentRuns(ConnectionCase):
         self.assertEqual(len(cut.Solids), 1)
         self.assertRoundTrip(loft)
 
+    def testRow12AFilletBesideTheMergedFace(self):
+        """Design case 4: a PartDesign Fillet (r 0.5) on the sharp side edge (10,10)>(0,9) where row 12's merged face
+        starts gives a valid single solid, as on integration's F 8 loft. (The edge (15,0)>(12,6) at its other end
+        fails to fillet on integration too, ops#1073; OCCT's fillet on loft.Shape itself is no test: a first-feature
+        loft is a solid flagged Reversed.)"""
+        loft = self.row("S3t", "S2s")
+        self.assertTrue(loft.isValid(), loft.getStatusString())
+        a, b = V(10, 10, 0), V(0, 9, H)
+        names = ["Edge%d" % i for i, e in enumerate(loft.Shape.Edges, 1)
+                 if min((e.Vertexes[0].Point - a).Length + (e.Vertexes[-1].Point - b).Length,
+                         (e.Vertexes[0].Point - b).Length + (e.Vertexes[-1].Point - a).Length) < 1e-6]
+        self.assertEqual(len(names), 1)
+        fillet = self.body.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (loft, names)
+        fillet.Radius = 0.5
+        self.doc.recompute()
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+        self.assertTrue(fillet.Shape.isValid())
+        self.assertEqual(len(fillet.Shape.Solids), 1)
+        self.assertLess(fillet.Shape.Volume, loft.Shape.Volume)
+
     def testRow19NormalToProfileDropsTangentToTangent(self):
         loft = self.row("S3m", "S2t", StartCondition="Normal to profile", EndCondition="Normal to profile")
         self.assertRow(loft, 7, 16792.185449, 4058.176207, [((-8, 14), (-3, 6))], straight=False)
