@@ -17,6 +17,7 @@
 #include "Body.h"
 #include "FeatureBase.h"
 #include "FeatureBoolean.h"
+#include "FeatureTransformed.h"
 #include "Studio.h"
 
 using namespace PartDesign;
@@ -318,9 +319,19 @@ std::string DeletePart::deleteLock(const App::DocumentObject* feature)
         && !mergeAllSkip(feature)) {
         if (Feature* ender = enderBefore(feature)) {
             // isDeleteLock()'s words (deletedBy), so a reopened file keeps the lock (sk1065 7)
-            return quoted(body) + " was deleted by " + quoted(ender)
+            std::string why = quoted(body) + " was deleted by " + quoted(ender)
                 + "; this feature comes after it. Move it before " + quoted(ender)
                 + ", or delete " + quoted(ender);
+            // A pattern of the feature that took the part (ops#1079): its copies act on the part
+            // they reach, where Onshape's do (RB50)
+            auto pattern = freecad_cast<const Transformed*>(feature);
+            if (pattern && ender->PartEnded.getValue()) {
+                const auto originals = pattern->Originals.getValues();
+                if (std::ranges::find(originals, ender) != originals.end()) {
+                    why += ". A pattern of " + quoted(ender) + " goes in the part its copies reach";
+                }
+            }
+            return why;
         }
     }
     // A part deleted before this feature in history (Onshape: the reference breaks)
