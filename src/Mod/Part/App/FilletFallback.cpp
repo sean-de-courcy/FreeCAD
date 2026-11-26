@@ -2260,6 +2260,17 @@ bool edgeWhollyBeyond(const TopoDS_Edge& edge, const gp_Pnt& point, const gp_Dir
     return false;
 }
 
+/// Whether the edge is a straight line that leaves the vertex the opposite way to `away` (it
+/// carries on the line of an edge that leaves the vertex along `away`)
+bool carriesLineOn(const TopoDS_Edge& edge, const TopoDS_Vertex& vertex, const gp_Dir& away)
+{
+    BRepAdaptor_Curve curve(edge);
+    if (curve.GetType() != GeomAbs_Line) {
+        return false;
+    }
+    return awayFrom(edge, vertex).IsOpposite(away, 1e-6);
+}
+
 /// Whether the part of the face within the reach of the point lies wholly on the far side of the
 /// plane there (whollyBeyond): the face is cut by a box of that half-size about the point, square
 /// to the plane, and each piece is bounded. A face that rises past the plane farther away than
@@ -2380,7 +2391,13 @@ void foldFarFaces(const Context& ctx,
                 // face running on below the floor into a face beyond it, a scallop in the base's
                 // outline at the wall's corner). The tool, bounded by the plane, never reaches it:
                 // left out, as foldFloorPieces leaves out the edges behind its floor
-                if (edgeWhollyBeyond(TopoDS::Edge(edge), point, toward)) {
+                // An own face's edge is left out only where it carries the corner's line straight
+                // on (the own face ends there below the floor): where it turns into the own face
+                // (a slope beside the corner), Onshape runs the round on down that face (RB149),
+                // which the fold's construction does not do
+                if (edgeWhollyBeyond(TopoDS::Edge(edge), point, toward)
+                    && (!touches(edge, {data.faces[0], data.faces[1]})
+                        || carriesLineOn(TopoDS::Edge(edge), vertex, away))) {
                     continue;
                 }
                 holds = false;
