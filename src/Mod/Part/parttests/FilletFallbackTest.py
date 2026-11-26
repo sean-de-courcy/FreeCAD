@@ -10169,6 +10169,46 @@ class LoneRoundCylinderTest(unittest.TestCase):
         y = 30 + math.sqrt(14**2 - 2**2)
         self.assertEqual(len([f for f in ref.Faces if self.onCylinder(f, 10.0, y, 10.0)]), 1)
 
+    def testEveryRollingRadius(self):
+        """Review pr546-r1f T1: at 60 mm the round stayed a B-spline for r 10.6 to 13 (the end circle
+        fitted through samples missed the edge tolerance). Every rolling radius r 8.2 to 14.2, at 60
+        and 600 mm, the pocket to y 50 (with it to y 45 the round's top line passes
+        the pocket's end past r 11.38 and every build refuses): the round is one Cylinder of radius r along x through
+        y = 30 + sqrt((r + 4)^2 - (r - 8)^2), z = 20 - r, and the fill adds one face"""
+        for k in (1.0, 10.0):
+            for i in range(31):
+                rr = 8.2 + 0.2 * i
+                with self.subTest(scale=k, radius=rr):
+                    s = self.tray(50.0)
+                    s.scale(k)
+                    top = [
+                        e
+                        for e in s.Edges
+                        if e.Curve.TypeId == "Part::GeomLine"
+                        and abs(self.mid(e).y - 34 * k) < 1e-6 * k
+                        and abs(self.mid(e).z - 20 * k) < 1e-6 * k
+                    ]
+                    self.assertEqual(len(top), 1)
+                    out = s.makeFillet(rr * k, top).removeSplitter()
+                    self.assertTrue(out.isValid())
+                    kinds = [f.Surface.TypeId for f in out.Faces]
+                    self.assertNotIn("Part::GeomBSplineSurface", kinds)
+                    y = 30 + math.sqrt((rr + 4) ** 2 - (rr - 8) ** 2)
+                    rounds = [f for f in out.Faces if self.onCylinder(f, rr * k, y * k, (20 - rr) * k)]
+                    self.assertEqual(len(rounds), 1)
+                    corner = [
+                        e
+                        for e in out.Edges
+                        if e.Curve.TypeId == "Part::GeomLine"
+                        and abs(self.mid(e).x - 55 * k) < 1e-6 * k
+                        and abs(self.mid(e).y - 50 * k) < 1e-6 * k
+                        and abs(e.Length - 15 * k) < 1e-6 * k
+                    ]
+                    self.assertEqual(len(corner), 1)
+                    got = out.makeFillet(self.RF * k, corner).removeSplitter()
+                    self.assertTrue(got.isValid())
+                    self.assertEqual(len(got.Faces), len(out.Faces) + 1)
+
     def testRoundAgainstItsWallIsUnchanged(self):
         rounded = self.rounded(3.0, 38.0)
         rounds = [f for f in rounded.Faces if self.onCylinder(f, 3.0, 37.0, 17.0)]

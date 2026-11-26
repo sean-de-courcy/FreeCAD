@@ -9549,7 +9549,20 @@ private:
                     || std::abs(circle.Value().Radius() - radius) > Precision::Confusion()) {
                     continue;
                 }
-                const gp_Cylinder candidate(gp_Ax3(circle.Value().Position()), radius);
+                // The seam half a turn from the face's middle, so the face doesn't run across it
+                // (review pr546-r1f: from the circle's own X it fell inside the face)
+                const gp_Ax1 axis = circle.Value().Axis();
+                const gp_Pnt middle = sample(0.5, 0.5);
+                const gp_Vec along(axis.Direction());
+                const gp_Pnt foot = axis.Location().Translated(
+                    along * gp_Vec(axis.Location(), middle).Dot(along));
+                const gp_Vec outward(foot, middle);
+                if (outward.Magnitude() <= Precision::Confusion()) {
+                    continue;
+                }
+                const gp_Cylinder candidate(
+                    gp_Ax3(axis.Location(), axis.Direction(), gp_Dir(outward.Reversed())),
+                    radius);
                 double off = 0.0;
                 for (int i = 0; i <= 20 && off <= Precision::Confusion(); ++i) {
                     for (int j = 0; j <= 20 && off <= Precision::Confusion(); ++j) {
@@ -9591,40 +9604,65 @@ private:
         ++loneCount;
     }
 
-    /// The line or circle the curve runs along within Precision::Confusion, or null
-    static Handle(Geom_Curve) lineOrCircle(const Handle(Geom_Curve)& curve, double first, double last)
+    /** The cylinder's ruling or cross-section the curve (on the cylinder) runs along within
+     * Precision::Confusion, or null. Both are made from the cylinder itself: a circle fitted through
+     * samples of OCCT's edge came out up to 2e-7 off in radius, past the edge tolerance, and the
+     * rebuilt shape was invalid over a band of radii (review pr546-r1f T1). On a cylinder the only
+     * lines are its rulings and the only circles its cross-sections
+     */
+    static Handle(Geom_Curve)
+    lineOrCircle(const Handle(Geom_Curve)& curve, double first, double last, const gp_Cylinder& cylinder)
     {
         auto at = [&](double s) {
             return curve->Value(first + (last - first) * s);
         };
+        const gp_Pnt origin = cylinder.Location();
+        const gp_Dir direction = cylinder.Axis().Direction();
+        const gp_Vec along(direction);
+        auto height = [&](const gp_Pnt& point) {
+            return gp_Vec(origin, point).Dot(along);
+        };
+        auto foot = [&](double h) {
+            return origin.Translated(along * h);
+        };
+        constexpr int samples = 16;
+        double mean = 0.0;
+        for (int k = 0; k <= samples; ++k) {
+            mean += height(at(double(k) / samples));
+        }
+        mean /= samples + 1;
         const gp_Pnt start = at(0.0);
-        const gp_Pnt end = at(1.0);
-        if (start.Distance(end) > Precision::Confusion()) {
-            const gp_Lin line(start, gp_Dir(gp_Vec(start, end)));
-            bool straight = true;
-            for (int k = 1; k < 16 && straight; ++k) {
-                straight = line.Distance(at(k / 16.0)) <= Precision::Confusion();
-            }
-            if (straight) {
-                return new Geom_Line(line.Position());
-            }
-        }
-        try {
-            gce_MakeCirc make(at(0.1), at(0.5), at(0.9));
-            if (!make.IsDone()) {
-                return {};
-            }
-            const gp_Circ circle = make.Value();
-            for (int k = 0; k <= 16; ++k) {
-                if (circle.Distance(at(k / 16.0)) > Precision::Confusion()) {
-                    return {};
-                }
-            }
-            return new Geom_Circle(circle);
-        }
-        catch (const Standard_Failure&) {
+        gp_Vec outward(foot(height(start)), start);
+        if (outward.Magnitude() <= Precision::Confusion()) {
             return {};
         }
+        outward.Normalize();
+        if (start.Distance(at(1.0)) > Precision::Confusion()) {
+            // A ruling: the line along the axis through the cylinder's point beside the start
+            const gp_Lin ruling(foot(height(start)).Translated(outward * cylinder.Radius()),
+                                direction);
+            bool straight = true;
+            for (int k = 1; k < samples && straight; ++k) {
+                straight = ruling.Distance(at(double(k) / samples)) <= Precision::Confusion();
+            }
+            if (straight) {
+                return new Geom_Line(ruling.Position());
+            }
+        }
+        // A cross-section: every sample at one height, the circle of the cylinder's radius there
+        for (int k = 0; k <= samples; ++k) {
+            if (std::abs(height(at(double(k) / samples)) - mean) > Precision::Confusion()) {
+                return {};
+            }
+        }
+        // Its origin half a turn from the edge's middle: a vertex is never on the seam
+        const gp_Pnt middle = at(0.5);
+        const gp_Vec toMiddle(foot(height(middle)), middle);
+        if (toMiddle.Magnitude() <= Precision::Confusion()) {
+            return {};
+        }
+        return new Geom_Circle(gp_Ax2(foot(mean), direction, gp_Dir(toMiddle.Reversed())),
+                               cylinder.Radius());
     }
 
     /// Whether the curve is a free form (a B-spline, a Bezier, an offset or other)
@@ -9688,7 +9726,7 @@ private:
             // A free-form curve on the cylinder that is a line or a circle: that line or circle
             // (where the face beside is tangent to the cylinder, as a slot's arc the round rolls
             // onto, an intersection would be ill-conditioned)
-            best = lineOrCircle(curve, first, last);
+            best = lineOrCircle(curve, first, last, cylinder);
         }
         const BRepAdaptor_Surface surface(other);  // global
         if (best.IsNull() && surface.GetType() == GeomAbs_Plane) {
