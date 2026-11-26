@@ -90,6 +90,8 @@ from parttests.FilletFallbackTest import (
     RoundBetweenCylindersTest,
     RoundOnASplineLidEndingInAHoleTest,
     RoundOverASliverTest,
+    RoundUnderALipTest,  # ops#640
+    ScoopRimUnderALipTest,  # ops#1053
     RoundAlongASplineEdgeTest,
     SeveralSolidsTest,
     WallOnAChamferedRimTest,

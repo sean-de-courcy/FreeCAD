@@ -8811,8 +8811,12 @@ std::shared_ptr<DressUpOutcome> buildDressUp(
                         request.contour.push_back(maker->Edge(i, j));
                     }
                 }
+                // (ops#1053: without the further, fuzzy tries under an overhang: where it refuses,
+                // OCCT's result stood before)
+                request.overhangFuzzy = false;
                 out.preferred
                     = FilletFallback::construct(base, edges, request, out.construction, &out.reason);
+                request.overhangFuzzy = true;
                 if (out.preferred) {
                     out.constructed = true;
                     return;
@@ -8925,6 +8929,12 @@ std::shared_ptr<DressUpOutcome> buildDressUp(
                     else if (!out.reflexFirst) {
                         out.widerAfterInvalid = true;
                     }
+                }
+                // ops#1053: built only by a further, fuzzy try under an overhang: where OCCT's
+                // result is invalid, the reverse order's valid result, which stood before, still
+                // comes first (as for the wider scope above)
+                if (out.invalid && out.constructed && out.construction.fuzzy) {
+                    out.widerAfterInvalid = true;
                 }
             }
         }

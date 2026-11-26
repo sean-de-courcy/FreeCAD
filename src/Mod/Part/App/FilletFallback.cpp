@@ -14722,11 +14722,20 @@ struct NoOverhang
  * result, and the result's volume must have changed by the tool's, within the base's own measure
  * (a whole-body difference: 1e-6 of the base, not of the tool; the cut itself is OCCT's).
  */
-TopoDS_Shape constructUnderOverhang(
+/// ops#1053: the fuzzy values of the further tries under an overhang, in order (1e-4 is the
+/// tolerance OCCT's maker gives a round's end against a wall, Request::faceTolerances). Measured on
+/// the designed case (ScoopRimUnderALipTest) over base edge tolerances from 1e-6 to 3e-5: each one
+/// builds with one of the two and never with neither, to the same result; 3e-4 adds none, 1e-3
+/// builds none
+constexpr std::array<double, 2> overhangFuzzies {1e-5, 1e-4};
+
+/// constructUnderOverhang() with its Booleans at the given fuzzy value (0: none)
+TopoDS_Shape constructUnderOverhangWith(
     const TopoDS_Shape& baseShape,
     const std::vector<TopoDS_Shape>& edges,
     const Request& request,
-    ShapeMapper& mapper
+    ShapeMapper& mapper,
+    double fuzzy
 )
 {
     if (request.kind != Kind::Fillet || request.size1 <= 0
@@ -14882,10 +14891,10 @@ TopoDS_Shape constructUnderOverhang(
     if (groups.empty() || !allOverhang) {
         throw NoOverhang {};
     }
-    auto boolean = [](BRepAlgoAPI_BooleanOperation& operation,
-                      const TopoDS_Shape& argument,
-                      const TopoDS_Shape& tool,
-                      const char* failure) {
+    auto boolean = [fuzzy](BRepAlgoAPI_BooleanOperation& operation,
+                           const TopoDS_Shape& argument,
+                           const TopoDS_Shape& tool,
+                           const char* failure) {
         TopTools_ListOfShape arguments;
         arguments.Append(argument);
         TopTools_ListOfShape tools;
@@ -14894,6 +14903,9 @@ TopoDS_Shape constructUnderOverhang(
         operation.SetTools(tools);
         operation.SetNonDestructive(Standard_True);
         operation.SetRunParallel(Standard_False);
+        if (fuzzy > 0) {
+            operation.SetFuzzyValue(fuzzy);
+        }
         operation.Build();
         if (!operation.IsDone() || operation.HasErrors()) {
             refuse(failure);
@@ -15174,6 +15186,57 @@ TopoDS_Shape constructUnderOverhang(
         }
     }
     return shape;
+}
+
+/** constructUnderOverhangWith(), and where it refused (ops#1053), once more with its Booleans at
+ * each of overhangFuzzies in turn. Along a free-form rim ending a hair from a cylinder's tangent
+ * line, OCCT's Booleans of the route misclassify near-coincident faces by the base's own
+ * tolerances (measured on copies, notes/dressup-scoop-rim-1053.md): what the round removes comes
+ * out with most of the piece in it, or the whole cut keeps a tool as a solid of its own. The
+ * further tries ask the same rules and checks; only after a refusal, so a result the route builds
+ * today stays as it is.
+ *
+ * @param fuzzyBuilt Null: no further tries. Else set to whether a further try built it
+ */
+TopoDS_Shape constructUnderOverhang(
+    const TopoDS_Shape& baseShape,
+    const std::vector<TopoDS_Shape>& edges,
+    const Request& request,
+    ShapeMapper& mapper,
+    bool* fuzzyBuilt = nullptr
+)
+{
+    if (fuzzyBuilt) {
+        *fuzzyBuilt = false;
+    }
+    try {
+        return constructUnderOverhangWith(baseShape, edges, request, mapper, 0.0);
+    }
+    catch (const Refusal& refusal) {
+        if (!fuzzyBuilt) {
+            throw;
+        }
+        // (Every refusal of the route comes before its history is mapped: the mapper is empty)
+        for (const double fuzzy : overhangFuzzies) {
+            try {
+                TopoDS_Shape shape
+                    = constructUnderOverhangWith(baseShape, edges, request, mapper, fuzzy);
+                *fuzzyBuilt = true;
+                FC_LOG("under an overhang: built with a fuzzy value of " << fuzzy
+                                                                         << " after: " << refusal.reason);
+                return shape;
+            }
+            catch (const Refusal& again) {
+                FC_LOG("under an overhang: with a fuzzy value of " << fuzzy << " too: " << again.reason);
+            }
+            catch (const Standard_Failure& e) {
+                FC_LOG("under an overhang: with a fuzzy value of " << fuzzy
+                                                                  << " too: OCCT: " << e.GetMessageString());
+            }
+        }
+        // The first try's reason stands
+        throw;
+    }
 }
 
 thread_local Recorder* innermostRecorder = nullptr;
@@ -21203,6 +21266,7 @@ bool constructSolid(
 )
 {
     out.newRule = false;
+    out.fuzzy = false;
     out.merged = MergedNames();
     // Whole rim loops on plane faces are built directly, without a Boolean; whatever that
     // refuses, or fails a check of its result, goes to the construction by Booleans below. The
@@ -21401,7 +21465,14 @@ bool constructSolid(
     std::string second;
     try {
         auto mapper = std::make_shared<ShapeMapper>();
-        TopoDS_Shape shape = constructUnderOverhang(base, edges, request, *mapper);
+        bool fuzzyBuilt = false;
+        TopoDS_Shape shape = constructUnderOverhang(
+            base,
+            edges,
+            request,
+            *mapper,
+            request.overhangFuzzy ? &fuzzyBuilt : nullptr
+        );
         TopTools_IndexedMapOfShape selected;
         for (const auto& edge : edges) {
             selected.Add(edge);
@@ -21410,6 +21481,11 @@ bool constructSolid(
         out.mapper = mapper;
         out.edges = selected.Extent();
         out.corners = 0;
+        // ops#1053: built only by a further, fuzzy try, which refused before: where a route that
+        // comes after the construction's refusal (OCCT in the reverse order) builds the fillet, it
+        // did so before, and its result stands
+        out.newRule = fuzzyBuilt;
+        out.fuzzy = fuzzyBuilt;
         return true;
     }
     catch (const NoOverhang&) {
