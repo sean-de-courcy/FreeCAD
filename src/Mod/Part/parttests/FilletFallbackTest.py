@@ -4432,7 +4432,7 @@ class ScoopRimUnderALipTest(unittest.TestCase):
         base, rim = self.model(0.3)
         at = [i for i, e in enumerate(base.Edges) if any(e.isSame(r) for r in rim)]
         results = []
-        for tolerance in (None, 1e-6, 3e-6, 6.85e-6, 1e-5, 3e-5):
+        for tolerance in (None, 1e-6, 3e-6, 7e-6, 1e-5, 3e-5):
             shape = base.copy()
             if tolerance:
                 shape.fixTolerance(tolerance, Part.Edge)
