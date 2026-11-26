@@ -208,7 +208,10 @@ namespace
 // one per turn, named from the profile's edge whatever the turns; cut at each turn for the
 // boolean and merged again after it, its faces and its crest take their whole names back (an
 // edge as a face does). The split's pieces are ordered with one projector per source.
-constexpr int ForkNamingRevision = 21;
+// 22: ops#1060, a repair (TopoShape::fix) names a source's pieces in the repaired shape's order,
+// not ShapeFix's history order, which isn't repeatable: the two arcs of a hole rim a repaired
+// fillet splits keep their 0of2/1of2 names at every recompute.
+constexpr int ForkNamingRevision = 22;
 
 // The `.N<n>` of the element map version: the form interned names are saved in (ops#6). 2: the
 // references are indices into the file's table (NamingFormat 2).

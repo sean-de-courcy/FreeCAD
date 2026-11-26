@@ -25,6 +25,7 @@
 #include <FCConfig.h>
 
 #include <TopoDS_Shape.hxx>
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdlib>
@@ -141,6 +142,7 @@
 #include <TopoDS_Solid.hxx>
 #include <TopoDS_Vertex.hxx>
 #include <TopExp.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopTools_HSequenceOfShape.hxx>
 #include <Transfer_FinderProcess.hxx>
@@ -3554,6 +3556,52 @@ void TopoShape::sewShape(double tolerance)
     this->_Shape = sew.SewedShape();
 }
 
+namespace
+{
+// ops#1060: ShapeFix's history (BRepTools_History::Modified/Generated of its context) lists a source's
+// pieces in an order that is not repeatable: the same repair, recomputed on the same input in one
+// process, gives a closed rim's two arcs either way round, while the repaired shape and its sub-shape
+// order stay the same. Twins of a closed source edge keep the maker's order (twinOrder), so their
+// `<k>of<n>` names flipped between recomputes. This mapper gives each source's pieces in the repaired
+// shape's own sub-shape order instead; a piece the result doesn't hold keeps its place after them.
+struct MapperHistoryInResultOrder: MapperHistory
+{
+    TopoDS_Shape result;
+    mutable TopTools_IndexedMapOfShape inResult;  // filled at the first source with two pieces or more
+    MapperHistoryInResultOrder(ShapeFix_Root& fixer, const TopoDS_Shape& result)
+        : MapperHistory(fixer)
+        , result(result)
+    {}
+    // Sorts _res, which the base class's modified() and generated() have just filled.
+    const std::vector<TopoDS_Shape>& inResultOrder() const
+    {
+        if (_res.size() > 1) {
+            if (inResult.IsEmpty()) {
+                TopExp::MapShapes(result, inResult);
+            }
+            auto place = [this](const TopoDS_Shape& piece) {
+                int index = inResult.FindIndex(piece);
+                return index > 0 ? index : inResult.Extent() + 1;
+            };
+            std::stable_sort(_res.begin(), _res.end(), [&place](const TopoDS_Shape& a, const TopoDS_Shape& b) {
+                return place(a) < place(b);
+            });
+        }
+        return _res;
+    }
+    const std::vector<TopoDS_Shape>& modified(const TopoDS_Shape& s) const override
+    {
+        MapperHistory::modified(s);
+        return inResultOrder();
+    }
+    const std::vector<TopoDS_Shape>& generated(const TopoDS_Shape& s) const override
+    {
+        MapperHistory::generated(s);
+        return inResultOrder();
+    }
+};
+}  // namespace
+
 bool TopoShape::fix()
 {
     if (this->_Shape.IsNull()) {
@@ -3620,10 +3668,14 @@ bool TopoShape::fix()
         // through makEWires(), and it will remove those edges. Without
         // remapping, there will be invalid index jumpping in reference in
         // Sketch002.ExternalEdge5.
-        makeShapeWithElementMap(fixThis.Shape(), MapperHistory(fixThis), {*this});
+        makeShapeWithElementMap(
+            fixThis.Shape(),
+            MapperHistoryInResultOrder(fixThis, fixThis.Shape()),
+            {*this}
+        );
     }
     else {
-        makeShapeWithElementMap(fix.Shape(), MapperHistory(fix), {copy});
+        makeShapeWithElementMap(fix.Shape(), MapperHistoryInResultOrder(fix, fix.Shape()), {copy});
     }
     return true;
 }

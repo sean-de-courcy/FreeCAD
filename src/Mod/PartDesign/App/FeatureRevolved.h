@@ -100,6 +100,7 @@ protected:
     void onDocumentRestored() override;
 
 private:
+    App::DocumentObjectExecReturn* executeRevolvedOnce(Part::RevolMode revolMode);
     App::DocumentObjectExecReturn* tryExecuteRevolved(Part::RevolMode revolMode);
     TopoShape tryGetBaseShape() const;
     // The face up to the first or last face of the base, or the chosen face (ToFace)
@@ -132,6 +133,27 @@ private:
     // A side's tool was built by constructFirstContact() in this recompute (ops#293 D2): its
     // volume checks integrate over knot spans (FirstContact::spanVolume())
     mutable bool constructedTool = false;
+    // ops#1048: setResult()'s point check refused the combined result (OCCT missed where the
+    // tool's cone meets the base), and this recompute's retry turns the profile's straight edges
+    // that end on the axis into degree-1 B-splines (freshAxisEdges()), which OCCT intersects
+    bool pointCheckRefused = false;
+    bool splineConeLines = false;
+    // review r1: the refused first result (its volume, the base's, valid or not) and the retry's
+    // volume once it passed the point check (-1: not reached); a retry that agrees with a valid
+    // first result keeps the first (the check refused a right result), computed with the check off
+    // (review r2: the solids must match; review r3: the agreement scales with the change)
+    double refusedVolume = -1.0;
+    double refusedBaseVolume = 0.0;
+    bool refusedValid = false;
+    unsigned long refusedSolids = 0;
+    double retriedVolume = -1.0;
+    unsigned long retriedSolids = 0;
+    bool skipPointCheck = false;
+    // how far the retry's volume may be from the refused first result's for the first to be
+    // kept: 1e-3 of the retry's change to the base (a miss differs by the change it missed;
+    // the retry's revolution surfaces by about 1e-5 of it), plus 1e-9 of the base for a change
+    // of nothing (a tool touching the base, review r1)
+    double keptTolerance() const;
 
     double getStartReferenceAngle(
         const TopoShape& profileShape,

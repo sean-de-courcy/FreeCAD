@@ -60,6 +60,10 @@
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakeRevol.hxx>
 #include <BRepTools.hxx>
+#include <TColStd_Array1OfInteger.hxx>
+#include <TColStd_Array1OfReal.hxx>
+#include <TColgp_Array1OfPnt.hxx>
+#include <BRepTopAdaptor_FClass2d.hxx>
 #include <BOPTools_AlgoTools3D.hxx>
 #include <ElCLib.hxx>
 #include <ElSLib.hxx>
@@ -1929,6 +1933,101 @@ double largestTolerance(const TopoDS_Shape& shape)
     return largest;
 }
 
+// Whether a fuse, cut or common of a revolution's tool with the base agrees with the tool where
+// the tool's cone points sit on the base's boundary (ops#1048). OCCT found no intersection of a
+// cone with a cylinder wall whose seam ran 1e-12 to 1e-7 beside the cone's apex: the fuse added
+// nothing, or the whole cone as a second solid overlapping the base, and the cut removed nothing,
+// all inside the volume bounds (notes\kernel-robustness.md section 35). Each tool face with a
+// degenerated edge (a pole) whose vertex lies on the base's boundary is sampled on a 4 x 4 grid of
+// its parameters. A sample outside the base must be on the result's boundary after a fuse and
+// outside it after a cut or common; a sample inside the base inside the result after a fuse and
+// on its boundary after a cut or common. No sample may be inside one of the result's solids and
+// in or on another (overlapping solids). Samples on the base's boundary say nothing.
+bool toolAgreesAtPoles(
+    const TopoDS_Shape& base,
+    const TopoDS_Shape& tool,
+    const TopoDS_Shape& result,
+    bool fuse
+)
+{
+    const double tolerance = std::max(
+        {Precision::Confusion(), largestTolerance(base), largestTolerance(tool)}
+    );
+    std::unique_ptr<SolidStates> baseStates;
+    std::vector<std::unique_ptr<BRepClass3d_SolidClassifier>> resultSolids;
+    for (TopExp_Explorer faces(tool, TopAbs_FACE); faces.More(); faces.Next()) {
+        const TopoDS_Face& face = TopoDS::Face(faces.Current());
+        bool poleOnBase = false;
+        for (TopExp_Explorer edges(face, TopAbs_EDGE); edges.More() && !poleOnBase; edges.Next()) {
+            const TopoDS_Edge& edge = TopoDS::Edge(edges.Current());
+            if (!BRep_Tool::Degenerated(edge)) {
+                continue;
+            }
+            TopoDS_Vertex v1;
+            TopoDS_Vertex v2;
+            TopExp::Vertices(edge, v1, v2);
+            if (v1.IsNull()) {
+                continue;
+            }
+            if (!baseStates) {
+                baseStates = std::make_unique<SolidStates>(base);
+            }
+            poleOnBase = (*baseStates)(BRep_Tool::Pnt(v1), tolerance) == TopAbs_ON;
+        }
+        if (!poleOnBase) {
+            continue;
+        }
+        if (resultSolids.empty()) {
+            for (TopExp_Explorer solids(result, TopAbs_SOLID); solids.More(); solids.Next()) {
+                resultSolids.push_back(
+                    std::make_unique<BRepClass3d_SolidClassifier>(solids.Current())
+                );
+            }
+        }
+        double uMin = 0.0;
+        double uMax = 0.0;
+        double vMin = 0.0;
+        double vMax = 0.0;
+        BRepTools::UVBounds(face, uMin, uMax, vMin, vMax);
+        const BRepAdaptor_Surface surface(face);
+        BRepTopAdaptor_FClass2d inFace(face, Precision::PConfusion());
+        constexpr int grid = 4;
+        for (int i = 0; i < grid; ++i) {
+            for (int j = 0; j < grid; ++j) {
+                const double u = uMin + (uMax - uMin) * (i + 0.5) / grid;
+                const double v = vMin + (vMax - vMin) * (j + 0.5) / grid;
+                if (inFace.Perform(gp_Pnt2d(u, v)) != TopAbs_IN) {
+                    continue;
+                }
+                const gp_Pnt point = surface.Value(u, v);
+                const TopAbs_State inBase = (*baseStates)(point, tolerance);
+                if (inBase == TopAbs_ON) {
+                    continue;
+                }
+                int in = 0;
+                int on = 0;
+                for (const auto& classifier : resultSolids) {
+                    classifier->Perform(point, tolerance);
+                    in += classifier->State() == TopAbs_IN ? 1 : 0;
+                    on += classifier->State() == TopAbs_ON ? 1 : 0;
+                }
+                if (in > 1 || (in == 1 && on > 0)) {
+                    return false;  // overlapping solids
+                }
+                const TopAbs_State inResult = in > 0 ? TopAbs_IN
+                    : on > 0                         ? TopAbs_ON
+                                                     : TopAbs_OUT;
+                const TopAbs_State wanted = inBase == TopAbs_OUT ? (fuse ? TopAbs_ON : TopAbs_OUT)
+                                                                 : (fuse ? TopAbs_IN : TopAbs_ON);
+                if (inResult != wanted) {
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
 // Whether a tool up to a face is built to the precision of its inputs: no vertex or edge
 // tolerance above 1e-3 of its size, or ten times its inputs' largest. Correct tools up to
 // B-spline walls reach 1.7e-4 of their size (an intersection curve's approximation: 5.5e-4 on a
@@ -2814,13 +2913,61 @@ Handle(Geom_Curve) analyticEdgeCurve(const TopoDS_Edge& edge, double& newFirst, 
 // new edges revolve right. A Groove then cut nothing and reported success. The face is rebuilt
 // on its surface from new edges and vertices made from the edges' located 3D curves; the edges,
 // vertices and face are named as modified from the old ones. Other faces are kept as they are.
-TopoShape freshAxisEdges(const TopoShape& profile, const gp_Ax1& axis)
+//
+// With `splineConeLines` (ops#1048, the retry of Revolved::executeRevolved()), a straight edge
+// with one end on the axis that is neither parallel nor perpendicular to it (it revolves into a
+// cone) is made a degree-1 B-spline, so it revolves into a revolution surface. OCCT found no
+// intersection of such a cone with a cylinder wall whose seam ran 1e-12 to 1e-7 beside the apex;
+// the revolution surface's intersection is found (notes\kernel-robustness.md section 35).
+TopoShape freshAxisEdges(const TopoShape& profile, const gp_Ax1& axis, bool splineConeLines)
 {
     const gp_Lin line(axis);
     auto onAxis = [&](const TopoDS_Vertex& vertex) {
         return !vertex.IsNull()
             && line.Distance(BRep_Tool::Pnt(vertex))
             <= std::max(BRep_Tool::Tolerance(vertex), Precision::Confusion());
+    };
+    // The degree-1 B-spline for an edge's curve between `first` and `last` when the edge would
+    // revolve into a cone with its apex on the axis; null otherwise
+    auto coneLineSpline = [&](const TopoDS_Edge& edge,
+                              const Handle(Geom_Curve) & curve,
+                              double first,
+                              double last) -> Handle(Geom_Curve) {
+        if (!splineConeLines || curve.IsNull()) {
+            return {};
+        }
+        Handle(Geom_Curve) basis = curve;
+        while (auto trimmed = Handle(Geom_TrimmedCurve)::DownCast(basis)) {
+            basis = trimmed->BasisCurve();
+        }
+        const auto straight = Handle(Geom_Line)::DownCast(basis);
+        TopoDS_Vertex v1;
+        TopoDS_Vertex v2;
+        TopExp::Vertices(edge, v1, v2);
+        if (straight.IsNull() || onAxis(v1) == onAxis(v2)) {
+            return {};
+        }
+        const gp_Dir direction = straight->Position().Direction();
+        if (direction.IsParallel(axis.Direction(), Precision::Angular())
+            || direction.IsNormal(axis.Direction(), Precision::Angular())) {
+            return {};
+        }
+        const gp_Pnt start = curve->Value(first);
+        const gp_Pnt end = curve->Value(last);
+        const double length = start.Distance(end);
+        if (length <= Precision::Confusion()) {
+            return {};
+        }
+        TColgp_Array1OfPnt poles(1, 2);
+        poles(1) = start;
+        poles(2) = end;
+        TColStd_Array1OfReal knots(1, 2);
+        knots(1) = 0.0;
+        knots(2) = length;
+        TColStd_Array1OfInteger multiplicities(1, 2);
+        multiplicities(1) = 2;
+        multiplicities(2) = 2;
+        return new Geom_BSplineCurve(poles, knots, multiplicities, 1);
     };
     auto needsFresh = [&](const TopoDS_Face& face) {
         TopLoc_Location location;
@@ -2839,6 +2986,14 @@ TopoShape freshAxisEdges(const TopoShape& profile, const gp_Ax1& axis)
             double analyticLast = 0.0;
             if (!analyticEdgeCurve(edge, analyticFirst, analyticLast).IsNull()) {
                 return true;
+            }
+            if (splineConeLines) {
+                double first3d = 0.0;
+                double last3d = 0.0;
+                const Handle(Geom_Curve) curve3d = BRep_Tool::Curve(edge, first3d, last3d);
+                if (!coneLineSpline(edge, curve3d, first3d, last3d).IsNull()) {
+                    return true;
+                }
             }
         }
         return false;
@@ -2875,6 +3030,12 @@ TopoShape freshAxisEdges(const TopoShape& profile, const gp_Ax1& axis)
             Handle(Geom_Curve) curve = analyticEdgeCurve(edge, first, last);
             if (curve.IsNull()) {
                 curve = BRep_Tool::Curve(edge, first, last);  // located
+            }
+            if (Handle(Geom_Curve) spline = coneLineSpline(edge, curve, first, last);
+                !spline.IsNull()) {
+                curve = spline;
+                first = spline->FirstParameter();
+                last = spline->LastParameter();
             }
             TopoDS_Vertex v1;
             TopoDS_Vertex v2;
@@ -3002,6 +3163,57 @@ void Revolved::onChanged(const App::Property* prop)
 }
 
 App::DocumentObjectExecReturn* Revolved::executeRevolved(Part::RevolMode revolMode)
+{
+    // ops#1048: a result the point check refuses is computed once more with the straight edges
+    // that end on the axis as degree-1 B-splines (revolution surfaces instead of cones); the same
+    // check then accepts it or refuses loudly
+    splineConeLines = false;
+    pointCheckRefused = false;
+    skipPointCheck = false;
+    refusedVolume = -1.0;
+    retriedVolume = -1.0;
+    App::DocumentObjectExecReturn* first = executeRevolvedOnce(revolMode);
+    if (!pointCheckRefused) {
+        return first;
+    }
+    delete first;  // NOLINT: never StdReturn here (null), the refusal returned an error
+    splineConeLines = true;
+    pointCheckRefused = false;
+    App::DocumentObjectExecReturn* retried = executeRevolvedOnce(revolMode);
+    splineConeLines = false;
+    pointCheckRefused = false;
+    // the revolution surfaces give the first result's volume and solids, and it was valid: the
+    // point check refused a right result (near a tangent contact, review r1). It is kept, names
+    // and all
+    const bool firstRight = refusedValid && refusedVolume >= 0.0 && retriedVolume >= 0.0
+        && refusedSolids == retriedSolids
+        && std::abs(retriedVolume - refusedVolume) <= keptTolerance();
+    if (firstRight) {
+        delete retried;  // NOLINT: StdReturn is null
+        skipPointCheck = true;
+        retried = executeRevolvedOnce(revolMode);
+        skipPointCheck = false;
+    }
+    const bool built = retried == App::DocumentObject::StdReturn;
+    // one line per retry, so a sweep's logs show where this path acts
+    Base::Console().warning(
+        "%s: OCCT missed where the revolution's apex meets the base; rebuilt with revolution "
+        "surfaces at the apex (%s)\n",
+        getFullLabel().c_str(),
+        !built           ? "refused"
+            : firstRight ? "the first result agrees: kept"
+                         : "built"
+    );
+    return retried;
+}
+
+double Revolved::keptTolerance() const
+{
+    return 1e-3 * std::abs(retriedVolume - refusedBaseVolume) + 1e-9 * refusedBaseVolume
+        + Precision::Confusion();
+}
+
+App::DocumentObjectExecReturn* Revolved::executeRevolvedOnce(Part::RevolMode revolMode)
 {
     constructedTool = false;
     try {
@@ -3224,7 +3436,7 @@ App::DocumentObjectExecReturn* Revolved::tryExecuteRevolved(Part::RevolMode revo
     const bool profileTouchesAxis = !seatedProfile.getShape().IsSame(sketchshape.getShape());
     sketchshape = seatedProfile;
     // A free-form edge ending on the axis in a face taken from a solid: fresh edges (ops#640, #113)
-    sketchshape = freshAxisEdges(sketchshape, revolutionAxis);
+    sketchshape = freshAxisEdges(sketchshape, revolutionAxis, splineConeLines);
     // Such a profile turned both ways from its plane is built as two sides from the plane only
     // where the base meets the profile (below). Elsewhere the one primitive is right and keeps
     // the revolved face whole, as Onshape does: two halves split it, and a reference to it kept
@@ -3617,6 +3829,52 @@ void Revolved::setResult(const TopoShape& base, const TopoShape& revolved, bool 
                 throw Base::RuntimeError(QT_TRANSLATE_NOOP(
                     "Exception",
                     "Could not combine the revolution with the base: the result's volume is wrong"
+                ));
+            }
+            // OCCT missed where the tool's cone meets the base, inside the volume bounds
+            // (ops#1048): refused here; the feature retries once with revolution surfaces
+            // (executeRevolved())
+            if (!skipPointCheck
+                && !toolAgreesAtPoles(
+                    base.getShape(),
+                    tool.getShape(),
+                    result.getShape(),
+                    getAddSubType() == FeatureAddSub::Type::Additive && !intersects
+                )) {
+                pointCheckRefused = !splineConeLines;
+                if (pointCheckRefused) {
+                    refusedVolume = precise(result).value;
+                    refusedBaseVolume = precise(base).value;
+                    refusedValid = BRepCheck_Analyzer(result.getShape()).IsValid();
+                    refusedSolids = result.countSubShapes(TopAbs_SOLID);
+                }
+                throw Base::RuntimeError(QT_TRANSLATE_NOOP(
+                    "Exception",
+                    "Could not combine the revolution with the base: the result does not follow "
+                    "the revolution where its apex meets the base"
+                ));
+            }
+            // the retry's B-spline tool can leave sliver faces where the first tool's result
+            // was right but refused (review r1): its volume decides between the two
+            // (executeRevolved()), and an invalid retried result is refused
+            if (splineConeLines) {
+                retriedVolume = precise(result).value;
+                retriedSolids = result.countSubShapes(TopAbs_SOLID);
+            }
+            // the kept first result, computed again with the check off, is the one refused
+            if (skipPointCheck
+                && std::abs(precise(result).value - refusedVolume) > keptTolerance()) {
+                throw Base::RuntimeError(QT_TRANSLATE_NOOP(
+                    "Exception",
+                    "Could not combine the revolution with the base: the result does not follow "
+                    "the revolution where its apex meets the base"
+                ));
+            }
+            if (splineConeLines && !BRepCheck_Analyzer(result.getShape()).IsValid()) {
+                throw Base::RuntimeError(QT_TRANSLATE_NOOP(
+                    "Exception",
+                    "Could not combine the revolution with the base: rebuilt with revolution "
+                    "surfaces at its apex, the result is not a valid solid"
                 ));
             }
             if (checkVolume
