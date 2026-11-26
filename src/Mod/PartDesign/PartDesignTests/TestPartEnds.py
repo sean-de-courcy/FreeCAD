@@ -430,26 +430,36 @@ class TestPartEnds(unittest.TestCase):
         self.assertFalse(pad.isValid())
         self.assertIn(LOCK, pad.getStatusString())
 
-    def testAbuttingToolsEndThePart(self):
-        """Review pr1065-r2 R2-1: a Boolean Cut by two tool Bodies that meet at x 5 inside the
-        block, and by one tool Body made of two touching boxes: each holds all of it: ended."""
+    def testOverlappingToolsEndThePart(self):
+        """Review pr1065-r2 R2-1: one tool Body made of two boxes overlapping inside the block
+        (x -1..6 and 4..11) holds all of it: each box's wall inside the block is inside the
+        other box: ended."""
         body, _ = self.block()
-        left = self.booleanTool("Left", Part.makeBox(6, 12, 4, V(-1, -1, -1)))
-        right = self.booleanTool("Right", Part.makeBox(6, 12, 4, V(5, -1, -1)))
+        pair = Part.makeCompound([Part.makeBox(7, 12, 4, V(-1, -1, -1)), Part.makeBox(7, 12, 4, V(4, -1, -1))])
+        tool = self.booleanTool("Pair", pair)
         cut = body.newObject("PartDesign::Boolean", "Cut")
-        cut.setObjects([left, right])
+        cut.setObjects([tool])
         cut.Type = "Cut"
         self.doc.recompute()
         self.assertEnded(cut, body)
 
-        other, _ = self.block(name="Other")
-        pair = Part.makeCompound([Part.makeBox(6, 12, 4, V(-1, -1, -1)), Part.makeBox(6, 12, 4, V(5, -1, -1))])
-        tool = self.booleanTool("Pair", pair)
-        cut2 = other.newObject("PartDesign::Boolean", "Cut2")
-        cut2.setObjects([tool])
-        cut2.Type = "Cut"
-        self.doc.recompute()
-        self.assertEnded(cut2, other)
+    def testAbuttingOrCoincidentToolsAreLoud(self):
+        """Reviews pr1065-r2 R2-1, R3-1: tools that only abut inside the block (x -1..5 and
+        5..11), emptied, are refused (loud debt: Onshape would end the part); two identical tools
+        with a hole, emptied, are refused (silent before: the coincident walls excused each other
+        and the pin was lost)."""
+        holed = Part.makeBox(12, 12, 4, V(-1, -1, -1)).cut(Part.makeBox(0.6, 0.6, 6, V(1.0, 1.0, -2)))
+        for name, shapes in (("Abut", (Part.makeBox(6, 12, 4, V(-1, -1, -1)), Part.makeBox(6, 12, 4, V(5, -1, -1)))),
+                             ("Twin", (holed, holed.copy()))):
+            with self.subTest(name=name):
+                body, _ = self.block(name=name)
+                tools = [self.booleanTool(name + "T%d" % k, shape) for k, shape in enumerate(shapes)]
+                cut = body.newObject("PartDesign::Boolean", name + "Cut")
+                cut.setObjects(tools)
+                cut.Type = "Cut"
+                self.doc.recompute()
+                self.emptyResult(cut)
+                self.assertLost(cut)
 
     def testBooleanIntersectOfDisjointBodies(self):
         """H: a Boolean Intersect of two disjoint Bodies leaves nothing: ended; with Keep tools

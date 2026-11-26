@@ -873,8 +873,11 @@ bool toolsHoldBase(const TopoDS_Shape& base, const std::vector<TopoDS_Shape>& to
     // The other way (review pr1065-r1 T1): no point of a tool's boundary strictly inside the base,
     // unless it is inside another tool too (overlapping copies' inner walls). A hole or channel in
     // the tool between the base's samples has its walls there: a pin it would leave is no end
-    // Per tool solid, the same tool's other solids included, and on another solid excuses a point:
-    // abutting tool Bodies or copies end the part (review pr1065-r2 R2-1)
+    // Per tool solid, the same tool's other solids included (review pr1065-r2 R2-1); only strictly
+    // inside another solid excuses a point: on one excused coincident holed tools, which leave a
+    // pin (R3-1, the second silent find here, so the literal rule: refuse). Tools that only abut
+    // inside the part are refused too, loud (the kernel's error), as debt
+    // TODO(ops#1065 debt): abutting tools that hold the part jointly end it in Onshape
     const Classifiers base1({base}, tolerance);
     std::vector<TopoDS_Shape> toolSolids;
     for (const TopoDS_Shape& tool : tools) {
@@ -902,7 +905,7 @@ bool toolsHoldBase(const TopoDS_Shape& base, const std::vector<TopoDS_Shape>& to
                     continue;
                 }
                 each[o]->Perform(point, tolerance);
-                inAnother = each[o]->State() == TopAbs_IN || each[o]->State() == TopAbs_ON;
+                inAnother = each[o]->State() == TopAbs_IN;
             }
             if (!inAnother) {
                 return false;
