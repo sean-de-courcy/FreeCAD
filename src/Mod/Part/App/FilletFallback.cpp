@@ -10596,8 +10596,8 @@ bool onOneFootLine(const TopoDS_Edge& foot, const TopoDS_Edge& other)
  * though each wall alone builds there. The bound lies between the facts: W 11 builds with its
  * second crossing 28.3 deg from that end (r 1.55) and fails at 31.5 (r 1.6); W 16 builds at 28.3
  * (r 1.1) and fails at 33.9 (r 1.2); W 6 builds at 25.0 (r 2.615). A continuation that crosses
- * once (W 6 beside W 16 at r 1.4) or misses never fails it. A wall that is not a plane has no
- * oracle: the join refuses. Read in the section at the edge's middle
+ * once (W 6 beside W 16 at r 1.4) or misses never fails it. A join with a wall that is not a
+ * plane refuses before it gets here (the caller). Read in the section at the edge's middle
  */
 void joinedRoundFits(
     const Section& middle,
@@ -13425,10 +13425,26 @@ TopoDS_Shape constructShape(
         // dress-up's other face, or on another foot line) leaves every wall to its own trim
         // (review pr1026-r1b: a wall on the other face trimmed first and the round was cut away
         // whole; RB35 3a: on two foot lines each stretch is cut by its own wall)
-        const bool oneLine = mine.size() > 1
+        bool oneLine = mine.size() > 1
             && std::all_of(mine.begin(), mine.end(), [&](const SurfaceWall* at) {
                    return at->face.IsSame(first.face) && onOneFootLine(first.foot, at->foot);
                });
+        if (oneLine) {
+            // A wall that is not a plane has no oracle in a join: a fillet or a chamfer refuses
+            // (review pr541-r2f: R2fBlendAndRibChamfer). Faces of one surface (a blend in two
+            // faces) are one wall: each trims alone, as before the join (review pr541-r2f, trace 3)
+            const bool curved = std::any_of(mine.begin(), mine.end(), [](const SurfaceWall* at) {
+                return BRepAdaptor_Surface(at->wall, Standard_True).GetType() != GeomAbs_Plane;
+            });
+            const bool oneSurface
+                = std::all_of(mine.begin(), mine.end(), [&](const SurfaceWall* at) {
+                      return sameDomain(at->wall, first.wall);
+                  });
+            if (curved && !oneSurface) {
+                refuse("a dress-up past walls on one foot line, one of them curved");
+            }
+            oneLine = !curved;
+        }
         if (!oneLine) {
             for (const SurfaceWall* at : mine) {
                 trimOne(*at, false);
@@ -13441,10 +13457,11 @@ TopoDS_Shape constructShape(
         if (edge == data.end()) {
             refuse("a corner piece's strip runs off its face into a wall");
         }
-        // Each foot's distance from the edge's middle, both taken onto the foot line; where two
-        // feet meet there (RB35: stretches over x 0..15 and 15..30), the one before it along the
-        // edge counts: the stretch over 15..30, the RB7 model's top edge running from x 30 to x 0
-        // as built here. Onshape's own edge direction isn't seen; that tie is fitted to RB35
+        // Each foot's distance from the edge's middle, both taken onto the foot line. Where feet
+        // of two walls on different planes meet there (RB35: stretches over x 0..15 and 15..30),
+        // Onshape takes the stretch over 15..30, but what that depends on isn't known: a choice by
+        // the edge's direction gave the other wall's row silently on the same solid built another
+        // way (review pr541-r2f). Such a tie refuses (ruling c816) until an oracle settles it
         const gp_Lin line = BRepAdaptor_Curve(first.foot).Line();
         auto onLine = [&](double parameter) {
             const gp_Pnt point = sectionAt(ctx, *edge, parameter).corner;
@@ -13462,8 +13479,7 @@ TopoDS_Shape constructShape(
         };
         const double middle = (edge->first + edge->last) / 2;
         const gp_Pnt atMiddle = onLine(middle);
-        const gp_Pnt beforeMiddle = onLine(middle - 1e-3 * (edge->last - edge->first));
-        std::vector<std::pair<std::pair<double, double>, const SurfaceWall*>> ordered;
+        std::vector<std::pair<double, const SurfaceWall*>> ordered;
         for (const SurfaceWall* at : mine) {
             double footTolerance = BRep_Tool::Tolerance(at->foot);
             for (TopExp_Explorer it(at->foot, TopAbs_VERTEX); it.More(); it.Next()) {
@@ -13474,11 +13490,16 @@ TopoDS_Shape constructShape(
             if (away <= footTolerance + 1000 * linearTolerance) {
                 away = 0.0;
             }
-            ordered.push_back({{away, distance(beforeMiddle, at->foot)}, at});
+            ordered.push_back({away, at});
         }
         std::stable_sort(ordered.begin(), ordered.end(), [](const auto& a, const auto& b) {
             return a.first < b.first;
         });
+        for (size_t k = 1; k < ordered.size() && ordered[k].first == 0.0; ++k) {
+            if (!sameDomain(ordered[k].second->wall, ordered[0].second->wall)) {
+                refuse("a dress-up past walls on one foot line that meet at its edge's middle");
+            }
+        }
         const SurfaceWall* cutter = nullptr;
         for (const auto& [key, at] : ordered) {
             if (!cutter) {

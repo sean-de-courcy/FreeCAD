@@ -46,6 +46,7 @@
 #include <BRepPrimAPI_MakeRevol.hxx>
 #include <BRepPrimAPI_MakeSphere.hxx>
 #include <BRepAdaptor_Curve.hxx>
+#include <BRepBuilderAPI_Transform.hxx>
 #include <BRepAdaptor_Surface.hxx>
 #include <BRep_Builder.hxx>
 #include <ShapeFix_ShapeTolerance.hxx>
@@ -4885,12 +4886,16 @@ TEST_F(FilletFallbackTest, roundPastAStripUnderTwoWallsIsCutByTheMiddleWall)
     const double fails = std::numeric_limits<double>::quiet_NaN();
     const double w6[] = {13.994095, 22.362287, 29.671771, 30.724084};  // r 1.5, 2, 2.5, 2.6
     const double w11 = 13.879918;  // r 1.5
+    // Two walls on different planes meeting exactly at the middle: Onshape builds the row given
+    // (RB35: the stretch over 15..30's wall), but what its tie depends on is not known; the
+    // fork refuses there (review pr541-r2f, ruling c816) until an oracle settles it
+    auto tie = [&](double /*onshape*/) { return fails; };
     const std::vector<Case> cases = {
         // Which wall: the middle's (RB35 1a, 1b, 1c, the moved split, RB22 rerun)
-        {"1a W6|W11", {{6, 0, 15}, {11, 15, 30}}, true, 1.5, w11},
-        {"1a W6|W11", {{6, 0, 15}, {11, 15, 30}}, true, 2.0, w6[1]},
-        {"RB22 W11|W6", {{11, 0, 15}, {6, 15, 30}}, true, 1.5, w6[0]},
-        {"RB22 W11|W6", {{11, 0, 15}, {6, 15, 30}}, true, 2.0, w6[1]},
+        {"1a W6|W11", {{6, 0, 15}, {11, 15, 30}}, true, 1.5, tie(w11)},
+        {"1a W6|W11", {{6, 0, 15}, {11, 15, 30}}, true, 2.0, tie(w6[1])},
+        {"RB22 W11|W6", {{11, 0, 15}, {6, 15, 30}}, true, 1.5, tie(w6[0])},
+        {"RB22 W11|W6", {{11, 0, 15}, {6, 15, 30}}, true, 2.0, tie(w6[1])},
         {"W11 14|W6", {{11, 0, 14}, {6, 14, 30}}, true, 1.5, w6[0]},
         {"W11 16|W6", {{11, 0, 16}, {6, 16, 30}}, true, 1.5, w11},
         {"1b W11 27|W6", {{11, 0, 27}, {6, 27, 30}}, true, 1.5, w11, {12.491926, 1.387992}},
@@ -4899,18 +4904,18 @@ TEST_F(FilletFallbackTest, roundPastAStripUnderTwoWallsIsCutByTheMiddleWall)
         {"1c W6 3|W11", {{6, 0, 3}, {11, 3, 30}}, true, 2.0, w6[1]},
         {"W11 3|W6", {{11, 0, 3}, {6, 3, 30}}, true, 1.5, w6[0]},
         // An upright or overhanging wall beside a leaning one (RB35 2a, 2b, 2c, each reversed)
-        {"2a W1|W11", {{1, 0, 15}, {11, 15, 30}}, true, 1.5, w11},
-        {"2a W1|W11", {{1, 0, 15}, {11, 15, 30}}, true, 2.0, 23.148909},
-        {"2a W1|W11", {{1, 0, 15}, {11, 15, 30}}, true, 3.0, 43.537769},
-        {"2a W11|W1", {{11, 0, 15}, {1, 15, 30}}, true, 1.5, 14.061721},
-        {"2c W-4|W1", {{-4, 0, 15}, {1, 15, 30}}, true, 1.5, 14.061721},
-        {"2c W-4|W1", {{-4, 0, 15}, {1, 15, 30}}, true, 2.0, 23.148909},
-        {"2c W-4|W1", {{-4, 0, 15}, {1, 15, 30}}, true, 3.0, 43.537769},
-        {"2c W1|W-4", {{1, 0, 15}, {-4, 15, 30}}, true, 1.5, 14.108818},
-        {"2b W-4|W6", {{-4, 0, 15}, {6, 15, 30}}, true, 1.5, w6[0]},
-        {"2b W-4|W6", {{-4, 0, 15}, {6, 15, 30}}, true, 2.0, w6[1]},
-        {"2b W-4|W6", {{-4, 0, 15}, {6, 15, 30}}, true, 3.0, 46.634575},
-        {"2b W6|W-4", {{6, 0, 15}, {-4, 15, 30}}, true, 1.5, 14.108818},
+        {"2a W1|W11", {{1, 0, 15}, {11, 15, 30}}, true, 1.5, tie(w11)},
+        {"2a W1|W11", {{1, 0, 15}, {11, 15, 30}}, true, 2.0, tie(23.148909)},
+        {"2a W1|W11", {{1, 0, 15}, {11, 15, 30}}, true, 3.0, tie(43.537769)},
+        {"2a W11|W1", {{11, 0, 15}, {1, 15, 30}}, true, 1.5, tie(14.061721)},
+        {"2c W-4|W1", {{-4, 0, 15}, {1, 15, 30}}, true, 1.5, tie(14.061721)},
+        {"2c W-4|W1", {{-4, 0, 15}, {1, 15, 30}}, true, 2.0, tie(23.148909)},
+        {"2c W-4|W1", {{-4, 0, 15}, {1, 15, 30}}, true, 3.0, tie(43.537769)},
+        {"2c W1|W-4", {{1, 0, 15}, {-4, 15, 30}}, true, 1.5, tie(14.108818)},
+        {"2b W-4|W6", {{-4, 0, 15}, {6, 15, 30}}, true, 1.5, tie(w6[0])},
+        {"2b W-4|W6", {{-4, 0, 15}, {6, 15, 30}}, true, 2.0, tie(w6[1])},
+        {"2b W-4|W6", {{-4, 0, 15}, {6, 15, 30}}, true, 3.0, tie(46.634575)},
+        {"2b W6|W-4", {{6, 0, 15}, {-4, 15, 30}}, true, 1.5, tie(14.108818)},
         // Three stretches: the middle one's wall (RB35 4a, 4b)
         {"4a W11|W6|W11", {{11, 0, 10}, {6, 10, 20}, {11, 20, 30}}, true, 1.5, w6[0]},
         {"4a W11|W6|W11", {{11, 0, 10}, {6, 10, 20}, {11, 20, 30}}, true, 2.0, w6[1]},
@@ -4921,34 +4926,34 @@ TEST_F(FilletFallbackTest, roundPastAStripUnderTwoWallsIsCutByTheMiddleWall)
         {"5a W6", {{6, 0, 30}}, true, 2.6, w6[3]},
         {"5a W6", {{6, 0, 30}}, true, 2.65, fails},
         {"5a W6", {{6, 0, 30}}, true, 2.7, fails},
-        {"5b W11|W6", {{11, 0, 15}, {6, 15, 30}}, true, 2.5, w6[2]},
-        {"5b W11|W6", {{11, 0, 15}, {6, 15, 30}}, true, 2.6, w6[3]},
+        {"5b W11|W6", {{11, 0, 15}, {6, 15, 30}}, true, 2.5, tie(w6[2])},
+        {"5b W11|W6", {{11, 0, 15}, {6, 15, 30}}, true, 2.6, tie(w6[3])},
         {"5b W11|W6", {{11, 0, 15}, {6, 15, 30}}, true, 2.65, fails},
         {"5b W11|W6", {{11, 0, 15}, {6, 15, 30}}, true, 2.7, fails},
         {"RB22 W11|W6", {{11, 0, 15}, {6, 15, 30}}, true, 3.0, fails},
         // A join fails where the cutting wall's continuation crosses the arc twice and a second
         // crossing lies far from the arc's end (RB35 5c, RB42, RB43), though each wall builds alone
-        {"1a W6|W11", {{6, 0, 15}, {11, 15, 30}}, true, 1.55, 14.652835},
+        {"1a W6|W11", {{6, 0, 15}, {11, 15, 30}}, true, 1.55, tie(14.652835)},
         {"1a W6|W11", {{6, 0, 15}, {11, 15, 30}}, true, 1.6, fails},
         {"1a W6|W11", {{6, 0, 15}, {11, 15, 30}}, true, 1.65, fails},
         {"1a W6|W11", {{6, 0, 15}, {11, 15, 30}}, true, 1.7, fails},
         {"2a W1|W11", {{1, 0, 15}, {11, 15, 30}}, true, 1.6, fails},
         {"2a W1|W11", {{1, 0, 15}, {11, 15, 30}}, true, 1.7, fails},
-        {"RB22 W11|W6", {{11, 0, 15}, {6, 15, 30}}, true, 2.61, 30.809822},
-        {"RB22 W11|W6", {{11, 0, 15}, {6, 15, 30}}, true, 2.615, 30.849924},
+        {"RB22 W11|W6", {{11, 0, 15}, {6, 15, 30}}, true, 2.61, tie(30.809822)},
+        {"RB22 W11|W6", {{11, 0, 15}, {6, 15, 30}}, true, 2.615, tie(30.849924)},
         {"W6", {{6, 0, 30}}, true, 2.615, 30.849924},
-        {"W16|W6", {{16, 0, 15}, {6, 15, 30}}, true, 1.4, 12.356948},
-        {"W16|W6", {{16, 0, 15}, {6, 15, 30}}, true, 1.5, w6[0]},
-        {"5c W11|W16", {{11, 0, 15}, {16, 15, 30}}, true, 1.1, 7.784952},
+        {"W16|W6", {{16, 0, 15}, {6, 15, 30}}, true, 1.4, tie(12.356948)},
+        {"W16|W6", {{16, 0, 15}, {6, 15, 30}}, true, 1.5, tie(w6[0])},
+        {"5c W11|W16", {{11, 0, 15}, {16, 15, 30}}, true, 1.1, tie(7.784952)},
         {"5c W11|W16", {{11, 0, 15}, {16, 15, 30}}, true, 1.2, fails},
         {"5c W11|W16", {{11, 0, 15}, {16, 15, 30}}, true, 1.3, fails},
         {"5c W11|W16", {{11, 0, 15}, {16, 15, 30}}, true, 1.4, fails},
         {"5c W11|W16", {{11, 0, 15}, {16, 15, 30}}, true, 1.7, fails},
         {"5c W16|W11", {{16, 0, 15}, {11, 15, 30}}, true, 1.4, fails},
         {"5c W16|W11", {{16, 0, 15}, {11, 15, 30}}, true, 1.7, fails},
-        {"5c W11|W16", {{11, 0, 15}, {16, 15, 30}}, true, 1.5, w11},
+        {"5c W11|W16", {{11, 0, 15}, {16, 15, 30}}, true, 1.5, tie(w11)},
         {"5c W11|W16", {{11, 0, 15}, {16, 15, 30}}, true, 1.75, fails},
-        {"5c W16|W11", {{16, 0, 15}, {11, 15, 30}}, true, 1.5, w11},
+        {"5c W16|W11", {{16, 0, 15}, {11, 15, 30}}, true, 1.5, tie(w11)},
         {"5c W16|W11", {{16, 0, 15}, {11, 15, 30}}, true, 1.75, fails},
         // Two foot lines: each stretch its own wall (RB35 3a, 3b)
         {"3a W1 s1|W0.6 s0.6", {{1, 0, 15, 1}, {0.6, 15, 30, 0.6}}, true, 0.8, 4.095115, {2.060178, 2.034938}},
@@ -4956,12 +4961,12 @@ TEST_F(FilletFallbackTest, roundPastAStripUnderTwoWallsIsCutByTheMiddleWall)
         {"3a W1 s1|W0.6 s0.6", {{1, 0, 15, 1}, {0.6, 15, 30, 0.6}}, true, 2.0, 20.709489, {11.574455, 9.135035}},
         {"3b W6 s1|W10.6 s0.6", {{6, 0, 15, 1}, {10.6, 15, 30, 0.6}}, true, 1.5, fails},
         // Chamfers (RB35 6, RB22)
-        {"1a W6|W11", {{6, 0, 15}, {11, 15, 30}}, false, 1.5, 26.25},
+        {"1a W6|W11", {{6, 0, 15}, {11, 15, 30}}, false, 1.5, tie(26.25)},
         {"1a W6|W11", {{6, 0, 15}, {11, 15, 30}}, false, 2.0, fails},
-        {"RB22 W11|W6", {{11, 0, 15}, {6, 15, 30}}, false, 1.5, 26.25},
-        {"2a W1|W11", {{1, 0, 15}, {11, 15, 30}}, false, 1.5, 30},
-        {"2a W1|W11", {{1, 0, 15}, {11, 15, 30}}, false, 2.0, 45},
-        {"2b W-4|W6", {{-4, 0, 15}, {6, 15, 30}}, false, 1.5, 26.25},
+        {"RB22 W11|W6", {{11, 0, 15}, {6, 15, 30}}, false, 1.5, tie(26.25)},
+        {"2a W1|W11", {{1, 0, 15}, {11, 15, 30}}, false, 1.5, tie(30)},
+        {"2a W1|W11", {{1, 0, 15}, {11, 15, 30}}, false, 2.0, tie(45)},
+        {"2b W-4|W6", {{-4, 0, 15}, {6, 15, 30}}, false, 1.5, tie(26.25)},
         {"2b W-4|W6", {{-4, 0, 15}, {6, 15, 30}}, false, 2.0, fails},
         {"3a W1 s1|W0.6 s0.6", {{1, 0, 15, 1}, {0.6, 15, 30, 0.6}}, false, 1.5, 25.8, {15, 10.8}},
         {"3a W1 s1|W0.6 s0.6", {{1, 0, 15, 1}, {0.6, 15, 30, 0.6}}, false, 2.0, 37.8, {22.5, 15.3}},
@@ -4976,17 +4981,45 @@ TEST_F(FilletFallbackTest, roundPastAStripUnderTwoWallsIsCutByTheMiddleWall)
         move.SetTranslation(gp_Vec(at.x0, 0, 0));
         return prism.Moved(TopLoc_Location(move));
     };
+    // Each case twice: as listed, and built mirrored across x 15 from the stretches in reverse
+    // order, then mirrored back: the same solid, its front edge running the other way (review
+    // pr541-r2f: the tie at the middle must not depend on the edge's direction)
+    auto frontRunsUp = [](const TopoShape& base) {
+        const TopoDS_Edge front
+            = TopoDS::Edge(edgeBetween(base, {0, 0, 10}, {30, 0, 10}).getShape());
+        BRepAdaptor_Curve curve(front);
+        return curve.Value(curve.LastParameter()).X() > curve.Value(curve.FirstParameter()).X();
+    };
+    std::vector<bool> directions;
     for (const auto& c : cases) {
+        for (bool mirrored : {false, true}) {
         const std::string label = std::string(c.name) + (c.round ? " r " : " chamfer ")
-            + std::to_string(c.size);
-        TopoDS_Shape shape = stretch(c.stretches[0]);
+            + std::to_string(c.size) + (mirrored ? " mirrored build" : "");
+        auto placed = [&](size_t k) {
+            Stretch at = c.stretches[k];
+            if (mirrored) {
+                at.x0 = 30 - c.stretches[k].x1;
+                at.x1 = 30 - c.stretches[k].x0;
+            }
+            return stretch(at);
+        };
+        TopoDS_Shape shape = placed(0);
         for (size_t k = 1; k < c.stretches.size(); ++k) {
-            BRepAlgoAPI_Fuse fuse(shape, stretch(c.stretches[k]));
+            BRepAlgoAPI_Fuse fuse(shape, placed(k));
             shape = fuse.Shape();
         }
         ShapeUpgrade_UnifySameDomain unify(shape);
         unify.Build();
-        TopoShape base(unify.Shape(), 1L);
+        shape = unify.Shape();
+        if (mirrored) {
+            gp_Trsf mirror;
+            mirror.SetMirror(gp_Ax2(gp_Pnt(15, 0, 0), gp_Dir(1, 0, 0)));
+            shape = BRepBuilderAPI_Transform(shape, mirror, Standard_True).Shape();
+        }
+        TopoShape base(shape, 1L);
+        if (c.stretches.size() > 1) {
+            directions.push_back(frontRunsUp(base));
+        }
         TopoShape front = edgeBetween(base, {0, 0, 10}, {30, 0, 10});
         const double before = volume(base.getShape());
         TopoShape result;
@@ -5011,7 +5044,11 @@ TEST_F(FilletFallbackTest, roundPastAStripUnderTwoWallsIsCutByTheMiddleWall)
                 - volume(BRepAlgoAPI_Common(result.getShape(), over).Shape());
             EXPECT_NEAR(lost, share, 1e-5) << label << " stretch " << k;
         }
+        }
     }
+    // Both edge directions were covered
+    EXPECT_NE(std::count(directions.begin(), directions.end(), true), 0);
+    EXPECT_NE(std::count(directions.begin(), directions.end(), false), 0);
 }
 
 TEST_F(FilletFallbackTest, roundPastTwoWallsOnOneFootLineAndAFrontWallIsNotCutAwayWhole)
