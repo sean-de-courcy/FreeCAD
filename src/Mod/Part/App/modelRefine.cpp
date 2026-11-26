@@ -1052,6 +1052,15 @@ double faceArea(const TopoDS_Shape& shape)
     return props.Mass();
 }
 
+// A free-form face's area by the readouts' adaptive integration (ops#1044). OCCT's default
+// integration of a B-spline wall is 1e-7 to 4e-6 off, and differently for a face and for its
+// pieces when they cover other knot spans: a right merge of the two halves of a wall split across
+// its u knots then differed from the halves by 3 times the allowance. Adaptive, they agree to 1e-12
+double readoutFaceArea(const TopoDS_Shape& shape)
+{
+    return Part::MassProperties::readoutArea(shape);
+}
+
 // The slack of a face's boundary in an area comparison (ops#1044): the sum over its edges (those
 // in `only`, if given) of the gap between the edge's curve on this face and its 3D curve, times the
 // edge's length. A face's area is integrated inside its curves on the surface. An approximated edge
@@ -1100,13 +1109,17 @@ double boundarySlack(const TopoDS_Face& face, const TopTools_IndexedMapOfShape* 
 // periodic surface is still caught. On the merged face the tolerance test of boundarySlack()
 // cannot refuse (the face fix has already raised its edges' tolerances to cover their curves):
 // there the cap is the guard
-bool coversGroup(const FaceVectorType& faces, const TopoDS_Face& face)
+bool coversGroup(
+    const FaceVectorType& faces,
+    const TopoDS_Face& face,
+    double (*areaOf)(const TopoDS_Shape&) = faceArea
+)
 {
     double area = 0.0;
     for (const auto& f : faces) {
-        area += faceArea(f);
+        area += areaOf(f);
     }
-    const double difference = std::fabs(faceArea(face) - area);
+    const double difference = std::fabs(areaOf(face) - area);
     const double allowed = 1e-7 * area + Precision::Confusion();
     if (difference <= allowed) {
         return true;
@@ -2111,7 +2124,8 @@ TopoDS_Face FaceTypedBSpline::buildFace(const FaceVectorType& faces) const
                 return {};
             }
             const TopoDS_Face face = faceFixer.Face();
-            if (face.IsNull() || !BRepCheck_Analyzer(face).IsValid() || !coversGroup(faces, face)) {
+            if (face.IsNull() || !BRepCheck_Analyzer(face).IsValid()
+                || !coversGroup(faces, face, readoutFaceArea)) {
                 return {};
             }
             return face;
