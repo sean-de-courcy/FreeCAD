@@ -1738,6 +1738,24 @@ std::vector<std::pair<gp_Pnt, gp_Pnt>> unconnectedStarts(
     return starts;
 }
 
+/// The tests' hook: FREECAD_CH_LOFT_START_TEST=throw makes a run that took an automatic start fail.
+bool startTestHook()
+{
+#ifdef _MSC_VER
+    char* value = nullptr;
+    size_t size = 0;
+    if (_dupenv_s(&value, &size, "FREECAD_CH_LOFT_START_TEST") != 0 || !value) {
+        return false;
+    }
+    const bool on = std::string(value) == "throw";
+    std::free(value);
+    return on;
+#else
+    const char* value = std::getenv("FREECAD_CH_LOFT_START_TEST");
+    return value && std::string(value) == "throw";
+#endif
+}
+
 /// The loops of an unconnected loft matched from the first start pair whose chain builds
 /// (`unconnectedStarts`), or nothing.
 std::optional<LoopMatch> unconnectedMatch(const Part::TopoShape& profile, const Part::TopoShape& section)
@@ -3068,8 +3086,7 @@ App::DocumentObjectExecReturn* Loft::executeLoft(bool automaticStarts, bool& aut
                 match = unconnectedMatch(sectionWires.front(), sectionWires.back());
                 if (match) {
                     automaticUsed = true;
-                    if (const char* hook = std::getenv("FREECAD_CH_LOFT_START_TEST");
-                        hook && std::string(hook) == "throw") {
+                    if (startTestHook()) {
                         throw Base::CADKernelError("Loft: test hook, the automatic start fails");
                     }
                 }
