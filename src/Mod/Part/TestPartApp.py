@@ -61,6 +61,7 @@ from parttests.FilletFallbackTest import (
     EndOnTangentWallTest,  # ops#999
     ShallowRidgeTest,  # ops#999
     SmoothEdgeTest,  # ops#999
+    LipCornerOverflowTest,  # ops#1027
     CornerWithACircleTest,
     BlendEndTrimTest,
     CurvedEndTrimTest,

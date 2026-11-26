@@ -538,7 +538,8 @@ names it.
 | `fix/i1025-mitre-sphere` | fix | ops#1025, ops#1024 | - | `fix/i1020-mitre-angle` `7b882791ed` (stacked on fork PR 535) | `091421dbef` (fork PR 537), 2026-11-25 | never (fork fix): the mitre run-on corner from r = q, a sphere at r = q, as Onshape's (RB27) |
 | `fix/i1028-concave-outline-runout` | fix | ops#1028 | - | open | `d7af7bcf81` (fork PR 539), 2026-11-25 | drop when upstream refuses a run-out into a concave outline corner |
 | `infra/gen6-1125` | infra | ops#883 | - | `integration` `d7af7bcf81` | `8388e5e747` (fork PR 543), 2026-11-25 | never (fork corpus) |
-| `fix/i1040-vertex-fillets` | fix | ops#1040 | - | `integration` `091421dbef` | (fork PR 542) | never (fork fix): fillets and chamfers ending at a vertex of 4 edges behind a face (folds), fills run past their face over a face beyond ruled along its normal, decided exactly |
+| `fix/i1040-vertex-fillets` | fix | ops#1040 | - | `integration` `091421dbef` | `be7163b688` (fork PR 542), 2026-11-26 | never (fork fix): fillets and chamfers ending at a vertex of 4 edges behind a face (folds), fills run past their face over a face beyond ruled along its normal, decided exactly |
+| `fix/i1027-overflow-tight-arc` | fix | ops#1027 | - | open | (fork PR 538) | drop when upstream fails the overflow past a tight arc |
 
 ## Fork-only commits in carried topics
 
