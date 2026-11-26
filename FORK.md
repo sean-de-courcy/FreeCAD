@@ -543,7 +543,8 @@ names it.
 | `infra/i1049-forkrelease-15` | infra | ops#1049 | - | `integration` `d7af7bcf81` | `fd104faf25` (fork PR 544), 2026-11-26 | never (fork stamp) |
 | `fix/i1039-upto-curved-face` | fix | ops#1039 | - | `integration` `fd104faf25` | `f5648d1e7f` (fork PR 540), 2026-11-26 | never (fork fix): up to a picked cylinder, cone or sphere face by the split against its full turn, each point to its first crossing; BRepFeat's own-base retry must reach the face |
 | `fix/i1026-two-walls` | fix | ops#1026 | - | open | `24f9ac5566` (fork PR 541), 2026-11-26 | drop when upstream builds a dress-up past a strip under two walls |
-| `fix/i1060-fix-twin-order` | fix | ops#1060 | - | open | (fork PR 547) | drop when `BRepTools_History` gives a split source's pieces in a repeatable order |
+| `fix/i1060-fix-twin-order` | fix | ops#1060 | - | open | `51fa2be4ed` (fork PR 547), 2026-11-26 | drop when `BRepTools_History` gives a split source's pieces in a repeatable order |
+| `fix/i1051-fill-on-bspline-round` | fix | ops#1051 | - | open | (fork PR 546) | drop when upstream builds a lone round on its cylinder as one cylinder face |
 
 ## Fork-only commits in carried topics
 
