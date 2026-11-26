@@ -216,11 +216,17 @@ public:
     }
 
 private:
+    bool processOnce();
+
     TopoDS_Shell workShell;
     std::vector<FaceTypedBase*> typeObjects;
     std::vector<ShapePairType> modifiedShapes;
     ShapeVectorType deletedShapes;
     bool modifiedSignal;
+    // ops#1106: the B-spline groups merged in this pass with their faces as built, and the faces of
+    // the groups a later pass leaves as they are
+    std::vector<std::pair<FaceVectorType, TopoDS_Face>> bsplineMerges;
+    FaceVectorType refusedFaces;
 };
 
 // The edges of the cone, torus and sphere faces of `shape` that the face uniter would leave

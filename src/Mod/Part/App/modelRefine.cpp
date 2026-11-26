@@ -2190,17 +2190,7 @@ TopoDS_Face FaceTypedBSpline::buildFace(const FaceVectorType& faces) const
         return {};
     }
 
-    // The guards of the reversed kind above (ops#1106): a merged face that is not valid, or that
-    // does not cover its group (a boundary whose loops at one vertex were wired into the wrong
-    // outer wire), is not built, and the group stays as it is. One such group used to make the
-    // whole refine invalid, so the feature, and every later one merging the same faces, kept
-    // its shape unrefined
-    const TopoDS_Face face = faceFixer.Face();
-    if (face.IsNull() || !BRepCheck_Analyzer(face).IsValid()
-        || !coversGroup(faces, face, readoutFaceArea)) {
-        return {};
-    }
-    return face;
+    return faceFixer.Face();
 }
 
 FaceTypedBSpline& ModelRefine::getBSplineObject()
@@ -2217,13 +2207,67 @@ FaceUniter::FaceUniter(const TopoDS_Shell& shellIn)
     workShell = shellIn;
 }
 
+// A merged B-spline face is checked in the finished shell, after sewing, the fuse of edges and
+// their face fixes (ops#1106): a face that is not valid there, or whose area moved off its group's
+// by more than coversGroup()'s cap, puts its group on the refused list, and the shell is united
+// again from the start without merging that group. The face is not checked as built: a group on a
+// closed surface is built without its seam and comes out whole only after sewing. One bad group
+// used to make the whole refine invalid; FeatureRefine then kept the feature unrefined, and every
+// later feature that merged the same faces too
 bool FaceUniter::process()
 {
     if (workShell.IsNull()) {
         return false;
     }
+    const TopoDS_Shell input = workShell;
+    refusedFaces.clear();
+    for (int pass = 0;; ++pass) {
+        if (!processOnce()) {
+            return false;
+        }
+        const std::size_t refused = refusedFaces.size();
+        for (const auto& merge : bsplineMerges) {
+            const FaceVectorType& group = merge.first;
+            TopoDS_Shape result = merge.second;
+            for (const auto& pair : modifiedShapes) {
+                if (pair.first.IsSame(group.front())) {
+                    result = pair.second;
+                    break;
+                }
+            }
+            if (result.IsNull() || result.ShapeType() != TopAbs_FACE) {
+                continue;
+            }
+            double area = 0.0;
+            for (const auto& face : group) {
+                area += readoutFaceArea(face);
+            }
+            bool bad = true;
+            try {
+                bad = !BRepCheck_Analyzer(result).IsValid()
+                    || std::fabs(readoutFaceArea(result) - area) > 1e-4 * area;
+            }
+            catch (Standard_Failure&) {
+            }
+            if (bad) {
+                refusedFaces.insert(refusedFaces.end(), group.begin(), group.end());
+            }
+        }
+        // each pass refuses at least one more group; FeatureRefine's check stays the backstop
+        if (refusedFaces.size() == refused || pass >= 4) {
+            return true;
+        }
+        workShell = input;
+        modifiedSignal = false;
+    }
+}
+
+bool FaceUniter::processOnce()
+{
     modifiedShapes.clear();
     deletedShapes.clear();
+    bsplineMerges.clear();
+    typeObjects.clear();
     typeObjects.push_back(&getPlaneObject());
     typeObjects.push_back(&getCylinderObject());
     typeObjects.push_back(&getConeObject());
@@ -2259,7 +2303,25 @@ bool FaceUniter::process()
                  ++adjacentIndex) {
                 //                    std::cout << "         face count is: " <<
                 //                    adjacencySplitter.getGroup(adjacentIndex).size() << std::endl;
-                TopoDS_Face newFace = (*typeIt)->buildFace(adjacencySplitter.getGroup(adjacentIndex));
+                const FaceVectorType& candidates = adjacencySplitter.getGroup(adjacentIndex);
+                const bool refused = std::any_of(
+                    candidates.begin(),
+                    candidates.end(),
+                    [this](const TopoDS_Face& face) {
+                        return std::any_of(
+                            refusedFaces.begin(),
+                            refusedFaces.end(),
+                            [&face](const TopoDS_Face& other) { return other.IsSame(face); }
+                        );
+                    }
+                );
+                if (refused) {
+                    continue;
+                }
+                TopoDS_Face newFace = (*typeIt)->buildFace(candidates);
+                if (!newFace.IsNull() && *typeIt == &getBSplineObject()) {
+                    bsplineMerges.emplace_back(candidates, newFace);
+                }
                 if (!newFace.IsNull()) {
                     // the created face should have the same orientation as the input faces
                     const FaceVectorType& faces = adjacencySplitter.getGroup(adjacentIndex);

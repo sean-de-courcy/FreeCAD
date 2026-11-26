@@ -443,6 +443,36 @@ class RefineBSplineGuardTest(unittest.TestCase):
         self.assertAlmostEqual(refined.Area, shell.Area, places=6)
         self.assertEqual(len(refined.Faces), 2, [f.Area for f in refined.Faces])
 
+    def patchRefined(self, base, radius):
+        # a cylinder through one side of the wall: its patch fused back, the wall in two pieces
+        tool = Part.makeCylinder(radius, 20, V(-20, 0.4, 5), V(1, 0, 0))
+        fused = base.common(tool).fuse(base.cut(tool))
+        self.assertEqual(len(fused.Faces), len(base.Faces) + 1)
+        refined = fused.removeSplitter()
+        self.assertTrue(refined.isValid())
+        self.assertAlmostEqual(refined.Volume, base.Volume, delta=1e-7 * base.Volume)
+        return refined
+
+    def testClosedLoftWallPatchMerges(self):
+        # review pr1106-r1 R1: a wall on a closed B-spline surface, its seam face in the group; the
+        # merged face is built without its seam and is whole only after sewing
+        def circle(r, x, y, z):
+            return Part.Wire([Part.Circle(V(x, y, z), V(0, 0, 1), r).toShape()])
+
+        base = Part.makeLoft(
+            [circle(5, 0, 0, 0), circle(6.5, 0.6, 0.3, 5), circle(4, -0.4, 0.5, 10)], True, False
+        )
+        self.assertEqual(len(self.patchRefined(base, 1.5).Faces), len(base.Faces))
+
+    def testRationalPatchesMerge(self):
+        # review pr1106-r1 R2: on a rational surface the areas of a face and of its pieces differ
+        # by about 2e-7 of the area, more than an exact comparison allows
+        for base in (
+            Part.makeSphere(5).toNurbs(),
+            Part.makeCylinder(5, 10).toNurbs(),
+        ):
+            self.assertEqual(len(self.patchRefined(base, 1.5).Faces), len(base.Faces))
+
     def testSquaresMerge(self):
         refined = Part.Shell([self.a, self.b]).removeSplitter()
         self.assertTrue(refined.isValid())
