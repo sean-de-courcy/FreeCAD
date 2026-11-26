@@ -100,6 +100,7 @@ from PartDesignTests.TestLoftConnections import (  # FreeCAD-CH, ops#640
     TestLoftTangentRuns,  # ops#1046
     TestLoftElbowPairing,  # ops#933
     TestLoftUnconnected,  # ops#1071
+    TestLoftSolidForward,  # ops#1073
 )
 from PartDesignTests.TestPrimitive import TestPrimitive
 from PartDesignTests.TestPrimitive import TestBaseAfterARefine  # FreeCAD-CH, ops#474
