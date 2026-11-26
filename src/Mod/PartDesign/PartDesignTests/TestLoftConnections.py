@@ -1205,6 +1205,70 @@ class TestLoftUnconnected(ConnectionCase):
                 finally:
                     self.fresh()
 
+    # ties in mismatch: a rectangle to its copy with one corner chamfered gives two chains of exactly equal
+    # mismatch (both sums telescope); the loops' geometry decides, never B's place or the sketches' order (RB54:
+    # the chamfer's lower end takes B's corner, its upper end a new vertex at the middle of B's right side)
+    CHAMFERED = [(-20, 10), (20, 10), (20, -7), (17, -10), (-20, -10)]
+
+    def chamferSides(self, dx=0):
+        return [((-20, 10), (-12 + dx, 6)), ((20, 10), (12 + dx, 6)), ((-20, -10), (-12 + dx, -6)),
+                ((17, -10), (12 + dx, -6)), ((20, -7), (12 + dx, 0))]
+
+    def testChamferedRectangleWithBMoved(self):
+        volume = None
+        for dx in (0, 0.001, -0.001, 5, -5, 8):
+            with self.subTest(dx=dx):
+                try:
+                    loft = self.build(models.polygon(self.CHAMFERED), models.rectangle(-12 + dx, -6, 12 + dx, 6))
+                    self.assertValid(loft)
+                    self.assertEqual(len(loft.Shape.Faces), 7, self.sideSet(loft))
+                    self.assertSides(loft, self.chamferSides(dx))
+                    if volume is None:
+                        volume = loft.Shape.Volume
+                    self.assertAlmostEqual(loft.Shape.Volume, volume, delta=1e-6 * volume)
+                finally:
+                    self.fresh()
+
+    def testChamferedRectangleWhicheverWayTheSketchesRun(self):
+        A = self.CHAMFERED
+        rect = [(-12, 6), (12, 6), (12, -6), (-12, -6)]
+        variants = []
+        for k in range(len(A)):
+            q = A[k:] + A[:k]
+            variants.append(("A from %d" % k, q, rect))
+            variants.append(("A back from %d" % k, [q[0]] + q[:0:-1], rect))
+        for k in range(4):
+            q = rect[k:] + rect[:k]
+            variants.append(("B from %d" % k, A, q))
+            variants.append(("B back from %d" % k, A, [q[0]] + q[:0:-1]))
+        for label, bottom, top in variants:
+            with self.subTest(variant=label):
+                try:
+                    loft = self.build(models.polygon(bottom), models.polygon(top))
+                    self.assertValid(loft)
+                    self.assertSides(loft, self.chamferSides())
+                finally:
+                    self.fresh()
+
+    def testRectangleToChamferedCopyWithBMoved(self):
+        # the other way up: B is the chamfered copy x 0.6 (the review's RectToChamferTopMoved); Onshape's pairing
+        # here is not measured, so only that it translates with B is asserted
+        reference = None
+        for dx in (0, 0.001, -0.001, 5):
+            with self.subTest(dx=dx):
+                try:
+                    top = [(0.6 * x + dx, 0.6 * y) for x, y in self.CHAMFERED]
+                    loft = self.build(models.rectangle(-20, -10, 20, 10), models.polygon(top))
+                    self.assertValid(loft)
+                    got = sorted((p[0], p[1], round(p[2] - dx, 3) + 0.0, p[3]) for p in self.sideSet(loft))
+                    self.assertEqual(len(got), 5, got)
+                    if reference is None:
+                        reference = (got, loft.Shape.Volume)
+                    self.assertEqual(got, reference[0])
+                    self.assertAlmostEqual(loft.Shape.Volume, reference[1], delta=1e-6 * reference[1])
+                finally:
+                    self.fresh()
+
     def testHexagonToSquareEveryOrder(self):
         hexagon = [(10 * math.cos(math.radians(60 * k)), 10 * math.sin(math.radians(60 * k))) for k in range(6)]
         square = [(5, 5), (-5, 5), (-5, -5), (5, -5)]

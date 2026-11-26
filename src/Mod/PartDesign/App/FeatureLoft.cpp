@@ -1593,20 +1593,6 @@ gp_Pnt loopCentre(const std::vector<TopoDS_Edge>& edges)
     return gp_Pnt(mass > 0 ? sum / mass : sum);
 }
 
-/// The sum of |fraction - partner's fraction| over the fewer side's vertices `partnersOf` matches:
-/// the cost its table minimises.
-double partnerCost(const std::vector<double>& fewer, const std::vector<double>& more)
-{
-    const std::vector<int> partner = partnersOf(fewer, more);
-    double cost = 0;
-    for (size_t j = 0; j < partner.size(); ++j) {
-        if (partner[j] >= 0) {
-            cost += std::abs(fewer[partner[j]] - more[j]);
-        }
-    }
-    return cost;
-}
-
 /// The start pairs to try for an unconnected loop pair, best first, one per distinct chain and at
 /// most `limit`: (profile vertex, section vertex) in the loops' frame, for `connectedLoops`. Empty
 /// when the loops can't be told the same way round.
@@ -1648,19 +1634,28 @@ std::vector<std::pair<gp_Pnt, gp_Pnt>> unconnectedStarts(
     const gp_Pnt ca = loopCentre(a);
     const gp_Pnt cb = loopCentre(b);
 
+    // each vertex's offset from its own loop's centre: the pairing translates with a loop
+    std::vector<gp_Vec> offA, offB;
+    for (const auto& e : a) {
+        offA.emplace_back(ca, startPoint(e));
+    }
+    for (const auto& e : b) {
+        offB.emplace_back(cb, startPoint(e));
+    }
+    const auto apart = [&](int i, int j) { return offA[i].Subtracted(offB[j]).Magnitude(); };
+
     struct Candidate
     {
         int i, j;
-        double mismatch, distance;
+        std::vector<double> keys;  // mismatch, then the tie-breaks (`unconnectedStarts`' order)
         std::set<std::pair<int, int>> chain;  // the vertex pairs the chain matches
-        int mismatchGroup = 0, distanceGroup = 0;
+        int group = 0;
     };
     std::vector<Candidate> candidates;
     for (int i = 0; i < na0; ++i) {
-        const gp_Vec ra(ca, startPoint(a[i]));
         std::vector<double> offsets;
         for (int j = 0; j < nb0; ++j) {
-            offsets.push_back(ra.Subtracted(gp_Vec(cb, startPoint(b[j]))).Magnitude());
+            offsets.push_back(apart(i, j));
         }
         const double nearest = *std::ranges::min_element(offsets);
         for (int j = 0; j < nb0; ++j) {
@@ -1676,11 +1671,13 @@ std::vector<std::pair<gp_Pnt, gp_Pnt>> unconnectedStarts(
             const bool aFewer = fa.size() < fb.size();
             const auto& fewer = aFewer ? fa : fb;
             const auto& more = aFewer ? fb : fa;
-            Candidate c {i, j, partnerCost(fewer, more), startPoint(a[i]).Distance(startPoint(b[j])), {}};
+            Candidate c {i, j, {}, {}};
             c.chain.emplace(i, j);
+            double mismatch = 0;  // the cost partnersOf's table minimises
             const std::vector<int> partner = partnersOf(fewer, more);
             for (size_t k = 0; k < partner.size(); ++k) {
                 if (partner[k] >= 0) {
+                    mismatch += std::abs(fewer[partner[k]] - more[k]);
                     const int kf = partner[k] + 1;  // inner vertex k of a chain is its vertex k + 1
                     const int km = static_cast<int>(k) + 1;
                     const int ia = (i + (aFewer ? kf : km)) % na0;
@@ -1688,40 +1685,41 @@ std::vector<std::pair<gp_Pnt, gp_Pnt>> unconnectedStarts(
                     c.chain.emplace(ia, jb);
                 }
             }
+            // Ties in mismatch (a rectangle and its copy with one corner chamfered: both chains
+            // telescope to the same sum) are broken by the loops' geometry only, never by where or
+            // which way a sketch starts or where a loop sits (RB54: the pairing translates with B
+            // and ignores the sketch's order): (1) the chain's whole positional misfit, the sum of
+            // its vertex pairs' offset distances; (2) the start pair's offset distance; (3) the
+            // start pair's offsets, coordinate by coordinate (distinct vertices differ there).
+            double misfit = 0;
+            for (const auto& [ia, jb] : c.chain) {
+                misfit += apart(ia, jb);
+            }
+            c.keys = {mismatch, misfit, apart(i, j)};
+            for (const gp_Vec& v : {offA[i], offB[j]}) {
+                c.keys.insert(c.keys.end(), {v.X(), v.Y(), v.Z()});
+            }
             candidates.push_back(std::move(c));
         }
     }
-    // groups of equal mismatch, inside them of equal distance; then the indices (no tolerant comparator)
-    std::ranges::sort(candidates, {}, &Candidate::mismatch);
-    for (size_t k = 1, first = 0; k < candidates.size(); ++k) {
-        if (candidates[k].mismatch - candidates[first].mismatch > 1e-9) {
-            first = k;
-            candidates[k].mismatchGroup = candidates[k - 1].mismatchGroup + 1;
-        }
-        else {
-            candidates[k].mismatchGroup = candidates[first].mismatchGroup;
-        }
-    }
-    std::ranges::sort(candidates, [](const Candidate& x, const Candidate& y) {
-        return std::tie(x.mismatchGroup, x.distance) < std::tie(y.mismatchGroup, y.distance);
-    });
-    for (size_t k = 1, first = 0; k < candidates.size(); ++k) {
-        if (candidates[k].mismatchGroup != candidates[first].mismatchGroup) {
-            first = k;
-            continue;
-        }
-        if (candidates[k].distance - candidates[first].distance > 1e-7 * size) {
-            first = k;
-            candidates[k].distanceGroup = candidates[k - 1].distanceGroup + 1;
-        }
-        else {
-            candidates[k].distanceGroup = candidates[first].distanceGroup;
+    // Sort key by key, each into groups of equal value (mismatch within 1e-9, lengths within
+    // 1e-7 of the loops' size), so no comparator uses a tolerance.
+    const size_t nkeys = 9;
+    for (size_t key = 0; key < nkeys; ++key) {
+        const double tolerance = key == 0 ? 1e-9 : (key == 1 ? 1e-7 * size * (na0 + nb0) : 1e-7 * size);
+        std::ranges::sort(candidates, [key](const Candidate& x, const Candidate& y) {
+            return std::tie(x.group, x.keys[key]) < std::tie(y.group, y.keys[key]);
+        });
+        int next = 0;
+        for (size_t k = 0, first = 0; k < candidates.size(); ++k) {
+            const bool same = k > 0 && candidates[k].group == candidates[first].group
+                && candidates[k].keys[key] - candidates[first].keys[key] <= tolerance;
+            if (!same) {
+                first = k;
+            }
+            candidates[k].group = same ? candidates[k - 1].group : next++;
         }
     }
-    std::ranges::sort(candidates, [](const Candidate& x, const Candidate& y) {
-        return std::tie(x.mismatchGroup, x.distanceGroup, x.i, x.j)
-            < std::tie(y.mismatchGroup, y.distanceGroup, y.i, y.j);
-    });
 
     std::vector<std::pair<gp_Pnt, gp_Pnt>> starts;
     std::vector<const std::set<std::pair<int, int>>*> chains;
