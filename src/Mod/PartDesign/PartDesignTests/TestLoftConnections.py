@@ -843,10 +843,27 @@ class TestLoftTangentRuns(ConnectionCase):
         self.assertStops(loft, "tangent")
 
     def testUnmatchedTangentRunsWithTwoConnectionsStop(self):
-        """sk1046 change 1 (D): LC3 with two connections isn't reproduced by the rule; it stays a stop."""
+        """sk1046 change 1 (D): LC3 with two connections, in either order, stops. Onshape builds it (F 6, V 5831.449304),
+        and RB52 O3 shows the connections' order decides which chain is the odd one (listed the other way round, the
+        solid turns half a turn); that rule isn't built yet (ops#1046 follow-up)."""
         slot, rounded = TestLoftConnectionsUnequal.slotAndRoundedRectangle(self)
-        loft = self.loft(slot, rounded, [((10, 5), (6, 4)), ((-10, -5), (-6, -4))])
-        self.assertStops(loft, "connection", "tangent")
+        for connections in ([((10, 5), (6, 4)), ((-10, -5), (-6, -4))], [((-10, -5), (-6, -4)), ((10, 5), (6, 4))]):
+            with self.subTest(connections=connections):
+                loft = self.loft(slot, rounded, connections)
+                self.assertStops(loft, "connection", "tangent")
+                self.tearDown()
+                self.setUp()
+
+    def testFourCornerConnectionsAsOneConnection(self):
+        """RB52 O2: the slot to the rounded rectangle with all four corners connected gives LC3 one-connection's solid
+        (F 6, the four connections the only side edges, V 5923.4667)."""
+        slot, rounded = TestLoftConnectionsUnequal.slotAndRoundedRectangle(self)
+        loft = self.loft(slot, rounded, [((10, 5), (6, 4)), ((-10, 5), (-6, 4)), ((-10, -5), (-6, -4)),
+                                         ((10, -5), (6, -4))])
+        self.assertTrue(loft.isValid(), loft.getStatusString())
+        self.assertTrue(loft.Shape.isValid())
+        self.assertEqual(len(loft.Shape.Faces), 6)
+        self.assertAlmostEqual(loft.Shape.Volume, 5923.4667, delta=ONSHAPE_SURFACE * 5923.4667)
 
 
 class TestLoftElbowPairing(unittest.TestCase):
