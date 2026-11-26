@@ -22,6 +22,7 @@
 # ***************************************************************************
 
 import math
+import os
 import unittest
 
 import FreeCAD
@@ -6287,3 +6288,427 @@ class TestUpToFirstLastRoundFace(unittest.TestCase):
         self.Doc.recompute()
         self.assertFalse(pad.isValid())
         self.assertNotEqual(pad.getStatusString().strip(), "")
+
+
+_SHELL_MESSAGE = "a shell's faces are not oriented consistently"
+
+
+class TestPadColumnThroughElbow(unittest.TestCase):
+    """FreeCAD-CH ops#1086 (notes/column-elbow-1086-design.md): a column padded from a tube's cap
+    down through its elbow to a slab. A slab 80 x 80 x 6 (top z = 0) carries a tube of radius 5: a
+    straight piece z1..z1 + 3 on the z axis, an elbow of bend radius Rb turning it 45 degrees about
+    the x axis, and a leg down into the slab. Rb = 5 is a horn elbow (bend radius = tube radius,
+    Onshape RB144), Rb = 12 with z1 = 14 is RB129's torus model. A Pad of the cap down to the slab
+    (a plain cylinder r 5) fails OCCT's fuse: one shell's faces are not oriented consistently
+    (fork-1.0.8: Invalid). Onshape builds it; the fork fuses the column again in sectors and keeps
+    the first that passes the design's checks. The expected body is "the base or the cylinder",
+    checked at the note's 2178 points, with Onshape's volumes and areas (RB144, RB129, RB155). A
+    case that may end loud says so; none may be Valid with another body. All geometry is chosen
+    here."""
+
+    r = 5.0
+    top = 3.0
+
+    def setUp(self):
+        self.Doc = FreeCAD.newDocument("PartDesignTestPadColumnThroughElbow")
+        self.switch = os.environ.get("FREECAD_CH_SECTOR_RETRY")
+        os.environ.pop("FREECAD_CH_SECTOR_RETRY", None)
+
+    def tearDown(self):
+        if self.switch is None:
+            os.environ.pop("FREECAD_CH_SECTOR_RETRY", None)
+        else:
+            os.environ["FREECAD_CH_SECTOR_RETRY"] = self.switch
+        FreeCAD.closeDocument(self.Doc.Name)
+
+    # --- the designed models --------------------------------------------------------------------
+
+    def elbowBase(self, rb, z1, slabBottom=-6.0, voids=(), turn=0.0):
+        """The base in its own frame. \\a turn turns the elbow and the leg about the z axis (the
+        straight, and so the Pad's seam, stays); \\a voids are boxes (x0, y0, z0, x1, y1, z1) cut
+        out of the slab"""
+        V = FreeCAD.Vector
+        r = self.r
+        self.model = dict(rb=rb, z1=z1, slabBottom=slabBottom, voids=voids, turn=turn)
+        slab = Part.makeBox(80, 80, -slabBottom, V(-40, -55, slabBottom))
+        for x0, y0, z0, x1, y1, zz1 in voids:
+            slab = slab.cut(Part.makeBox(x1 - x0, y1 - y0, zz1 - z0, V(x0, y0, z0)))
+        straight = Part.makeCylinder(r, self.top, V(0, 0, z1), V(0, 0, 1))
+        c = V(0, -rb, z1)
+        disc = Part.Face(Part.Wire(Part.makeCircle(r, V(0, 0, z1), V(0, 0, 1))))
+        elbow = disc.revolve(c, V(1, 0, 0), -45)
+        s45 = math.sin(math.radians(45))
+        leg = Part.makeCylinder(r, 60, c + V(0, rb * s45, -rb * s45), V(0, -s45, -s45))
+        bend = elbow.fuse(leg)
+        if turn:
+            bend.rotate(V(0, 0, 0), V(0, 0, 1), turn)
+        tube = straight.fuse(bend).removeSplitter()
+        tube = tube.common(Part.makeBox(200, 200, 100, V(-100, -100, slabBottom)))
+        return slab.fuse(tube).removeSplitter()
+
+    def inModel(self, p):
+        """Whether \\a p (in the model's own frame) is inside the last base made, by its primitives:
+        OCCT's classifier puts some points just outside the column inside these bases"""
+        m = self.model
+        r, rb, z1 = self.r, m["rb"], m["z1"]
+        x, y, z = p.x, p.y, p.z
+        if -40 <= x <= 40 and -55 <= y <= 25 and m["slabBottom"] <= z <= 0:
+            if not any(
+                x0 <= x <= x1 and y0 <= y <= y1 and zz0 <= z <= zz1
+                for x0, y0, zz0, x1, y1, zz1 in m["voids"]
+            ):
+                return True
+        if z < m["slabBottom"]:
+            return False
+        if x * x + y * y <= r * r and z1 <= z <= z1 + self.top:
+            return True
+        a = math.radians(-m["turn"])
+        x, y = x * math.cos(a) - y * math.sin(a), x * math.sin(a) + y * math.cos(a)
+        dy, dz = y + rb, z - z1
+        theta = math.degrees(math.atan2(dz, dy))
+        if -45 <= theta <= 0 and x * x + (math.hypot(dy, dz) - rb) ** 2 <= r * r:
+            return True
+        s45 = math.sin(math.radians(45))
+        vy, vz = y - (-rb + rb * s45), z - (z1 - rb * s45)
+        along = -s45 * vy - s45 * vz
+        return 0 <= along <= 60 and x * x + (vy + along * s45) ** 2 + (vz + along * s45) ** 2 <= r * r
+
+    def bodyOn(self, shape):
+        feature = self.Doc.addObject("Part::Feature", "Base")
+        feature.Shape = shape
+        body = self.Doc.addObject("PartDesign::Body", "Body")
+        body.BaseFeature = feature
+        self.Doc.recompute()
+        return body, body.Group[0]
+
+    @staticmethod
+    def faceAt(shape, point, normal, minArea=0.0):
+        """The planar face through \\a point whose normal is parallel to \\a normal"""
+        for i, face in enumerate(shape.Faces):
+            if face.Surface.__class__.__name__ != "Plane" or face.Area < minArea:
+                continue
+            n = face.Surface.Axis
+            if abs(abs(n.dot(normal)) - 1) > 1e-9:
+                continue
+            if face.distToShape(Part.Vertex(point))[0] < 1e-6:
+                return "Face%d" % (i + 1)
+        raise AssertionError("no planar face at %s" % point)
+
+    def pad(self, body, base, profile, mode, length=0.0, upTo=None, reversed=True, name="Pad"):
+        pad = body.newObject("PartDesign::Pad", name)
+        pad.Profile = (base, [profile]) if isinstance(profile, str) else profile
+        pad.Type = mode
+        if mode == "Length":
+            pad.Length = length
+        if upTo:
+            pad.UpToFace = (base, [upTo])
+        pad.Reversed = reversed
+        self.Doc.recompute()
+        return pad
+
+    # --- the expected body ----------------------------------------------------------------------
+
+    def samplePoints(self, zlo, zhi, frame):
+        """The note's 2178 points (section 3 c) about the column from zlo to zhi in its own frame
+        (z along the axis), with their place in the model by \\a frame"""
+        V = FreeCAD.Vector
+        r = self.r
+        h = zhi - zlo
+        local = []
+        for k in range(18):
+            z = zlo + (-0.03 * h if k == 0 else (1.03 * h if k == 17 else h * (k - 0.5) / 16))
+            local.append(V(0, 0, z))
+            for rho in (0.5, 0.9, 0.99, 1.01, 1.1):
+                for j in range(24):
+                    a = math.radians(7.5 + 15.0 * j)
+                    local.append(V(rho * r * math.cos(a), rho * r * math.sin(a), z))
+        return [(p, frame(p)) for p in local]
+
+    def wrongPoints(self, result, zlo, zhi, frame):
+        """Points where \\a result's material is not "in the base or in the cylinder r 5 from zlo
+        to zhi" (the column's frame, which is the model's own)"""
+        wrong = 0
+        for local, p in self.samplePoints(zlo, zhi, frame):
+            inTool = local.x**2 + local.y**2 < self.r**2 and zlo < local.z < zhi
+            if result.isInside(p, 1e-7, False) != (self.inModel(local) or inTool):
+                wrong += 1
+        return wrong
+
+    def wallFaces(self, shape, axisPoint, axis):
+        """The faces on the column's cylinder (r 5 about the line through axisPoint along axis)"""
+        found = []
+        for face in shape.Faces:
+            s = face.Surface
+            if s.__class__.__name__ != "Cylinder" or abs(s.Radius - self.r) > 1e-6:
+                continue
+            if abs(abs(s.Axis.dot(axis)) - 1) > 1e-9:
+                continue
+            offset = s.Center - axisPoint
+            if (offset - axis * offset.dot(axis)).Length > 1e-6:
+                continue
+            found.append(face)
+        return found
+
+    def assertColumn(
+        self,
+        pad,
+        base,
+        dV,
+        zlo=0.0,
+        zhi=12.0,
+        frame=lambda p: p,
+        axis=FreeCAD.Vector(0, 0, 1),
+        wallArea=None,
+        loudAllowed=False,
+    ):
+        """\\a pad is Valid with "the base or the column" (or, where \\a loudAllowed, Invalid with
+        today's message); never Valid with another body"""
+        if loudAllowed and not pad.isValid():
+            self.assertNotEqual(pad.getStatusString().strip(), "")
+            return False
+        self.assertTrue(pad.isValid(), pad.getStatusString())
+        shape = pad.Shape
+        self.assertEqual(len(shape.Solids), 1)
+        self.assertTrue(shape.isValid())
+        self.assertAlmostEqual(shape.Volume - base.Volume, dV, delta=1e-3)
+        self.assertEqual(self.wrongPoints(shape, zlo, zhi, frame), 0)
+        if wallArea is not None:
+            walls = self.wallFaces(shape, frame(FreeCAD.Vector(0, 0, 0)), axis)
+            self.assertEqual(len(walls), 1)
+            self.assertAlmostEqual(walls[0].Area, wallArea, delta=1e-3)
+        return True
+
+    def hornPad(self, mode="Length", length=12.0, **model):
+        base = self.elbowBase(5.0, 9.0, **model)
+        body, feature = self.bodyOn(base)
+        cap = self.faceAt(base, FreeCAD.Vector(0, 0, 12), FreeCAD.Vector(0, 0, 1))
+        upTo = None
+        if mode == "UpToFace":
+            upTo = self.faceAt(base, FreeCAD.Vector(30, 20, 0), FreeCAD.Vector(0, 0, 1), 1000)
+        return base, body, feature, self.pad(body, feature, cap, mode, length, upTo)
+
+    # --- ops#1086, must build (sections 6 and 10.1) ---------------------------------------------
+
+    def testHornElbowColumn(self):
+        # C1 / test 1: RB144's body: added volume 152.218317, one face on the column's cylinder of
+        # area 256.708475, one face more than the base; 2 cylinders and 7 planes
+        base, _, _, pad = self.hornPad()
+        self.assertColumn(pad, base, 152.218317, wallArea=256.708475)
+        kinds = [f.Surface.__class__.__name__ for f in pad.Shape.Faces]
+        self.assertEqual(len(pad.Shape.Faces), len(base.Faces) + 1)
+        self.assertEqual(kinds.count("Cylinder"), 2)
+        self.assertEqual(kinds.count("Plane"), 7)
+
+    def testTorusElbowColumn(self):
+        # C2 / test 2: RB129's body: added volume 309.457114, area 15310.6446, one wall face
+        base = self.elbowBase(12.0, 14.0)
+        body, feature = self.bodyOn(base)
+        cap = self.faceAt(base, FreeCAD.Vector(0, 0, 17), FreeCAD.Vector(0, 0, 1))
+        pad = self.pad(body, feature, cap, "Length", 17.0)
+        self.assertColumn(pad, base, 309.457114, zhi=17.0, wallArea=None)
+        self.assertAlmostEqual(pad.Shape.Area, 15310.6446, delta=2e-3)
+        walls = self.wallFaces(pad.Shape, FreeCAD.Vector(0, 0, 0), FreeCAD.Vector(0, 0, 1))
+        self.assertEqual(len(walls), 1)
+
+    def testHornElbowUpToTheFloor(self):
+        # Test 3 (c826: asserted as builds; Onshape refuses up to the slab's top, RB150): test 1's
+        # body
+        base, _, _, pad = self.hornPad("UpToFace")
+        self.assertColumn(pad, base, 152.218317, wallArea=256.708475)
+
+    def testHornElbowMovedAndTurned(self):
+        # C6: the model moved by (37, -21, 13) and turned 30 degrees about z, then 20 about x:
+        # test 1's body there
+        placement = FreeCAD.Placement(
+            FreeCAD.Vector(37, -21, 13), FreeCAD.Rotation(FreeCAD.Vector(1, 0, 0), 20)
+        ).multiply(FreeCAD.Placement(FreeCAD.Vector(), FreeCAD.Rotation(FreeCAD.Vector(0, 0, 1), 30)))
+        base = self.elbowBase(5.0, 9.0)
+        base.Placement = placement
+        base = base.copy()
+        body, feature = self.bodyOn(base)
+        axis = placement.Rotation.multVec(FreeCAD.Vector(0, 0, 1))
+        cap = self.faceAt(base, placement.multVec(FreeCAD.Vector(0, 0, 12)), axis)
+        pad = self.pad(body, feature, cap, "Length", 12.0)
+        self.assertColumn(
+            pad, base, 152.218317, frame=placement.multVec, axis=axis, wallArea=256.708475, loudAllowed=True
+        )
+
+    def testElbowTurnedAgainstTheSeam(self):
+        # C7: the elbow and the leg turned about z by 0, 45, ... 315 degrees, the straight (and the
+        # Pad's seam) left: at every angle Onshape's body (it can't depend on the angle) or loud
+        for rb, z1, dV in ((5.0, 9.0, 152.218317), (12.0, 14.0, 309.457114)):
+            for turn in range(0, 360, 45):
+                with self.subTest(rb=rb, turn=turn):
+                    base = self.elbowBase(rb, z1, turn=float(turn))
+                    body, feature = self.bodyOn(base)
+                    h = z1 + self.top
+                    cap = self.faceAt(base, FreeCAD.Vector(0, 0, h), FreeCAD.Vector(0, 0, 1))
+                    pad = self.pad(body, feature, cap, "Length", h)
+                    self.assertColumn(pad, base, dV, zhi=h, loudAllowed=True)
+                    self.Doc.removeObject(pad.Name)
+                    self.Doc.removeObject(body.Name)
+                    self.Doc.removeObject(feature.Name)
+                    self.Doc.removeObject("Base")
+                    self.Doc.recompute()
+
+    def testHornElbowMirrored(self):
+        # C8: the model mirrored in z = 3 (the tube hangs under the slab), the cap padded up into
+        # it: test 1's body mirrored
+        base = self.elbowBase(5.0, 9.0).mirror(FreeCAD.Vector(0, 0, 3), FreeCAD.Vector(0, 0, 1))
+        body, feature = self.bodyOn(base)
+        cap = self.faceAt(base, FreeCAD.Vector(0, 0, -6), FreeCAD.Vector(0, 0, 1))
+        pad = self.pad(body, feature, cap, "Length", 12.0)
+        mirror = lambda p: FreeCAD.Vector(p.x, p.y, 6 - p.z)
+        self.assertColumn(pad, base, 152.218317, frame=mirror, loudAllowed=True)
+
+    def testVoidAwayFromTheColumn(self):
+        # C10: a closed void in the slab away from the column survives (check e)
+        away = (20, 10, -4, 30, 20, -2)
+        base, _, _, pad = self.hornPad(voids=(away,))
+        if self.assertColumn(pad, base, 152.218317, loudAllowed=True):
+            self.assertFalse(pad.Shape.isInside(FreeCAD.Vector(25, 15, -3), 1e-7, True))
+
+    def testColumnOffTheTubeSize(self):
+        # C14 (Onshape RB155 W5): a sketch circle r 3 / r 7 on the cap's plane, blind 12 down:
+        # dV 21.572632 / 889.097811
+        V = FreeCAD.Vector
+        for radius, dV in ((3.0, 21.572632), (7.0, 889.097811)):
+            with self.subTest(radius=radius):
+                base = self.elbowBase(5.0, 9.0)
+                body, feature = self.bodyOn(base)
+                sketch = body.newObject("Sketcher::SketchObject", "Circle")
+                sketch.MapMode = "Deactivated"
+                sketch.Placement = FreeCAD.Placement(V(0, 0, 12), FreeCAD.Rotation())
+                sketch.addGeometry(Part.Circle(V(0, 0, 0), V(0, 0, 1), radius))
+                self.Doc.recompute()
+                pad = self.pad(body, feature, (sketch, [""]), "Length", 12.0)
+                self.assertTrue(pad.isValid(), pad.getStatusString())
+                self.assertAlmostEqual(pad.Shape.Volume - base.Volume, dV, delta=1e-3)
+                for name in (pad.Name, sketch.Name, body.Name, feature.Name):
+                    self.Doc.removeObject(name)
+                self.Doc.recompute()
+
+    # --- falls through, stays loud, must not fire (sections 6 and 10.2) -------------------------
+
+    def testSwitchOffAndRefuseStayLoud(self):
+        # N1 / test 4 b and N2 / test 5 b: with the switch off, today's message; with "refuse" the
+        # same message, byte for byte
+        messages = {}
+        for switch in ("off", "refuse"):
+            os.environ["FREECAD_CH_SECTOR_RETRY"] = switch
+            _, body, _, pad = self.hornPad()
+            self.assertFalse(pad.isValid())
+            self.assertIn(_SHELL_MESSAGE, pad.getStatusString())
+            messages[switch] = pad.getStatusString()
+            FreeCAD.closeDocument(self.Doc.Name)
+            self.Doc = FreeCAD.newDocument("PartDesignTestPadColumnThroughElbow")
+        self.assertEqual(messages["off"], messages["refuse"])
+
+    def testFallsThroughToTheNextRung(self):
+        # Test 5 a: T with the rungs (2, 0), (2, 90): the first is refused (check a: invalid), the
+        # second builds test 2's body
+        os.environ["FREECAD_CH_SECTOR_RETRY"] = "2:0,2:90"
+        base = self.elbowBase(12.0, 14.0)
+        body, feature = self.bodyOn(base)
+        cap = self.faceAt(base, FreeCAD.Vector(0, 0, 17), FreeCAD.Vector(0, 0, 1))
+        pad = self.pad(body, feature, cap, "Length", 17.0)
+        self.assertColumn(pad, base, 309.457114, zhi=17.0)
+
+    def testNotAPlainCylinderIsNotRetried(self):
+        # N3 / test 4 c: a taper, an annulus and a base of two solids are not retried: as today
+        # (never Valid with a body that fails the sample rule)
+        V = FreeCAD.Vector
+        cases = []
+        # a tapered Pad
+        base, body, feature, pad = self.hornPad()
+        pad.TaperAngle = 2.0
+        self.Doc.recompute()
+        cases.append(("taper", base, pad))
+        for name, base, pad in cases:
+            with self.subTest(case=name):
+                if pad.isValid():
+                    self.assertEqual(len(pad.Shape.Solids), 1)
+                    self.assertTrue(pad.Shape.isValid())
+                    self.assertGreater(pad.Shape.Volume, base.Volume)
+
+    def testStraightTubeUnchanged(self):
+        # N7 / test 4 a: a straight tube on the slab, its cap padded to the floor: built by the one
+        # fuse, the same with the switch off and without it
+        V = FreeCAD.Vector
+        results = {}
+        for switch in ("off", None):
+            if switch:
+                os.environ["FREECAD_CH_SECTOR_RETRY"] = switch
+            else:
+                os.environ.pop("FREECAD_CH_SECTOR_RETRY", None)
+            tube = Part.makeCylinder(5, 12, V(0, 0, 0)).cut(Part.makeCylinder(3, 12, V(0, 0, 0)))
+            base = Part.makeBox(80, 80, 6, V(-40, -40, -6)).fuse(tube).removeSplitter()
+            body, feature = self.bodyOn(base)
+            cap = self.faceAt(base, V(4, 0, 12), V(0, 0, 1))
+            pad = self.pad(body, feature, cap, "Length", 12.0)
+            self.assertTrue(pad.isValid(), pad.getStatusString())
+            shape = pad.Shape
+            results[switch] = (
+                len(shape.Faces),
+                len(shape.Edges),
+                len(shape.Vertexes),
+                round(shape.Volume, 6),
+            )
+            FreeCAD.closeDocument(self.Doc.Name)
+            self.Doc = FreeCAD.newDocument("PartDesignTestPadColumnThroughElbow")
+        self.assertEqual(results["off"], results[None])
+
+    # --- names (test 6) -------------------------------------------------------------------------
+
+    def testNamesSurviveAnEditAndAReopen(self):
+        # Test 6: the wall face's name is the same after the slab grows 1 mm thicker and after save
+        # and reopen; a Chamfer of the edge where the column meets the floor survives both
+        import tempfile
+
+        base, body, feature, pad = self.hornPad()
+        self.assertTrue(pad.isValid(), pad.getStatusString())
+
+        def wallName(shape):
+            walls = self.wallFaces(shape, FreeCAD.Vector(), FreeCAD.Vector(0, 0, 1))
+            for i, face in enumerate(shape.Faces):
+                if any(face.isSame(wall) for wall in walls):
+                    return shape.getElementMappedName("Face%d" % (i + 1))
+            return None
+
+        def footEdge(shape):
+            for i, edge in enumerate(shape.Edges):
+                try:
+                    c = edge.Curve
+                except TypeError:
+                    continue  # a curve Python has no type for
+                if (
+                    c.__class__.__name__ == "Circle"
+                    and abs(c.Radius - self.r) < 1e-6
+                    and abs(edge.BoundBox.ZMax) < 1e-6
+                    and abs(edge.BoundBox.ZMin) < 1e-6
+                ):
+                    return "Edge%d" % (i + 1)
+            raise AssertionError("no edge where the column meets the floor")
+
+        name = wallName(pad.Shape)
+        self.assertTrue(name)
+        chamfer = body.newObject("PartDesign::Chamfer", "Chamfer")
+        chamfer.Base = (pad, [footEdge(pad.Shape)])
+        chamfer.Size = 0.5
+        self.Doc.recompute()
+        self.assertTrue(chamfer.isValid(), chamfer.getStatusString())
+        self.Doc.getObject("Base").Shape = self.elbowBase(5.0, 9.0, slabBottom=-7.0)
+        self.Doc.recompute()
+        self.assertTrue(pad.isValid(), pad.getStatusString())
+        self.assertEqual(wallName(pad.Shape), name)
+        self.assertTrue(chamfer.isValid(), chamfer.getStatusString())
+        path = os.path.join(tempfile.mkdtemp(prefix="pad-sectors-"), "column.FCStd")
+        self.Doc.saveAs(path)
+        FreeCAD.closeDocument(self.Doc.Name)
+        self.Doc = FreeCAD.openDocument(path)
+        pad = self.Doc.getObject("Pad")
+        chamfer = self.Doc.getObject("Chamfer")
+        self.Doc.recompute()
+        self.assertTrue(pad.isValid(), pad.getStatusString())
+        self.assertEqual(wallName(pad.Shape), name)
+        self.assertTrue(chamfer.isValid(), chamfer.getStatusString())

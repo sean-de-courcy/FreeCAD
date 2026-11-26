@@ -25,8 +25,10 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <numbers>
 #include <optional>
 #include <string>
 #include <utility>
@@ -36,6 +38,7 @@
 #include <BRep_Tool.hxx>
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
+#include <BRepClass3d_SolidClassifier.hxx>
 #include <BRepBuilderAPI_MakeVertex.hxx>
 #include <BRepClass_FaceClassifier.hxx>
 #include <BRepAlgoAPI_Common.hxx>
@@ -49,7 +52,9 @@
 #include <BRepProj_Projection.hxx>
 #include <BRepTools.hxx>
 #include <BRepFeat_MakePrism.hxx>
+#include <BRepPrimAPI_MakeCylinder.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
+#include <ElSLib.hxx>
 #include <Bnd_Box.hxx>
 #include <gp.hxx>
 #include <gp_Dir.hxx>
@@ -60,7 +65,11 @@
 #include <gp_Ax3.hxx>
 #include <gp_Pln.hxx>
 #include <Precision.hxx>
+#include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
+#include <gp_Cylinder.hxx>
+#include <gp_Trsf.hxx>
 #include <TopLoc_Location.hxx>
 #include <TopoDS_Compound.hxx>
 #include <TopoDS_Face.hxx>
@@ -77,6 +86,7 @@
 #include <Base/Tools.h>
 #include <Mod/Part/App/DatumFeature.h>
 #include <Mod/Part/App/ExtrusionHelper.h>
+#include <Mod/Part/App/KernelBudget.h>
 #include <Mod/Part/App/MassProperties.h>
 #include <Mod/Part/App/Tools.h>
 #include "Mod/Part/App/TopoShapeOpCode.h"
@@ -87,6 +97,7 @@
 #include "FeatureExtrude.h"
 #include "FeaturePad.h"
 #include "FeaturePocket.h"
+#include "ResultCheck.h"
 #include "StudioList.h"
 #include "StudioOwner.h"
 
@@ -100,6 +111,10 @@ namespace PartDesign
 bool upToFaceBehind(const TopoShape& upToFace, const TopoShape& profile, const gp_Dir& dir);
 // Below: an own up-to reference must lie on the instance's base (ops#963 A; FeatureHole.cpp too)
 void requireOwnOnBase(const TopoDS_Shape& reference, const TopoDS_Shape& base);
+// FeatureTransformed.cpp (ops#901): checkResult()'s shell test on the shells holding a new face,
+// and whether checkResult() runs on the feature's result
+bool newShellsSound(const TopoDS_Shape& result, const TopoDS_Shape& base, bool firstSolidOnly);
+bool resultWillBeChecked(const PartDesign::Feature& feature);
 }  // namespace PartDesign
 
 const char* FeatureExtrude::SideTypesEnums[] = {"One side", "Two sides", "Symmetric", nullptr};
@@ -1419,6 +1434,349 @@ TopoShape ownerUpToPerRegion(
     tool.makeElementFuse(prisms, Part::OpCodes::Extrude);
     return tool;
 }
+
+/** FreeCAD-CH ops#1086 (notes/column-elbow-1086-design.md): a tool that is a plain right circular
+ * cylinder, one cap on the profile's plane, in the design's frame (section 3) */
+struct PlainCylinder
+{
+    gp_Pnt origin;  ///< the centre of the cap away from the profile
+    gp_Dir axis;    ///< from that cap towards the profile
+    gp_Dir seam;    ///< from the axis to the wall face's u = 0 line
+    double radius = 0.0;
+    double height = 0.0;
+};
+
+int solidCount(const TopoDS_Shape& shape)
+{
+    int count = 0;
+    for (TopExp_Explorer it(shape, TopAbs_SOLID); it.More(); it.Next()) {
+        ++count;
+    }
+    return count;
+}
+
+/// The tool as a PlainCylinder: one solid of three faces, one cylindrical face closed over the full
+/// turn and two planar caps normal to its axis, one of them on \a profile's plane. A taper, a
+/// tilted or curved end, a tube, a slot or a two-sided tool is none (section 2, 3)
+std::optional<PlainCylinder> plainCylinderTool(const TopoDS_Shape& tool, const TopoDS_Shape& profile)
+{
+    if (tool.IsNull() || profile.IsNull() || solidCount(tool) != 1) {
+        return std::nullopt;
+    }
+    TopTools_IndexedMapOfShape faces;
+    TopExp::MapShapes(tool, TopAbs_FACE, faces);
+    if (faces.Extent() != 3) {
+        return std::nullopt;
+    }
+    TopoDS_Face wall;
+    std::vector<gp_Pln> caps;
+    for (int i = 1; i <= faces.Extent(); ++i) {
+        const TopoDS_Face& face = TopoDS::Face(faces(i));
+        BRepAdaptor_Surface surface(face);
+        if (surface.GetType() == GeomAbs_Cylinder && wall.IsNull()) {
+            wall = face;
+        }
+        else if (surface.GetType() == GeomAbs_Plane) {
+            caps.push_back(surface.Plane());
+        }
+        else {
+            return std::nullopt;
+        }
+    }
+    if (wall.IsNull() || caps.size() != 2) {
+        return std::nullopt;
+    }
+    const gp_Cylinder cylinder = BRepAdaptor_Surface(wall).Cylinder();
+    double u0 = 0.0;
+    double u1 = 0.0;
+    double v0 = 0.0;
+    double v1 = 0.0;
+    BRepTools::UVBounds(wall, u0, u1, v0, v1);
+    if (std::abs(u1 - u0 - 2.0 * std::numbers::pi) > Precision::PConfusion()) {
+        return std::nullopt;
+    }
+    const gp_Ax1 axis = cylinder.Axis();
+    std::array<double, 2> along {};
+    for (std::size_t k = 0; k < 2; ++k) {
+        if (!caps[k].Axis().IsParallel(axis, Precision::Angular())) {
+            return std::nullopt;
+        }
+        along[k] = gp_Vec(axis.Location(), caps[k].Location()).Dot(gp_Vec(axis.Direction()));
+    }
+    const double height = std::abs(along[1] - along[0]);
+    if (height < Precision::Confusion()) {
+        return std::nullopt;
+    }
+    TopExp_Explorer profileFace(profile, TopAbs_FACE);
+    if (!profileFace.More()) {
+        return std::nullopt;
+    }
+    BRepAdaptor_Surface profileSurface(TopoDS::Face(profileFace.Current()));
+    if (profileSurface.GetType() != GeomAbs_Plane) {
+        return std::nullopt;
+    }
+    const gp_Pln profilePlane = profileSurface.Plane();
+    int nearCap = -1;
+    for (std::size_t k = 0; k < 2; ++k) {
+        if (caps[k].Axis().IsParallel(profilePlane.Axis(), Precision::Angular())
+            && profilePlane.Distance(caps[k].Location()) < 10 * Precision::Confusion()) {
+            if (nearCap >= 0) {
+                return std::nullopt;
+            }
+            nearCap = static_cast<int>(k);
+        }
+    }
+    if (nearCap < 0) {
+        return std::nullopt;
+    }
+    const std::size_t farCap = 1 - static_cast<std::size_t>(nearCap);
+    PlainCylinder result;
+    result.origin = axis.Location().Translated(along[farCap] * gp_Vec(axis.Direction()));
+    result.axis = along[nearCap] > along[farCap] ? axis.Direction() : axis.Direction().Reversed();
+    gp_Vec radial(axis.Location(), ElSLib::Value(u0, 0.0, cylinder));
+    radial -= radial.Dot(gp_Vec(axis.Direction())) * gp_Vec(axis.Direction());
+    if (radial.Magnitude() < Precision::Confusion()) {
+        return std::nullopt;
+    }
+    result.seam = gp_Dir(radial);
+    result.radius = cylinder.Radius();
+    result.height = height;
+    return result;
+}
+
+/// One rung of the ladder: n sectors, the seam turned by phi degrees
+struct SectorRung
+{
+    int count = 2;
+    double phi = 0.0;
+};
+
+/// FREECAD_CH_SECTOR_RETRY, for tests only (as ops#901's switch): unset, the ladder (2, 90), (2, 0),
+/// (2, 45), (2, 135); "off", never; "refuse", the ladder with nothing accepted; "n:phi,n:phi..."
+/// those rungs in that order
+struct SectorLadder
+{
+    bool off = false;
+    bool refuse = false;
+    std::vector<SectorRung> rungs {{2, 90.0}, {2, 0.0}, {2, 45.0}, {2, 135.0}};
+};
+
+SectorLadder sectorLadder()
+{
+    SectorLadder ladder;
+    std::string value;
+#ifdef _MSC_VER
+    char* raw = nullptr;
+    std::size_t size = 0;
+    if (_dupenv_s(&raw, &size, "FREECAD_CH_SECTOR_RETRY") == 0 && raw) {
+        value = raw;
+        std::free(raw);
+    }
+#else
+    if (const char* raw = std::getenv("FREECAD_CH_SECTOR_RETRY")) {
+        value = raw;
+    }
+#endif
+    if (value.empty()) {
+        return ladder;
+    }
+    if (value == "off") {
+        ladder.off = true;
+        return ladder;
+    }
+    if (value == "refuse") {
+        ladder.refuse = true;
+        return ladder;
+    }
+    std::vector<SectorRung> rungs;
+    std::size_t start = 0;
+    while (start < value.size()) {
+        const std::size_t end = std::min(value.find(',', start), value.size());
+        const std::string item = value.substr(start, end - start);
+        const std::size_t colon = item.find(':');
+        if (colon != std::string::npos) {
+            try {
+                const int count = std::stoi(item.substr(0, colon));
+                const double phi = std::stod(item.substr(colon + 1));
+                if (count >= 2 && count <= 12) {
+                    rungs.push_back({count, phi});
+                }
+            }
+            catch (const std::exception&) {
+                // not a rung: skipped
+            }
+        }
+        start = end + 1;
+    }
+    if (!rungs.empty()) {
+        ladder.rungs = std::move(rungs);
+    }
+    return ladder;
+}
+
+/// A rung's sectors (sections 1 and 5): the tool turned by phi about its own axis, so that its seam
+/// moves by phi and its faces keep their names, cut into n sectors by planes through the axis
+/// starting at that seam, each a common with a wedge 4 R wide and 1.2 H long
+std::vector<TopoShape> sectorsOf(
+    const PartDesign::Feature& owner,
+    const TopoShape& tool,
+    const PlainCylinder& cylinder,
+    const SectorRung& rung
+)
+{
+    const gp_Ax1 axis(cylinder.origin, cylinder.axis);
+    const double phi = rung.phi * std::numbers::pi / 180.0;
+    gp_Trsf turn;
+    turn.SetRotation(axis, phi);
+    TopoShape copy = tool;
+    const TopoShape turned = copy.makeElementTransform(turn);
+    const double sweep = 2.0 * std::numbers::pi / rung.count;
+    const gp_Pnt foot =
+        cylinder.origin.Translated(-0.1 * cylinder.height * gp_Vec(cylinder.axis));
+    std::vector<TopoShape> sectors;
+    for (int k = 0; k < rung.count; ++k) {
+        const gp_Dir start = cylinder.seam.Rotated(axis, phi + k * sweep);
+        BRepPrimAPI_MakeCylinder wedge(
+            gp_Ax2(foot, cylinder.axis, start),
+            4.0 * cylinder.radius,
+            1.2 * cylinder.height,
+            sweep
+        );
+        TopoShape sector = owner.makeTopoShape();
+        sector.makeElementBoolean(
+            Part::OpCodes::Common,
+            {turned, owner.makeTopoShape(wedge.Shape())}
+        );
+        if (solidCount(sector.getShape()) != 1) {
+            throw Base::RuntimeError("a sector is not one solid");
+        }
+        sectors.push_back(sector);
+    }
+    return sectors;
+}
+
+double signedVolume(const TopoDS_Shape& shape)
+{
+    GProp_GProps props;
+    BRepGProp::VolumeProperties(shape, props);
+    return props.Mass();
+}
+
+TopoDS_Shape firstSolid(const TopoDS_Shape& shape)
+{
+    TopExp_Explorer it(shape, TopAbs_SOLID);
+    return it.More() ? it.Current() : TopoDS_Shape();
+}
+
+/// Check c of section 3: the material at 2178 points in and around the tool (18 heights; the axis
+/// and 24 angles on 5 radii) is in \a result exactly where it is in \a base or in the cylinder. A
+/// point on the base's boundary is skipped; one on the result's boundary alone fails
+bool samplesAgree(const TopoDS_Shape& base, const TopoDS_Shape& result, const PlainCylinder& cylinder)
+{
+    const TopoDS_Shape baseSolid = firstSolid(base);
+    const TopoDS_Shape resultSolid = firstSolid(result);
+    if (baseSolid.IsNull() || resultSolid.IsNull()) {
+        return false;
+    }
+    constexpr double tolerance = 1e-7;
+    BRepClass3d_SolidClassifier inBase(baseSolid);
+    BRepClass3d_SolidClassifier inResult(resultSolid);
+    const gp_Vec x(cylinder.seam);
+    const gp_Vec y(cylinder.axis.Crossed(cylinder.seam));
+    const gp_Vec up(cylinder.axis);
+    const double r = cylinder.radius;
+    const double h = cylinder.height;
+    auto agrees = [&](double z, double rho, double angle) {
+        const gp_Pnt p = cylinder.origin.Translated(
+            z * up + rho * r * (std::cos(angle) * x + std::sin(angle) * y)
+        );
+        inBase.Perform(p, tolerance);
+        const TopAbs_State b = inBase.State();
+        if (b == TopAbs_ON) {
+            return true;
+        }
+        inResult.Perform(p, tolerance);
+        const TopAbs_State s = inResult.State();
+        if (s == TopAbs_ON) {
+            return false;
+        }
+        const bool inTool = rho < 1.0 && z > 0.0 && z < h;
+        return (s == TopAbs_IN) == (b == TopAbs_IN || inTool);
+    };
+    constexpr std::array<double, 5> radii {0.5, 0.9, 0.99, 1.01, 1.1};
+    for (int k = 0; k < 18; ++k) {
+        const double z = k == 0 ? -0.03 * h : (k == 17 ? 1.03 * h : h * (k - 0.5) / 16.0);
+        if (!agrees(z, 0.0, 0.0)) {
+            return false;
+        }
+        for (double rho : radii) {
+            for (int j = 0; j < 24; ++j) {
+                if (!agrees(z, rho, (7.5 + 15.0 * j) * std::numbers::pi / 180.0)) {
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
+/// Check e of section 3: every face \a base lost and every face \a result gained lies near the tool
+/// (its box meets the tool's grown by 0.1 R), so nothing changed away from it
+bool changedOnlyNearTool(
+    const TopoDS_Shape& base,
+    const TopoDS_Shape& result,
+    const TopoDS_Shape& tool,
+    const PlainCylinder& cylinder
+)
+{
+    Bnd_Box nearTool;
+    BRepBndLib::Add(tool, nearTool);
+    nearTool.Enlarge(0.1 * cylinder.radius);
+    TopTools_IndexedMapOfShape baseFaces;
+    TopTools_IndexedMapOfShape resultFaces;
+    TopExp::MapShapes(base, TopAbs_FACE, baseFaces);
+    TopExp::MapShapes(result, TopAbs_FACE, resultFaces);
+    auto away = [&](const TopoDS_Shape& face) {
+        Bnd_Box box;
+        BRepBndLib::Add(face, box);
+        return box.IsOut(nearTool);
+    };
+    for (int i = 1; i <= resultFaces.Extent(); ++i) {
+        if (!baseFaces.Contains(resultFaces(i)) && away(resultFaces(i))) {
+            return false;
+        }
+    }
+    for (int i = 1; i <= baseFaces.Extent(); ++i) {
+        if (!resultFaces.Contains(baseFaces(i)) && away(baseFaces(i))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// Checks a, b, c and e of section 3 on a rung's \a result; d (the time limit) is the caller's
+bool sectorResultAccepted(
+    const TopoDS_Shape& base,
+    const TopoDS_Shape& result,
+    const TopoDS_Shape& tool,
+    const PlainCylinder& cylinder
+)
+{
+    // a. one solid, a valid shape, sound shells
+    if (result.IsNull() || solidCount(result) != 1
+        || !Part::KernelBudget::checkValid(result) || !PartDesign::newShellsSound(result, base, false)) {
+        return false;
+    }
+    // b. the signed volume grows by at most the tool's
+    const double was = signedVolume(base);
+    const double now = signedVolume(result);
+    const double slack = 1e-6 * std::abs(was);
+    if (now < was - slack || now > was + std::abs(signedVolume(tool)) + slack) {
+        return false;
+    }
+    // e. nothing changed away from the tool; c. the material at the sample points
+    return changedOnlyNearTool(base, result, tool, cylinder) && samplesAgree(base, result, cylinder);
+}
 }  // namespace
 
 App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions options)
@@ -2165,6 +2523,89 @@ App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions opt
                 return new App::DocumentObjectExecReturn(
                     QT_TRANSLATE_NOOP("Exception", "Fusion with base feature failed")
                 );
+            }
+            // FreeCAD-CH ops#1086 (notes/column-elbow-1086-design.md): a plain cylinder whose one
+            // fuse checkResult() would refuse, for a shell (OCCT's section of the column through
+            // an elbow's torus) or for a part that got smaller (the fuse kept the column alone:
+            // the same model moved or mirrored), is fused again in sectors, its seam turned first;
+            // the first rung that passes the design's checks is kept. Otherwise the one fuse stays
+            // and is refused as before. Only where checkResult() would refuse it, so a feature that
+            // builds today never takes the retry
+            if (booleanOperation == BooleanOperation::Union && !result.isNull()
+                && countSolids(base.getShape()) == 1) {
+                const SectorLadder ladder = sectorLadder();
+                const std::optional<PlainCylinder> cylinder = ladder.off
+                    ? std::nullopt
+                    : plainCylinderTool(prism.getShape(), startSketch.getShape());
+                const bool firstSolidOnly =
+                    singleSolidRuleMode() == SingleSolidRuleMode::Enforced
+                    && !StudioList::holding(this);
+                auto refused = [&]() {
+                    if (!newShellsSound(result.getShape(), base.getShape(), firstSolidOnly)) {
+                        return true;
+                    }
+                    // checkResult()'s volume rule: an add doesn't shrink the part (1e-5)
+                    const double was = signedVolume(base.getShape());
+                    return signedVolume(result.getShape()) < was - 1e-5 * std::abs(was);
+                };
+                if (cylinder && resultWillBeChecked(*this) && refused()) {
+                    const bool oneFuseValid = booleanInputsValid;
+                    std::size_t kept = 0;
+                    for (std::size_t i = 0; i < ladder.rungs.size() && kept == 0; ++i) {
+                        // The retry shares the feature's time limit (check d)
+                        ResultCheck::stopIfPastTheLimit("The fuse in sectors");
+                        try {
+                            std::vector<TopoShape> shapes {base};
+                            for (TopoShape& sector :
+                                 sectorsOf(*this, prism, *cylinder, ladder.rungs[i])) {
+                                shapes.push_back(std::move(sector));
+                            }
+                            TopoShape again = makeTopoShape();
+                            bool valid = false;
+                            again.makeElementBoolean(
+                                getBooleanMaker(),
+                                shapes,
+                                nullptr,
+                                FuzzyTolerance.getValue(),
+                                Part::ElementMapPolicy::Propagate,
+                                booleanInputCheck(),
+                                &valid
+                            );
+                            if (!ladder.refuse
+                                && sectorResultAccepted(
+                                    base.getShape(),
+                                    again.getShape(),
+                                    prism.getShape(),
+                                    *cylinder
+                                )) {
+                                result = again;
+                                booleanInputsValid = valid;
+                                kept = i + 1;
+                            }
+                        }
+                        catch (const Standard_Failure&) {
+                            // a rung that throws is a refused rung
+                        }
+                        catch (const Base::Exception&) {
+                            // an empty result, a lost tool: a refused rung
+                        }
+                    }
+                    if (kept == 0) {
+                        booleanInputsValid = oneFuseValid;
+                        Base::Console().log(
+                            "%s: fused in sectors, refused (ops#1086)\n",
+                            getFullName().c_str()
+                        );
+                    }
+                    else {
+                        // Counted by Tier F: none on a result that builds without it
+                        Base::Console().log(
+                            "%s: fused in sectors, rung %d kept (ops#1086)\n",
+                            getFullName().c_str(),
+                            static_cast<int>(kept)
+                        );
+                    }
+                }
             }
             if (cuts && booleanOperation == BooleanOperation::Common
                 && (result.isNull() || !result.hasSubShape(TopAbs_SOLID))) {
