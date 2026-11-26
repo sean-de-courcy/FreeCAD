@@ -8552,6 +8552,39 @@ class MixedCoverageTest(unittest.TestCase):
         with self.assertRaises(Exception):
             body.makeFillet(self.R, edges + along)
 
+    def testExtrudedEdgeStaysWithItsRim(self):
+        # Review pr1045-r1 L1: the ellipse 30 x 15 above the chord y = -5 with a rib (x 10..14,
+        # y -11..-5) on the chord plane, padded 20; r 2 on the rib's two outer edges (a full round,
+        # OCCT fails on the whole), the straight edge E between the chord plane and the ellipse, and
+        # the ellipse's top rim, which meets E at its top vertex. Since ops#1045 covers E, the split
+        # with E covered puts E and its rim in groups that meet; the split as before (the rib, then
+        # E with the rim by OCCT) builds, the same as the two groups in turn
+        a, b, chord, h, R = 30.0, 15.0, -5.0, 20.0, 2.0
+        xs = a * math.sqrt(1 - (chord / b) ** 2)
+        t0 = math.atan2(chord / b, xs / a)
+        wall = Part.ArcOfEllipse(Part.Ellipse(V(0, 0, 0), a, b), t0, math.pi - t0).toShape()
+        pts = [V(-xs, chord, 0), V(10, chord, 0), V(10, -11, 0), V(14, -11, 0), V(14, chord, 0), V(xs, chord, 0)]
+        lines = [Part.makeLine(pts[i], pts[i + 1]) for i in range(5)]
+        body = Part.Face(Part.Wire(Part.__sortEdges__(lines + [wall]))).extrude(V(0, 0, h))
+        rim = [
+            e
+            for e in body.Edges
+            if e.Curve.TypeId == "Part::GeomEllipse" and abs(e.BoundBox.ZMin - h) < 1e-9
+        ]
+        self.assertEqual(len(rim), 1)
+        rib = [self.edge_at(body, 10, -11), self.edge_at(body, 14, -11)]
+        rest = [self.edge_at(body, xs, chord), rim[0]]
+        result = body.makeFillet(R, rib + rest)
+        self.assertTrue(result.isValid())
+        self.assertEqual(len(result.Solids), 1)
+        pair = body.makeFillet(R, rib)
+        stepwise = pair.makeFillet(R, [self.edge_at(pair, xs, chord)] + [
+            e
+            for e in pair.Edges
+            if e.Curve.TypeId == "Part::GeomEllipse" and abs(e.BoundBox.ZMin - h) < 1e-9
+        ])
+        self.assertLess(result.cut(stepwise).Volume + stepwise.cut(result).Volume, 1e-6)
+
 
 class NotchEndFilletTest(unittest.TestCase):
     """ops#962, designed (notes fillet-notch-end-962): a stepped block (floor z 4, wall y 15, a rim
