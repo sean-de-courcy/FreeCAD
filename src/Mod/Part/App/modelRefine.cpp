@@ -2190,7 +2190,17 @@ TopoDS_Face FaceTypedBSpline::buildFace(const FaceVectorType& faces) const
         return {};
     }
 
-    return faceFixer.Face();
+    // The guards of the reversed kind above (ops#1106): a merged face that is not valid, or that
+    // does not cover its group (a boundary whose loops at one vertex were wired into the wrong
+    // outer wire), is not built, and the group stays as it is. One such group used to make the
+    // whole refine invalid, so the feature, and every later one merging the same faces, kept
+    // its shape unrefined
+    const TopoDS_Face face = faceFixer.Face();
+    if (face.IsNull() || !BRepCheck_Analyzer(face).IsValid()
+        || !coversGroup(faces, face, readoutFaceArea)) {
+        return {};
+    }
+    return face;
 }
 
 FaceTypedBSpline& ModelRefine::getBSplineObject()

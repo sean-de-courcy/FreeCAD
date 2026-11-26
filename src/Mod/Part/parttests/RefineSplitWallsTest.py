@@ -358,5 +358,98 @@ class RefineMergedWallHoledInEachHalfReferenceTest(RefineMergedHoledWallReferenc
     holeX = -3.0
 
 
+# ops#1106: the B-spline kind's index-equal merge gets the guards of the reversed kind.
+#
+
+
+def flatBSplineSurface():
+    s = Part.BSplineSurface()
+    s.buildFromPolesMultsKnots(
+        [[V(0, -2, 0), V(0, 10, 0)], [V(10, -2, 0), V(10, 10, 0)]],
+        [2, 2],
+        [2, 2],
+        [0, 1],
+        [0, 1],
+        False,
+        False,
+        1,
+        1,
+    )
+    return s
+
+
+def squaresAndPetal():
+    """The squares A and B and the petal's loop edge, on one surface, sharing their edges."""
+    tools = [
+        Part.LineSegment(V(5, 0, 0), V(5, 11, 0)).toShape(),
+        Part.LineSegment(V(-1, 0, 0), V(11, 0, 0)).toShape(),
+    ]
+    petal = Part.BSplineCurve()
+    petal.buildFromPolesMultsKnots(
+        [V(5, 0, 0), V(4, -1, 0), V(6, -1, 0), V(5, 0, 0)], [2, 1, 1, 2], [0, 1, 2, 3], False, 1
+    )
+    tools.append(petal.toShape())
+    faces = Part.Face(flatBSplineSurface()).generalFuse(tools)[0].Faces
+    squares = [f for f in faces if abs(f.Area - 50) < 1e-9]
+    a = [f for f in squares if f.CenterOfMass.x < 5]
+    b = [f for f in squares if f.CenterOfMass.x > 5]
+    small = [f for f in faces if f.Area < 2]
+    assert len(a) == 1 and len(b) == 1 and len(small) == 1, [f.Area for f in faces]
+    loops = [e for e in small[0].Edges if e.isClosed()]
+    assert len(loops) == 1
+    return a[0], b[0], loops[0]
+
+
+def withPetal(a, loop):
+    """A with the loop wired into its outer wire at the corner (5, 0)."""
+    corner = V(5, 0, 0)
+    edges = a.OuterWire.OrderedEdges
+    sequence = []
+    for index, edge in enumerate(edges):
+        sequence.append(edge)
+        following = edges[(index + 1) % len(edges)]
+        shared = [x for x in edge.Vertexes if any(x.isSame(y) for y in following.Vertexes)]
+        if shared and shared[0].Point.distanceToPoint(corner) < 1e-9 and len(sequence) <= len(edges):
+            sequence.append(loop)
+    wire = Part.Wire(sequence)
+    fixer = Part.ShapeFix.Edge()
+    for candidate in (wire, wire.reversed()):
+        face = Part.Face(a.Surface, candidate)
+        for edge in face.Edges:
+            fixer.fixAddPCurve(edge, face, False, 1e-7)
+        if face.Area > 0:
+            return face
+    raise AssertionError("no orientation of the petal wire gives a face")
+
+
+class RefineBSplineGuardTest(unittest.TestCase):
+    def setUp(self):
+        self.a, self.b, self.loop = squaresAndPetal()
+
+    def testPetalPairStaysSplit(self):
+        a = withPetal(self.a, self.loop)
+        # the designed state: A valid, one wire holding the loop, sharing the line x = 5 with B
+        self.assertTrue(a.isValid())
+        self.assertEqual(len(a.Wires), 1)
+        self.assertTrue(any(e.isSame(self.loop) for e in a.Edges))
+        # 51 mm2, to the accuracy of the petal's projected curves on the surface
+        self.assertAlmostEqual(a.Area, 51, delta=0.01)
+        shell = Part.Shell([a, self.b])
+        self.assertTrue(shell.isValid())
+        self.assertTrue(any(e.isSame(x) for e in a.Edges for x in self.b.Edges))
+
+        refined = shell.removeSplitter()
+        self.assertTrue(refined.isValid())
+        self.assertAlmostEqual(refined.Area, shell.Area, places=6)
+        self.assertEqual(len(refined.Faces), 2, [f.Area for f in refined.Faces])
+
+    def testSquaresMerge(self):
+        refined = Part.Shell([self.a, self.b]).removeSplitter()
+        self.assertTrue(refined.isValid())
+        self.assertEqual(len(refined.Faces), 1)
+        self.assertAlmostEqual(refined.Faces[0].Area, 100, places=6)
+        self.assertEqual(refined.Faces[0].Surface.__class__.__name__, "BSplineSurface")
+
+
 if __name__ == "__main__":
     unittest.main()
