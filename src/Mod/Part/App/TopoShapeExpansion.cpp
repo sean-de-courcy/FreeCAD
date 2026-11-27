@@ -10138,7 +10138,8 @@ bool roundCoveredSplit(
     const std::vector<TopoShape>& edges,
     const std::vector<bool>& covered,
     double radius,
-    const char* op
+    const char* op,
+    const char* how = "by coverage"
 );
 
 bool roundCoveredFirst(
@@ -10175,14 +10176,86 @@ bool roundCoveredFirst(
     return asBefore != covered && roundCoveredSplit(result, shape, edges, asBefore, radius, op);
 }
 
+/** ops#1114 (NS88 Labyrinth and NS88 Divided Labyrinth #18): a fillet whose selection is several
+ * separate loops, one with a reflex corner with a circle (reflexFirst), where the construction
+ * refused the whole selection only for an edge kind it doesn't cover in another loop. The reflex
+ * rule is limited to the connected groups of picked edges that hold such a corner: those groups
+ * are rounded as one pick (the construction, as a feature picking only them), the other groups as
+ * another (as a feature picking only them), one after the other through roundCoveredSplit(), with
+ * its checks (lost material, both orders, the order must not show). Asked only once the whole
+ * selection was refused. No corner group, or no other group: false, the feature's error stands
+ * (so the inner picks never split again)
+ */
+bool roundReflexGroupsFirst(
+    TopoShape& result,
+    const TopoShape& shape,
+    const std::vector<TopoShape>& edges,
+    double radius,
+    const char* op
+)
+{
+    const size_t n = edges.size();
+    if (n < 2) {
+        return false;
+    }
+    // The groups: edges sharing a vertex on the shape, transitively
+    std::vector<size_t> parent(n);
+    std::iota(parent.begin(), parent.end(), size_t {0});
+    std::function<size_t(size_t)> root = [&](size_t i) {
+        return parent[i] == i ? i : (parent[i] = root(parent[i]));
+    };
+    TopTools_IndexedMapOfShape vertices;
+    std::vector<std::vector<int>> vertexEdges;
+    for (size_t i = 0; i < n; ++i) {
+        for (TopExp_Explorer xv(edges[i].getShape(), TopAbs_VERTEX); xv.More(); xv.Next()) {
+            const int k = vertices.Add(xv.Current());
+            if (k > static_cast<int>(vertexEdges.size())) {
+                vertexEdges.resize(k);
+            }
+            for (int j : vertexEdges[k - 1]) {
+                parent[root(static_cast<size_t>(j))] = root(i);
+            }
+            vertexEdges[k - 1].push_back(static_cast<int>(i));
+        }
+    }
+    std::map<size_t, std::vector<size_t>> groups;
+    for (size_t i = 0; i < n; ++i) {
+        groups[root(i)].push_back(i);
+    }
+    if (groups.size() < 2) {
+        return false;
+    }
+    // A reflex corner needs two picked edges at one vertex: it lies in one group
+    std::vector<bool> inCorner(n, false);
+    bool anyCorner = false;
+    bool anyOther = false;
+    for (const auto& [key, members] : groups) {
+        std::vector<TopoDS_Shape> plain;
+        for (size_t i : members) {
+            plain.push_back(edges[i].getShape());
+        }
+        const bool corner = FilletFallback::reflexCircleCorner(shape.getShape(), plain);
+        for (size_t i : members) {
+            inCorner[i] = corner;
+        }
+        (corner ? anyCorner : anyOther) = true;
+    }
+    if (!anyCorner || !anyOther) {
+        return false;
+    }
+    return roundCoveredSplit(result, shape, edges, inCorner, radius, op, "by reflex groups");
+}
+
 /// roundCoveredFirst() with the selection's coverage given: the covered group first, then the rest
+/// ( how names the caller in the log)
 bool roundCoveredSplit(
     TopoShape& result,
     const TopoShape& shape,
     const std::vector<TopoShape>& edges,
     const std::vector<bool>& covered,
     double radius,
-    const char* op
+    const char* op,
+    const char* how
 )
 {
     if (covered.size() != edges.size()) {
@@ -10203,7 +10276,7 @@ bool roundCoveredSplit(
     for (const auto& edge : rest) {
         for (TopExp_Explorer xv(edge.getShape(), TopAbs_VERTEX); xv.More(); xv.Next()) {
             if (firstVertices.Contains(xv.Current())) {
-                FC_LOG("fillet by coverage: the groups meet at a vertex");
+                FC_LOG("fillet " << how << ": the groups meet at a vertex");
                 return false;
             }
         }
@@ -10269,7 +10342,7 @@ bool roundCoveredSplit(
         for (const auto& edge : rest) {
             const int index = copyOn(stage, TopoDS::Edge(edge.getShape()));
             if (index <= 0) {
-                FC_LOG("fillet by coverage: an edge of the rest is not on the first group's result");
+                FC_LOG("fillet " << how << ": an edge of the rest is not on the first group's result");
                 return false;
             }
             later.push_back(stage.getSubTopoShape(TopAbs_EDGE, index));
@@ -10283,7 +10356,7 @@ bool roundCoveredSplit(
         // tangent edge (Recorder::rolledOn()): the rest's OCCT round is checked here (review r1,
         // T2)
         if (const std::string lost = Part::lostMaterial(built, stage, later, radius); !lost.empty()) {
-            FC_LOG("fillet by coverage: the rest " << lost);
+            FC_LOG("fillet " << how << ": the rest " << lost);
             return false;
         }
         // The other order builds too, to the same volume: two groups whose bands meet build in
@@ -10292,7 +10365,7 @@ bool roundCoveredSplit(
         for (const auto& edge : first) {
             const int index = copyOn(alone, TopoDS::Edge(edge.getShape()));
             if (index <= 0) {
-                FC_LOG("fillet by coverage: an edge of the first group is not on the rest's result");
+                FC_LOG("fillet " << how << ": an edge of the first group is not on the rest's result");
                 return false;
             }
             firstLater.push_back(alone.getSubTopoShape(TopAbs_EDGE, index));
@@ -10325,23 +10398,23 @@ bool roundCoveredSplit(
             shows = orderShows();
         }
         if (shows) {
-            FC_LOG("fillet by coverage: the rest changes " << onStage << " on the first group's "
+            FC_LOG("fillet " << how << ": the rest changes " << onStage << " on the first group's "
                    "result, " << onBase << " on the base; the other order "
                    << vReverse - base << " against " << vBuilt - base);
             return false;
         }
-        FC_LOG("fillet by coverage: " << first.size() << " edges, then " << rest.size());
+        FC_LOG("fillet " << how << ": " << first.size() << " edges, then " << rest.size());
         result = built;
         return true;
     }
     catch (const Base::CADKernelError& e) {
-        FC_LOG("fillet by coverage: " << e.what());
+        FC_LOG("fillet " << how << ": " << e.what());
         if (KernelBudget::pastDeadline()) {
             throw;
         }
     }
     catch (const Standard_Failure& e) {
-        FC_LOG("fillet by coverage (OCCT): " << e.GetMessageString());
+        FC_LOG("fillet " << how << " (OCCT): " << e.GetMessageString());
     }
     FilletFallback::takeInvalidResult();
     return false;
@@ -10935,6 +11008,11 @@ TopoShape& TopoShape::makeElementFillet(
             }
         }
         if (fuzzyLast && finishConstruction(*this, *outcome, input, op)) {
+            return *this;
+        }
+        // ops#1114 B: the reflex rule kept to the groups of picked edges that hold the corner
+        if (outcome->reflexFirst && !outcome->constructed && edges.size() > 1 && radius1 == radius2
+            && roundReflexGroupsFirst(*this, shape, edges, radius1, op)) {
             return *this;
         }
         if (outcome->failed) {
