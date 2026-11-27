@@ -8803,6 +8803,12 @@ class MixedCoverageTest(unittest.TestCase):
         # d 2 (NS88 Labyrinth #18's form): needs the corner's run on (A) and the split (B)
         self.checkReflexGroups(2.0, [(0, 20)])
 
+    def testReflexCornerLoopAndAnotherLoopAtRightAngle(self):
+        # d 0: the corner built on the base and on the post's result measures 5e-4 apart (the
+        # construction's trimmed faces, about 5e-6 of the change), which the order test allows
+        # (review pr1114-r1 T1)
+        self.checkReflexGroups(0.0, [(0, 20)])
+
     def testReflexCornerLoopAndTwoOtherLoops(self):
         # The two feet are rounded together, as the second pick
         self.checkReflexGroups(2.0, [(-15, 20), (15, 20)])

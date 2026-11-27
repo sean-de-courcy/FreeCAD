@@ -10139,7 +10139,8 @@ bool roundCoveredSplit(
     const std::vector<bool>& covered,
     double radius,
     const char* op,
-    const char* how = "by coverage"
+    const char* how = "by coverage",
+    double precision = 0.0
 );
 
 bool roundCoveredFirst(
@@ -10243,11 +10244,15 @@ bool roundReflexGroupsFirst(
     if (!anyCorner || !anyOther) {
         return false;
     }
-    return roundCoveredSplit(result, shape, edges, inCorner, radius, op, "by reflex groups");
+    // The construction's corner, built on the base and on the rest's result, measures alike only
+    // to about 5e-6 of the change: its faces are trimmed by an approximated curve where a torus
+    // meets a cylinder (ops#1114, review pr1114-r1 T1: the orders differed by 6.6e-6 of the
+    // change on a PartDesign model, by 4e-8 on another)
+    return roundCoveredSplit(result, shape, edges, inCorner, radius, op, "by reflex groups", 2e-5);
 }
 
 /// roundCoveredFirst() with the selection's coverage given: the covered group first, then the rest
-/// ( how names the caller in the log)
+/// (how names the caller in the log; precision, how closely its groups measure)
 bool roundCoveredSplit(
     TopoShape& result,
     const TopoShape& shape,
@@ -10255,7 +10260,8 @@ bool roundCoveredSplit(
     const std::vector<bool>& covered,
     double radius,
     const char* op,
-    const char* how
+    const char* how,
+    double precision
 )
 {
     if (covered.size() != edges.size()) {
@@ -10388,7 +10394,10 @@ bool roundCoveredSplit(
             onStage = vBuilt - volume(stage);
             vReverse = volume(reverse);
             const double change = std::abs(vBuilt - base);
-            const double allowance = std::max(1e-6 * std::abs(onBase), 1e-9 * std::abs(base));
+            // precision: how closely the caller's groups measure, relative to the change
+            const double allowance = std::max(
+                {1e-6 * std::abs(onBase), 1e-9 * std::abs(base), precision * change}
+            );
             return !(std::abs(onStage - onBase) <= allowance)
                 || !(std::abs(vReverse - vBuilt) <= std::max(allowance, 1e-7 * change));
         };
@@ -11011,7 +11020,10 @@ TopoShape& TopoShape::makeElementFillet(
             return *this;
         }
         // ops#1114 B: the reflex rule kept to the groups of picked edges that hold the corner
-        if (outcome->reflexFirst && !outcome->constructed && edges.size() > 1 && radius1 == radius2
+        // (Not where the whole pick turned wrong way or formed a ring: those raise their own
+        // errors, below; review pr1114-r1 T2)
+        if (outcome->reflexFirst && !outcome->constructed && !outcome->ring
+            && outcome->wrongWay.empty() && edges.size() > 1 && radius1 == radius2
             && roundReflexGroupsFirst(*this, shape, edges, radius1, op)) {
             return *this;
         }
