@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <exception>
 #include <iterator>
 #include <map>
 #include <numeric>
@@ -14,6 +15,7 @@
 #include <optional>
 #include <sstream>
 
+#include <BOPAlgo_GlueEnum.hxx>
 #include <BOPTools_AlgoTools.hxx>
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
@@ -36,6 +38,7 @@
 #include <BRepCheck_Result.hxx>
 #include <BRepClass_FaceClassifier.hxx>
 #include <BRepLib.hxx>
+#include <BRepMesh_IncrementalMesh.hxx>
 #include <BRepClass3d_SolidClassifier.hxx>
 #include <BRepClass3d_SolidExplorer.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
@@ -11783,6 +11786,561 @@ bool trimByWall(
     refuse("a wall's surface does not cut off the dress-up that runs into it");
 }
 
+std::optional<gp_Pnt> pointInFace(const TopoDS_Face& face);
+
+/// Whether two walls are tangent neighbours: they share an edge, and their normals agree at its
+/// middle (a blend and the wall it runs into: Case Base's scoop and the blends to its outer walls)
+bool tangentNeighbours(const TopoDS_Face& wall, const TopoDS_Face& other)
+{
+    TopTools_IndexedMapOfShape mine;
+    TopExp::MapShapes(wall, TopAbs_EDGE, mine);
+    for (TopExp_Explorer it(other, TopAbs_EDGE); it.More(); it.Next()) {
+        const TopoDS_Edge& edge = TopoDS::Edge(it.Current());
+        if (!mine.Contains(edge) || BRep_Tool::Degenerated(edge)) {
+            continue;
+        }
+        try {
+            BRepAdaptor_Curve curve(edge);
+            const gp_Pnt at = curve.Value((curve.FirstParameter() + curve.LastParameter()) / 2);
+            if (outwardNormalAny(wall, at).Angle(outwardNormalAny(other, at)) < 1e-2) {
+                return true;
+            }
+        }
+        catch (const Refusal&) {
+        }
+        catch (const Standard_Failure&) {
+        }
+    }
+    return false;
+}
+
+/** A cut tool that runs off its face into two walls or more, tangent neighbours on different
+ * surfaces (cause T, ops#898: a lip corner's round past the floor into the scoop and the blend to
+ * the outer wall), where trimByWall refuses wall by wall: one wall's surface, run on, passes in
+ * front of its neighbour and cuts off a piece that lies along the neighbour's foot. Onshape builds
+ * (RB6, RB81): each wall cuts the round by its own continuation along its own foot. The tool is
+ * split by all the walls' sheets in one pass, and each cell is decided by the wall whose foot it
+ * runs along (or, along none, by the walls it lies behind): it goes where it lies behind that
+ * wall's sheet (not in the piece that holds the edge when the tool is split by that sheet alone),
+ * under trimByWall's checks of a piece that goes; else it stays. A cell along two feet, behind one
+ * sheet only, refuses. What is left must no longer run off over any of the feet, and with what went
+ * it must make up the tool's volume. The walls whose own surface bounds the tool are added to
+ * merged (trimByWall's return)
+ */
+void trimByTangentWalls(
+    const Context& ctx,
+    Tool& tool,
+    const EdgeData& data,
+    const std::vector<const SurfaceWall*>& group,
+    const std::vector<OtherWall>& otherWalls,
+    std::vector<TopoDS_Face>& merged
+)
+{
+    const SurfaceWall& at = *group.front();
+    const auto strip = std::find_if(tool.strips.begin(), tool.strips.end(), [&](const Strip& s) {
+        return s.face.IsSame(at.face);
+    });
+    if (strip == tool.strips.end()) {
+        refuse("a tool has no strip on the face it runs off into a wall");
+    }
+    const Section middle = sectionAt(ctx, data, (data.first + data.last) / 2);
+    const TopoDS_Vertex onEdge = BRepBuilderAPI_MakeVertex(middle.corner);
+    auto holds = [&](const TopoDS_Shape& piece) {
+        for (TopExp_Explorer it(piece, TopAbs_SHELL); it.More(); it.Next()) {
+            if (touch(onEdge, it.Current())) {
+                return true;
+            }
+        }
+        return false;
+    };
+    double footTolerance = 0.0;
+    double perimeter = 0.0;
+    for (const SurfaceWall* wall : group) {
+        footTolerance = std::max(footTolerance, BRep_Tool::Tolerance(wall->foot));
+        for (TopExp_Explorer it(wall->foot, TopAbs_VERTEX); it.More(); it.Next()) {
+            footTolerance
+                = std::max(footTolerance, BRep_Tool::Tolerance(TopoDS::Vertex(it.Current())));
+        }
+        perimeter += perimeterOf(wall->foot);
+    }
+    const double undecided = 2 * footTolerance * perimeter;
+    // As trimByWall's pastFoot, over one wall's foot
+    auto pastFoot = [&](const TopoDS_Shape& contact, const TopoDS_Edge& foot) {
+        BRepAlgoAPI_Cut outside(contact, at.face);
+        if (!outside.IsDone() || outside.HasErrors()) {
+            refuse("finding where a tangent strip runs off its face failed");
+        }
+        for (TopExp_Explorer it(outside.Shape(), TopAbs_FACE); it.More(); it.Next()) {
+            const TopoDS_Shape& part = it.Current();
+            if (touch(foot, part)
+                && lengthAlong(foot, part)
+                    > std::max(1000 * linearTolerance, 0.02 * std::sqrt(areaOf(part)))) {
+                return true;
+            }
+        }
+        return false;
+    };
+    // As trimByWall's alongFoot
+    auto alongFoot = [&](const TopoDS_Shape& piece, const TopoDS_Edge& foot) {
+        const double stretch = std::max(1000 * linearTolerance, 0.02 * std::cbrt(volumeOf(piece)));
+        for (TopExp_Explorer it(piece, TopAbs_SHELL); it.More(); it.Next()) {
+            if (touch(foot, it.Current()) && lengthAlong(foot, it.Current()) > stretch) {
+                return true;
+            }
+        }
+        return false;
+    };
+    auto splitBy = [&](const std::vector<TopoDS_Shape>& sheets,
+                       BRepAlgoAPI_Splitter& splitter,
+                       const TopoDS_Shape& solid) {
+        TopTools_ListOfShape arguments;
+        arguments.Append(solid);
+        TopTools_ListOfShape tools;
+        for (const auto& sheet : sheets) {
+            tools.Append(sheet);
+        }
+        splitter.SetArguments(arguments);
+        splitter.SetTools(tools);
+        splitter.SetRunParallel(Standard_False);
+        splitter.SetNonDestructive(Standard_True);
+        splitter.Build();
+        if (!splitter.IsDone() || splitter.HasErrors()) {
+            refuse("splitting a tool by a wall's surface failed");
+        }
+        std::vector<TopoDS_Shape> pieces;
+        for (TopExp_Explorer it(splitter.Shape(), TopAbs_SOLID); it.More(); it.Next()) {
+            pieces.push_back(it.Current());
+        }
+        return pieces;
+    };
+    Bnd_Box box;
+    BRepBndLib::Add(tool.solid, box);
+    const double reach = 2 * std::sqrt(box.SquareExtent());
+    const double before = tool.volume;
+    // Each wall's sheet, from the last extension that gave one
+    struct Sheet
+    {
+        TopoDS_Shape shape;
+        Handle(Geom_Surface) surface;
+        TopLoc_Location location;
+        int extend = 0;
+    };
+    std::vector<Sheet> sheets(group.size());
+    // Each wall's extension (wallSheet's extend), raised only for the walls whose foot a strip
+    // still runs past: a wall cut off by its own surface keeps it, and its face merges into it
+    std::vector<int> levels(group.size(), 0);
+    auto build = [&](size_t k) {
+        Handle(Geom_Surface) surface;
+        TopLoc_Location location;
+        TopoDS_Face beyond;
+        TopoDS_Face sheet = wallSheet(
+            ctx,
+            group[k]->wall,
+            group[k]->foot,
+            reach,
+            levels[k],
+            surface,
+            location,
+            beyond
+        );
+        if (sheet.IsNull()) {
+            return false;  // nothing to extend: the last sheet stays
+        }
+        sheets[k] = {sheetWith(sheet, beyond), surface, location, levels[k]};
+        return true;
+    };
+    auto raise = [&](const std::vector<size_t>& which) {
+        bool changed = false;
+        for (size_t k : which) {
+            while (levels[k] < 2) {
+                ++levels[k];
+                if (build(k)) {
+                    changed = true;
+                    break;
+                }
+            }
+        }
+        return changed;
+    };
+    std::vector<size_t> everyWall(group.size());
+    std::iota(everyWall.begin(), everyWall.end(), size_t {0});
+    for (size_t k = 0; k < group.size(); ++k) {
+        if (!build(k)) {
+            refuse("a wall's surface does not cut off the dress-up that runs into it");
+        }
+    }
+    for (int round = 0; round <= 2 * static_cast<int>(group.size()); ++round) {
+        std::vector<TopoDS_Shape> all;
+        for (const auto& sheet : sheets) {
+            all.push_back(sheet.shape);
+        }
+        BRepAlgoAPI_Splitter splitter;
+        const auto pieces = splitBy(all, splitter, tool.solid);
+        if (pieces.size() < 2) {
+            if (!raise(everyWall)) {
+                break;
+            }
+            continue;  // no surface reaches past its foot: extended behind the face
+        }
+        // Whether a cell lies behind a wall's sheet, on the material's side of the wall: its faces
+        // on the sheet look along the wall's outward normal (as sideOfSheet). A cell with no face
+        // on the sheet, or whose faces there disagree, is not behind it
+        std::vector<double> orientation(group.size(), 0.0);
+        for (size_t k = 0; k < group.size(); ++k) {
+            BRepAdaptor_Curve along(group[k]->foot);
+            const gp_Pnt point = along.Value((along.FirstParameter() + along.LastParameter()) / 2);
+            for (TopExp_Explorer on(sheets[k].shape, TopAbs_FACE); on.More(); on.Next()) {
+                try {
+                    orientation[k] = outwardNormalAny(TopoDS::Face(on.Current()), point)
+                                         .Dot(outwardNormalAny(group[k]->wall, point));
+                    break;
+                }
+                catch (const Refusal&) {
+                }
+            }
+            if (std::abs(orientation[k]) < 0.5) {
+                refuse("a wall's surface does not run through its foot");
+            }
+        }
+        auto behind = [&](const TopoDS_Shape& piece, size_t k) {
+            int side = 0;
+            for (TopExp_Explorer it(piece, TopAbs_FACE); it.More(); it.Next()) {
+                const TopoDS_Face& face = TopoDS::Face(it.Current());
+                if (face.Orientation() != TopAbs_FORWARD && face.Orientation() != TopAbs_REVERSED) {
+                    continue;  // a sheet's face left inside the cell: no side
+                }
+                for (TopExp_Explorer on(sheets[k].shape, TopAbs_FACE); on.More(); on.Next()) {
+                    const TopoDS_Face& source = TopoDS::Face(on.Current());
+                    bool image = face.IsSame(source);
+                    for (const auto& modified : splitter.Modified(source)) {
+                        image = image || face.IsSame(modified);
+                    }
+                    if (!image) {
+                        continue;
+                    }
+                    const std::optional<gp_Pnt> point = pointInFace(face);
+                    if (!point) {
+                        continue;
+                    }
+                    const double along
+                        = outwardNormalAny(face, *point).Dot(outwardNormalAny(source, *point));
+                    if (std::abs(along) < 0.5) {
+                        continue;
+                    }
+                    const int here = along * orientation[k] > 0 ? 1 : -1;
+                    if (side != 0 && side != here) {
+                        return false;
+                    }
+                    side = here;
+                    break;
+                }
+            }
+            return side > 0;
+        };
+        const Stage stage(splitter.History(), splitter.Shape());
+        auto stripIn = [&](const TopoDS_Shape& piece, double& on, double& off, double& tolerance) {
+            TopTools_IndexedMapOfShape faces;
+            TopExp::MapShapes(piece, TopAbs_FACE, faces);
+            for (const auto& contact : strip->contacts) {
+                for (const auto& image : stage.images(contact)) {
+                    if (!faces.Contains(image)) {
+                        continue;
+                    }
+                    double area = areaOf(image);
+                    double inside = areaOf(commonOf(at.face, image));
+                    on += inside;
+                    off += area - inside;
+                    tolerance += areaToleranceOf(image, *strip);
+                }
+            }
+        };
+        int holding = 0;
+        std::vector<TopoDS_Shape> staying;
+        BRep_Builder builder;
+        TopoDS_Compound away;
+        builder.MakeCompound(away);
+        double removed = 0.0;
+        // The cells that go, by the wall along whose foot each runs furthest (else the first it
+        // lies behind)
+        std::vector<std::vector<TopoDS_Shape>> byWall(group.size());
+        auto footLength = [&](const TopoDS_Shape& piece, const TopoDS_Edge& foot) {
+            double length = 0.0;
+            for (TopExp_Explorer it(piece, TopAbs_SHELL); it.More(); it.Next()) {
+                if (touch(foot, it.Current())) {
+                    length = std::max(length, lengthAlong(foot, it.Current()));
+                }
+            }
+            return length;
+        };
+        for (const auto& piece : pieces) {
+            if (holds(piece)) {
+                ++holding;
+                staying.push_back(piece);
+                continue;
+            }
+            // The walls that decide the cell: those whose foot it runs along, else those it lies
+            // behind
+            std::vector<size_t> owners;
+            for (size_t k = 0; k < group.size(); ++k) {
+                if (alongFoot(piece, group[k]->foot)) {
+                    owners.push_back(k);
+                }
+            }
+            const bool byFoot = !owners.empty();
+            if (!byFoot) {
+                for (size_t k = 0; k < group.size(); ++k) {
+                    if (behind(piece, k)) {
+                        owners.push_back(k);
+                    }
+                }
+            }
+            const auto back = std::count_if(owners.begin(), owners.end(), [&](size_t k) {
+                return behind(piece, k);
+            });
+            if (back == 0) {
+                // In front of the wall along whose foot it runs (or of every wall): it stays
+                staying.push_back(piece);
+                continue;
+            }
+            if (back != static_cast<long>(owners.size())) {
+                refuse("a piece of a dress-up runs along the feet of tangent walls, behind one of "
+                       "them only");
+            }
+            double on = 0.0;
+            double off = 0.0;
+            double tolerance = 0.0;
+            stripIn(piece, on, off, tolerance);
+            if (on > tolerance + undecided) {
+                refuse("a wall's surface cuts a dress-up off on its own face");
+            }
+            if (off <= tolerance) {
+                // Past where the walls' continuations meet the round's circle (RB7)
+                if (byFoot) {
+                    refuse("a wall's surface cuts a piece off a dress-up that is not behind the wall");
+                }
+                staying.push_back(piece);
+                continue;
+            }
+            {
+                TopTools_IndexedMapOfShape faces;
+                TopExp::MapShapes(piece, TopAbs_FACE, faces);
+                for (const auto& other : tool.strips) {
+                    if (&other == &*strip) {
+                        continue;
+                    }
+                    for (const auto& contact : other.contacts) {
+                        for (const auto& image : stage.images(contact)) {
+                            if (faces.Contains(image)
+                                && areaOf(image) > areaToleranceOf(image, other)) {
+                                refuse("a wall's surface cuts a dress-up off on its other face");
+                            }
+                        }
+                    }
+                }
+            }
+            for (const auto& other : otherWalls) {
+                if (alongFoot(piece, other.foot)) {
+                    refuse("a wall's surface cuts a dress-up off in front of another wall");
+                }
+            }
+            builder.Add(away, piece);
+            removed += volumeOf(piece);
+            size_t main = owners.front();
+            if (byFoot) {
+                for (size_t k : owners) {
+                    if (footLength(piece, group[k]->foot) > footLength(piece, group[main]->foot)) {
+                        main = k;
+                    }
+                }
+            }
+            byWall[main].push_back(piece);
+        }
+        if (holding != 1) {
+            refuse(
+                "a wall's surface leaves " + std::to_string(holding)
+                + " pieces of a dress-up on its edge"
+            );
+        }
+        std::vector<size_t> stillPast;
+        for (size_t k = 0; k < group.size(); ++k) {
+            bool past = false;
+            for (const auto& piece : staying) {
+                TopTools_IndexedMapOfShape faces;
+                TopExp::MapShapes(piece, TopAbs_FACE, faces);
+                for (const auto& contact : strip->contacts) {
+                    for (const auto& image : stage.images(contact)) {
+                        past = past || (faces.Contains(image) && pastFoot(image, group[k]->foot));
+                    }
+                }
+            }
+            if (past) {
+                stillPast.push_back(k);
+            }
+        }
+        if (!stillPast.empty()) {
+            if (raise(stillPast)) {
+                continue;  // a surface ends before the strip does: extended
+            }
+            refuse("a wall's surface leaves a dress-up's strip past the wall's foot");
+        }
+        if (removed <= 0.0) {
+            refuse("tangent walls' surfaces cut nothing off the dress-up that runs into them");
+        }
+        // The cells go by their own wall's surface alone, where that cuts off the same: split by
+        // both surfaces, a neighbour's surface, tangent to the wall along their common edge,
+        // passes it by a hair there and leaves a face of zero width (RB6 at r 0.98). Else as
+        // the cells are
+        const double allowed = volumeTolerance * before
+            + raisedTolerance(tool.solid, {}) * squareSize(tool.solid);
+        try {
+            Tool alone = tool;
+            std::vector<Sheet> used = sheets;
+            for (size_t k = 0; k < group.size(); ++k) {
+                if (byWall[k].empty()) {
+                    continue;
+                }
+                TopoDS_Compound cells;
+                builder.MakeCompound(cells);
+                double volume = 0.0;
+                for (const auto& cell : byWall[k]) {
+                    builder.Add(cells, cell);
+                    volume += volumeOf(cell);
+                }
+                bool done = false;
+                for (int level = levels[k]; level <= 2 && !done; ++level) {
+                    Handle(Geom_Surface) surface;
+                    TopLoc_Location location;
+                    TopoDS_Face beyond;
+                    TopoDS_Face sheet = wallSheet(
+                        ctx,
+                        group[k]->wall,
+                        group[k]->foot,
+                        reach,
+                        level,
+                        surface,
+                        location,
+                        beyond
+                    );
+                    if (sheet.IsNull()) {
+                        continue;
+                    }
+                    const TopoDS_Shape shape = sheetWith(sheet, beyond);
+                    BRepAlgoAPI_Splitter split;
+                    const auto parts = splitBy({shape}, split, alone.solid);
+                    TopoDS_Compound gone;
+                    builder.MakeCompound(gone);
+                    double cut = 0.0;
+                    for (const auto& part : parts) {
+                        if (!holds(part)
+                            && volumeOf(commonOf(cells, part)) > 0.5 * volumeOf(part)) {
+                            builder.Add(gone, part);
+                            cut += volumeOf(part);
+                        }
+                    }
+                    // The same cells to a twentieth: the cells' faces on the neighbour's surface
+                    // are measured off a hair there (RB6 at r 1.0: 0.000577 and 0.000581 on the
+                    // two mirrored corners, where the wall alone cuts 0.000581 off each)
+                    if (cut > 0.0 && std::abs(cut - volume) <= allowed + 0.05 * volume) {
+                        const double was = alone.volume;
+                        clipTool(alone, gone);
+                        if (std::abs(was - alone.volume - cut) > allowed + 0.05 * cut) {
+                            refuse("a tool cut by a wall's surface alone lost other than its cells");
+                        }
+                        used[k] = {shape, surface, location, level};
+                        done = true;
+                    }
+                }
+                if (!done) {
+                    refuse("a wall's surface alone does not cut off its cells");
+                }
+            }
+            tool = alone;
+            sheets = used;
+        }
+        catch (const Refusal&) {
+            // The cells that stay, glued: a cut of the tool by the cells that go can leave the
+            // tool whole (RB6 at r 1.0, where the round reaches the lip's underside)
+            TopoDS_Shape solid = staying.front();
+            Handle(BRepTools_History) glued;
+            if (staying.size() > 1) {
+                TopTools_ListOfShape arguments;
+                arguments.Append(staying.front());
+                TopTools_ListOfShape others;
+                for (size_t k = 1; k < staying.size(); ++k) {
+                    others.Append(staying[k]);
+                }
+                BRepAlgoAPI_Fuse fuse;
+                fuse.SetArguments(arguments);
+                fuse.SetTools(others);
+                fuse.SetGlue(BOPAlgo_GlueFull);
+                fuse.SetNonDestructive(Standard_True);
+                fuse.SetRunParallel(Standard_False);
+                fuse.Build();
+                if (!fuse.IsDone() || fuse.HasErrors()) {
+                    refuse("joining the cells of a tool that stay failed");
+                }
+                solid = fuse.Shape();
+                glued = fuse.History();
+            }
+            if (countSolids(solid) != 1) {
+                refuse("a tool trimmed by the walls behind its strip is not one solid");
+            }
+            if (solid.ShapeType() != TopAbs_SOLID) {
+                solid = TopExp_Explorer(solid, TopAbs_SOLID).Current();
+            }
+            TopTools_IndexedMapOfShape kept;
+            TopExp::MapShapes(solid, TopAbs_FACE, kept);
+            const Stage after(glued, solid);
+            auto remap = [&](std::vector<TopoDS_Shape>& shapes) {
+                std::vector<TopoDS_Shape> images;
+                for (const auto& shape : shapes) {
+                    for (const auto& image : stage.images(shape)) {
+                        if (glued.IsNull()) {
+                            if (kept.Contains(image)) {
+                                images.push_back(image);
+                            }
+                            continue;
+                        }
+                        for (const auto& last : after.images(image)) {
+                            images.push_back(last);
+                        }
+                    }
+                }
+                shapes = std::move(images);
+            };
+            remap(tool.contactFaces);
+            remap(tool.capFaces);
+            remap(tool.unionEndFaces);
+            for (auto& own : tool.strips) {
+                remap(own.contacts);
+            }
+            tool.solid = solid;
+            tool.volume = volumeOf(solid);
+        }
+        double allowance = raisedTolerance(tool.solid, {}) * squareSize(tool.solid);
+        if (std::abs(tool.volume + removed - before) > volumeTolerance * before + allowance) {
+            refuse("a dress-up trimmed by a wall's surface: " + describe(tool.volume) + " left and "
+                   + describe(removed) + " cut away of " + describe(before));
+        }
+        for (size_t k = 0; k < group.size(); ++k) {
+            if (sheets[k].extend == 0) {
+                tool.capSurfaces.emplace_back(sheets[k].surface, sheets[k].location);
+                merged.push_back(group[k]->wall);
+            }
+            else {
+                TopLoc_Location ownLocation;
+                const Handle(Geom_Surface) own = BRep_Tool::Surface(group[k]->wall, ownLocation);
+                if (!own.IsNull() && own != sheets[k].surface
+                    && ownLocation.IsEqual(sheets[k].location)) {
+                    tool.reseats.push_back({sheets[k].surface, own, sheets[k].location});
+                }
+            }
+        }
+        return;
+    }
+    refuse("a wall's surface does not cut off the dress-up that runs into it");
+}
+
 /** One Boolean stage, and its checks (5.6, interface point 5). The volume it must remove or add is
  * the caller's: the tools' closed forms less the overlaps at unequal corners, or, for a trimmed
  * tool, its common part with the shape. The tolerance scales with the tools' closed forms, and
@@ -14278,6 +14836,52 @@ TopoDS_Shape constructShape(
         }
         return deferred;
     };
+    // Tangent neighbours trimmed together (trimByTangentWalls), with trimOne's checks
+    auto trimGroup = [&](const std::vector<const SurfaceWall*>& group) {
+        const SurfaceWall& at = *group.front();
+        const auto tool = std::find_if(tools.begin(), tools.end(), [&](const Tool& t) {
+            return &t == at.tool;
+        });
+        const auto edge = std::find_if(data.begin(), data.end(), [&](const EdgeData& d) {
+            return tool != tools.end() && d.edge.IsSame(tool->source);
+        });
+        if (tool == tools.end() || edge == data.end()) {
+            refuse("a corner piece's strip runs off its face into a wall");
+        }
+        for (const auto& runs : wallsOf) {
+            if (std::any_of(runs.begin(), runs.end(), [&](const auto& run) {
+                    return run.first == at.tool;
+                })) {
+                refuse("a dress-up runs into a wall straight back from its face and into one that "
+                       "is not");
+            }
+        }
+        std::vector<OtherWall> otherWalls;
+        for (const auto& other : surfaceWalls) {
+            if (other.tool != at.tool) {
+                continue;
+            }
+            const bool inGroup = std::any_of(group.begin(), group.end(), [&](const SurfaceWall* w) {
+                TopLoc_Location mine;
+                TopLoc_Location theirs;
+                return other.wall.IsSame(w->wall) || sameDomain(other.wall, w->wall)
+                    || (BRep_Tool::Surface(w->wall, mine) == BRep_Tool::Surface(other.wall, theirs)
+                        && mine.IsEqual(theirs));
+            });
+            if (!inGroup) {
+                otherWalls.push_back({other.wall, other.foot, false});
+            }
+        }
+        std::vector<TopoDS_Face> merged;
+        trimByTangentWalls(ctx, *tool, *edge, group, otherWalls, merged);
+        for (const auto& face : merged) {
+            if (std::none_of(wallFaces.begin(), wallFaces.end(), [&](const TopoDS_Face& known) {
+                    return known.IsSame(face);
+                })) {
+                wallFaces.push_back(face);
+            }
+        }
+    };
     std::vector<const Tool*> doneTools;
     for (const auto& first : surfaceWalls) {
         if (std::find(doneTools.begin(), doneTools.end(), first.tool) != doneTools.end()) {
@@ -14317,8 +14921,78 @@ TopoDS_Shape constructShape(
             oneLine = !curved;
         }
         if (!oneLine) {
+            // Tangent neighbours on different surfaces, on one face (cause T, ops#898): where the
+            // walls refuse one by one, they trim the tool together (trimByTangentWalls)
+            std::vector<std::vector<const SurfaceWall*>> groups;
             for (const SurfaceWall* at : mine) {
-                trimOne(*at, false);
+                auto sameSurface = [&](const SurfaceWall* other) {
+                    TopLoc_Location mineAt;
+                    TopLoc_Location theirs;
+                    return other->wall.IsSame(at->wall) || sameDomain(other->wall, at->wall)
+                        || (BRep_Tool::Surface(at->wall, mineAt)
+                                == BRep_Tool::Surface(other->wall, theirs)
+                            && mineAt.IsEqual(theirs));
+                };
+                std::vector<size_t> joined;
+                for (size_t g = 0; g < groups.size(); ++g) {
+                    if (groups[g].front()->face.IsSame(at->face)
+                        && std::none_of(groups[g].begin(), groups[g].end(), sameSurface)
+                        && std::any_of(groups[g].begin(), groups[g].end(), [&](const SurfaceWall* o) {
+                               return tangentNeighbours(o->wall, at->wall);
+                           })) {
+                        joined.push_back(g);
+                    }
+                }
+                if (joined.empty()) {
+                    groups.push_back({at});
+                    continue;
+                }
+                groups[joined.front()].push_back(at);
+                for (auto g = joined.rbegin(); g != std::prev(joined.rend()); ++g) {
+                    groups[joined.front()].insert(
+                        groups[joined.front()].end(),
+                        groups[*g].begin(),
+                        groups[*g].end()
+                    );
+                    groups.erase(groups.begin() + static_cast<long>(*g));
+                }
+            }
+            const bool anyGroup = std::any_of(groups.begin(), groups.end(), [](const auto& g) {
+                return g.size() > 1;
+            });
+            const auto tool = std::find_if(tools.begin(), tools.end(), [&](const Tool& t) {
+                return &t == first.tool;
+            });
+            if (!anyGroup || tool == tools.end()) {
+                for (const SurfaceWall* at : mine) {
+                    trimOne(*at, false);
+                }
+                continue;
+            }
+            const Tool saved = *tool;
+            const auto savedWallFaces = wallFaces;
+            try {
+                for (const SurfaceWall* at : mine) {
+                    trimOne(*at, false);
+                }
+                continue;
+            }
+            catch (const Refusal&) {
+                *tool = saved;
+                wallFaces = savedWallFaces;
+                std::exception_ptr refusal = std::current_exception();
+                try {
+                    for (const auto& group : groups) {
+                        if (group.size() == 1) {
+                            trimOne(*group.front(), false);
+                            continue;
+                        }
+                        trimGroup(group);
+                    }
+                }
+                catch (const Refusal&) {
+                    std::rethrow_exception(refusal);
+                }
             }
             continue;
         }
@@ -16897,7 +17571,26 @@ TopoDS_Face thinFace(const TopoDS_Shape& result, const TopoDS_Shape& base)
         // cancel (a face rounder than a square: A / (P / 4), a disc's diameter)
         double area = std::abs(areaOf(face));
         double quarter = perimeterOf(face) / 4;
-        double width = area / (quarter + std::sqrt(std::max(0.0, quarter * quarter - area)));
+        auto widthOf = [&](double measured) {
+            return measured / (quarter + std::sqrt(std::max(0.0, quarter * quarter - measured)));
+        };
+        double width = widthOf(area);
+        if (!(width >= tolerance)) {
+            // OCCT's integration can lose a long sliver on a B-spline (RB6 at r 1.0, ops#898: the
+            // scoop's growth under the round, 4e-4 wide and 16 long, integrated 7e-16 where
+            // Onshape's growth is 0.006414): measured again on a mesh of a copy, which a face
+            // of zero width leaves at zero
+            try {
+                TopoDS_Shape copy = BRepBuilderAPI_Copy(face).Shape();
+                BRepMesh_IncrementalMesh mesh(copy, tolerance, Standard_False, 0.1, Standard_False);
+                GProp_GProps meshed;
+                BRepGProp::SurfaceProperties(copy, meshed, Standard_False, Standard_True);
+                width = widthOf(std::abs(meshed.Mass()));
+            }
+            catch (const Standard_Failure&) {
+                // no second measure: the face stays of zero width
+            }
+        }
         if (!(width >= tolerance)) {
             return face;
         }

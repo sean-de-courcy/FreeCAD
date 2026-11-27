@@ -351,6 +351,75 @@ class TestFilletVertexFolds(unittest.TestCase):
 # P: a stadium boss on a bar of its own width, each nose's foot arc ending tangent to the bar's sides, which drop below
 #    the floor: the plain revolved fill kept between the side planes (RB136: one torus per arc, nothing removed).
 
+    # ops#898 cause T (Case Base V2 #48 and eight more studios): a round past its floor into two walls that are
+    # tangent neighbours, each cutting the round by its own continuation along its own foot (Onshape RB6, RB20)
+    def fillet(self, shape, test, size):
+        body = self.doc.addObject("PartDesign::Body", "Body")
+        base = self.doc.addObject("Part::Feature", "Base")
+        base.Shape = shape
+        body.BaseFeature = base
+        self.doc.recompute()
+        names = ["Edge%d" % (i + 1) for i, e in enumerate(shape.Edges) if test(e)]
+        self.assertTrue(names)
+        feature = body.newObject("PartDesign::Fillet", "Fillet")
+        feature.Base = (body.Group[0], names)
+        feature.UseAllEdges = False
+        feature.Refine = True
+        feature.TangentPropagation = False
+        feature.Radius = size
+        self.doc.recompute()
+        return (feature.Shape if feature.isValid() else None), names
+
+    @staticmethod
+    def wall(shape, x):
+        """The area of the outer wall's plane face x = 0 (x) or y = 0."""
+        for face in shape.Faces:
+            if isinstance(face.Surface, Part.Plane) and all(
+                abs(v.Point.x if x else v.Point.y) < 1e-9 for v in face.Vertexes
+            ):
+                return face.Area
+        return 0.0
+
+    @staticmethod
+    def splines(shape):
+        return sum(f.Area for f in shape.Faces if isinstance(f.Surface, Part.BSplineSurface))
+
+    def testRoundPastAFloorIntoTangentNeighbourWalls(self):
+        """RB6's corner (blends 0.8, lip corners 1), the rim chain: T4 r 0.97 as before; T1 r 0.98 (6.7e-4 under
+        Onshape's: the scoop's sliver of growth under the round is not kept there); T2 r 0.999 (RB20); T3 r 1.0, where
+        each outer wall loses 0.765395, the blends, not the scoop, take the growth along their feet (2 x 0.516421 +
+        0.006414) and each lip corner takes a sphere."""
+        base = scoop_corner()
+        for size, area, within in ((0.97, -7.665097, 1e-4), (0.98, -7.740446, 1e-3), (0.999, -7.878888, 1e-4), (1.0, -7.886001, 1e-4)):
+            with self.subTest(size=size):
+                shape, names = self.fillet(base, rim_chain(1.0), size)
+                self.assertEqual(len(names), 6)
+                self.assertIsNotNone(shape)
+                self.assertTrue(shape.isValid())
+                self.assertEqual(len(shape.Solids), 1)
+                self.assertAlmostEqual(shape.Area - base.Area, area, delta=within)
+                if size == 1.0:
+                    self.assertAlmostEqual(self.wall(shape, True), self.wall(shape, False), delta=1e-6)
+                    self.assertAlmostEqual(self.wall(shape, True) - self.wall(base, True), -0.765395, delta=1e-4)
+                    self.assertAlmostEqual(self.splines(shape) - self.splines(base), 2 * 0.516421 + 0.006414, delta=1e-4)
+                    self.assertTrue(any(isinstance(f.Surface, Part.Sphere) for f in shape.Faces))
+
+    def testRoundPastTheLipCornersRadiusStaysRefused(self):
+        """T6: past the lip corners' radius Onshape fails (FILLET_FACE_RANGE_TOO_LARGE); so does the fork."""
+        shape, _ = self.fillet(scoop_corner(), rim_chain(1.0), 1.05)
+        self.assertIsNone(shape)
+
+    def testStripUnderAStraightBossIsCutByEachWall(self):
+        """RB137 T4 (draft 0): the plate's front top edge rounded r 1.5 past the 1-wide strip under the boss's plane
+        wall and its end cylinders: -19.003014. Drafted 15 deg (T2) the fork still refuses ("band crosses a hole or
+        pocket"), where Onshape builds -18.979252: debt, never silent."""
+        base = drafted_boss(0)
+        shape, _ = self.fillet(base, front_top, 1.5)
+        self.assertIsNotNone(shape)
+        self.assertAlmostEqual(shape.Volume - base.Volume, -19.003014, delta=1e-4)
+        shape, _ = self.fillet(drafted_boss(15), front_top, 1.5)
+        self.assertIsNone(shape)
+
 
 def handle_block(flush=False):
     """Block x 0..24, y 0..17, z 0..10; a handle r 7 along x through (y 8.5, z 10) on x = 24, 10 long. flush: only
@@ -431,3 +500,92 @@ class TestFilletEndsPastTheEndFace(unittest.TestCase):
         self.assertLess(base.cut(shape).Volume, 1e-6)
         self.assertAlmostEqual(shape.cut(base).Volume, 2 * 0.959141, delta=2e-4)
         self.assertAlmostEqual(shape.Area - base.Area, 2 * -2.048973, delta=1e-5)
+
+
+def curve_of(edge):
+    """The edge's curve, or None where Part has no type for it."""
+    try:
+        return edge.Curve
+    except TypeError:
+        return None
+
+
+def scoop_corner(blend=0.8, corner=1.0):
+    """RB6's corner (ops#898 cause T): a block 40 x 40 x 20; a sphere r 8 scaled 1.5 along z about (3, 3, 0) cut out
+    above z 1 (the scoop, leaning over the floor); a cylinder r 7 about the same axis cut through z 0..1 (the lip, 1
+    thick, its floor at z 1 0.9722 wide). The scoop's edges on the outer walls rounded blend (0: none), then the
+    lip's two vertical edges on the r 7 face rounded corner."""
+    import math
+
+    sphere = Part.makeSphere(8)
+    scale = App.Matrix()
+    scale.A33 = 1.5
+    sphere = sphere.transformGeometry(scale)
+    sphere.translate(V(3, 3, 0))
+    upper = sphere.common(Part.makeBox(60, 60, 60, V(-30, -30, 1)))
+    shape = Part.makeBox(40, 40, 20).cut(upper).cut(Part.makeCylinder(7, 1, V(3, 3, 0))).removeSplitter()
+
+    def mid(e):
+        return e.valueAt((e.FirstParameter + e.LastParameter) / 2)
+
+    if blend > 0:
+        edges = [
+            e
+            for e in shape.Edges
+            if not isinstance(curve_of(e), (Part.Line, type(None)))
+            and mid(e).z > 1.001
+            and (abs(mid(e).x) < 1e-6 or abs(mid(e).y) < 1e-6)
+        ]
+        shape = shape.makeFillet(blend, edges).removeSplitter()
+    edges = [
+        e
+        for e in shape.Edges
+        if isinstance(curve_of(e), Part.Line)
+        and abs(e.Length - 1) < 1e-6
+        and abs(mid(e).z - 0.5) < 1e-6
+        and abs(math.hypot(mid(e).x - 3, mid(e).y - 3) - 7) < 1e-6
+    ]
+    return shape.makeFillet(corner, edges).removeSplitter()
+
+
+def rim_chain(corner):
+    """RB6's rim chain at z 1: the r 7 arc, the lip corners' arcs and the short lines on the outer walls."""
+
+    def test(edge):
+        if not on(edge, lambda p: abs(p.z - 1) < 1e-6):
+            return False
+        curve = curve_of(edge)
+        if isinstance(curve, Part.Circle):
+            return abs(curve.Radius - 7) < 1e-6 or abs(curve.Radius - corner) < 1e-6
+        p = edge.CenterOfMass
+        return isinstance(curve, Part.Line) and edge.Length < 3 and (abs(p.x) < 1e-6 or abs(p.y) < 1e-6)
+
+    return test
+
+
+def drafted_boss(draft):
+    """RB137 (row K-T): a plate 40 x 20 x 10 with a stadium boss on its top (y 1..11, end arcs r 5 about (10, 6) and
+    (30, 6)), 6 high, drafted narrowing upward."""
+    import math
+
+    def stadium(z, inset):
+        r = 5 - inset
+        return Part.Wire(
+            [
+                Part.ArcOfCircle(Part.Circle(V(10, 6, z), V(0, 0, 1), r), math.pi / 2, 3 * math.pi / 2).toShape(),
+                Part.LineSegment(V(10, 6 - r, z), V(30, 6 - r, z)).toShape(),
+                Part.ArcOfCircle(Part.Circle(V(30, 6, z), V(0, 0, 1), r), -math.pi / 2, math.pi / 2).toShape(),
+                Part.LineSegment(V(30, 6 + r, z), V(10, 6 + r, z)).toShape(),
+            ]
+        )
+
+    inset = 6 * math.tan(math.radians(draft))
+    if draft:
+        boss = Part.makeLoft([stadium(10, 0), stadium(16, inset)], True, True)
+    else:
+        boss = Part.Face(stadium(10, 0)).extrude(V(0, 0, 6))
+    return Part.makeBox(40, 20, 10).fuse(boss).removeSplitter()
+
+
+def front_top(edge):
+    return on(edge, lambda p: abs(p.y) < 1e-9 and abs(p.z - 10) < 1e-9) and edge.Length > 39
