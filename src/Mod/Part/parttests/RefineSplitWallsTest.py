@@ -249,6 +249,20 @@ class RefineSplitWallsTest(unittest.TestCase):
         ):
             self.assertEqual(len(self.patchRefined(base, 1.5).Faces), len(base.Faces))
 
+    def testRationalCylinderHalvesKeepTheirVolume(self):
+        # review pr1106-r2 C1: a NURBS cylinder (r 5, h 10) cut at y = 1 and fused back. Integration
+        # merged its top cap halves into a face 4e-4 smaller than the cap (volume 1e-4 off, valid,
+        # silent); the cap's halves now stay apart, and the wall and the bottom cap merge
+        base = Part.makeCylinder(5, 10).toNurbs()
+        low = Part.makeBox(200, 101, 200, V(-100, -100, -100))
+        high = Part.makeBox(200, 99, 200, V(-100, 1, -100))
+        fused = base.common(low).fuse(base.common(high))
+        refined = fused.removeSplitter()
+        self.assertTrue(refined.isValid())
+        exact = math.pi * 25 * 10
+        self.assertLess(abs(refined.Volume - exact), 1e-6 * exact)
+        self.assertLessEqual(len(refined.Faces), 4)
+
     def testBSplineSquaresMerge(self):
         a, b, _ = squaresAndPetal()
         refined = Part.Shell([a, b]).removeSplitter()
