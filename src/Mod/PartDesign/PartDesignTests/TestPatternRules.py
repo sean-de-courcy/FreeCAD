@@ -68,7 +68,7 @@ SQUARE = 40 * 40 * 10
 
 # -- FreeCAD-CH ops#1041: pattern copies' narrow gaps to the part closed ---------------------------
 # Pattern copies stay rigid, and a narrow gap between an adding copy and the part is closed
-# (FreeCAD-CH ops#1041; ops repo notes/pattern-gap-close-1041-design.md, tests C1-C22). Mixed into TestPatternRules (its setUp and tearDown).
+# (FreeCAD-CH ops#1041; ops repo notes/pattern-gap-close-1041-design.md, tests C1-C24). Mixed into TestPatternRules (its setUp and tearDown).
 #
 # Onshape (RB120, RB143, RB151, RB152, RB156, RB157, RB158): a FEATURE pattern's copy is the seed's
 # tool moved, never re-derived; with Reapply on, a copy's face that stands at most about 0.00825 off
@@ -157,7 +157,7 @@ def lensSketch(body, name, small, big, z=FL_H, rotation=None):
 
 
 class PatternGapCloseCases:
-    """ops#1041's cases (C1-C22), run as TestPatternRules' own"""
+    """ops#1041's cases (C1-C24), run as TestPatternRules' own"""
 
     # -- models ----------------------------------------------------------------------------------
 
@@ -512,13 +512,16 @@ class PatternGapCloseCases:
         shape = self.assertBuilds(pat, faces=len(ridge.Shape.Faces) + 3)
         self.assertEqual(len(self.flatSides(shape, 0.001675, 0.0219)), 1)
 
-    def testC13UnsoundSlabWarns(self):
+    def assertCantClose(self, pat, what=None):
+        """R5a as the design's literal stop (reviews pr1041-r1 to r4): a gap that qualifies but can't be closed
+        exactly is an error on the pattern, never silent"""
+        self.assertFalse(pat.isValid(), what)
+        self.assertIn("can't be closed exactly", pat.getStatusString(), what)
+
+    def testC13UnsoundSlabStops(self):
         for post, corner in (("tube", False), ("hole", False), ("solid", True)):
             body, ridge, pat = self.modelG(0.002, 0, post=post, roundCorner=corner)
-            self.assertTrue(pat.isValid(), pat.getStatusString())
-            self.assertIn("Warning", pat.State, post)
-            self.assertIn("wasn't closed", pat.getStatusString(), post)
-            self.assertEqual(len(self.flatSides(pat.Shape, 0.002, 0)), 1, post)
+            self.assertCantClose(pat, post)
             App.closeDocument(self.doc.Name)
             self.doc = App.newDocument("PartDesignTestPatternRules")
 
@@ -732,15 +735,9 @@ class PatternGapCloseCases:
 
     def testC20SlotBetweenSamples(self):
         # in front of the slot the wall is 0.0065 to 0.0145 away, over T_gap where the gap exceeds 0.002375:
-        # the face is not closed (rule 3a), the copy stays rigid with R5a's warning, the slot stays empty
+        # the face is not closed (rule 3a): the pattern stops with the error, never fills the slot
         seed, pat = self.slotRow(self.SLOT_BETWEEN)
-        self.assertTrue(pat.isValid(), pat.getStatusString())
-        shape = pat.Shape
-        self.assertEqual(len(shape.Solids), 1)
-        self.assertIn("wasn't closed", pat.getStatusString())
-        self.assertAlmostEqual(self.added(shape, seed), 3.9925, delta=1e-6)
-        self.assertFalse(shape.isInside(V(10.003, 2.545, 2.5), 1e-7, True))
-        self.assertFalse(shape.isInside(V(9.999, 2.545, 2.5), 1e-7, True))
+        self.assertCantClose(pat)
         App.closeDocument(self.doc.Name)
         self.doc = App.newDocument("PartDesignTestPatternRules")
         # control: no slot, the face is closed (the gap is material)
@@ -750,28 +747,93 @@ class PatternGapCloseCases:
 
     def testC21VoidBehindSkin(self):
         """Review pr1041-r2 T1: a void in the wall behind a skin 0.0065 thick, 0.0089 or more in front of the face
-        and nearer than the slab's far face: never filled. The copy stays rigid with R5a's warning (Onshape would
-        close the gap and keep the void: not modelled, loud here)"""
+        and nearer than the slab's far face: never filled. An error on the pattern (Onshape would close the gap
+        and keep the void: not modelled, loud here)"""
         seed, pat = self.slotRow(self.SLOT_BEHIND)
-        self.assertTrue(pat.isValid(), pat.getStatusString())
-        shape = pat.Shape
-        self.assertEqual(len(shape.Solids), 1)
-        self.assertIn("wasn't closed", pat.getStatusString())
-        self.assertFalse(shape.isInside(V(10.00875, 3.0, 2.5), 1e-7, True))
-        self.assertFalse(shape.isInside(V(9.999, 3.0, 2.5), 1e-7, True))
-        self.assertAlmostEqual(self.added(shape, seed), 3.9925, delta=1e-6)
+        self.assertCantClose(pat)
+
+    def bigRow(self, ly, h, hole=None, cut=None):
+        """slotRow's block and wall, the copy's face ly x h (y 2 .. 2 + ly, z 2 .. 2 + h), a wedge gap 0.0005 to
+        0.008. `hole` (y, z, side): a square hole through the wall. `cut` (y0, y1): a Pocket ahead of the Pad in
+        the tree, both originals, whose copy cuts the wall x 10 .. 10.5 in front of the pad copy's face"""
+        def poly(points):
+            return [Part.LineSegment(V(*a, 0), V(*b, 0)) for a, b in zip(points, points[1:] + points[:1])]
+
+        def box(x0, y0, x1, y1):
+            return poly([(x0, y0), (x1, y0), (x1, y1), (x0, y1)])
+
+        length = 5.9995
+        body = self.doc.addObject("PartDesign::Body", "Body")
+        for name, geo, z, depth in (("Plate", box(0, 0, 20, ly + 4), 0, 2), ("Wall", box(10, 0, 12, ly + 4), 2, h + 3)):
+            sk = planeSketch(body, name + "Sketch", z)
+            sk.addGeometry(geo, False)
+            feat = body.newObject("PartDesign::Pad", name)
+            feat.Profile = sk
+            feat.Length = depth
+        originals = []
+        if hole:
+            y, z, side = hole
+            sk = planeSketch(body, "HoleSketch", rotation=App.Rotation(V(1, 1, 1), 120), base=V(11, 0, 0))
+            sk.addGeometry(box(y - side / 2, z - side / 2, y + side / 2, z + side / 2), False)
+            feat = body.newObject("PartDesign::Pocket", "Hole")
+            feat.Profile = sk
+            feat.Length = 2.5
+            feat.Midplane = True
+        if cut:
+            sk = planeSketch(body, "CutSketch", 5)
+            sk.addGeometry(box(10 - length, cut[0], 10.5 - length, cut[1]), False)
+            feat = body.newObject("PartDesign::Pocket", "Cut")
+            feat.Profile = sk
+            feat.Length = 3.5
+            originals.append(feat)
+        sk = planeSketch(body, "SeedSketch", 2)
+        sk.addGeometry(poly([(2, 2), (10 - 0.0005 - length, 2), (10 - 0.008 - length, 2 + ly), (2, 2 + ly)]), False)
+        seed = body.newObject("PartDesign::Pad", "Seed")
+        seed.Profile = sk
+        seed.Length = h
+        originals.append(seed)
+        self.doc.recompute()
+        pat = body.newObject("PartDesign::LinearPattern", "Row")
+        pat.Originals = originals
+        pat.Direction = ([o for o in body.Origin.OriginFeatures if o.Role == "X_Axis"][0], [""])
+        pat.Length = length
+        pat.Occurrences = 2
+        pat.Reapply = True
+        pat.Refine = True
+        body.Tip = pat
+        self.doc.recompute()
+        return seed, pat
+
+    def testC23HoleInWallNotPlugged(self):
+        """Review pr1041-r4 T1: a hole 0.1 x 0.1 through the wall in front of a face 200 x 100, between the samples
+        (its section under 1e-6 of the face): never plugged. Control: the same hole above the face closes"""
+        seed, pat = self.bigRow(200.0, 100.0, hole=(2 + 0.27 * 200, 2 + 0.42 * 100, 0.1))
+        self.assertCantClose(pat)
+        App.closeDocument(self.doc.Name)
+        self.doc = App.newDocument("PartDesignTestPatternRules")
+        seed, pat = self.bigRow(200.0, 100.0, hole=(2 + 0.27 * 200, 2 + 1.015 * 100, 0.1))
+        shape = self.assertBuilds(pat)
+        self.assertTrue(shape.isInside(V(9.998, 2 + 0.6 * 200, 2 + 0.37 * 100), 1e-7, True))
+
+    def testC24SiblingPocketCopyNotRefilled(self):
+        """Review pr1041-r4 T2: a Pocket's copy (an earlier original of the same instance) cuts the wall in front of
+        the Pad copy's face: the slab is checked against that part too, never refills the cut. Control: the cut
+        clear of the face closes"""
+        seed, pat = self.bigRow(2.0, 1.0, cut=(2.3, 2.6))
+        self.assertCantClose(pat)
+        App.closeDocument(self.doc.Name)
+        self.doc = App.newDocument("PartDesignTestPatternRules")
+        seed, pat = self.bigRow(2.0, 1.0, cut=(5.0, 5.3))
+        shape = self.assertBuilds(pat)
+        self.assertFalse(shape.isInside(V(10.003, 5.15, 2.5), 1e-7, True))
+        self.assertTrue(shape.isInside(V(9.997, 3.5, 2.5), 1e-7, True))
 
     def testC22VoidBehindSkinAnySize(self):
         """Review pr1041-r3 T1 and T2: a void behind a skin is never filled, however small (8.1e-5, wholly beyond
-        T_gap) and however near (behind a skin 0.001 thick, within T_gap of the face): R5a, as C21"""
-        for slot, inside in ((self.SLOT_BEHIND_NARROW, V(10.00875, 2.51, 2.5)), (self.SLOT_BEHIND_NEAR, V(10.003, 2.35, 2.5))):
+        T_gap) and however near (behind a skin 0.001 thick, within T_gap of the face): the literal stop, as C21"""
+        for slot in (self.SLOT_BEHIND_NARROW, self.SLOT_BEHIND_NEAR):
             seed, pat = self.slotRow(slot)
-            self.assertTrue(pat.isValid(), pat.getStatusString())
-            shape = pat.Shape
-            self.assertEqual(len(shape.Solids), 1)
-            self.assertIn("wasn't closed", pat.getStatusString())
-            self.assertFalse(shape.isInside(inside, 1e-7, True), slot)
-            self.assertAlmostEqual(self.added(shape, seed), 3.9925, delta=1e-6)
+            self.assertCantClose(pat, slot)
             App.closeDocument(self.doc.Name)
             self.doc = App.newDocument("PartDesignTestPatternRules")
 

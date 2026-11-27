@@ -2454,6 +2454,12 @@ double gapArea(const TopoDS_Shape& shape)
 /// Section 4 step 3: the slab on \a face, thickness \a depth along its outward normal, cut by the
 /// surface of each face of the copy that shares an edge with it, keeping the copy's side. Null
 /// where it can't be made
+/// Whether \a shape has a face (a boolean's result: exact emptiness, no area tolerance)
+bool gapHasFace(const TopoDS_Shape& shape)
+{
+    return !shape.IsNull() && TopExp_Explorer(shape, TopAbs_FACE).More();
+}
+
 /// \a widened thickened by \a signedDepth along its surface's normal, as one solid (null if not)
 TopoDS_Shape gapThickened(const TopoDS_Face& widened, double signedDepth)
 {
@@ -2608,9 +2614,9 @@ bool gapSlabSound(const TopoDS_Shape& slab, const TopoDS_Face& face, const TopoD
     if (std::abs(nearArea - faceArea) > 1e-6 * faceArea || !anyFar) {
         return false;
     }
-    const double farArea = gapArea(farFaces);
-    FCBRepAlgoAPI_Common inside(farFaces, part);
-    if (!inside.IsDone() || std::abs(gapArea(inside.Shape()) - farArea) > 1e-6 * farArea) {
+    // review pr1041-r4 T1: exact, no area tolerance (a pinhole in the wall passed 1e-6 of the area)
+    FCBRepAlgoAPI_Cut outside(farFaces, part);
+    if (!outside.IsDone() || gapHasFace(outside.Shape())) {
         return false;
     }
     FCBRepAlgoAPI_Cut rest(slab, part);
@@ -2648,14 +2654,15 @@ bool gapSlabSound(const TopoDS_Shape& slab, const TopoDS_Face& face, const TopoD
         return false;
     }
     FCBRepAlgoAPI_Common atLevel(level, rest.Shape());
-    return atLevel.IsDone() && gapArea(atLevel.Shape()) <= 1e-6 * faceArea;
+    return atLevel.IsDone() && !gapHasFace(atLevel.Shape());
 }
 
 /// FreeCAD-CH ops#1041: \a copy, an adding copy of a pattern with Reapply on, with every narrow
 /// gap to \a part closed (rule 3 of the design: section 4 steps 1-5): the copy fused with a sound
 /// slab on each face that qualifies. The copy itself where nothing qualifies, it touches nothing
 /// (rule 3c, R6), or the fused copy isn't one solid at least the copy's volume
-Part::TopoShape closeNarrowGaps(const Part::TopoShape& copy, const Part::TopoShape& part, GapClosing& out)
+Part::TopoShape closeNarrowGaps(const Part::TopoShape& copy, const Part::TopoShape& part, GapClosing& out,
+                                const Part::TopoShape* now = nullptr)
 {
     out = GapClosing {};
     const TopoDS_Shape& shape = copy.getShape();
@@ -2687,7 +2694,12 @@ Part::TopoShape closeNarrowGaps(const Part::TopoShape& copy, const Part::TopoSha
         TopoDS_Shape slab;
         try {
             slab = gapSlab(face, edgeFaces, depth);
-            if (slab.IsNull() || !gapSlabSound(slab, face, part.getShape(), g, depth)) {
+            // review pr1041-r4 T2: on the instance-by-instance path the part has moved on (an
+            // earlier original of this instance, a pocket, may have cut where the slab goes): the
+            // slab must be sound against that part too
+            if (slab.IsNull() || !gapSlabSound(slab, face, part.getShape(), g, depth)
+                || (now && !now->isNull() && !now->getShape().IsSame(part.getShape())
+                    && !gapSlabSound(slab, face, now->getShape(), g, depth))) {
                 slab.Nullify();
             }
         }
@@ -2858,20 +2870,23 @@ App::DocumentObjectExecReturn* Transformed::execute()
     bool gapsClosed = false;
     double gapRigid = 0.0;
     double gapAllowance = 0.0;
-    const auto closeGaps = [&](Part::TopoShape& copy, int instance) {
+    const auto closeGaps = [&](Part::TopoShape& copy, int instance, const Part::TopoShape* now) {
         GapClosing closing;
-        copy = closeNarrowGaps(copy, gapBase, closing);
+        copy = closeNarrowGaps(copy, gapBase, closing, now);
         gapRigid += closing.rigidVolume;
         if (closing.closed) {
             gapsClosed = true;
             gapAllowance += closing.allowance;
         }
         if (closing.unsound) {
-            // R5a: the copy stays rigid, today's result, and the pattern says so
+            // R5a, as the design's literal stop (reviews pr1041-r1 to r4 found four silent fills
+            // in the slab's checks): a gap that qualifies but can't be closed exactly is an error
+            // on the pattern, never a rigid copy that may hide a wrong one
             Body* body = getFeatureBody();
             gapsNotClosed.push_back(
-                "instance " + std::to_string(instance) + ": its gap to "
-                + (body ? quoted(body) : std::string("the part")) + " wasn't closed"
+                "instance " + std::to_string(instance) + ": its narrow gap to "
+                + (body ? quoted(body) : std::string("the part"))
+                + " can't be closed exactly (ops#1041)"
             );
         }
     };
@@ -2916,7 +2931,7 @@ App::DocumentObjectExecReturn* Transformed::execute()
                                     .makeElementTransform(origShape, *transformIter, opName.c_str()));
             if (closing) {
                 // closed before its section is appended: a closed copy is named as an open one
-                closeGaps(shapes.back(), instance);
+                closeGaps(shapes.back(), instance, nullptr);
             }
             if (nameInstances) {
                 // a studio step names by its owner (ops#654, notes/stored-tags.md 3 item 2)
@@ -3232,7 +3247,7 @@ App::DocumentObjectExecReturn* Transformed::execute()
                                     makeResultShape(shape).makeElementTransform(shape, outer, op.c_str());
                                 resetGaps();
                                 if (reapply && item.additive && !item.rerun && !item.hole) {
-                                    closeGaps(placed, static_cast<int>(position) + 1);
+                                    closeGaps(placed, static_cast<int>(position) + 1, &supportShape);
                                 }
                                 if (nameInstances) {
                                     placed.appendElementSection(
@@ -3545,14 +3560,11 @@ App::DocumentObjectExecReturn* Transformed::execute()
     }
 
     if (!gapsNotClosed.empty()) {
-        if (App::Document* doc = getDocument()) {
-            std::string text;
-            for (const std::string& line : gapsNotClosed) {
-                text += (text.empty() ? "" : "\n") + line;
-            }
-            const char* previous = doc->getWarningDescription(this);
-            doc->setWarning(this, previous && *previous ? std::string(previous) + "\n" + text : text);
+        std::string text;
+        for (const std::string& line : gapsNotClosed) {
+            text += (text.empty() ? "" : "\n") + line;
         }
+        return new App::DocumentObjectExecReturn(text);
     }
 
     supportShape = refineShapeIfActive((supportShape));
