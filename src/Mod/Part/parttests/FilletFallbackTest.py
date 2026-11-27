@@ -7017,7 +7017,8 @@ class DPocketCornerTest(unittest.TestCase):
     def checkTall(self, result, body, d):
         """Model T's result: one cylinder and one torus more, nothing removed, the fill by the closed
         form. A solid trimmed by the torus' and the cylinder's intersection measures to about 1e-3
-        here (the Boolean reference of the two whole fills measures 3.9e-3 over the closed form at
+        here, about 5e-6 relative (OCCT's volume of an untrimmed fill is exact to 1e-11; the error
+        is the approximated intersection curve's), so (the Boolean reference of the two whole fills measures 3.9e-3 over the closed form at
         d -3, with no symmetric difference from the result): the closed form to 2e-3, and the
         reference by the symmetric difference (ops#1114)"""
         self.assertTrue(result.isValid())
