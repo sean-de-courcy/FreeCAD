@@ -84,6 +84,7 @@
 #include <Mod/Part/App/AttachExtension.h>
 #include <Mod/Part/App/FuzzyHelper.h>
 #include <Mod/Part/App/KernelBudget.h>
+#include <Mod/Part/App/MassProperties.h>
 #include <Mod/Part/App/modelRefine.h>
 
 #include "FeatureTransformed.h"
@@ -2072,6 +2073,15 @@ double solidVolume(const TopoDS_Shape& shape)
     return std::abs(props.Mass());
 }
 
+/// FreeCAD-CH ops#1041: the gap code's volumes read as Shape.Volume does (adaptive on free-form
+/// faces). OCCT's default integral is off by ~3e-4 relative on a part with a B-spline face and
+/// moves with the face splits a copy makes, by more than a copy's volume (fab1041g,
+/// notes/gasket-fuse-1041.md 2)
+double gapVolume(const TopoDS_Shape& shape)
+{
+    return std::abs(Part::MassProperties::readoutVolume(shape));
+}
+
 // FreeCAD-CH ops#1041 (notes/pattern-gap-close-1041-design.md): an adding copy whose face stands a
 // narrow gap off the part has that gap closed, as Onshape's pattern does (RB143, RB151, RB152).
 // The three widths are readings of Onshape's rows (design section 1), not its constants
@@ -2596,7 +2606,7 @@ bool gapSlabSound(const TopoDS_Shape& slab, const TopoDS_Face& face, const TopoD
         return false;
     }
     FCBRepAlgoAPI_Cut rest(slab, part);
-    return rest.IsDone() && solidVolume(rest.Shape()) <= faceArea * g + 1e-9;
+    return rest.IsDone() && gapVolume(rest.Shape()) <= faceArea * g + 1e-9;
 }
 
 /// FreeCAD-CH ops#1041: \a copy, an adding copy of a pattern with Reapply on, with every narrow
@@ -2610,7 +2620,7 @@ Part::TopoShape closeNarrowGaps(const Part::TopoShape& copy, const Part::TopoSha
     if (shape.IsNull()) {
         return copy;
     }
-    out.rigidVolume = solidVolume(shape);
+    out.rigidVolume = gapVolume(shape);
     if (part.isNull() || !FeatureAddSub::shapesTouch(shape, part.getShape())) {
         return copy;
     }
@@ -2662,8 +2672,14 @@ Part::TopoShape closeNarrowGaps(const Part::TopoShape& copy, const Part::TopoSha
     catch (const Base::Exception&) {
         closed = Part::TopoShape();
     }
+    if (!closed.isNull()) {
+        // fab1041g (notes/gasket-fuse-1041.md 3): refined, so the buried flat side's boundary
+        // edges, a hair off the wall, leave the copy; left in, they and a neighbour's edges merge
+        // under the fuse's fuzzy value and the pattern's fuse gives no solid
+        closed = closed.makeElementRefine(nullptr, Part::RefineFail::shapeUntouched);
+    }
     if (closed.isNull() || gapSolids(closed.getShape()) != 1
-        || solidVolume(closed.getShape()) < out.rigidVolume * (1.0 - 1e-9)) {
+        || gapVolume(closed.getShape()) < out.rigidVolume * (1.0 - 1e-9)) {
         out.unsound = true;
         return copy;
     }
@@ -2828,8 +2844,8 @@ App::DocumentObjectExecReturn* Transformed::execute()
         if (!gapsClosed) {
             return std::string();
         }
-        const double was = solidVolume(before.getShape());
-        const double gain = solidVolume(after.getShape()) - was;
+        const double was = gapVolume(before.getShape());
+        const double gain = gapVolume(after.getShape()) - was;
         if (Feature::countSolids(after.getShape(), TopAbs_SHELL)
                 == Feature::countSolids(before.getShape(), TopAbs_SHELL)
             && gain <= gapRigid + gapAllowance + 1e-6 * was) {
