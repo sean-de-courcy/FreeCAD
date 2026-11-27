@@ -2095,7 +2095,7 @@ struct GapClosing
     bool closed = false;    ///< slabs were added
     bool unsound = false;   ///< a face qualified but no sound slab was made for it (R5a)
     double rigidVolume = 0.0;  ///< the copy's volume before closing
-    double allowance = 0.0;    ///< the closed faces' area x g, summed (step 6's bound)
+    double allowance = 0.0;    ///< the closed slabs' empty space, summed (step 6's bound)
 };
 
 /// The part measured against: one classifier per solid and one ray caster
@@ -2576,10 +2576,12 @@ TopoDS_Shape gapSlab(const TopoDS_Face& face,
 }
 
 /// Section 4 step 4: the slab's face on \a face's surface is \a face in area; its farFaces face lies
-/// wholly inside the part; the slab less the part holds no more than the face's area x g
+/// wholly inside the part; the slab less the part is the gap only (below). \a empty receives that
+/// empty space's volume (step 6's allowance)
 bool gapSlabSound(const TopoDS_Shape& slab, const TopoDS_Face& face, const TopoDS_Shape& part,
-                  double g, double depth)
+                  double depth, double& empty)
 {
+    empty = 0.0;
     const Handle(Geom_Surface) surface = BRep_Tool::Surface(face);
     const double sign = face.Orientation() == TopAbs_REVERSED ? -1.0 : 1.0;
     double nearArea = 0.0;
@@ -2619,16 +2621,21 @@ bool gapSlabSound(const TopoDS_Shape& slab, const TopoDS_Face& face, const TopoD
     if (!outside.IsDone() || gapHasFace(outside.Shape())) {
         return false;
     }
+    // review pr1041-r5 L1: no bound by the face's area x g. The slab ends on the neighbours'
+    // surfaces, so its empty space exceeds area x g wherever a neighbour isn't square to the face
+    // or the face is concave: an estimate that refused gaps rule 3 closes. The tests below confine
+    // the empty space to the gap
     FCBRepAlgoAPI_Cut rest(slab, part);
-    if (!rest.IsDone() || gapVolume(rest.Shape()) > faceArea * g + 1e-9) {
+    if (!rest.IsDone()) {
         return false;
     }
+    empty = gapVolume(rest.Shape());
     // Only the gap is closed (reviews pr1041-r1 T1, a slot in the wall between the samples;
     // pr1041-r2 T1 and pr1041-r3 T1/T2, voids behind a skin of the wall, beyond and within T_gap).
     // The slab's empty space is the gap only: each of its solids touches the face (a void behind a
     // skin of the part never does), and none reaches past T_gap (the face's surface moved T_gap
-    // outwards meets none of it: a slot open to the gap, however thin). Else the slab is refused
-    // and the copy stays rigid with R5a's warning
+    // outwards meets none of it: a slot open to the gap, however thin). Else the slab is refused:
+    // an error on the pattern (R5a as the design's literal stop)
     for (TopExp_Explorer piece(rest.Shape(), TopAbs_SOLID); piece.More(); piece.Next()) {
         BRepExtrema_DistShapeShape touch(piece.Current(), face);
         if (!touch.IsDone() || touch.Value() > 1e-6) {
@@ -2692,14 +2699,16 @@ Part::TopoShape closeNarrowGaps(const Part::TopoShape& copy, const Part::TopoSha
         }
         const double depth = g + margin;
         TopoDS_Shape slab;
+        double empty = 0.0;
+        double emptyNow = 0.0;
         try {
             slab = gapSlab(face, edgeFaces, depth);
             // review pr1041-r4 T2: on the instance-by-instance path the part has moved on (an
             // earlier original of this instance, a pocket, may have cut where the slab goes): the
             // slab must be sound against that part too
-            if (slab.IsNull() || !gapSlabSound(slab, face, part.getShape(), g, depth)
+            if (slab.IsNull() || !gapSlabSound(slab, face, part.getShape(), depth, empty)
                 || (now && !now->isNull() && !now->getShape().IsSame(part.getShape())
-                    && !gapSlabSound(slab, face, now->getShape(), g, depth))) {
+                    && !gapSlabSound(slab, face, now->getShape(), depth, emptyNow))) {
                 slab.Nullify();
             }
         }
@@ -2711,7 +2720,8 @@ Part::TopoShape closeNarrowGaps(const Part::TopoShape& copy, const Part::TopoSha
             continue;
         }
         sources.emplace_back(slab);
-        allowance += gapArea(face) * g;
+        // step 6: what the slab fills, measured (review pr1041-r5 L1: area x g is an estimate)
+        allowance += std::max(empty, emptyNow);
     }
     if (sources.size() == 1) {
         return copy;

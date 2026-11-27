@@ -828,6 +828,80 @@ class PatternGapCloseCases:
         self.assertFalse(shape.isInside(V(10.003, 5.15, 2.5), 1e-7, True))
         self.assertTrue(shape.isInside(V(9.997, 3.5, 2.5), 1e-7, True))
 
+    def gapRow(self, gap, slant=0.0, concave=False):
+        """slotRow's plate, a copy (LinearPattern of 2, length 6, Reapply on) whose +x face stands a constant `gap` off
+        the wall. Flat: the face on x = 10 - gap, y 2 .. 4, its +y side face slanting by `slant` over its 2 or so
+        (under 90 deg to the face). Concave: the face a cylinder of radius 5 + gap around the wall's convex cylinder
+        of radius 5 about (15, 3)"""
+        def seg(a, b):
+            return Part.LineSegment(V(*a, 0), V(*b, 0))
+
+        length = 6.0
+        body = self.doc.addObject("PartDesign::Body", "Body")
+        sk = planeSketch(body, "PlateSketch")
+        sk.addGeometry([seg((0, 0), (20, 0)), seg((20, 0), (20, 6)), seg((20, 6), (0, 6)), seg((0, 6), (0, 0))], False)
+        plate = body.newObject("PartDesign::Pad", "Plate")
+        plate.Profile = sk
+        plate.Length = 2
+        sk = planeSketch(body, "WallSketch", 2)
+        if concave:
+            beta = math.asin(2.0 / 5.0)
+            x = 15 - 5 * math.cos(beta)
+            arc = Part.ArcOfCircle(Part.Circle(V(15, 3, 0), V(0, 0, 1), 5), math.pi - beta, math.pi + beta)
+            sk.addGeometry([arc, seg((x, 1), (12, 1)), seg((12, 1), (12, 5)), seg((12, 5), (x, 5))], False)
+        else:
+            sk.addGeometry([seg((10, 1), (12, 1)), seg((12, 1), (12, 5)), seg((12, 5), (10, 5)), seg((10, 5), (10, 1))],
+                           False)
+        wall = body.newObject("PartDesign::Pad", "Wall")
+        wall.Profile = sk
+        wall.Length = 4
+        sk = planeSketch(body, "SeedSketch", 2)
+        if concave:
+            r = 5 + gap
+            alpha = math.asin(1.0 / r)
+            x = 15 - length - r * math.cos(alpha)
+            arc = Part.ArcOfCircle(Part.Circle(V(15 - length, 3, 0), V(0, 0, 1), r), math.pi - alpha, math.pi + alpha)
+            sk.addGeometry([arc, seg((x, 2), (2, 2)), seg((2, 2), (2, 4)), seg((2, 4), (x, 4))], False)
+        else:
+            x = 10 - gap - length
+            sk.addGeometry([seg((2, 2), (x, 2)), seg((x, 2), (x, 4)), seg((x, 4), (2, 4 - slant)), seg((2, 4 - slant), (2, 2))],
+                           False)
+        seed = body.newObject("PartDesign::Pad", "Seed")
+        seed.Profile = sk
+        seed.Length = 1
+        self.doc.recompute()
+        pat = body.newObject("PartDesign::LinearPattern", "Row")
+        pat.Originals = [seed]
+        pat.Direction = ([o for o in body.Origin.OriginFeatures if o.Role == "X_Axis"][0], [""])
+        pat.Length = length
+        pat.Occurrences = 2
+        pat.Reapply = True
+        pat.Refine = True
+        body.Tip = pat
+        self.doc.recompute()
+        return seed, pat
+
+    def testC25ConstantGapSlantedNeighbourCloses(self):
+        """Review pr1041-r5 L1: a face a constant 0.006 off the wall, its +y side face at about 83 and 89.9 deg to it:
+        the slab, bounded by that side's plane, holds more than the face's area x g; the gap is closed. Control: the
+        side square to the face"""
+        for slant in (0.25, 0.0025, 0.0):
+            seed, pat = self.gapRow(0.006, slant=slant)
+            shape = self.assertBuilds(pat)
+            self.assertTrue(shape.isInside(V(9.997, 3.0, 2.5), 1e-7, True), slant)
+            App.closeDocument(self.doc.Name)
+            self.doc = App.newDocument("PartDesignTestPatternRules")
+
+    def testC26ConcaveFaceAroundConvexWallCloses(self):
+        """Review pr1041-r5 L1: a concave cylindrical face 0.006 and 0.002 around a convex wall of radius 5: the gap is
+        closed (its slab, ending on the square side faces' planes, holds more than area x g)"""
+        for gap in (0.006, 0.002):
+            seed, pat = self.gapRow(gap, concave=True)
+            shape = self.assertBuilds(pat)
+            self.assertTrue(shape.isInside(V(10.0 - gap / 2, 3.0, 2.5), 1e-7, True), gap)
+            App.closeDocument(self.doc.Name)
+            self.doc = App.newDocument("PartDesignTestPatternRules")
+
     def testC22VoidBehindSkinAnySize(self):
         """Review pr1041-r3 T1 and T2: a void behind a skin is never filled, however small (8.1e-5, wholly beyond
         T_gap) and however near (behind a skin 0.001 thick, within T_gap of the face): the literal stop, as C21"""
