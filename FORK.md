@@ -552,7 +552,8 @@ names it.
 | `fix/i1071-loft-pairing` | fix | ops#1071 | - | open | `99059a9fc5` (fork PR 556), 2026-11-26 | never (fork fix): unconnected lofts with unequal vertex counts pair from Onshape's start pair |
 | `fix/i1045-prism-preference` | fix | ops#1045 | - | open | `4ec0a989c8` (fork PR 554), 2026-11-26 | carries `fix/i1045-extruded-wall-coverage` (fork PR 553, closed): rounds of a straight edge on a wall extruded along it by the exact construction, then preferred to OCCT's; drop when upstream rounds a straight edge on an extruded wall as an exact cylinder |
 | `fix/i1044-refine-cb` | fix | ops#1044 | - | open | `397c1b3e3b` (fork PR 552), 2026-11-26 | drop if upstream's refine merges reversed B-spline walls and updates every merged pair after sewing |
-| `fix/i1073-solid-forward` | fix | ops#1073 | - | open | (fork PR 557) | never (fork fix): loft and pipe solids are Forward |
+| `fix/i1073-solid-forward` | fix | ops#1073 | - | open | `955702c064` (fork PR 557), 2026-11-26 | never (fork fix): loft and pipe solids are Forward |
+| `fix/i1040-vertex-k2` | fix | ops#1040, ops#898 | - | `integration` `955702c064` | (fork PR 551) | never (fork fix): fillets and chamfers at a vertex of 4 or 6 edges where the wall's face runs on below the floor straight down (C), a merged face rises behind the floor only past the tool's reach (D), or a groove's two cusp faces are pieces of the wall's plane (A); a straight edge's round whose end runs into material past its end face (L); a concave arc's cusp end against a plane end face (P) |
 
 ## Fork-only commits in carried topics
 
