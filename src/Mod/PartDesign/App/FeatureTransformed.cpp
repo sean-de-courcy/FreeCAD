@@ -2100,9 +2100,46 @@ struct GapProbe
             solids.push_back(std::make_unique<BRepClass3d_SolidClassifier>(it.Current()));
         }
         rays.Load(part, tol);
+        sides.Load(part, tol);
     }
-    /// IN, ON (within the tolerance) or OUT of the part
-    TopAbs_State state(const gp_Pnt& p)
+    /// IN, ON (within the tolerance) or OUT of the part, read from the nearest crossing of the line through \a p
+    /// along \a dir: a solid classifier costs about 20 ms a point on a part with B-spline faces (the gasket, 11-26),
+    /// a line about 0.2 ms. The classifier decides only where the line meets nothing near or grazes the part
+    TopAbs_State state(const gp_Pnt& p, const gp_Dir& dir)
+    {
+        constexpr double reach = 1.0;
+        sides.Perform(gp_Lin(p, dir), -reach, reach);
+        if (sides.IsDone() && sides.NbPnt() > 0) {
+            int nearest = 1;
+            for (int i = 2; i <= sides.NbPnt(); ++i) {
+                if (std::abs(sides.WParameter(i)) < std::abs(sides.WParameter(nearest))) {
+                    nearest = i;
+                }
+            }
+            const double t = sides.WParameter(nearest);
+            if (std::abs(t) <= tolerance) {
+                return TopAbs_ON;
+            }
+            const TopoDS_Face& face = sides.Face(nearest);
+            BRepAdaptor_Surface surface(face);
+            BRepLProp_SLProps props(surface, sides.UParameter(nearest), sides.VParameter(nearest), 1,
+                                    Precision::Confusion());
+            if (props.IsNormalDefined()) {
+                gp_Dir normal = props.Normal();
+                if (face.Orientation() == TopAbs_REVERSED) {
+                    normal.Reverse();
+                }
+                const double along = normal.Dot(dir);
+                if (std::abs(along) > 1e-3) {
+                    // the line leaves the part at that crossing where it runs along the part's outward normal
+                    const bool leaves = along > 0.0;
+                    return (t > 0.0) == leaves ? TopAbs_IN : TopAbs_OUT;
+                }
+            }
+        }
+        return classified(p);
+    }
+    TopAbs_State classified(const gp_Pnt& p)
     {
         bool on = false;
         for (auto& solid : solids) {
@@ -2119,6 +2156,7 @@ struct GapProbe
     Bnd_Box box;
     std::vector<std::unique_ptr<BRepClass3d_SolidClassifier>> solids;
     IntCurvesFace_ShapeIntersector rays;
+    IntCurvesFace_ShapeIntersector sides;
 };
 
 /// The point and outward normal of \a face at (u, v); false where no normal is defined
@@ -2249,7 +2287,7 @@ GapVerdict measureGap(const TopoDS_Face& face,
         if (!gapPointNormal(surface, uv.X(), uv.Y(), p, n)) {
             continue;
         }
-        const TopAbs_State state = part.state(p);
+        const TopAbs_State state = part.state(p, n);
         if (state != TopAbs_OUT) {
             continue;  // on the part, or inside it (d < 0)
         }
@@ -2294,7 +2332,12 @@ GapVerdict measureGap(const TopoDS_Face& face,
         const auto otherSamples = gapEdgeSamples(other, edge, otherSurface);
         if (otherSamples.empty()
             || std::ranges::any_of(otherSamples, [&](const gp_Pnt2d& uv) {
-                   return part.state(otherSurface.Value(uv.X(), uv.Y())) == TopAbs_OUT;
+                   gp_Pnt q;
+                   gp_Dir m;
+                   if (!gapPointNormal(otherSurface, uv.X(), uv.Y(), q, m)) {
+                       return part.classified(otherSurface.Value(uv.X(), uv.Y())) == TopAbs_OUT;
+                   }
+                   return part.state(q, m) == TopAbs_OUT;
                })) {
             continue;
         }
@@ -2446,61 +2489,65 @@ TopoDS_Shape gapSlab(const TopoDS_Face& face,
             }
         }
     }
+    if (neighbours.empty()) {
+        return slab;
+    }
+    // One split by every neighbour's widened surface, then the pieces on the copy's side of all of them
+    BRepAlgoAPI_Splitter splitter;
+    TopTools_ListOfShape arguments;
+    TopTools_ListOfShape tools;
+    arguments.Append(slab);
     for (const TopoDS_Face& other : neighbours) {
         const TopoDS_Face cutter = gapWidened(other, 8.0 * depth + 1.0);
         if (cutter.IsNull()) {
             return {};
         }
-        BRepAlgoAPI_Splitter splitter;
-        TopTools_ListOfShape arguments;
-        TopTools_ListOfShape tools;
-        arguments.Append(slab);
         tools.Append(cutter);
-        splitter.SetArguments(arguments);
-        splitter.SetTools(tools);
-        splitter.Build();
-        if (!splitter.IsDone()) {
-            return {};
-        }
+    }
+    splitter.SetArguments(arguments);
+    splitter.SetTools(tools);
+    splitter.Build();
+    if (!splitter.IsDone()) {
+        return {};
+    }
+    const auto copySide = [&](const TopoDS_Face& other, const gp_Pnt& centre) {
         const Handle(Geom_Surface) otherSurface = BRep_Tool::Surface(other);
-        const double otherSign = other.Orientation() == TopAbs_REVERSED ? -1.0 : 1.0;
-        std::vector<TopoDS_Shape> kept;
-        for (TopExp_Explorer piece(splitter.Shape(), TopAbs_SOLID); piece.More(); piece.Next()) {
-            GProp_GProps props;
-            BRepGProp::VolumeProperties(piece.Current(), props);
-            const gp_Pnt centre = props.CentreOfMass();
-            GeomAPI_ProjectPointOnSurf onOther(centre, otherSurface);
-            if (onOther.NbPoints() == 0) {
-                continue;
-            }
-            double u = 0.0, v = 0.0;
-            onOther.LowerDistanceParameters(u, v);
-            GeomLProp_SLProps props2(otherSurface, u, v, 1, Precision::Confusion());
-            if (!props2.IsNormalDefined()) {
-                continue;
-            }
-            const gp_Vec outward = gp_Vec(props2.Normal()) * otherSign;
-            if (gp_Vec(props2.Value(), centre).Dot(outward) < 0.0) {
-                kept.push_back(piece.Current());
-            }
+        GeomAPI_ProjectPointOnSurf onOther(centre, otherSurface);
+        if (onOther.NbPoints() == 0) {
+            return false;
         }
-        if (kept.empty()) {
-            return {};
+        double u = 0.0, v = 0.0;
+        onOther.LowerDistanceParameters(u, v);
+        GeomLProp_SLProps props(otherSurface, u, v, 1, Precision::Confusion());
+        if (!props.IsNormalDefined()) {
+            return false;
         }
-        if (kept.size() == 1) {
-            slab = kept.front();
-        }
-        else {
-            // Pieces on one side of a single cutter are apart: a compound holds them
-            BRep_Builder builder;
-            TopoDS_Compound pieces;
-            builder.MakeCompound(pieces);
-            for (const TopoDS_Shape& piece : kept) {
-                builder.Add(pieces, piece);
-            }
-            slab = pieces;
+        const double sign = other.Orientation() == TopAbs_REVERSED ? -1.0 : 1.0;
+        return gp_Vec(props.Value(), centre).Dot(gp_Vec(props.Normal()) * sign) < 0.0;
+    };
+    std::vector<TopoDS_Shape> kept;
+    for (TopExp_Explorer piece(splitter.Shape(), TopAbs_SOLID); piece.More(); piece.Next()) {
+        GProp_GProps props;
+        BRepGProp::VolumeProperties(piece.Current(), props);
+        const gp_Pnt centre = props.CentreOfMass();
+        if (std::ranges::all_of(neighbours, [&](const TopoDS_Face& other) { return copySide(other, centre); })) {
+            kept.push_back(piece.Current());
         }
     }
+    if (kept.empty()) {
+        return {};
+    }
+    if (kept.size() == 1) {
+        return kept.front();
+    }
+    // Pieces kept apart by the cuts: a compound holds them
+    BRep_Builder builder;
+    TopoDS_Compound pieces;
+    builder.MakeCompound(pieces);
+    for (const TopoDS_Shape& piece : kept) {
+        builder.Add(pieces, piece);
+    }
+    slab = pieces;
     return slab;
 }
 
