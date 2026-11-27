@@ -2606,7 +2606,32 @@ bool gapSlabSound(const TopoDS_Shape& slab, const TopoDS_Face& face, const TopoD
         return false;
     }
     FCBRepAlgoAPI_Cut rest(slab, part);
-    return rest.IsDone() && gapVolume(rest.Shape()) <= faceArea * g + 1e-9;
+    if (!rest.IsDone() || gapVolume(rest.Shape()) > faceArea * g + 1e-9) {
+        return false;
+    }
+    // Rule 3a exactly, not only at the samples (review pr1041-r1 T1: a slot in the wall between
+    // the samples was filled): the face's surface moved T_gap outwards meets no empty space of the
+    // slab, so nothing farther than T_gap in front of the face is closed
+    const TopoDS_Face widened = gapWidened(face, 4.0 * depth);
+    if (widened.IsNull()) {
+        return false;
+    }
+    const TopoDS_Shape level = Part::TopoShape(widened)
+                                   .makeElementOffset(
+                                       sign * gapLimit,
+                                       1e-7,
+                                       false,
+                                       false,
+                                       0,
+                                       Part::JoinType::arc,
+                                       Part::FillType::noFill
+                                   )
+                                   .getShape();
+    if (level.IsNull()) {
+        return false;
+    }
+    FCBRepAlgoAPI_Common beyond(level, rest.Shape());
+    return beyond.IsDone() && gapArea(beyond.Shape()) <= 1e-6 * faceArea;
 }
 
 /// FreeCAD-CH ops#1041: \a copy, an adding copy of a pattern with Reapply on, with every narrow

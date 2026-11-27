@@ -630,3 +630,63 @@ class TestPatternGapClose(unittest.TestCase):
             self.assertNotIn("SurfaceOfExtrusion", kinds(shape))
             App.closeDocument(self.doc.Name)
             self.doc = App.newDocument("TestPatternGapClose")
+
+    # -- C20: rule 3a holds between the samples (review pr1041-r1 T1) -----------------------------
+
+    def slotRow(self, slot):
+        """A block's copy (LinearPattern, Reapply on) whose +x face slants from 0.0005 to 0.008 off a wall; with
+        `slot`, a slot 0.006 deep in the wall in front of the face, between the face's samples (y 2.525 to 2.565)"""
+        def poly(points):
+            return [Part.LineSegment(V(*a, 0), V(*b, 0)) for a, b in zip(points, points[1:] + points[:1])]
+
+        def box(x0, y0, x1, y1):
+            return poly([(x0, y0), (x1, y0), (x1, y1), (x0, y1)])
+
+        body = self.doc.addObject("PartDesign::Body", "Body")
+        for name, geo, z, length, kind in (("Plate", box(0, 0, 20, 10), 0, 2, "Pad"),
+                                           ("Wall", box(10, 0, 12, 10), 2, 3, "Pad")):
+            sk = planeSketch(body, name + "Sketch", z)
+            sk.addGeometry(geo, False)
+            feat = body.newObject("PartDesign::" + kind, name)
+            feat.Profile = sk
+            feat.Length = length
+        if slot:
+            sk = planeSketch(body, "SlotSketch", 5)
+            sk.addGeometry(box(10, 2.525, 10.006, 2.565), False)
+            pocket = body.newObject("PartDesign::Pocket", "Slot")
+            pocket.Profile = sk
+            pocket.Length = 2.9
+        sk = planeSketch(body, "SeedSketch", 2)
+        sk.addGeometry(poly([(2, 2), (4, 2), (3.9925, 4), (2, 4)]), False)
+        seed = body.newObject("PartDesign::Pad", "Seed")
+        seed.Profile = sk
+        seed.Length = 1
+        self.doc.recompute()
+        pat = body.newObject("PartDesign::LinearPattern", "Row")
+        pat.Originals = [seed]
+        pat.Direction = ([o for o in body.Origin.OriginFeatures if o.Role == "X_Axis"][0], [""])
+        pat.Length = 5.9995
+        pat.Occurrences = 2
+        pat.Reapply = True
+        pat.Refine = True
+        body.Tip = pat
+        self.doc.recompute()
+        return seed, pat
+
+    def testC20SlotBetweenSamples(self):
+        # in front of the slot the wall is 0.0065 to 0.0145 away, over T_gap where the gap exceeds 0.002375:
+        # the face is not closed (rule 3a), the copy stays rigid with R5a's warning, the slot stays empty
+        seed, pat = self.slotRow(True)
+        self.assertTrue(pat.isValid(), pat.getStatusString())
+        shape = pat.Shape
+        self.assertEqual(len(shape.Solids), 1)
+        self.assertIn("wasn't closed", pat.getStatusString())
+        self.assertAlmostEqual(self.added(shape, seed), 3.9925, delta=1e-6)
+        self.assertFalse(shape.isInside(V(10.003, 2.545, 2.5), 1e-7, True))
+        self.assertFalse(shape.isInside(V(9.999, 2.545, 2.5), 1e-7, True))
+        App.closeDocument(self.doc.Name)
+        self.doc = App.newDocument("TestPatternGapClose")
+        # control: no slot, the face is closed (the gap is material)
+        seed, pat = self.slotRow(False)
+        shape = self.assertBuilds(pat)
+        self.assertTrue(shape.isInside(V(9.999, 2.545, 2.5), 1e-7, True))
