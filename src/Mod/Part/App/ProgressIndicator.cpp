@@ -80,6 +80,7 @@
 
 #include <initializer_list>
 
+#include <BRepAdaptor_Surface.hxx>
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepCheck_Edge.hxx>
 #include <BRepCheck_Face.hxx>
@@ -88,6 +89,7 @@
 #include <BRepCheck_Solid.hxx>
 #include <BRepCheck_Vertex.hxx>
 #include <BRepCheck_Wire.hxx>
+#include <BRepLib_MakePolygon.hxx>
 #include <BRepTools.hxx>
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
@@ -2261,13 +2263,56 @@ bool faceValidByParts(const TopoDS_Face& face)
         boxes.push_back({b.u0 - margin, b.v0 - margin, b.u1 + margin, b.v1 + margin, k});
     }
     std::sort(boxes.begin(), boxes.end(), [](const Box& a, const Box& b) { return a.u0 < b.u0; });
+    // On a plane a pair's part holds a rectangle around the two holes as its outer wire, not the
+    // face's (ops#1103). The part only has to find two holes that cross, touch or nest, which
+    // OCCT finds between the holes alone; each hole already met the real outer wire in its batch.
+    // The real one was checked again from nothing in every pair's part (its edges projected onto
+    // the plane, its classifier): a plate of 900 holes with a 1000-edge outline took 190 s.
+    // Other surfaces keep the real outer wire (a rectangle in the parameters is not one there).
+    const bool onPlane = BRepAdaptor_Surface(face, Standard_False).GetType() == GeomAbs_Plane;
+    const Handle(Geom_Surface) surface = BRep_Tool::Surface(face);  // located, as the holes
+    auto pairValid = [&](const Box& a, const Box& b) {
+        const TopoDS_Shape& first = holes[a.hole];
+        const TopoDS_Shape& second = holes[b.hole];
+        if (!onPlane || surface.IsNull()) {
+            return partValid(face, {&outer, &first, &second});
+        }
+        double bu0 = std::min(a.u0, b.u0);
+        double bv0 = std::min(a.v0, b.v0);
+        double bu1 = std::max(a.u1, b.u1);
+        double bv1 = std::max(a.v1, b.v1);
+        // Wide enough that the rectangle never touches a hole: a tenth of the pair's span
+        const double grow = std::max(0.1 * std::hypot(bu1 - bu0, bv1 - bv0), margin);
+        bu0 -= grow;
+        bv0 -= grow;
+        bu1 += grow;
+        bv1 += grow;
+        // Counter-clockwise in (u, v): the outer wire of the face's own TShape. BRep_Builder::Add
+        // composes a wire with the face's orientation, so a reversed face (a solid's bottom) gets
+        // it reversed, or it is stored clockwise and reads as a hole
+        BRepLib_MakePolygon polygon(
+            surface->Value(bu0, bv0),
+            surface->Value(bu1, bv0),
+            surface->Value(bu1, bv1),
+            surface->Value(bu0, bv1),
+            Standard_True
+        );
+        if (!polygon.IsDone()) {
+            return partValid(face, {&outer, &first, &second});
+        }
+        TopoDS_Shape box = polygon.Wire();
+        if (face.Orientation() == TopAbs_REVERSED) {
+            box.Reverse();
+        }
+        return partValid(face, {&box, &first, &second});
+    };
     for (std::size_t a = 0; a < boxes.size(); ++a) {
         for (std::size_t b = a + 1; b < boxes.size() && boxes[b].u0 <= boxes[a].u1; ++b) {
             if (boxes[b].v0 > boxes[a].v1 || boxes[a].v0 > boxes[b].v1
                 || boxes[a].hole / holesPerPart == boxes[b].hole / holesPerPart) {
                 continue;  // apart, or checked together in their batch
             }
-            if (!partValid(face, {&outer, &holes[boxes[a].hole], &holes[boxes[b].hole]})) {
+            if (!pairValid(boxes[a], boxes[b])) {
                 return false;
             }
         }
