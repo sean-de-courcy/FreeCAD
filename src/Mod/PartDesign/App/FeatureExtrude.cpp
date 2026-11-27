@@ -49,6 +49,7 @@
 #include <BRepExtrema_DistShapeShape.hxx>
 #include <BRepGProp.hxx>
 #include <BRepIntCurveSurface_Inter.hxx>
+#include <IntCurvesFace_ShapeIntersector.hxx>
 #include <BRepProj_Projection.hxx>
 #include <BRepTools.hxx>
 #include <BRepFeat_MakePrism.hxx>
@@ -1769,35 +1770,89 @@ bool curvedFaceNearTool(const TopoDS_Shape& base, const TopoDS_Shape& tool, cons
 
 /// FreeCAD-CH ops#1101: whether the union's \a result (one solid) leaves out a point inside the
 /// cylinder (16 heights; the axis and 24 angles on 0.5, 0.9 and 0.99 of the radius, check c's
-/// inner points). A union holds its whole tool,
-/// so one point out is material the fuse lost: OCCT's fuse of a column through an elbow can be a
-/// valid solid that adds nothing, or part of the column (up to the slab's bottom, a column ending
-/// in the air under the elbow). Only the result is classified, never the base
+/// inner points: 1168). A union holds its whole tool, so one point out is material the fuse lost:
+/// OCCT's fuse of a column through an elbow can be a valid solid that adds nothing, or part of the
+/// column (up to the slab's bottom, a column ending in the air under the elbow, a void or a shelf
+/// under it); the lost part can miss the axis (up to first on H keeps the axis, loses the rest).
+///
+/// This runs on every union of a plain cylinder that overlaps its base next to a curved face, and
+/// its usual answer is "nothing lost", so it must cost little: a point classification walks the
+/// whole result (2.3 s each on a 14728-face part; review pr1086-r1: 1168 of them cost 15-40 s per
+/// Pad next to tori and pushed a 64-torus part past the time limit). So each of the 73 lines
+/// parallel to the axis through the sample positions is intersected with the result's faces once
+/// (box-filtered): a point is inside exactly when an odd number of crossings lie beyond it on its
+/// line. A crossing on a face's boundary, a tangent one, or one within 1e-6 of a sample's height
+/// makes that line's parity unsafe: then its 16 points are classified one by one. A rung the ladder
+/// keeps is still checked at check c's 2178 points. Only the result is looked at, never the base
 bool missesToolInterior(const TopoDS_Shape& result, const PlainCylinder& cylinder)
 {
     if (solidCount(result) != 1) {
         return false;
     }
-    BRepClass3d_SolidClassifier inResult(firstSolid(result));
+    const TopoDS_Shape solid = firstSolid(result);
+    const double h = cylinder.height;
+    const double slack = 1e-6 * std::max(1.0, h);
+    auto height = [&](int k) {
+        return h * (k - 0.5) / 16.0;
+    };
     const gp_Vec x(cylinder.seam);
     const gp_Vec y(cylinder.axis.Crossed(cylinder.seam));
     const gp_Vec up(cylinder.axis);
-    auto out = [&](const gp_Pnt& p) {
-        inResult.Perform(p, 1e-7);
-        return inResult.State() == TopAbs_OUT;
-    };
-    for (int k = 1; k <= 16; ++k) {
-        const gp_Pnt centre = cylinder.origin.Translated(cylinder.height * (k - 0.5) / 16.0 * up);
-        if (out(centre)) {
-            return true;
+    std::vector<gp_Vec> offsets {gp_Vec(0.0, 0.0, 0.0)};
+    for (double rho : {0.5, 0.9, 0.99}) {
+        for (int j = 0; j < 24; ++j) {
+            const double angle = (7.5 + 15.0 * j) * std::numbers::pi / 180.0;
+            offsets.push_back(rho * cylinder.radius * (std::cos(angle) * x + std::sin(angle) * y));
         }
-        for (double rho : {0.5, 0.9, 0.99}) {
-            for (int j = 0; j < 24; ++j) {
-                const double angle = (7.5 + 15.0 * j) * std::numbers::pi / 180.0;
-                const gp_Vec radial = rho * cylinder.radius * (std::cos(angle) * x + std::sin(angle) * y);
-                if (out(centre.Translated(radial))) {
-                    return true;
+    }
+    IntCurvesFace_ShapeIntersector lines;
+    bool loaded = true;
+    try {
+        lines.Load(solid, 1e-7);
+    }
+    catch (const Standard_Failure&) {
+        loaded = false;
+    }
+    std::optional<BRepClass3d_SolidClassifier> inResult;
+    for (const gp_Vec& offset : offsets) {
+        const gp_Pnt start = cylinder.origin.Translated(offset);
+        std::vector<double> crossings;
+        bool safe = loaded;
+        if (safe) {
+            try {
+                lines.Perform(gp_Lin(start, cylinder.axis), -Precision::Infinite(), Precision::Infinite());
+                safe = lines.IsDone();
+                for (int i = 1; safe && i <= lines.NbPnt(); ++i) {
+                    const double w = lines.WParameter(i);
+                    safe = lines.State(i) == TopAbs_IN
+                        && lines.Transition(i) != IntCurveSurface_Tangent;
+                    for (int k = 1; safe && k <= 16; ++k) {
+                        safe = std::abs(w - height(k)) > slack;
+                    }
+                    crossings.push_back(w);
                 }
+            }
+            catch (const Standard_Failure&) {
+                safe = false;
+            }
+        }
+        for (int k = 1; k <= 16; ++k) {
+            bool out = false;
+            if (safe) {
+                const auto beyond = std::count_if(crossings.begin(), crossings.end(), [&](double w) {
+                    return w > height(k);
+                });
+                out = beyond % 2 == 0;
+            }
+            else {
+                if (!inResult) {
+                    inResult.emplace(solid);
+                }
+                inResult->Perform(start.Translated(height(k) * up), 1e-7);
+                out = inResult->State() == TopAbs_OUT;
+            }
+            if (out) {
+                return true;
             }
         }
     }

@@ -6770,6 +6770,47 @@ class TestPadColumnThroughElbow(unittest.TestCase):
             self.Doc = FreeCAD.newDocument("PartDesignTestPadColumnThroughElbow")
         self.assertEqual(results["off"], results[None])
 
+    def testRodThroughABellowsCostsLittle(self):
+        # Review pr1086-r1 (RodThroughBellows): ten tori (R 20, r 6) on the z axis 10 apart, fused,
+        # and a rod r 6 padded along z through their wall at x = 20, from z = -10 to 100. OCCT's
+        # one fuse is right here (the rod outside the tori, by the midpoint rule on the primitives:
+        # 1855.623), so the lost-material check runs to its end next to 18 curved faces: it must
+        # cost little (it once took 69 s here, and refused a 64-torus bellows at the time limit)
+        import time
+
+        V = FreeCAD.Vector
+        tori = [Part.makeTorus(20, 6, V(0, 0, 10 * k), V(0, 0, 1)) for k in range(10)]
+        base = tori[0].fuse(tori[1:]).removeSplitter()
+        results = {}
+        for switch in ("off", None):
+            if switch:
+                os.environ["FREECAD_CH_SECTOR_RETRY"] = switch
+            else:
+                os.environ.pop("FREECAD_CH_SECTOR_RETRY", None)
+            feature = self.Doc.addObject("Part::Feature", "Base")
+            feature.Shape = base
+            body = self.Doc.addObject("PartDesign::Body", "Body")
+            body.BaseFeature = feature
+            self.Doc.recompute()
+            sketch = body.newObject("Sketcher::SketchObject", "Rod")
+            sketch.Placement = FreeCAD.Placement(V(20, 0, -10), FreeCAD.Rotation())
+            sketch.addGeometry(Part.Circle(V(0, 0, 0), V(0, 0, 1), 6))
+            pad = body.newObject("PartDesign::Pad", "Pad")
+            pad.Profile = sketch
+            pad.Length = 110
+            self.Doc.recompute()
+            started = time.process_time()
+            pad.touch()
+            self.Doc.recompute()
+            spent = time.process_time() - started
+            self.assertTrue(pad.isValid(), pad.getStatusString())
+            results[switch] = (round(pad.Shape.Volume - base.Volume, 6), spent)
+            FreeCAD.closeDocument(self.Doc.Name)
+            self.Doc = FreeCAD.newDocument("PartDesignTestPadColumnThroughElbow")
+        self.assertEqual(results["off"][0], results[None][0])
+        self.assertAlmostEqual(results[None][0], 1855.623, delta=0.2)
+        self.assertLess(results[None][1], 10 * results["off"][1] + 5.0)
+
     # --- names (test 6) -------------------------------------------------------------------------
 
     def testNamesSurviveAnEditAndAReopen(self):
