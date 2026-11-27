@@ -68,7 +68,7 @@ SQUARE = 40 * 40 * 10
 
 # -- FreeCAD-CH ops#1041: pattern copies' narrow gaps to the part closed ---------------------------
 # Pattern copies stay rigid, and a narrow gap between an adding copy and the part is closed
-# (FreeCAD-CH ops#1041; ops repo notes/pattern-gap-close-1041-design.md, tests C1-C21). Mixed into TestPatternRules (its setUp and tearDown).
+# (FreeCAD-CH ops#1041; ops repo notes/pattern-gap-close-1041-design.md, tests C1-C22). Mixed into TestPatternRules (its setUp and tearDown).
 #
 # Onshape (RB120, RB143, RB151, RB152, RB156, RB157, RB158): a FEATURE pattern's copy is the seed's
 # tool moved, never re-derived; with Reapply on, a copy's face that stands at most about 0.00825 off
@@ -157,7 +157,7 @@ def lensSketch(body, name, small, big, z=FL_H, rotation=None):
 
 
 class PatternGapCloseCases:
-    """ops#1041's cases (C1-C21), run as TestPatternRules' own"""
+    """ops#1041's cases (C1-C22), run as TestPatternRules' own"""
 
     # -- models ----------------------------------------------------------------------------------
 
@@ -687,6 +687,8 @@ class PatternGapCloseCases:
 
     SLOT_BETWEEN = (10, 2.525, 10.006, 2.565)  # open to the gap, 0.006 deep, between the face's samples
     SLOT_BEHIND = (10.0065, 2.5, 10.011, 3.5)  # a void behind a skin 0.0065 thick, short of the slab's far face
+    SLOT_BEHIND_NARROW = (10.0065, 2.5, 10.011, 2.52)  # the same, 0.02 wide: 8.1e-5, wholly beyond T_gap
+    SLOT_BEHIND_NEAR = (10.001, 2.1, 10.005, 2.6)  # behind a skin 0.001 thick, 0.0015 to 0.0078 in front of the face
 
     def slotRow(self, slot):
         """A block's copy (LinearPattern, Reapply on) whose +x face slants from 0.0005 to 0.008 off a wall; with
@@ -758,6 +760,20 @@ class PatternGapCloseCases:
         self.assertFalse(shape.isInside(V(10.00875, 3.0, 2.5), 1e-7, True))
         self.assertFalse(shape.isInside(V(9.999, 3.0, 2.5), 1e-7, True))
         self.assertAlmostEqual(self.added(shape, seed), 3.9925, delta=1e-6)
+
+    def testC22VoidBehindSkinAnySize(self):
+        """Review pr1041-r3 T1 and T2: a void behind a skin is never filled, however small (8.1e-5, wholly beyond
+        T_gap) and however near (behind a skin 0.001 thick, within T_gap of the face): R5a, as C21"""
+        for slot, inside in ((self.SLOT_BEHIND_NARROW, V(10.00875, 2.51, 2.5)), (self.SLOT_BEHIND_NEAR, V(10.003, 2.35, 2.5))):
+            seed, pat = self.slotRow(slot)
+            self.assertTrue(pat.isValid(), pat.getStatusString())
+            shape = pat.Shape
+            self.assertEqual(len(shape.Solids), 1)
+            self.assertIn("wasn't closed", pat.getStatusString())
+            self.assertFalse(shape.isInside(inside, 1e-7, True), slot)
+            self.assertAlmostEqual(self.added(shape, seed), 3.9925, delta=1e-6)
+            App.closeDocument(self.doc.Name)
+            self.doc = App.newDocument("PartDesignTestPatternRules")
 
 
 class TestPatternRules(PatternGapCloseCases, unittest.TestCase):

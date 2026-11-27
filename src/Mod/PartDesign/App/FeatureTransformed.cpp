@@ -2617,13 +2617,18 @@ bool gapSlabSound(const TopoDS_Shape& slab, const TopoDS_Face& face, const TopoD
     if (!rest.IsDone() || gapVolume(rest.Shape()) > faceArea * g + 1e-9) {
         return false;
     }
-    // Only the gap is closed, not only at the samples (reviews pr1041-r1 T1, a slot in the wall
-    // between the samples, and pr1041-r2 T1, a void behind a thin skin of the wall, were filled;
-    // design rule 3: never anything wider than T_gap). The face's surface moved T_gap outwards
-    // meets no empty space of the slab (a slot open to the gap, however thin), and no empty space
-    // of the slab lies beyond it (a void behind a skin: up to 1 % of area x g and a 1e-6 sheet,
-    // above the cut's noise, 2e-7 on the tilted ring). Else the slab is refused, the copy stays
-    // rigid with R5a's warning
+    // Only the gap is closed (reviews pr1041-r1 T1, a slot in the wall between the samples;
+    // pr1041-r2 T1 and pr1041-r3 T1/T2, voids behind a skin of the wall, beyond and within T_gap).
+    // The slab's empty space is the gap only: each of its solids touches the face (a void behind a
+    // skin of the part never does), and none reaches past T_gap (the face's surface moved T_gap
+    // outwards meets none of it: a slot open to the gap, however thin). Else the slab is refused
+    // and the copy stays rigid with R5a's warning
+    for (TopExp_Explorer piece(rest.Shape(), TopAbs_SOLID); piece.More(); piece.Next()) {
+        BRepExtrema_DistShapeShape touch(piece.Current(), face);
+        if (!touch.IsDone() || touch.Value() > 1e-6) {
+            return false;
+        }
+    }
     const TopoDS_Face widened = gapWidened(face, 4.0 * depth);
     if (widened.IsNull()) {
         return false;
@@ -2639,16 +2644,11 @@ bool gapSlabSound(const TopoDS_Shape& slab, const TopoDS_Face& face, const TopoD
                                        Part::FillType::noFill
                                    )
                                    .getShape();
-    const TopoDS_Shape within = gapThickened(widened, sign * gapLimit);
-    if (level.IsNull() || within.IsNull()) {
+    if (level.IsNull()) {
         return false;
     }
     FCBRepAlgoAPI_Common atLevel(level, rest.Shape());
-    if (!atLevel.IsDone() || gapArea(atLevel.Shape()) > 1e-6 * faceArea) {
-        return false;
-    }
-    FCBRepAlgoAPI_Cut beyond(rest.Shape(), within);
-    return beyond.IsDone() && gapVolume(beyond.Shape()) <= 0.01 * faceArea * g + 1e-6 * faceArea;
+    return atLevel.IsDone() && gapArea(atLevel.Shape()) <= 1e-6 * faceArea;
 }
 
 /// FreeCAD-CH ops#1041: \a copy, an adding copy of a pattern with Reapply on, with every narrow
