@@ -351,6 +351,75 @@ class TestFilletVertexFolds(unittest.TestCase):
 # P: a stadium boss on a bar of its own width, each nose's foot arc ending tangent to the bar's sides, which drop below
 #    the floor: the plain revolved fill kept between the side planes (RB136: one torus per arc, nothing removed).
 
+    # ops#898 cause T (Case Base V2 #48 and eight more studios): a round past its floor into two walls that are
+    # tangent neighbours, each cutting the round by its own continuation along its own foot (Onshape RB6, RB20)
+    def fillet(self, shape, test, size):
+        body = self.doc.addObject("PartDesign::Body", "Body")
+        base = self.doc.addObject("Part::Feature", "Base")
+        base.Shape = shape
+        body.BaseFeature = base
+        self.doc.recompute()
+        names = ["Edge%d" % (i + 1) for i, e in enumerate(shape.Edges) if test(e)]
+        self.assertTrue(names)
+        feature = body.newObject("PartDesign::Fillet", "Fillet")
+        feature.Base = (body.Group[0], names)
+        feature.UseAllEdges = False
+        feature.Refine = True
+        feature.TangentPropagation = False
+        feature.Radius = size
+        self.doc.recompute()
+        return (feature.Shape if feature.isValid() else None), names
+
+    @staticmethod
+    def wall(shape, x):
+        """The area of the outer wall's plane face x = 0 (x) or y = 0."""
+        for face in shape.Faces:
+            if isinstance(face.Surface, Part.Plane) and all(
+                abs(v.Point.x if x else v.Point.y) < 1e-9 for v in face.Vertexes
+            ):
+                return face.Area
+        return 0.0
+
+    @staticmethod
+    def splines(shape):
+        return sum(f.Area for f in shape.Faces if isinstance(f.Surface, Part.BSplineSurface))
+
+    def testRoundPastAFloorIntoTangentNeighbourWalls(self):
+        """RB6's corner (blends 0.8, lip corners 1), the rim chain: T4 r 0.97 as before; T1 r 0.98 (6.7e-4 under
+        Onshape's: the scoop's sliver of growth under the round is not kept there); T2 r 0.999 (RB20); T3 r 1.0, where
+        each outer wall loses 0.765395, the blends, not the scoop, take the growth along their feet (2 x 0.516421 +
+        0.006414) and each lip corner takes a sphere."""
+        base = scoop_corner()
+        for size, area, within in ((0.97, -7.665097, 1e-4), (0.98, -7.740446, 1e-3), (0.999, -7.878888, 1e-4), (1.0, -7.886001, 1e-4)):
+            with self.subTest(size=size):
+                shape, names = self.fillet(base, rim_chain(1.0), size)
+                self.assertEqual(len(names), 6)
+                self.assertIsNotNone(shape)
+                self.assertTrue(shape.isValid())
+                self.assertEqual(len(shape.Solids), 1)
+                self.assertAlmostEqual(shape.Area - base.Area, area, delta=within)
+                if size == 1.0:
+                    self.assertAlmostEqual(self.wall(shape, True), self.wall(shape, False), delta=1e-6)
+                    self.assertAlmostEqual(self.wall(shape, True) - self.wall(base, True), -0.765395, delta=1e-4)
+                    self.assertAlmostEqual(self.splines(shape) - self.splines(base), 2 * 0.516421 + 0.006414, delta=1e-4)
+                    self.assertTrue(any(isinstance(f.Surface, Part.Sphere) for f in shape.Faces))
+
+    def testRoundPastTheLipCornersRadiusStaysRefused(self):
+        """T6: past the lip corners' radius Onshape fails (FILLET_FACE_RANGE_TOO_LARGE); so does the fork."""
+        shape, _ = self.fillet(scoop_corner(), rim_chain(1.0), 1.05)
+        self.assertIsNone(shape)
+
+    def testStripUnderAStraightBossIsCutByEachWall(self):
+        """RB137 T4 (draft 0): the plate's front top edge rounded r 1.5 past the 1-wide strip under the boss's plane
+        wall and its end cylinders: -19.003014. Drafted 15 deg (T2) the fork still refuses ("band crosses a hole or
+        pocket"), where Onshape builds -18.979252: debt, never silent."""
+        base = drafted_boss(0)
+        shape, _ = self.fillet(base, front_top, 1.5)
+        self.assertIsNotNone(shape)
+        self.assertAlmostEqual(shape.Volume - base.Volume, -19.003014, delta=1e-4)
+        shape, _ = self.fillet(drafted_boss(15), front_top, 1.5)
+        self.assertIsNone(shape)
+
 
 def handle_block(flush=False):
     """Block x 0..24, y 0..17, z 0..10; a handle r 7 along x through (y 8.5, z 10) on x = 24, 10 long. flush: only
@@ -520,78 +589,3 @@ def drafted_boss(draft):
 
 def front_top(edge):
     return on(edge, lambda p: abs(p.y) < 1e-9 and abs(p.z - 10) < 1e-9) and edge.Length > 39
-
-
-class TestFilletTangentNeighbourWalls(unittest.TestCase):
-    """ops#898 cause T (Case Base V2 #48 and eight more studios): a round past its floor into two walls that are
-    tangent neighbours, each cutting the round by its own continuation along its own foot (Onshape RB6, RB20)."""
-
-    setUp = TestFilletVertexEnds.setUp
-    tearDown = TestFilletVertexEnds.tearDown
-
-    def fillet(self, shape, test, size):
-        body = self.doc.addObject("PartDesign::Body", "Body")
-        base = self.doc.addObject("Part::Feature", "Base")
-        base.Shape = shape
-        body.BaseFeature = base
-        self.doc.recompute()
-        names = ["Edge%d" % (i + 1) for i, e in enumerate(shape.Edges) if test(e)]
-        self.assertTrue(names)
-        feature = body.newObject("PartDesign::Fillet", "Fillet")
-        feature.Base = (body.Group[0], names)
-        feature.UseAllEdges = False
-        feature.Refine = True
-        feature.TangentPropagation = False
-        feature.Radius = size
-        self.doc.recompute()
-        return (feature.Shape if feature.isValid() else None), names
-
-    @staticmethod
-    def wall(shape, x):
-        """The area of the outer wall's plane face x = 0 (x) or y = 0."""
-        for face in shape.Faces:
-            if isinstance(face.Surface, Part.Plane) and all(
-                abs(v.Point.x if x else v.Point.y) < 1e-9 for v in face.Vertexes
-            ):
-                return face.Area
-        return 0.0
-
-    @staticmethod
-    def splines(shape):
-        return sum(f.Area for f in shape.Faces if isinstance(f.Surface, Part.BSplineSurface))
-
-    def testRoundPastAFloorIntoTangentNeighbourWalls(self):
-        """RB6's corner (blends 0.8, lip corners 1), the rim chain: T4 r 0.97 as before; T1 r 0.98 (6.7e-4 under
-        Onshape's: the scoop's sliver of growth under the round is not kept there); T2 r 0.999 (RB20); T3 r 1.0, where
-        each outer wall loses 0.765395, the blends, not the scoop, take the growth along their feet (2 x 0.516421 +
-        0.006414) and each lip corner takes a sphere."""
-        base = scoop_corner()
-        for size, area, within in ((0.97, -7.665097, 1e-4), (0.98, -7.740446, 1e-3), (0.999, -7.878888, 1e-4), (1.0, -7.886001, 1e-4)):
-            with self.subTest(size=size):
-                shape, names = self.fillet(base, rim_chain(1.0), size)
-                self.assertEqual(len(names), 6)
-                self.assertIsNotNone(shape)
-                self.assertTrue(shape.isValid())
-                self.assertEqual(len(shape.Solids), 1)
-                self.assertAlmostEqual(shape.Area - base.Area, area, delta=within)
-                if size == 1.0:
-                    self.assertAlmostEqual(self.wall(shape, True), self.wall(shape, False), delta=1e-6)
-                    self.assertAlmostEqual(self.wall(shape, True) - self.wall(base, True), -0.765395, delta=1e-4)
-                    self.assertAlmostEqual(self.splines(shape) - self.splines(base), 2 * 0.516421 + 0.006414, delta=1e-4)
-                    self.assertTrue(any(isinstance(f.Surface, Part.Sphere) for f in shape.Faces))
-
-    def testRoundPastTheLipCornersRadiusStaysRefused(self):
-        """T6: past the lip corners' radius Onshape fails (FILLET_FACE_RANGE_TOO_LARGE); so does the fork."""
-        shape, _ = self.fillet(scoop_corner(), rim_chain(1.0), 1.05)
-        self.assertIsNone(shape)
-
-    def testStripUnderAStraightBossIsCutByEachWall(self):
-        """RB137 T4 (draft 0): the plate's front top edge rounded r 1.5 past the 1-wide strip under the boss's plane
-        wall and its end cylinders: -19.003014. Drafted 15 deg (T2) the fork still refuses ("band crosses a hole or
-        pocket"), where Onshape builds -18.979252: debt, never silent."""
-        base = drafted_boss(0)
-        shape, _ = self.fillet(base, front_top, 1.5)
-        self.assertIsNotNone(shape)
-        self.assertAlmostEqual(shape.Volume - base.Volume, -19.003014, delta=1e-4)
-        shape, _ = self.fillet(drafted_boss(15), front_top, 1.5)
-        self.assertIsNone(shape)
