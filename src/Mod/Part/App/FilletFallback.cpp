@@ -12856,7 +12856,17 @@ double overlapRunOnOf(
         double middle = (low + high) / 2;
         (inside(middle) ? high : low) = middle;
     }
-    const double run = 1.25 * high;
+    double run = 1.25 * high;
+    // ops#1114 A: where the section lies on the other wall's material side at the vertex already
+    // (an inside corner on an arc wall concave toward the floor, at a floor angle up to a little
+    // over 90 degrees; an acute corner at a boss), the bisection ends at nil. A real run on all
+    // the same, a quarter of the size as beyond `high` elsewhere, so that the tool's end face lies
+    // inside the material and not on the vertex, where it would touch the other wall
+    const double nilLevel = 1000 * linearTolerance;
+    const double length = data.line ? high : high * data.circle.Radius();
+    if (length <= nilLevel) {
+        run = data.line ? c / 4 : (c / 4) / data.circle.Radius();
+    }
     if (!inside(run)) {
         refuse("a concave corner whose fills leave the other wall's material side again");
     }

@@ -1,0 +1,9 @@
+{
+"entries": {
+"ReflexLoopAndPostMovedRightAngle|fillet_edges|V2s": {"axes": ["M1", "E2"], "classes": ["none"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr1114-r1", "issue": "ops#1114", "tier": "F"},
+"ReflexLoopAndPostMovedStudiosForm|fillet_edges|V2s": {"axes": ["M1", "E2"], "classes": ["none"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr1114-r1", "issue": "ops#1114", "tier": "F"},
+"ReflexLoopAndPostMoved|binder_chord_round|V2s": {"axes": ["M1", "E2"], "classes": ["none"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr1114-r1", "issue": "ops#1114", "tier": "F"},
+"ReflexLoopAndPostMoved|binder_post_round|V2s": {"axes": ["M1", "E2"], "classes": ["none"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr1114-r1", "issue": "ops#1114", "tier": "F"},
+"ReflexLoopAndPostMoved|fillet_edges|V2s": {"axes": ["M1", "E2"], "classes": ["none"], "expect": "CORRECT", "expected": "correct", "found_by": "review pr1114-r1", "issue": "ops#1114", "tier": "F"}
+}
+}

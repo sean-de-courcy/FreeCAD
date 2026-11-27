@@ -557,7 +557,8 @@ names it.
 | `fix/i898-t` | fix | ops#898 | - | `integration` `cfb4d152c4` | `b1fc93d6b7` (fork PR 558), 2026-11-26 | never (fork fix): a round past its floor into two tangent-neighbour walls is cut by each wall's own continuation along its own foot; a face OCCT integrates thinner than its edges' tolerance is measured on a mesh |
 | `fix/i1106-bspline-guard` | fix | ops#1106 | - | open | `e38329f918` (fork PR 559), 2026-11-26 | drop if upstream's refine checks its merged B-spline faces |
 | `fix/i1103-pair-box` | fix | ops#1103 | - | open | `4a26dfa267` (fork PR 560), 2026-11-26 | never (fork fix): the shape check's pair parts use a box as outer wire |
-| `fix/i1041-pattern-gap-close` | fix | ops#1041 | - | open | (fork PR 561) | never (fork fix): with Reapply on, a pattern's adding copy within 0.008375 of the part has the gap closed as Onshape does, or the pattern stops when it can't be closed exactly |
+| `fix/i1041-pattern-gap-close` | fix | ops#1041 | - | open | `4dafc72ea9` (fork PR 561), 2026-11-27 | never (fork fix): with Reapply on, a pattern's adding copy within 0.008375 of the part has the gap closed as Onshape does, or the pattern stops when it can't be closed exactly |
+| `fix/i1114-corner-split` | fix | ops#1114 | - | open | (fork PR 562) | never (fork fix): an inside floor corner on a concave arc wall runs on when its section is in the material at the vertex (A); a fillet refused at a reflex corner with a circle splits into the corner's loops and the rest (B), as Onshape's DU6 |
 
 ## Fork-only commits in carried topics
 

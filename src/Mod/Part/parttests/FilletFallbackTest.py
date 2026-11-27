@@ -6890,6 +6890,78 @@ class KeyholeBossCornerTest(unittest.TestCase):
                 dress(1.0, edges + end)
 
 
+def d_pocket_fill_volume(R, d, c, kind, top=float("inf"), n=32):
+    """The material two floor fills add to a D pocket {rho <= R, y >= d} where they meet along
+    their intersection (DU6, ops#1114): the volume under the larger of their heights over the
+    floor, cut at the height top. The chord's fill, plus the arc's, less the smaller height where
+    both reach (both corners, split along t = s, the area element (R - s) / sqrt((R - s)^2 -
+    (d + t)^2) at the offsets t from the chord and s from the arc). A fill's point at distance u
+    from its wall, by the parameter p: a fillet u = c (1 - cos p), h = c (1 - sin p); a chamfer
+    u = p, h = c - p"""
+    if kind == "fillet":
+        span = math.pi / 2
+        u = lambda p: c * (1 - math.cos(p))
+        du = lambda p: c * math.sin(p)
+        h = lambda p: min(top, c * (1 - math.sin(p)))
+    else:
+        span = c
+        u = lambda p: p
+        du = lambda p: 1.0
+        h = lambda p: min(top, c - p)
+    # The height's kink where it reaches the cut: each outer integral in two pieces
+    kink = 0.0
+    if top < c:
+        kink = math.asin(1 - top / c) if kind == "fillet" else c - top
+
+    def pieces(f):
+        return sum(gauss_legendre(f, a, b, n) for a, b in ((0, kink), (kink, span)) if b > a)
+
+    chord = pieces(lambda p: h(p) * 2 * math.sqrt(R * R - (d + u(p)) ** 2) * du(p))
+    arc = pieces(lambda p: h(p) * (R - u(p)) * (math.pi - 2 * math.asin(d / (R - u(p)))) * du(p))
+
+    def jacobian(t, s):
+        return (R - s) / math.sqrt((R - s) ** 2 - (d + t) ** 2)
+
+    def outer(a):
+        big = u(a)
+        inner = gauss_legendre(lambda b: (jacobian(big, u(b)) + jacobian(u(b), big)) * du(b), 0, a, n)
+        return h(a) * du(a) * inner
+
+    return chord + arc - 2 * pieces(outer)
+
+
+def tall_d_pocket(d, posts=(), side=None, turned=True):
+    """ops#1114 model T, designed: a slab 120 x 100 x 3 under a block 10 high with a D pocket, the
+    disc R 40 about the z axis cut by the chord y = d (the pocket is y >= d), its cylinder's seam
+    turned to (0, -40), outside the pocket (unturned, at (40, 0), it lies on the arc). The floor's
+    arc and chord meet at two inside corners at the floor angle acos(d / 40). Optional: elliptical
+    posts (semi-axes 6 and 3, centres `posts`) standing on the floor; the block's side face `side`
+    behind the corner at x > 0 along the chord. Returns the body and the floor's edges"""
+    slab = Part.makeBox(120, 100, 3, V(-60, -50, 0))
+    block = Part.makeBox(120, 100, 10, V(-60, -50, 3))
+    disc = Part.makeCylinder(40, 10, V(0, 0, 3))
+    if turned:
+        disc.rotate(V(0, 0, 0), V(0, 0, 1), -90)
+    walls = block.cut(disc.common(Part.makeBox(200, 100, 10, V(-100, d, 3))))
+    if side is not None:
+        corner = math.sqrt(40 * 40 - d * d)
+        walls = walls.cut(Part.makeBox(100, 200, 10, V(corner + side, -100, 3)))
+    body = slab.fuse(walls)
+    for cx, cy in posts:
+        foot = Part.Face(Part.Wire(Part.Ellipse(V(cx, cy, 3), 6.0, 3.0).toShape()))
+        body = body.fuse(foot.extrude(V(0, 0, 10)))
+    body = body.removeSplitter()
+    floor = [
+        e
+        for e in body.Edges
+        if abs(e.BoundBox.ZMin - 3) < 1e-9
+        and abs(e.BoundBox.ZMax - 3) < 1e-9
+        and e.BoundBox.XLength < 119
+        and e.BoundBox.YLength < 99
+    ]
+    return body, floor
+
+
 class DPocketCornerTest(unittest.TestCase):
     """ops#888 A3b, designed (skeptic A3b-R2-2): a block 24 x 24 x 5 with a D-shaped pocket of depth
     h, the disk r 6 about the z axis cut by the chord y = w, its seam turned away from the arc's
@@ -6925,6 +6997,74 @@ class DPocketCornerTest(unittest.TestCase):
     def testFillet(self):
         body, floor = self.body(4, 0.5)
         self.check(body.makeFillet(1.0, floor), body, 6.749786)
+
+    def testReferencesInClosedForm(self):
+        # The pocket here is y <= w: the closed form's y >= d mirrored, d = -w (ops#1114)
+        self.assertAlmostEqual(d_pocket_fill_volume(6, -2, 1, "chamfer", 0.5), 11.865546, delta=1e-6)
+        self.assertAlmostEqual(d_pocket_fill_volume(6, -4, 1, "fillet", 0.5), 6.749786, delta=1e-6)
+
+    def testLowWallsAtRightAndAcuteFloorAngles(self):
+        # ops#1114 A: at a floor angle of 90 degrees (w 0) and under it (w -2, 70.53 degrees) both
+        # fills' sections lie in the other wall's material at the vertex already; their run on was
+        # nil, and the pair check refused it. OCCT fails (walls lower than c)
+        for w in (0, -2):
+            body, floor = self.body(w, 0.5)
+            for kind in ("chamfer", "fillet"):
+                with self.subTest(w=w, kind=kind):
+                    dress = body.makeChamfer if kind == "chamfer" else body.makeFillet
+                    self.check(dress(1.0, floor), body, d_pocket_fill_volume(6, -w, 1, kind, 0.5))
+
+    def checkTall(self, result, body, d):
+        """Model T's result: one cylinder and one torus more, nothing removed, the fill by the closed
+        form. A solid trimmed by the torus' and the cylinder's intersection measures to about 1e-3
+        here, about 5e-6 relative (OCCT's volume of an untrimmed fill is exact to 1e-11; the error
+        is the approximated intersection curve's), so (the Boolean reference of the two whole fills measures 3.9e-3 over the closed form at
+        d -3, with no symmetric difference from the result): the closed form to 2e-3, and the
+        reference by the symmetric difference (ops#1114)"""
+        self.assertTrue(result.isValid())
+        self.assertEqual(len(result.Solids), 1)
+        kinds = [f.Surface.TypeId for f in result.Faces]
+        for kind in [f.Surface.TypeId for f in body.Faces]:
+            kinds.remove(kind)
+        self.assertEqual(sorted(kinds), ["Part::GeomCylinder", "Part::GeomToroid"])
+        self.assertLess(body.cut(result).Volume, 1e-9)
+        fill = result.cut(body)
+        self.assertAlmostEqual(fill.Volume, d_pocket_fill_volume(40, d, 2, "fillet"), delta=2e-3)
+        pocket = Part.makeCylinder(40, 10, V(0, 0, 3)).common(Part.makeBox(200, 100, 10, V(-100, d, 3)))
+        chord = Part.makeBox(160, 2, 2, V(-80, d, 3)).cut(
+            Part.makeCylinder(2, 160, V(-80, d + 2, 5), V(1, 0, 0))
+        )
+        ring = Part.makeCylinder(40, 2, V(0, 0, 3)).cut(Part.makeCylinder(38, 2, V(0, 0, 3)))
+        reference = chord.fuse(ring.cut(Part.makeTorus(38, 2, V(0, 0, 5)))).common(pocket)
+        self.assertLess(fill.cut(reference).Volume + reference.cut(fill).Volume, 1e-5)
+
+    def testTallWallsInsideCornerOnAConcaveArc(self):
+        # ops#1114 A (NS88 Labyrinth #18's corner): tall_d_pocket() at floor angles 94.30 (d -3,
+        # the control: both run ons real), 87.13 (d 2, the studios' form), 90 (d 0) and 91.43
+        # degrees (d -1: the chord's run on nil, the arc's real; OCCT's maker fails). Refused
+        # before, except at d -3: "a fill at a concave corner reflex in the material does not run on"
+        for d in (-3.0, 2.0, 0.0, -1.0):
+            with self.subTest(d=d):
+                body, floor = tall_d_pocket(d)
+                self.assertEqual(len(floor), 2)
+                self.checkTall(body.makeFillet(2.0, floor), body, d)
+
+    def testTallWallsArcInTwoEdgesAtTheSeam(self):
+        # The cylinder's seam on the arc (unturned): three floor edges, the same fill
+        body, floor = tall_d_pocket(-3.0, turned=False)
+        self.assertEqual(len(floor), 3)
+        result = body.makeFillet(2.0, floor)
+        self.assertTrue(result.isValid())
+        self.assertAlmostEqual(
+            result.cut(body).Volume, d_pocket_fill_volume(40, -3, 2, "fillet"), delta=2e-3
+        )
+
+    def testWallBehindTheCornerThinnerThanTheRunOnStaysRefused(self):
+        # The block's side face 0.3 behind the corner along the chord: the chord's run on (0.5)
+        # reaches past it
+        body, floor = tall_d_pocket(2.0, side=0.3)
+        with self.assertRaises(Exception):
+            body.makeFillet(2.0, floor)
 
 
 class NotchedDPocketCornerTest(unittest.TestCase):
@@ -8627,6 +8767,63 @@ class MixedCoverageTest(unittest.TestCase):
         edges = [self.edge_at(body, 30, 0), self.edge_at(body, 30, top), self.edge_at(body, x0, top)]
         with self.assertRaises(Exception):
             body.makeFillet(self.R, edges + along)
+
+    def checkReflexGroups(self, d, posts):
+        """ops#1114 B (NS88 Labyrinth #18): tall_d_pocket()'s floor, with a reflex corner with a
+        circle in one loop (the D's), and elliptical posts' feet, which the construction doesn't
+        cover, in other loops. The construction refused the whole pick for the ellipses; the loops
+        are rounded as the corner's loop alone (the construction) and the feet alone (OCCT), one
+        after the other. Both pick orders build the stepwise result"""
+        body, floor = tall_d_pocket(d, posts)
+        rim = [e for e in floor if e.Curve.TypeId != "Part::GeomEllipse"]
+        feet = [e for e in floor if e.Curve.TypeId == "Part::GeomEllipse"]
+        self.assertEqual((len(rim), len(feet)), (2, len(posts)))
+        corner = body.makeFillet(2.0, rim)
+        stepwise = corner.makeFillet(
+            2.0,
+            [
+                e
+                for e in corner.Edges
+                if e.Curve.TypeId == "Part::GeomEllipse" and abs(e.BoundBox.ZMax - 3) < 1e-9
+            ],
+        )
+        added = corner.cut(body).Volume + body.makeFillet(2.0, feet).cut(body).Volume
+        for pick in (rim + feet, feet + rim):
+            result = body.makeFillet(2.0, pick)
+            self.assertTrue(result.isValid())
+            self.assertEqual(len(result.Solids), 1)
+            self.assertAlmostEqual(result.cut(body).Volume, added, delta=1e-3)
+            self.assertLess(result.cut(stepwise).Volume + stepwise.cut(result).Volume, 1e-6)
+
+    def testReflexCornerLoopAndAnotherLoop(self):
+        # d -3: the corner's loop builds alone; the pick failed for the post's foot alone
+        self.checkReflexGroups(-3.0, [(0, 20)])
+
+    def testReflexCornerLoopAndAnotherLoopStudiosForm(self):
+        # d 2 (NS88 Labyrinth #18's form): needs the corner's run on (A) and the split (B)
+        self.checkReflexGroups(2.0, [(0, 20)])
+
+    def testReflexCornerLoopAndAnotherLoopAtRightAngle(self):
+        # d 0: the corner built on the base and on the post's result measures 5e-4 apart (the
+        # construction's trimmed faces, about 5e-6 of the change), which the order test allows
+        # (review pr1114-r1 T1)
+        self.checkReflexGroups(0.0, [(0, 20)])
+
+    def testReflexCornerLoopAndTwoOtherLoops(self):
+        # The two feet are rounded together, as the second pick
+        self.checkReflexGroups(2.0, [(-15, 20), (15, 20)])
+
+    def testReflexGroupRefusedAloneStaysRefused(self):
+        # The corner's loop refuses alone (the wall behind the corner thinner than the run on)
+        body, floor = tall_d_pocket(2.0, [(0, 20)], side=0.3)
+        with self.assertRaises(Exception):
+            body.makeFillet(2.0, floor)
+
+    def testReflexGroupsWhoseBandsMeetStayRefused(self):
+        # The post's wall 3 from the chord's: the two bands (2 each) overlap by 1
+        body, floor = tall_d_pocket(-3.0, [(0, 3)])
+        with self.assertRaises(Exception):
+            body.makeFillet(2.0, floor)
 
 
 
