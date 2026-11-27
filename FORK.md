@@ -554,7 +554,8 @@ names it.
 | `fix/i1044-refine-cb` | fix | ops#1044 | - | open | `397c1b3e3b` (fork PR 552), 2026-11-26 | drop if upstream's refine merges reversed B-spline walls and updates every merged pair after sewing |
 | `fix/i1073-solid-forward` | fix | ops#1073 | - | open | `955702c064` (fork PR 557), 2026-11-26 | never (fork fix): loft and pipe solids are Forward |
 | `fix/i1040-vertex-k2` | fix | ops#1040, ops#898 | - | `integration` `955702c064` | `cfb4d152c4` (fork PR 551), 2026-11-26 | never (fork fix): fillets and chamfers at a vertex of 4 or 6 edges where the wall's face runs on below the floor straight down (C), a merged face rises behind the floor only past the tool's reach (D), or a groove's two cusp faces are pieces of the wall's plane (A); a straight edge's round whose end runs into material past its end face (L); a concave arc's cusp end against a plane end face (P) |
-| `fix/i898-t` | fix | ops#898 | - | `integration` `cfb4d152c4` | (fork PR 558) | never (fork fix): a round past its floor into two tangent-neighbour walls is cut by each wall's own continuation along its own foot; a face OCCT integrates thinner than its edges' tolerance is measured on a mesh |
+| `fix/i898-t` | fix | ops#898 | - | `integration` `cfb4d152c4` | `b1fc93d6b7` (fork PR 558), 2026-11-26 | never (fork fix): a round past its floor into two tangent-neighbour walls is cut by each wall's own continuation along its own foot; a face OCCT integrates thinner than its edges' tolerance is measured on a mesh |
+| `fix/i1106-bspline-guard` | fix | ops#1106 | - | open | (fork PR 559) | drop if upstream's refine checks its merged B-spline faces |
 
 ## Fork-only commits in carried topics
 
