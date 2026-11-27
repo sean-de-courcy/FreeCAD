@@ -2031,21 +2031,43 @@ EdgeData analyse(const Context& ctx, const TopoDS_Edge& edge)
             refuse("a smooth edge (its faces are tangent along it)");
         }
     }
-    // ops#1085: a tip between two cylinders along the edge, their inward directions parallel (the
-    // faces' normals opposite). The sign of the convexity product above is then a number of size
-    // 1e-16; the tip is convex by rule. The air cusp between two bosses tangent along a line has the
-    // same directions: taken as convex, its ball finds no centre and the construction refuses
+    // ops#1085: two cylinders along the edge whose inward directions are parallel (the faces'
+    // normals opposite, a wedge of angle 0 or 2 pi). The sign of the convexity product above is then
+    // a number of size 1e-16. Decided instead a step s along the inward direction: the point there
+    // on the second cylinder lies inside the material of the first face (behind its outward normal)
+    // for a tip, a wedge of material, and outside it for an air cusp (two bosses tangent along a
+    // line, a boss tangent inside a hole: review pr1085-r1 C1), by a distance of order s^2 / R.
+    // A tip is the fold's and the round's (data.tip); an air cusp is concave and filled as before
     if (data.ruled && !data.extruded && s0.GetType() == GeomAbs_Cylinder
         && s1.GetType() == GeomAbs_Cylinder) {
-        bool tip = true;
+        bool parallelInward = true;
         for (double at : {data.first, middle, data.last}) {
             const double turn = std::acos(std::clamp(
                 inwardOf(data.faces[0], at).Dot(inwardOf(data.faces[1], at)), -1.0, 1.0));
-            tip = tip && turn < 1e-3;
+            parallelInward = parallelInward && turn < 1e-3;
         }
-        if (tip) {
-            data.tip = true;
-            data.convex = true;
+        if (parallelInward) {
+            const gp_Cylinder c0 = s0.Cylinder();
+            const gp_Cylinder c1 = s1.Cylinder();
+            // The point of a cylinder nearest q, and its radial direction there
+            auto onCylinder = [](const gp_Cylinder& c, const gp_Pnt& q, gp_Dir& radial) {
+                const gp_Lin axis(c.Axis());
+                const gp_Vec along(c.Axis().Direction());
+                const gp_Vec v(c.Location(), q);
+                const gp_Vec off = v - along * v.Dot(along);
+                radial = gp_Dir(off);
+                return c.Location().Translated(along * v.Dot(along) + gp_Vec(radial) * c.Radius());
+            };
+            const double s = 0.01 * std::min(c0.Radius(), c1.Radius());
+            const gp_Vec step = gp_Vec(inwardOf(data.faces[0], middle)) * s;
+            gp_Dir radial0;
+            gp_Dir radial1;
+            onCylinder(c0, point, radial0);
+            const double side = gp_Vec(outwardNormal(data.faces[0], point)).Dot(gp_Vec(radial0)) < 0 ? -1.0 : 1.0;
+            const gp_Pnt q0 = onCylinder(c0, point.Translated(step), radial0);
+            const gp_Pnt q1 = onCylinder(c1, point.Translated(step), radial1);
+            data.convex = gp_Vec(q0, q1).Dot(gp_Vec(radial0)) * side < 0;
+            data.tip = data.convex;
         }
     }
     // On a cone only what Onshape was measured on (ops#935): a concave round, the fill at the foot

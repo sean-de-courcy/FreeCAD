@@ -5827,6 +5827,38 @@ class RoundBetweenCylindersTest(unittest.TestCase):
                     else:
                         self.assertTipCut(base, res, tool(r))
 
+
+    def testAirCuspBetweenAHoleAndABossStillFills(self):
+        # review pr1085-r1 C1: a boss R 5 tangent inside a hole R 8 along a line (y 0, z 0), the hole's
+        # lower half filled. The cusp of air above the line has the tip's opposite normals but is
+        # concave: it is filled (the base with the fill's prism added), as built, mirrored and turned
+        R1, R2, L = 8.0, 5.0, 10.0
+        disc = Part.makeCylinder(R1, L, V(0, -R1, 0), V(1, 0, 0))
+        block = Part.makeBox(L, 3 * R1, 3 * R1, V(0, -2.5 * R1, -1.5 * R1))
+        lower = disc.common(Part.makeBox(L, 4 * R1, 2 * R1, V(0, -3 * R1, -2 * R1)))
+        base = block.cut(disc).fuse([Part.makeCylinder(R2, L, V(0, -R2, 0), V(1, 0, 0)), lower]).removeSplitter()
+
+        def turned(shape):
+            shape = shape.copy()
+            shape.rotate(V(1, 2, 3), V(0.3, -0.5, 0.8), 37)
+            return shape
+
+        for name, place in (("built", lambda x: x.copy()), ("mirrored", lambda x: x.mirror(V(0, 0, 0), V(0, 0, 1))),
+                            ("turned", turned)):
+            shape = place(base)
+            edge = [e for e in shape.Edges if e.Curve.TypeId == "Part::GeomLine" and len(shape.ancestorsOfType(e, Part.Face)) == 2
+                    and e.Length > L - 1e-6 and all(f.Surface.__class__.__name__ == "Cylinder" for f in shape.ancestorsOfType(e, Part.Face))]
+            self.assertEqual(len(edge), 1, name)
+            for r in (0.3, 1.0):
+                with self.subTest(case=name, r=r):
+                    fill = place(tipTool((-R1, 0), R1, (-R2, 0), R2, r, 0, L, a=R1 - r, b=R2 + r, upper=True))
+                    res = shape.makeFillet(r, edge)
+                    expected = shape.fuse(fill)
+                    self.assertTrue(res.isValid())
+                    self.assertAlmostEqual(res.Volume, expected.Volume, delta=1e-6)
+                    self.assertLess(res.cut(expected).Volume, 1e-7)
+                    self.assertLess(expected.cut(res).Volume, 1e-7)
+
     @unittest.expectedFailure
     def testPlaneAndCylinderTipStaysOutsideTheGate(self):
         # L5: a plane tangent to a cylinder along the edge is outside ops#1085's fold (two cylinders
@@ -10672,16 +10704,17 @@ def tipLayout(corners, x0=5.0, x1=15.0, clip=None):
     return block.cut(tools).removeSplitter()
 
 
-def tipTool(c1, R1, c2, R2, r, x0, x1):
+def tipTool(c1, R1, c2, R2, r, x0, x1, a=None, b=None, upper=False):
     """The prism x0..x1 of the section a round r removes at the origin of the yz plane, between the
-    circles (c1, R1) and (c2, R2) through it and the ball tangent to both below it"""
+    circles (c1, R1) and (c2, R2) through it and the ball tangent to both below it (upper: above it),
+    its centre a from c1 and b from c2 (default R1 + r and R2 + r)"""
     (y1, z1), (y2, z2) = c1, c2
-    a, b = R1 + r, R2 + r
+    a, b = (R1 + r if a is None else a), (R2 + r if b is None else b)
     D = math.hypot(y2 - y1, z2 - z1)
     ey, ez = (y2 - y1) / D, (z2 - z1) / D
     l = (a * a - b * b + D * D) / (2 * D)
     h = math.sqrt(a * a - l * l)
-    ball = min(((y1 + l * ey - s * h * ez, z1 + l * ez + s * h * ey) for s in (-1, 1)), key=lambda c: c[1])
+    ball = sorted(((y1 + l * ey - s * h * ez, z1 + l * ez + s * h * ey) for s in (-1, 1)), key=lambda c: c[1])[1 if upper else 0]
 
     def touch(c, R):
         n = math.hypot(ball[0] - c[0], ball[1] - c[1])
