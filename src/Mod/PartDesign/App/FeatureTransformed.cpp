@@ -2454,6 +2454,36 @@ double gapArea(const TopoDS_Shape& shape)
 /// Section 4 step 3: the slab on \a face, thickness \a depth along its outward normal, cut by the
 /// surface of each face of the copy that shares an edge with it, keeping the copy's side. Null
 /// where it can't be made
+/// \a widened thickened by \a signedDepth along its surface's normal, as one solid (null if not)
+TopoDS_Shape gapThickened(const TopoDS_Face& widened, double signedDepth)
+{
+    TopoDS_Shape thick = Part::TopoShape(widened)
+                             .makeElementOffset(
+                                 signedDepth,
+                                 1e-7,
+                                 false,
+                                 false,
+                                 0,
+                                 Part::JoinType::arc,
+                                 Part::FillType::fill
+                             )
+                             .getShape();
+    if (thick.IsNull() || thick.ShapeType() == TopAbs_SOLID) {
+        return thick;
+    }
+    TopExp_Explorer shell(thick, TopAbs_SHELL);
+    if (!shell.More()) {
+        return {};
+    }
+    BRepBuilderAPI_MakeSolid solid(TopoDS::Shell(shell.Current()));
+    if (!solid.IsDone()) {
+        return {};
+    }
+    TopoDS_Solid made = solid.Solid();
+    BRepLib::OrientClosedSolid(made);
+    return made;
+}
+
 TopoDS_Shape gapSlab(const TopoDS_Face& face,
                      const TopTools_IndexedDataMapOfShapeListOfShape& edgeFaces,
                      double depth)
@@ -2465,31 +2495,9 @@ TopoDS_Shape gapSlab(const TopoDS_Face& face,
     // The widened face is the face's own surface, oriented forward: the outward side is the
     // surface's normal unless the face is reversed
     const double sign = face.Orientation() == TopAbs_REVERSED ? -1.0 : 1.0;
-    Part::TopoShape thick = Part::TopoShape(widened).makeElementOffset(
-        sign * depth,
-        1e-7,
-        false,
-        false,
-        0,
-        Part::JoinType::arc,
-        Part::FillType::fill
-    );
-    TopoDS_Shape slab = thick.getShape();
+    TopoDS_Shape slab = gapThickened(widened, sign * depth);
     if (slab.IsNull()) {
         return {};
-    }
-    if (slab.ShapeType() != TopAbs_SOLID) {
-        TopExp_Explorer shell(slab, TopAbs_SHELL);
-        if (!shell.More()) {
-            return {};
-        }
-        BRepBuilderAPI_MakeSolid solid(TopoDS::Shell(shell.Current()));
-        if (!solid.IsDone()) {
-            return {};
-        }
-        TopoDS_Solid made = solid.Solid();
-        BRepLib::OrientClosedSolid(made);
-        slab = made;
     }
     std::vector<TopoDS_Face> neighbours;
     for (TopExp_Explorer it(face, TopAbs_EDGE); it.More(); it.Next()) {
@@ -2609,9 +2617,13 @@ bool gapSlabSound(const TopoDS_Shape& slab, const TopoDS_Face& face, const TopoD
     if (!rest.IsDone() || gapVolume(rest.Shape()) > faceArea * g + 1e-9) {
         return false;
     }
-    // Rule 3a exactly, not only at the samples (review pr1041-r1 T1: a slot in the wall between
-    // the samples was filled): the face's surface moved T_gap outwards meets no empty space of the
-    // slab, so nothing farther than T_gap in front of the face is closed
+    // Only the gap is closed, not only at the samples (reviews pr1041-r1 T1, a slot in the wall
+    // between the samples, and pr1041-r2 T1, a void behind a thin skin of the wall, were filled;
+    // design rule 3: never anything wider than T_gap). The face's surface moved T_gap outwards
+    // meets no empty space of the slab (a slot open to the gap, however thin), and no empty space
+    // of the slab lies beyond it (a void behind a skin: up to 1 % of area x g and a 1e-6 sheet,
+    // above the cut's noise, 2e-7 on the tilted ring). Else the slab is refused, the copy stays
+    // rigid with R5a's warning
     const TopoDS_Face widened = gapWidened(face, 4.0 * depth);
     if (widened.IsNull()) {
         return false;
@@ -2627,11 +2639,16 @@ bool gapSlabSound(const TopoDS_Shape& slab, const TopoDS_Face& face, const TopoD
                                        Part::FillType::noFill
                                    )
                                    .getShape();
-    if (level.IsNull()) {
+    const TopoDS_Shape within = gapThickened(widened, sign * gapLimit);
+    if (level.IsNull() || within.IsNull()) {
         return false;
     }
-    FCBRepAlgoAPI_Common beyond(level, rest.Shape());
-    return beyond.IsDone() && gapArea(beyond.Shape()) <= 1e-6 * faceArea;
+    FCBRepAlgoAPI_Common atLevel(level, rest.Shape());
+    if (!atLevel.IsDone() || gapArea(atLevel.Shape()) > 1e-6 * faceArea) {
+        return false;
+    }
+    FCBRepAlgoAPI_Cut beyond(rest.Shape(), within);
+    return beyond.IsDone() && gapVolume(beyond.Shape()) <= 0.01 * faceArea * g + 1e-6 * faceArea;
 }
 
 /// FreeCAD-CH ops#1041: \a copy, an adding copy of a pattern with Reapply on, with every narrow
