@@ -5696,6 +5696,84 @@ class RoundBetweenCylindersTest(unittest.TestCase):
         for face in result.Faces:
             self.assertNotIn("BSpline", face.Surface.TypeId)
 
+    # ops#1085: a round on a tip, two pocket corners of radius R back to back (their cylinders
+    # tangent along the edge, normals opposite), ending in the pockets' end walls: two faces of one
+    # plane touching at each end vertex (5 edges, 5 faces). Onshape (RB153): one cylinder r, its axis
+    # d = sqrt(2 R r + r^2) behind the tip; each end wall and the tip's section one face. Models and
+    # closed forms below the classes (tipPockets(), tipRemoved())
+
+    def testTipInPocketWallsIsOnshapes(self):
+        base = tipPockets()
+        self.assertEqual(len(base.Faces), 15)
+        for r, wall in ((0.5, 89.698582), (1.0, 90.225783), (2.0, 91.202559)):
+            removed, d, phi = tipRemoved(5, r, 10)
+            res = base.makeFillet(r, [tipEdge(base)])
+            self.assertTrue(res.isValid())
+            self.assertEqual(len(res.Solids), 1)
+            self.assertAlmostEqual(base.Volume - res.Volume, removed, delta=1e-6)
+            self.assertEqual(faceKinds(res), {"Plane": 11, "Cylinder": 3})
+            self.assertEqual(len(res.Edges), 38)
+            rounds = [f for f in res.Faces if isinstance(f.Surface, Part.Cylinder) and abs(f.Surface.Radius - r) < 1e-9]
+            self.assertEqual(len(rounds), 1)
+            self.assertAlmostEqual(rounds[0].Area, r * (math.pi - 2 * phi) * 10, delta=1e-6)
+            self.assertLess(abs(rounds[0].Surface.Center.y), 1e-7)
+            self.assertAlmostEqual(rounds[0].Surface.Center.z, -d, delta=1e-7)
+            for x in (5, 15):
+                walls = [f for f in res.Faces if isinstance(f.Surface, Part.Plane) and abs(f.BoundBox.XMin - x) < 1e-7 and abs(f.BoundBox.XMax - x) < 1e-7]
+                self.assertEqual(len(walls), 1, x)
+                self.assertAlmostEqual(walls[0].Area, wall, delta=1e-5)
+
+    def testTipWithOneEndOutOfTheBlock(self):
+        # the pockets run out through the block's side at x 20: one end wall, one plain end
+        base = tipPockets(x1=25.0)
+        for r in (0.5, 1.0, 2.0):
+            removed, d, phi = tipRemoved(5, r, 15)
+            res = base.makeFillet(r, [tipEdge(base)])
+            self.assertTrue(res.isValid())
+            self.assertAlmostEqual(base.Volume - res.Volume, removed, delta=1e-6)
+            self.assertEqual(faceKinds(res).get("Cylinder"), 3)
+
+    def testTipOnAFrameFaceNeedsTheReach(self):
+        # the issue's model: R 10, L 40, the outer plane one face framing both pockets, rising past
+        # the walls' plane 30 mm from the vertex; as built and turned about a skew axis
+        base = tipFrame()
+        for r in (0.5, 1.0, 2.0, 4.0):
+            removed, d, phi = tipRemoved(10, r, 40)
+            for turned in (False, True):
+                shape = base.copy()
+                if turned:
+                    shape.rotate(V(1, 2, 3), V(0.3, -0.5, 0.8), 37)
+                res = shape.makeFillet(r, [tipEdge(shape)])
+                self.assertTrue(res.isValid(), (r, turned))
+                self.assertAlmostEqual(shape.Volume - res.Volume, removed, delta=1e-6 * shape.Volume)
+                self.assertEqual(len(res.Faces), len(shape.Faces) - 1, (r, turned))
+                self.assertEqual(faceKinds(res).get("Cylinder"), 3, (r, turned))
+
+    def testTipWithPlainEndsStillBuilds(self):
+        # two cylinders cut through the whole block: the tip ends on its side faces (3 edges)
+        block = Part.makeBox(10, 30, 12, V(0, -15, -12))
+        base = block.cut([Part.makeCylinder(5, 14, V(-2, s * 5, 0), V(1, 0, 0)) for s in (-1, 1)])
+        for r in (0.5, 1.0):
+            removed, d, phi = tipRemoved(5, r, 10)
+            for shape in (base, base.mirror(V(0, 0, 0), V(0, 0, 1))):
+                res = shape.makeFillet(r, [tipEdge(shape)])
+                self.assertTrue(res.isValid())
+                self.assertAlmostEqual(shape.Volume - res.Volume, removed, delta=1e-6)
+                self.assertEqual(len(res.Faces), len(shape.Faces) + 1)
+
+    def testTipTooDeepForItsMaterialStaysLoud(self):
+        # L4: the block 3 deep; a round 2 reaches down to its touches past the bottom. It raises,
+        # with the construction's own reason (not "would overflow a strip"), or builds the closed form
+        base = tipPockets(bottom=-3.0)
+        removed, d, phi = tipRemoved(5, 2.0, 10)
+        try:
+            res = base.makeFillet(2.0, [tipEdge(base)])
+        except Part.OCCError as e:
+            self.assertNotIn("would overflow a strip", str(e))
+        else:
+            self.assertTrue(res.isValid())
+            self.assertAlmostEqual(base.Volume - res.Volume, removed, delta=1e-6)
+
 
 class RoundOverASliverTest(unittest.TestCase):
     """A round of a convex straight edge between two cylinders, where the ball can't stay on one of
@@ -10490,3 +10568,57 @@ class LoneRoundCylinderTest(unittest.TestCase):
         got = rounded.makeFillet(self.RF, self.corner(rounded, 38.0)).removeSplitter()
         self.assertTrue(got.isValid())
         self.assertEqual(len(got.Faces), len(rounded.Faces) + 1)
+
+
+# ops#1085 (RoundBetweenCylindersTest's tip tests)
+def tipRemoved(R, r, L):
+    """What a round r removes from a tip of two radius-R cylinders over a length L; d and phi"""
+    d = math.sqrt(2 * R * r + r * r)
+    phi = math.atan(d / R)
+    return L * (R * d - R * R * phi - r * r * (math.pi - 2 * phi) / 2), d, phi
+
+
+def tipPockets(x1=15.0, bottom=-10.0):
+    """RB153: a block x 0..20, y -10..10, z bottom..0; two pockets x 5..x1, each a box and a corner
+    cylinder R 5 about (y -+5, z 0), touching along y 0, z 0 on the outer plane"""
+    block = Part.makeBox(20, 20, -bottom, V(0, -10, bottom))
+    tools = []
+    for s in (-1, 1):
+        box = Part.makeBox(x1 - 5, 7, 6, V(5, -12 if s < 0 else 5, -5))
+        tools.append(box.fuse(Part.makeCylinder(5, x1 - 5, V(5, 5 * s, 0), V(1, 0, 0))))
+    return block.cut(tools).removeSplitter()
+
+
+def tipFrame():
+    """The issue's model B: R 10, L 40, pockets cut from the block's face y = 0 (one face framing both)"""
+    R, L, zc = 10.0, 40.0, 30.0
+    block = Part.makeBox(L + 6, 2 * R, 2 * zc + 6, V(-3, 0, -3))
+    pocket = Part.makeBox(L, R, zc)
+    corner = Part.makeBox(L, R, R, V(0, 0, zc - R)).cut(Part.makeCylinder(R, L, V(0, 0, zc - R), V(1, 0, 0)))
+    pocket = pocket.cut(corner).removeSplitter()
+    return block.cut(pocket.fuse(pocket.mirror(V(0, 0, zc), V(0, 0, 1)))).removeSplitter()
+
+
+def tipEdge(shape):
+    """The straight edge whose two faces have opposite normals"""
+    found = []
+    for e in shape.Edges:
+        if e.Curve.TypeId != "Part::GeomLine":
+            continue
+        faces = shape.ancestorsOfType(e, Part.Face)
+        if len(faces) != 2:
+            continue
+        m = e.valueAt((e.FirstParameter + e.LastParameter) / 2)
+        n = [f.normalAt(*f.Surface.parameter(m)) for f in faces]
+        if n[0].dot(n[1]) < -1 + 1e-9:
+            found.append(e)
+    assert len(found) == 1, len(found)
+    return found[0]
+
+
+def faceKinds(shape):
+    k = {}
+    for f in shape.Faces:
+        n = f.Surface.__class__.__name__
+        k[n] = k.get(n, 0) + 1
+    return k

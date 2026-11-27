@@ -1597,6 +1597,10 @@ struct EdgeData
     /// circle: the other face is a cone about the circle's axis, not a cylinder (ops#935)
     bool cone = false;
     bool convex = true;
+    /// ops#1085: a straight edge between two cylinders along it that are tangent there with
+    /// opposite normals (a tip, a wedge of angle 0: two pocket corners of one radius back to back).
+    /// Convex by rule (analyse())
+    bool tip = false;
     /// A straight edge with a cylinder parallel to it among its faces (a curved wall's end,
     /// ops#640, #150): its round is a plane fillet of the faces' traces, swept along the edge
     bool ruled = false;
@@ -2027,6 +2031,23 @@ EdgeData analyse(const Context& ctx, const TopoDS_Edge& edge)
             refuse("a smooth edge (its faces are tangent along it)");
         }
     }
+    // ops#1085: a tip between two cylinders along the edge, their inward directions parallel (the
+    // faces' normals opposite). The sign of the convexity product above is then a number of size
+    // 1e-16; the tip is convex by rule. The air cusp between two bosses tangent along a line has the
+    // same directions: taken as convex, its ball finds no centre and the construction refuses
+    if (data.ruled && !data.extruded && s0.GetType() == GeomAbs_Cylinder
+        && s1.GetType() == GeomAbs_Cylinder) {
+        bool tip = true;
+        for (double at : {data.first, middle, data.last}) {
+            const double turn = std::acos(std::clamp(
+                inwardOf(data.faces[0], at).Dot(inwardOf(data.faces[1], at)), -1.0, 1.0));
+            tip = tip && turn < 1e-3;
+        }
+        if (tip) {
+            data.tip = true;
+            data.convex = true;
+        }
+    }
     // On a cone only what Onshape was measured on (ops#935): a concave round, the fill at the foot
     // of a cone standing on the plane. A convex circle on a cone (a frustum's top), or a chamfer,
     // is refused as before
@@ -2437,6 +2458,7 @@ void foldFarFaces(const Context& ctx,
 /// must each meet the floor in one edge at the vertex, which are kept; anything else stays
 /// refused. Called only for a vertex that would be refused
 Section sectionAt(const Context& ctx, const EdgeData& data, double parameter);
+double ruledReach(const EdgeData& data, double r);
 
 void foldFloorPieces(const Context& ctx,
                      const EdgeData& data,
@@ -2444,15 +2466,19 @@ void foldFloorPieces(const Context& ctx,
                      std::vector<TopoDS_Shape>& edges,
                      std::vector<TopoDS_Shape>& faces)
 {
-    // A convex edge between two planes only (review of fix935 2 r1, T2 and T3): a concave edge's
-    // fill reaches behind the floor's plane, and an edge between cylinders can take the preferred
-    // construction where OCCT builds, which must not move
+    // A convex edge between two planes (review of fix935 2 r1, T2 and T3), or a tip between two
+    // cylinders (ops#1085: two pocket corners back to back, ending in the pockets' end walls, two
+    // faces of one plane touching at the vertex). A concave edge's fill reaches behind the floor's
+    // plane, and an edge between cylinders at a real angle can take the preferred construction
+    // where OCCT builds, which must not move
     if (!data.convex || !data.line) {
         return;
     }
-    for (const auto& face : data.faces) {
-        if (BRepAdaptor_Surface(face, Standard_False).GetType() != GeomAbs_Plane) {
-            return;
+    if (!data.tip) {
+        for (const auto& face : data.faces) {
+            if (BRepAdaptor_Surface(face, Standard_False).GetType() != GeomAbs_Plane) {
+                return;
+            }
         }
     }
     gp_Pnt point = BRep_Tool::Pnt(vertex);
@@ -2500,8 +2526,19 @@ void foldFloorPieces(const Context& ctx,
     // rises past the floor farther away (HNY Honeypot #10). The tool, bounded by the floor's plane,
     // reaches no further from the vertex than its section: only the face's part within twice the
     // section's extent is bounded
-    const Section section = sectionAt(ctx, data, atVertex);
-    const double reach = 2 * (section.length[0] + section.length[1]);
+    // On a tip the tool's section lies within the longer chord from the tip to a touch of the
+    // ball (ruledReach(); tangent faces give sectionAt() no corner); no ball, no fold
+    double reach = 0.0;
+    if (data.tip) {
+        reach = ruledReach(data, ctx.request.size1);
+        if (!(reach > linearTolerance)) {
+            return;
+        }
+    }
+    else {
+        const Section section = sectionAt(ctx, data, atVertex);
+        reach = 2 * (section.length[0] + section.length[1]);
+    }
     std::vector<TopoDS_Shape> behind;
     for (const auto& face : faces) {
         if (ownIndex(face) >= 0 || among(face, floor)) {
@@ -4172,6 +4209,77 @@ bool ruledTouches(const RuledTrace& t, const gp_Pnt& touch, const gp_Pnt& centre
         && std::abs(touch.Distance(centre) - r) <= linearTolerance;
 }
 
+/// The ball's centre for a straight edge's round: of ruledCentres()' candidates the one nearer the
+/// corner. On a tip (ops#1085) the two are equally near, one in the air above the tip: where the
+/// nearer one does not touch both faces, another within linearTolerance as near that does. Every
+/// other edge keeps the nearer one
+gp_Pnt ruledCentre(const std::vector<gp_Pnt>& candidates, const RuledTrace traces[2], const gp_Pnt& corner, double r)
+{
+    gp_Pnt centre = candidates.front();
+    for (const auto& p : candidates) {
+        if (p.Distance(corner) < centre.Distance(corner)) {
+            centre = p;
+        }
+    }
+    auto touchesBoth = [&](const gp_Pnt& c) {
+        return ruledTouches(traces[0], ruledTouch(traces[0], c), c, r)
+            && ruledTouches(traces[1], ruledTouch(traces[1], c), c, r);
+    };
+    if (touchesBoth(centre)) {
+        return centre;
+    }
+    for (const auto& p : candidates) {
+        if (std::abs(p.Distance(corner) - centre.Distance(corner)) <= linearTolerance
+            && touchesBoth(p)) {
+            return p;
+        }
+    }
+    return centre;
+}
+
+/// ops#1085: how far from the edge a tip's round tool reaches in its section: the longer chord from
+/// the tip to a touch of the ball ruledTool() takes. 0 where no ball fits
+double ruledReach(const EdgeData& data, double r)
+{
+    try {
+        const gp_Dir direction(gp_Vec(data.start, data.end));
+        RuledTrace traces[2];
+        for (int k = 0; k < 2; ++k) {
+            traces[k] = ruledTrace(
+                data,
+                data.faces[k],
+                data.start,
+                data.start,
+                inwardIn(data.faces[k], data.edge, data.first),
+                r
+            );
+            if (traces[k].tooSmall || traces[k].curve) {
+                return 0.0;
+            }
+        }
+        const std::vector<gp_Pnt> candidates = ruledCentres(traces[0], traces[1], direction, r);
+        if (candidates.empty()) {
+            return 0.0;
+        }
+        const gp_Pnt centre = ruledCentre(candidates, traces, data.start, r);
+        double reach = 0.0;
+        for (int k = 0; k < 2; ++k) {
+            const gp_Pnt touch = ruledTouch(traces[k], centre);
+            if (!ruledTouches(traces[k], touch, centre, r)) {
+                return 0.0;
+            }
+            reach = std::max(reach, data.start.Distance(touch));
+        }
+        return reach;
+    }
+    catch (const Refusal&) {
+        return 0.0;
+    }
+    catch (const Standard_Failure&) {
+        return 0.0;
+    }
+}
+
 /** A piece of a section's boundary in the section plane: a line, or an arc of a circle about the
  * centre by the signed angle (counterclockwise about the edge's direction positive)
  */
@@ -5135,12 +5243,7 @@ Tool ruledTool(const Context& ctx, const EdgeData& data, const VertexEnd ends[2]
         reason = "no round of the radius fits between a straight edge's faces";
     }
     else {
-        centre = candidates.front();
-        for (const auto& p : candidates) {
-            if (p.Distance(corner) < centre.Distance(corner)) {
-                centre = p;
-            }
-        }
+        centre = ruledCentre(candidates, traces, corner, r);
         // The tangent points, on each face's side of the corner
         for (int k = 0; k < 2 && reason.empty(); ++k) {
             touches[k] = ruledTouch(traces[k], centre);
@@ -22210,7 +22313,9 @@ std::string narrowStrip(
                 gp_Dir n1 = outwardNormalAny(TopoDS::Face(faces.First()), middle);
                 gp_Dir n2 = outwardNormalAny(TopoDS::Face(faces.Last()), middle);
                 double angle = n1.Angle(n2);
-                if (angle < 1e-3) {
+                // ops#1085: on a tip (normals opposite) tan(a/2) is unbounded; the construction's
+                // own reason is the one to give there
+                if (angle < 1e-3 || pi - angle < 1e-3) {
                     continue;
                 }
                 setback = size * std::tan(0.5 * angle);
