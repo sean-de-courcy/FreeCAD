@@ -2099,11 +2099,12 @@ static bool endRowsMeet(const Handle(Geom_BSplineSurface) & surface, int directi
 // clamped surface is extrapolated, not wrapped: the face fix raises the edges' tolerances to the
 // gap and the face is off the pieces (a strip across a NURBS cylinder's seam: 2 % of its area).
 // Built on a periodic copy, the same parameters wrap onto the surface itself. Returns `surface`
-// itself unless every face of the group is on a B-spline surface, the group reaches both ends of a
-// direction that is not periodic and leaves a gap between them, the end rows of poles and weights
-// agree to Precision::Confusion() (they are then made equal), the ends are clamped, the other
-// direction does not close unless periodic, the seam is smooth (the rows next to the ends in
-// proportion, see below) and the periodic copy evaluates as the clamped one.
+// itself unless every face of the group is on a B-spline surface with no degenerated edge, the
+// group reaches both ends of a direction that is not periodic and leaves a gap between them, the
+// end rows of poles and weights agree to Precision::Confusion() (they are then made equal), the
+// ends are clamped, the other direction does not close unless periodic, the seam is smooth (the
+// rows next to the ends in proportion, see below) and the periodic copy evaluates as the clamped
+// one.
 // The reversed kind (a member on the surface run backwards) is not converted
 static Handle(Geom_BSplineSurface) periodicAcrossSeam(
     const FaceVectorType& faces,
@@ -2120,6 +2121,15 @@ static Handle(Geom_BSplineSurface) periodicAcrossSeam(
     for (const auto& face : faces) {
         if (!BRep_Tool::Surface(face)->IsKind(STANDARD_TYPE(Geom_BSplineSurface))) {
             return surface;
+        }
+        // a face with a degenerated edge (an apex, a pole) is left as it is (review pr1120-r3 M1:
+        // a wall crossing its axis inside its parameter range, as a cone past its apex, has no row
+        // of one point for the test below to see; the merged face lost the apex edge and came out
+        // valid and silently off, under the area cap of process())
+        for (TopExp_Explorer edges(face, TopAbs_EDGE); edges.More(); edges.Next()) {
+            if (BRep_Tool::Degenerated(TopoDS::Edge(edges.Current()))) {
+                return surface;
+            }
         }
         double u0 = 0.0, u1 = 0.0, v0 = 0.0, v1 = 0.0;
         BRepTools::UVBounds(face, u0, u1, v0, v1);
