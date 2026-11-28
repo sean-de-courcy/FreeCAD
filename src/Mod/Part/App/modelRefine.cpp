@@ -1319,17 +1319,35 @@ TopoDS_Face buildRevolvedFace(Revolved kind, const FaceVectorType& faces, const 
         }
 
         if (encircling.empty()) {
-            BRepBuilderAPI_MakeFace maker(basis, wires.front());
-            if (!maker.IsDone()) {
-                return {};
-            }
-            for (std::size_t i = 1; i < wires.size(); ++i) {
-                maker.Add(wires[i]);
+            auto build = [&basis, &wires](bool reversed) -> TopoDS_Face {
+                auto wire = [reversed](const TopoDS_Wire& w) {
+                    return reversed ? TopoDS::Wire(w.Reversed()) : w;
+                };
+                BRepBuilderAPI_MakeFace maker(basis, wire(wires.front()));
                 if (!maker.IsDone()) {
                     return {};
                 }
+                for (std::size_t i = 1; i < wires.size(); ++i) {
+                    maker.Add(wire(wires[i]));
+                    if (!maker.IsDone()) {
+                        return {};
+                    }
+                }
+                return fixFace(maker.Face());
+            };
+            auto fits = [&](const TopoDS_Face& f) {
+                return !f.IsNull() && withinPeriods(f, kind) && BRepCheck_Analyzer(f).IsValid()
+                    && coversGroup(faces, f);
+            };
+            // ops#1122 (NS88 Labyrinth #18): on a surface closed in v (a torus, a sphere) the
+            // boundary taken from FORWARD faces bounds the complement for the maker: an invalid
+            // face of the group's area negated, refused below, so a round along one wall in two
+            // faces on one torus stayed two (Onshape: one). The boundary reversed bounds the
+            // group; the guards below check the face either way
+            face = build(false);
+            if (!fits(face)) {
+                face = build(true);
             }
-            face = fixFace(maker.Face());
         }
         else {
             // a band between two wires round the axis, as a cylinder's; a sphere's are caps and
