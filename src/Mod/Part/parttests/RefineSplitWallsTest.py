@@ -263,6 +263,52 @@ class RefineSplitWallsTest(unittest.TestCase):
         self.assertLess(abs(refined.Volume - exact), 1e-6 * exact)
         self.assertLessEqual(len(refined.Faces), 4)
 
+    # ops#1120: a strip across the seam of a wall that closes around its axis but is clamped there,
+    # not periodic. The two pieces lie at the two ends of the parameters; the merged face's wire
+    # ran on past the end, where the clamped surface is extrapolated (integration before 559: one
+    # face 2 % short of the strip, the volume 0.44 off; with 559 the pieces stayed apart). Onshape
+    # makes it one face. Expected: one face of the strip's area 0.16 * 5 * 10, the volume kept,
+    # the edges' tolerances not raised
+    def seamStrip(self, opening):
+        cut = clampedSeamCylinder(opening).cut(wedge(0.08, math.pi - 0.3)).cut(
+            wedge(-(math.pi - 0.3), -0.08)
+        )
+        self.assertTrue(cut.isValid())
+        refined = cut.removeSplitter()
+        self.assertTrue(refined.isValid())
+        self.assertTrue(relativelyEqual(refined.Volume, cut.Volume))
+        strip = [
+            f
+            for f in refined.Faces
+            if isinstance(f.Surface, Part.BSplineSurface) and abs(f.CenterOfMass.x - 5) < 0.1
+        ]
+        tolerance = max(e.Tolerance for e in cut.Edges)
+        self.assertLessEqual(max(e.Tolerance for e in refined.Edges), tolerance)
+        return cut, refined, strip
+
+    def testStripAcrossClampedSeamMerges(self):
+        for opening in (0.0, 1e-14, 1e-9):
+            cut, refined, strip = self.seamStrip(opening)
+            self.assertEqual(len(refined.Faces), len(cut.Faces) - 1, opening)
+            self.assertEqual(len(strip), 1, opening)
+            self.assertTrue(relativelyEqual(strip[0].Area, 0.16 * 5 * 10, 1e-9), strip[0].Area)
+            self.assertTrue(strip[0].Surface.isUPeriodic())
+
+    def testStripAcrossCreasedSeamStaysApart(self):
+        # the control: the seam creased (the second row of poles moved out by 0.5), so the wall is
+        # not smooth there and the strip keeps its seam edge; the refused attempt across it leaves
+        # no raised tolerance on the shape's edges (integration: 2.75e-2 on edges of 5e-6)
+        cut = creasedSeamCylinder().cut(wedge(0.08, math.pi - 0.3)).cut(
+            wedge(-(math.pi - 0.3), -0.08)
+        )
+        self.assertTrue(cut.isValid())
+        tolerance = max(e.Tolerance for e in cut.Edges)
+        refined = cut.removeSplitter()
+        self.assertTrue(refined.isValid())
+        self.assertEqual(len(refined.Faces), len(cut.Faces))
+        self.assertLessEqual(max(e.Tolerance for e in refined.Edges), tolerance)
+        self.assertLessEqual(max(e.Tolerance for e in cut.Edges), tolerance)
+
     def testBSplineSquaresMerge(self):
         a, b, _ = squaresAndPetal()
         refined = Part.Shell([a, b]).removeSplitter()
@@ -427,6 +473,55 @@ class RefineMergedWallHoledInEachHalfReferenceTest(RefineMergedHoledWallReferenc
     """The control: the hole at x = -3, a whole hole in each half; the hole's halves don't merge."""
 
     holeX = -3.0
+
+
+# ops#1120: a wall closed around its axis, clamped there.
+
+
+def clampedSeamCylinder(opening):
+    """A NURBS cylinder (r 5, h 10) whose wall is clamped around the axis, not periodic: its last
+    row of poles there moved by `opening` along X, the solid sewn back from the wall and the caps."""
+    base = Part.makeCylinder(5, 10).toNurbs()
+    wall = [f for f in base.Faces if f.Surface.isUPeriodic()][0]
+    surface = wall.Surface.copy()
+    surface.setUNotPeriodic()
+    last = surface.NbUPoles
+    for j in range(1, surface.NbVPoles + 1):
+        pole = surface.getPole(last, j) + V(opening, 0, 0)
+        surface.setPole(last, j, pole, surface.getWeight(last, j))
+    caps = [f for f in base.Faces if not f.isSame(wall)]
+    shell = Part.Shell(Part.makeShell([Part.Face(surface)] + caps).Faces)
+    shell.sewShape(1e-4)
+    return Part.Solid(shell)
+
+
+def creasedSeamCylinder():
+    """The clamped NURBS wall of clampedSeamCylinder() with its second row of poles around the axis
+    moved by 0.5 along X: closed, but creased at the seam; its caps made from its own edges."""
+    base = Part.makeCylinder(5, 10).toNurbs()
+    wall = [f for f in base.Faces if f.Surface.isUPeriodic()][0]
+    surface = wall.Surface.copy()
+    surface.setUNotPeriodic()
+    for j in range(1, surface.NbVPoles + 1):
+        surface.setPole(2, j, surface.getPole(2, j) + V(0.5, 0, 0), surface.getWeight(2, j))
+    face = Part.Face(surface)
+    caps = [
+        Part.Face(Part.Wire([e]))
+        for e in face.Edges
+        if e.isClosed() and e.BoundBox.ZLength < 1e-9
+    ]
+    shell = Part.makeShell([face] + caps)
+    shell.sewShape(1e-4)
+    return Part.Solid(shell if shell.ShapeType == "Shell" else shell.Shells[0])
+
+
+def wedge(start, end):
+    """The annular wedge between the angles `start` and `end` (radians) about Z, radii 2 to 15."""
+    span = math.degrees(end - start)
+    outer = Part.makeCylinder(15, 30, V(0, 0, -1), V(0, 0, 1), span)
+    shape = outer.cut(Part.makeCylinder(2, 30, V(0, 0, -1), V(0, 0, 1), span))
+    shape.rotate(V(0, 0, 0), V(0, 0, 1), math.degrees(start))
+    return shape
 
 
 # ops#1106: the B-spline kind's index-equal merge gets the guards of the reversed kind.
