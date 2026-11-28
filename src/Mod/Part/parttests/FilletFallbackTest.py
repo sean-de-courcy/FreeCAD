@@ -5696,6 +5696,183 @@ class RoundBetweenCylindersTest(unittest.TestCase):
         for face in result.Faces:
             self.assertNotIn("BSpline", face.Surface.TypeId)
 
+    # ops#1085: a round on a tip, two pocket corners of radius R back to back (their cylinders
+    # tangent along the edge, normals opposite), ending in the pockets' end walls: two faces of one
+    # plane touching at each end vertex (5 edges, 5 faces). Onshape (RB153): one cylinder r, its axis
+    # d = sqrt(2 R r + r^2) behind the tip; each end wall and the tip's section one face. Models and
+    # closed forms below the classes (tipPockets(), tipRemoved())
+
+    def testTipInPocketWallsIsOnshapes(self):
+        base = tipPockets()
+        self.assertEqual(len(base.Faces), 15)
+        for r, wall in ((0.5, 89.698582), (1.0, 90.225783), (2.0, 91.202559)):
+            removed, d, phi = tipRemoved(5, r, 10)
+            res = base.makeFillet(r, [tipEdge(base)])
+            self.assertTrue(res.isValid())
+            self.assertEqual(len(res.Solids), 1)
+            self.assertAlmostEqual(base.Volume - res.Volume, removed, delta=1e-6)
+            self.assertEqual(faceKinds(res), {"Plane": 11, "Cylinder": 3})
+            self.assertEqual(len(res.Edges), 38)
+            rounds = [f for f in res.Faces if isinstance(f.Surface, Part.Cylinder) and abs(f.Surface.Radius - r) < 1e-9]
+            self.assertEqual(len(rounds), 1)
+            self.assertAlmostEqual(rounds[0].Area, r * (math.pi - 2 * phi) * 10, delta=1e-6)
+            self.assertLess(abs(rounds[0].Surface.Center.y), 1e-7)
+            self.assertAlmostEqual(rounds[0].Surface.Center.z, -d, delta=1e-7)
+            for x in (5, 15):
+                walls = [f for f in res.Faces if isinstance(f.Surface, Part.Plane) and abs(f.BoundBox.XMin - x) < 1e-7 and abs(f.BoundBox.XMax - x) < 1e-7]
+                self.assertEqual(len(walls), 1, x)
+                self.assertAlmostEqual(walls[0].Area, wall, delta=1e-5)
+
+    def testTipWithOneEndOutOfTheBlock(self):
+        # the pockets run out through the block's side at x 20: one end wall, one plain end
+        base = tipPockets(x1=25.0)
+        for r in (0.5, 1.0, 2.0):
+            removed, d, phi = tipRemoved(5, r, 15)
+            res = base.makeFillet(r, [tipEdge(base)])
+            self.assertTrue(res.isValid())
+            self.assertAlmostEqual(base.Volume - res.Volume, removed, delta=1e-6)
+            self.assertEqual(faceKinds(res).get("Cylinder"), 3)
+
+    def testTipOnAFrameFaceNeedsTheReach(self):
+        # the issue's model: R 10, L 40, the outer plane one face framing both pockets, rising past
+        # the walls' plane 30 mm from the vertex; as built and turned about a skew axis
+        base = tipFrame()
+        for r in (0.5, 1.0, 2.0, 4.0):
+            removed, d, phi = tipRemoved(10, r, 40)
+            for turned in (False, True):
+                shape = base.copy()
+                if turned:
+                    shape.rotate(V(1, 2, 3), V(0.3, -0.5, 0.8), 37)
+                res = shape.makeFillet(r, [tipEdge(shape)])
+                self.assertTrue(res.isValid(), (r, turned))
+                self.assertAlmostEqual(shape.Volume - res.Volume, removed, delta=1e-6 * shape.Volume)
+                self.assertEqual(len(res.Faces), len(shape.Faces) - 1, (r, turned))
+                self.assertEqual(faceKinds(res).get("Cylinder"), 3, (r, turned))
+
+    def testTipWithPlainEndsStillBuilds(self):
+        # two cylinders cut through the whole block: the tip ends on its side faces (3 edges)
+        block = Part.makeBox(10, 30, 12, V(0, -15, -12))
+        base = block.cut([Part.makeCylinder(5, 14, V(-2, s * 5, 0), V(1, 0, 0)) for s in (-1, 1)])
+        for r in (0.5, 1.0):
+            removed, d, phi = tipRemoved(5, r, 10)
+            for shape in (base, base.mirror(V(0, 0, 0), V(0, 0, 1))):
+                res = shape.makeFillet(r, [tipEdge(shape)])
+                self.assertTrue(res.isValid())
+                self.assertAlmostEqual(shape.Volume - res.Volume, removed, delta=1e-6)
+                self.assertEqual(len(res.Faces), len(shape.Faces) + 1)
+
+    def testTipTooDeepForItsMaterialStaysLoud(self):
+        # L4: the block 3 deep; a round 2 reaches down to its touches past the bottom. It raises,
+        # with the construction's own reason (not "would overflow a strip"), or builds the closed form
+        base = tipPockets(bottom=-3.0)
+        removed, d, phi = tipRemoved(5, 2.0, 10)
+        try:
+            res = base.makeFillet(2.0, [tipEdge(base)])
+        except Part.OCCError as e:
+            self.assertNotIn("would overflow a strip", str(e))
+        else:
+            self.assertTrue(res.isValid())
+            self.assertAlmostEqual(base.Volume - res.Volume, removed, delta=1e-6)
+
+
+    def assertTipCut(self, base, res, tool):
+        """res is base less tool: same volume, and nothing of one outside the other"""
+        expected = base.cut(tool)
+        self.assertTrue(res.isValid())
+        self.assertEqual(len(res.Solids), 1)
+        self.assertAlmostEqual(res.Volume, expected.Volume, delta=1e-6)
+        self.assertLess(res.cut(expected).Volume, 1e-7)
+        self.assertLess(expected.cut(res).Volume, 1e-7)
+
+    def testTipOfUnequalRadiiIsTheBallsCut(self):
+        # cases 5 and 8: RB153's layout with corners R 5 and 5, and R 5 and 3. The result is the base
+        # less the prism of the section between the two circles and the ball tangent to both, built
+        # here from the circles (no Onshape row for unequal radii)
+        for R2 in (5.0, 3.0):
+            base = tipLayout([(-5, 0, 5, -1), (R2, 0, R2, 1)])
+            for r in (0.5, 1.0):
+                res = base.makeFillet(r, [tipEdge(base)])
+                self.assertTipCut(base, res, tipTool((-5, 0), 5, (R2, 0), R2, r, 5, 15))
+                self.assertEqual(faceKinds(res), {"Plane": 11, "Cylinder": 3}, (R2, r))
+
+    def testTipNotOfThisShapeStaysLoud(self):
+        # L1 end walls drafted 10 degrees; L2 end walls on different planes (pocket B 5..13); L3 a rib
+        # leaning past the walls' plane at the vertex; L7 a real angle between the cylinders (centres
+        # (y -+4, z 3)). Each raises, without the strip reason, or builds the base less the ball's
+        # prism ended on the walls (today: OCCT's own result, a B-spline round, equal to it)
+        t = math.tan(math.radians(10))
+        draft = Part.Face(Part.makePolygon([V(5 - t, -12, 1), V(15 + t, -12, 1), V(15 - 11 * t, -12, -10),
+                                            V(5 + 11 * t, -12, -10), V(5 - t, -12, 1)])).extrude(V(0, 24, 0))
+        rib = Part.Face(Part.makePolygon([V(2, -1, 0), V(5, -1, 0), V(6, -1, 2), V(2, -1, 2), V(2, -1, 0)])).extrude(V(0, 2, 0))
+        cases = [
+            ("L1", tipLayout([(-5, 0, 5, -1), (5, 0, 5, 1)], 3, 17, clip=draft),
+             lambda r: tipTool((-5, 0), 5, (5, 0), 5, r, 3, 17).common(draft), (0.5, 1.0)),
+            ("L2", tipLayout([(-5, 0, 5, -1), (5, 0, 5, 1, 13.0)]),
+             lambda r: tipTool((-5, 0), 5, (5, 0), 5, r, 5, 13), (0.5, 1.0)),
+            ("L3", tipLayout([(-5, 0, 5, -1), (5, 0, 5, 1)]).fuse(rib).removeSplitter(),
+             lambda r: tipTool((-5, 0), 5, (5, 0), 5, r, 5, 15), (0.5, 1.0)),
+            ("L7", tipLayout([(-4, 3, 5, -1), (4, 3, 5, 1)]),
+             lambda r: tipTool((-4, 3), 5, (4, 3), 5, r, 5, 15), (0.5, 1.0, 2.0)),
+        ]
+        for name, base, tool, radii in cases:
+            edge = [e for e in base.Edges if all(abs(v.Point.y) < 1e-6 and abs(v.Point.z) < 1e-6 for v in e.Vertexes)
+                    and e.CenterOfMass.x < 10.5]
+            self.assertEqual(len(edge), 1, name)
+            for r in radii:
+                with self.subTest(case=name, r=r):
+                    try:
+                        res = base.makeFillet(r, edge)
+                    except (Part.OCCError, FreeCAD.Base.CADKernelError) as e:
+                        self.assertNotIn("would overflow a strip", str(e))
+                    else:
+                        self.assertTipCut(base, res, tool(r))
+
+
+    def testAirCuspBetweenAHoleAndABossStillFills(self):
+        # review pr1085-r1 C1: a boss R 5 tangent inside a hole R 8 along a line (y 0, z 0), the hole's
+        # lower half filled. The cusp of air above the line has the tip's opposite normals but is
+        # concave: it is filled (the base with the fill's prism added), as built, mirrored and turned
+        R1, R2, L = 8.0, 5.0, 10.0
+        disc = Part.makeCylinder(R1, L, V(0, -R1, 0), V(1, 0, 0))
+        block = Part.makeBox(L, 3 * R1, 3 * R1, V(0, -2.5 * R1, -1.5 * R1))
+        lower = disc.common(Part.makeBox(L, 4 * R1, 2 * R1, V(0, -3 * R1, -2 * R1)))
+        base = block.cut(disc).fuse([Part.makeCylinder(R2, L, V(0, -R2, 0), V(1, 0, 0)), lower]).removeSplitter()
+
+        def turned(shape):
+            shape = shape.copy()
+            shape.rotate(V(1, 2, 3), V(0.3, -0.5, 0.8), 37)
+            return shape
+
+        for name, place in (("built", lambda x: x.copy()), ("mirrored", lambda x: x.mirror(V(0, 0, 0), V(0, 0, 1))),
+                            ("turned", turned)):
+            shape = place(base)
+            edge = [e for e in shape.Edges if e.Curve.TypeId == "Part::GeomLine" and len(shape.ancestorsOfType(e, Part.Face)) == 2
+                    and e.Length > L - 1e-6 and all(f.Surface.__class__.__name__ == "Cylinder" for f in shape.ancestorsOfType(e, Part.Face))]
+            self.assertEqual(len(edge), 1, name)
+            for r in (0.3, 1.0):
+                with self.subTest(case=name, r=r):
+                    fill = place(tipTool((-R1, 0), R1, (-R2, 0), R2, r, 0, L, a=R1 - r, b=R2 + r, upper=True))
+                    res = shape.makeFillet(r, edge)
+                    expected = shape.fuse(fill)
+                    self.assertTrue(res.isValid())
+                    self.assertAlmostEqual(res.Volume, expected.Volume, delta=1e-6)
+                    self.assertLess(res.cut(expected).Volume, 1e-7)
+                    self.assertLess(expected.cut(res).Volume, 1e-7)
+
+    @unittest.expectedFailure
+    def testPlaneAndCylinderTipStaysOutsideTheGate(self):
+        # L5: a plane tangent to a cylinder along the edge is outside ops#1085's fold (two cylinders
+        # only). Today OCCT's result is valid but keeps only a sliver of the part (ops#1118, silent on
+        # integration too): this asserts the right outcome, so drop the decorator with ops#1118's fix
+        base = Part.makeBox(10, 10, 10, V(0, 0, -10)).cut(Part.makeCylinder(5, 14, V(-2, 0, -5), V(1, 0, 0)))
+        edge = [e for e in base.Edges if all(abs(v.Point.y) < 1e-7 and abs(v.Point.z) < 1e-7 for v in e.Vertexes)]
+        self.assertEqual(len(edge), 1)
+        try:
+            res = base.makeFillet(0.5, edge)
+        except (Part.OCCError, FreeCAD.Base.CADKernelError):
+            return
+        self.assertTrue(res.isValid())
+        self.assertLess(base.Volume - res.Volume, 1.0)
 
 class RoundOverASliverTest(unittest.TestCase):
     """A round of a convex straight edge between two cylinders, where the ball can't stay on one of
@@ -10490,3 +10667,99 @@ class LoneRoundCylinderTest(unittest.TestCase):
         got = rounded.makeFillet(self.RF, self.corner(rounded, 38.0)).removeSplitter()
         self.assertTrue(got.isValid())
         self.assertEqual(len(got.Faces), len(rounded.Faces) + 1)
+
+
+# ops#1085 (RoundBetweenCylindersTest's tip tests)
+def tipRemoved(R, r, L):
+    """What a round r removes from a tip of two radius-R cylinders over a length L; d and phi"""
+    d = math.sqrt(2 * R * r + r * r)
+    phi = math.atan(d / R)
+    return L * (R * d - R * R * phi - r * r * (math.pi - 2 * phi) / 2), d, phi
+
+
+def tipPockets(x1=15.0, bottom=-10.0):
+    """RB153: a block x 0..20, y -10..10, z bottom..0; two pockets x 5..x1, each a box and a corner
+    cylinder R 5 about (y -+5, z 0), touching along y 0, z 0 on the outer plane"""
+    block = Part.makeBox(20, 20, -bottom, V(0, -10, bottom))
+    tools = []
+    for s in (-1, 1):
+        box = Part.makeBox(x1 - 5, 7, 6, V(5, -12 if s < 0 else 5, -5))
+        tools.append(box.fuse(Part.makeCylinder(5, x1 - 5, V(5, 5 * s, 0), V(1, 0, 0))))
+    return block.cut(tools).removeSplitter()
+
+
+
+def tipLayout(corners, x0=5.0, x1=15.0, clip=None):
+    """RB153's block (x 0..20, y -10..10, z -10..0) less a pocket per corner (yc, zc, R, side[, end]):
+    a cylinder R about (yc, zc) along x from x0 to end (default x1), and a box beyond it toward side
+    from zc - R up, so the corner is a quarter cylinder; clip: a solid each pocket is cut to"""
+    block = Part.makeBox(20, 20, 10, V(0, -10, -10))
+    tools = []
+    for corner in corners:
+        yc, zc, R, side = corner[:4]
+        end = corner[4] if len(corner) > 4 else x1
+        box = Part.makeBox(end - x0, 12, 20, V(x0, yc - 12 if side < 0 else yc, zc - R))
+        tool = box.fuse(Part.makeCylinder(R, end - x0, V(x0, yc, zc), V(1, 0, 0)))
+        tools.append(tool.common(clip) if clip is not None else tool)
+    return block.cut(tools).removeSplitter()
+
+
+def tipTool(c1, R1, c2, R2, r, x0, x1, a=None, b=None, upper=False):
+    """The prism x0..x1 of the section a round r removes at the origin of the yz plane, between the
+    circles (c1, R1) and (c2, R2) through it and the ball tangent to both below it (upper: above it),
+    its centre a from c1 and b from c2 (default R1 + r and R2 + r)"""
+    (y1, z1), (y2, z2) = c1, c2
+    a, b = (R1 + r if a is None else a), (R2 + r if b is None else b)
+    D = math.hypot(y2 - y1, z2 - z1)
+    ey, ez = (y2 - y1) / D, (z2 - z1) / D
+    l = (a * a - b * b + D * D) / (2 * D)
+    h = math.sqrt(a * a - l * l)
+    ball = sorted(((y1 + l * ey - s * h * ez, z1 + l * ez + s * h * ey) for s in (-1, 1)), key=lambda c: c[1])[1 if upper else 0]
+
+    def touch(c, R):
+        n = math.hypot(ball[0] - c[0], ball[1] - c[1])
+        return (c[0] + R * (ball[0] - c[0]) / n, c[1] + R * (ball[1] - c[1]) / n)
+
+    def arc(c, R, p, q):
+        a0 = math.atan2(p[1] - c[1], p[0] - c[0])
+        a1 = math.atan2(q[1] - c[1], q[0] - c[0])
+        m = a0 + ((a1 - a0 + math.pi) % (2 * math.pi) - math.pi) / 2
+        return Part.Arc(V(x0, *p), V(x0, c[0] + R * math.cos(m), c[1] + R * math.sin(m)), V(x0, *q)).toShape()
+
+    t1, t2, tip = touch(c1, R1), touch(c2, R2), (0.0, 0.0)
+    wire = Part.Wire([arc(c1, R1, tip, t1), arc(ball, r, t1, t2), arc(c2, R2, t2, tip)])
+    return Part.Face(wire).extrude(V(x1 - x0, 0, 0))
+
+def tipFrame():
+    """The issue's model B: R 10, L 40, pockets cut from the block's face y = 0 (one face framing both)"""
+    R, L, zc = 10.0, 40.0, 30.0
+    block = Part.makeBox(L + 6, 2 * R, 2 * zc + 6, V(-3, 0, -3))
+    pocket = Part.makeBox(L, R, zc)
+    corner = Part.makeBox(L, R, R, V(0, 0, zc - R)).cut(Part.makeCylinder(R, L, V(0, 0, zc - R), V(1, 0, 0)))
+    pocket = pocket.cut(corner).removeSplitter()
+    return block.cut(pocket.fuse(pocket.mirror(V(0, 0, zc), V(0, 0, 1)))).removeSplitter()
+
+
+def tipEdge(shape):
+    """The straight edge whose two faces have opposite normals"""
+    found = []
+    for e in shape.Edges:
+        if e.Curve.TypeId != "Part::GeomLine":
+            continue
+        faces = shape.ancestorsOfType(e, Part.Face)
+        if len(faces) != 2:
+            continue
+        m = e.valueAt((e.FirstParameter + e.LastParameter) / 2)
+        n = [f.normalAt(*f.Surface.parameter(m)) for f in faces]
+        if n[0].dot(n[1]) < -1 + 1e-9:
+            found.append(e)
+    assert len(found) == 1, len(found)
+    return found[0]
+
+
+def faceKinds(shape):
+    k = {}
+    for f in shape.Faces:
+        n = f.Surface.__class__.__name__
+        k[n] = k.get(n, 0) + 1
+    return k

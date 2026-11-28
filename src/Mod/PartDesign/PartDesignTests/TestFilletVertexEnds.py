@@ -11,6 +11,9 @@
 # - a round-nosed rib 0.3 short of the plate's side: the rib rounded on a plate long enough, then cut square at
 #   the side (the face beyond drops away square, ops#898 A).
 
+import math
+import os
+import tempfile
 import unittest
 
 import FreeCAD
@@ -420,6 +423,74 @@ class TestFilletVertexFolds(unittest.TestCase):
         shape, _ = self.fillet(drafted_boss(15), front_top, 1.5)
         self.assertIsNone(shape)
 
+
+    def testRoundOnATangentTipKeepsItsNamesAfterReopen(self):
+        """ops#1085 case 6: RB153's form from PartDesign features (a block, two pocket corners R 5 back to back, their
+        cylinders tangent along the tip), the tip rounded r 0.5 with tangent propagation on: one edge, Onshape's
+        removed volume 4.286734 and 14 faces. After save and reopen: the same volume, faces and round's name, and a
+        Chamfer saved on one of the round's straight contact edges still finds that edge (and refuses it as
+        smooth, as Onshape)."""
+        body = self.doc.addObject("PartDesign::Body", "Body")
+        block = body.newObject("PartDesign::AdditiveBox", "Block")
+        block.Length, block.Width, block.Height = 20, 20, 10
+        block.Placement = App.Placement(V(0, -10, -10), App.Rotation())
+        for side in (-1, 1):
+            box = body.newObject("PartDesign::SubtractiveBox", "PocketBox")
+            box.Length, box.Width, box.Height = 10, 7, 6
+            box.Placement = App.Placement(V(5, -12 if side < 0 else 5, -5), App.Rotation())
+            corner = body.newObject("PartDesign::SubtractiveCylinder", "PocketCorner")
+            corner.Radius, corner.Height = 5, 10
+            corner.Placement = App.Placement(V(5, 5 * side, 0), App.Rotation(V(0, 1, 0), 90))
+        self.doc.recompute()
+        base = body.Tip
+        tip = ["Edge%d" % (i + 1) for i, e in enumerate(base.Shape.Edges)
+               if e.Length > 1 and all(abs(v.Point.y) < 1e-7 and abs(v.Point.z) < 1e-7 for v in e.Vertexes)]
+        self.assertEqual(len(tip), 1)
+        fillet = body.newObject("PartDesign::Fillet", "Fillet")
+        fillet.Base = (base, tip)
+        fillet.TangentPropagation = True
+        fillet.Radius = 0.5
+        self.doc.recompute()
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+
+        def state(shape):
+            names = {v: k for k, v in shape.ElementMap.items()}
+            rounds = [i + 1 for i, f in enumerate(shape.Faces)
+                      if isinstance(f.Surface, Part.Cylinder) and abs(f.Surface.Radius - 0.5) < 1e-9]
+            self.assertEqual(len(rounds), 1)
+            lines = [i + 1 for i, e in enumerate(shape.Edges) if e.Curve.TypeId == "Part::GeomLine"
+                     and any(e.isSame(c) for c in shape.Faces[rounds[0] - 1].Edges)]
+            self.assertEqual(len(lines), 2)
+            return shape.Volume, len(shape.Faces), names["Face%d" % rounds[0]], ["Edge%d" % i for i in lines]
+
+        volume, faces, name, lines = state(fillet.Shape)
+        d = math.sqrt(2 * 5 * 0.5 + 0.25)
+        phi = math.atan(d / 5)
+        removed = 10 * (5 * d - 25 * phi - 0.25 * (math.pi - 2 * phi) / 2)
+        self.assertAlmostEqual(base.Shape.Volume - volume, removed, delta=1e-6)
+        self.assertAlmostEqual(removed, 4.286734, delta=1e-6)
+        self.assertEqual(faces, 14)
+        chamfer = body.newObject("PartDesign::Chamfer", "Chamfer")
+        chamfer.Base = (fillet, lines[:1])
+        chamfer.Size = 0.2
+        self.doc.recompute()
+        self.assertIn("smooth", chamfer.getStatusString())
+
+        path = os.path.join(tempfile.mkdtemp(), "TangentTip1085.FCStd")
+        self.doc.saveAs(path)
+        App.closeDocument(self.doc.Name)
+        self.doc = App.openDocument(path)
+        fillet, chamfer = self.doc.getObject("Fillet"), self.doc.getObject("Chamfer")
+        fillet.touch()
+        self.doc.recompute()
+        self.assertTrue(fillet.isValid(), fillet.getStatusString())
+        again = state(fillet.Shape)
+        self.assertAlmostEqual(again[0], volume, delta=1e-9)
+        self.assertEqual(again[1:3], (faces, name))
+        self.assertIn("smooth", chamfer.getStatusString())
+        edge = fillet.getSubObject(chamfer.Base[1][0])
+        self.assertEqual(edge.Curve.TypeId, "Part::GeomLine")
+        self.assertTrue(any(edge.isSame(fillet.Shape.Edges[int(n[4:]) - 1]) for n in again[3]))
 
 def handle_block(flush=False):
     """Block x 0..24, y 0..17, z 0..10; a handle r 7 along x through (y 8.5, z 10) on x = 24, 10 long. flush: only
