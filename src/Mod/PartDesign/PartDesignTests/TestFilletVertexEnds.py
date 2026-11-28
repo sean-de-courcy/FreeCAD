@@ -354,7 +354,7 @@ class TestFilletVertexFolds(unittest.TestCase):
     def testTiltedCornerWithAMergedFaceBehindTheFloor(self):
         """Cause D with the block's end face leaning, x + 2 (z - 4) = 0 (review r1 T1 of ops#1040 D): the edge meets
         the floor at 26.6 degrees, and the tool's footprint on the floor is its section over the sine. The second
-        block 8 away builds the plain round, fillet and chamfer; 2 away it stays refused."""
+        block 8 away builds the plain round, fillet and chamfer; 2 and 4 away it stays refused."""
         width = 3.9375
 
         def tilted(second_x=None):
@@ -384,6 +384,9 @@ class TestFilletVertexFolds(unittest.TestCase):
                 expected = alone.fuse(Part.makeBox(4, 4, 5, V(8, -4, 4))).removeSplitter()
                 self.assertSameBody(shape, expected)
                 self.assertTrue(self.refuses(tilted(second_x=2.0), corner, 2.0, kind))
+                # 4 away: within the footprint over the sine (1.2 * 2 / sin 26.6 = 5.4), past 1.2 * 2 without
+                # it (PR 567 review gap a)
+                self.assertTrue(self.refuses(tilted(second_x=4.0), corner, 2.0, kind))
 
     def testShallowTiltedCornerKeepsTheFoldPastFourExtents(self):
         """Review r2 L1 of ops#1040 D: the corners leaning at 12 degrees to the floor (2 high), the second block
