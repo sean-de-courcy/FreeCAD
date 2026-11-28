@@ -2546,8 +2546,9 @@ void foldFloorPieces(const Context& ctx,
     }
     // ops#1040 cause D: a face behind the floor may be merged by refine with a coplanar face that
     // rises past the floor farther away (HNY Honeypot #10). The tool, bounded by the floor's plane,
-    // reaches no further from the vertex than its section: only the face's part within twice the
-    // section's extent is bounded
+    // reaches no further from the vertex than its section: only the face's part within the
+    // section's longer extent, with a fifth of it as margin, is bounded (fr1040: four radii kept a
+    // wall 2.5 radii away and refused the vertex)
     // On a tip the tool's section lies within the longer chord from the tip to a touch of the
     // ball (ruledReach(); tangent faces give sectionAt() no corner); no ball, no fold
     double reach = 0.0;
@@ -2559,7 +2560,7 @@ void foldFloorPieces(const Context& ctx,
     }
     else {
         const Section section = sectionAt(ctx, data, atVertex);
-        reach = 2 * (section.length[0] + section.length[1]);
+        reach = 1.2 * std::max(section.length[0], section.length[1]);
     }
     std::vector<TopoDS_Shape> behind;
     for (const auto& face : faces) {

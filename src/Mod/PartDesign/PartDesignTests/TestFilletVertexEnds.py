@@ -337,14 +337,19 @@ class TestFilletVertexFolds(unittest.TestCase):
 
     def testSixEdgeCornerWithAMergedFaceBehindTheFloor(self):
         """Cause D (HNY Honeypot #10): the end 3.9375 wide, r 2 (OCCT fails where the rounds overlap). The second
-        block 8 away is past the tool's reach; 1 away it is within it, and the vertex stays refused."""
+        block 8, 5.5 or 3 away is past the tool's reach (its section's extent, 2, with a margin; fr1040: up to
+        four radii refused); 2 or 1 away it is within it, and the vertex stays refused."""
         width = 3.9375
         corner = block_corner(width)
-        shape = self.dressUp(stepped_plate(width, second_x=8.0), corner, 2.0)
         alone = self.dressUp(stepped_plate(width), corner, 2.0)
-        expected = alone.fuse(Part.makeBox(4, 4, 5, V(8, -4, 4))).removeSplitter()
-        self.assertSameBody(shape, expected)
-        self.assertTrue(self.refuses(stepped_plate(width, second_x=1.0), corner, 2.0))
+        for gap in (8.0, 5.5, 3.0):
+            with self.subTest(gap=gap):
+                shape = self.dressUp(stepped_plate(width, second_x=gap), corner, 2.0)
+                expected = alone.fuse(Part.makeBox(4, 4, 5, V(gap, -4, 4))).removeSplitter()
+                self.assertSameBody(shape, expected)
+        for gap in (2.0, 1.0):
+            with self.subTest(gap=gap):
+                self.assertTrue(self.refuses(stepped_plate(width, second_x=gap), corner, 2.0))
 
 
 # ops#898 causes L and P (sk898tlp's cases; Onshape RB136, RB138).
