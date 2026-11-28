@@ -72,8 +72,8 @@
 #include <gp_Cylinder.hxx>
 #include <gp_Pln.hxx>
 #include <gp_Pnt.hxx>
-#include <gp_Torus.hxx>
 #include <gp_Vec.hxx>
+#include <gp_Torus.hxx>
 #include <GProp_GProps.hxx>
 #include <Precision.hxx>
 #include <ShapeAnalysis_Curve.hxx>
@@ -2064,8 +2064,8 @@ GeomAbs_SurfaceType FaceTypedBSpline::getType() const
 // Built on a periodic copy, the same parameters wrap onto the surface itself. Returns `surface`
 // itself unless every face of the group is on a B-spline surface, the group reaches both ends of a
 // direction that is not periodic and leaves a gap between them, the end rows of poles and weights
-// agree to Precision::Confusion() (they are then made equal), the seam is smooth (the derivatives
-// across it agree in direction to 1e-6 rad) and the periodic copy evaluates as the clamped one.
+// agree to Precision::Confusion() (they are then made equal), the seam is smooth (the rows next to
+// the ends in proportion, see below) and the periodic copy evaluates as the clamped one.
 // The reversed kind (a member on the surface run backwards) is not converted
 static Handle(Geom_BSplineSurface) periodicAcrossSeam(
     const FaceVectorType& faces,
@@ -2121,24 +2121,45 @@ static Handle(Geom_BSplineSurface) periodicAcrossSeam(
                 && std::fabs(surface->Weight(i0, j0) - surface->Weight(i1, j1))
                     <= 1e-12 * std::max(1.0, surface->Weight(i0, j0));
         }
-        // and the seam is smooth: a creased closed surface keeps its seam as an edge
-        for (int sample = 0; closes && sample <= 8; ++sample) {
-            const int other = 1 - direction;
-            const double across = first[other] + (last[other] - first[other]) * sample / 8.0;
-            gp_Pnt point;
-            gp_Vec du0, dv0, du1, dv1;
-            if (direction == 0) {
-                surface->D1(first[0], across, point, du0, dv0);
-                surface->D1(last[0], across, point, du1, dv1);
+        // and the seam is smooth everywhere along it (review pr1120-r1 R1: a sampled test missed
+        // a crease between its samples). With the end rows equal (P0, weights b), the row next to
+        // each end with weights a common multiple of the end row's (k b at the start, k' b at the
+        // end) and the pole differences P1 - P0 one common positive multiple of Pn - Pn-1, the
+        // derivative across the seam at any parameter is sum N b (P1 - P0) times k at the start and
+        // k' / that multiple at the end (the weight terms cancel, as sum N b (P0 - S) = 0 for the
+        // surface point S): parallel. A creased closed wall keeps its seam as an edge
+        if (closes) {
+            const int count = direction == 0 ? surface->NbUPoles() : surface->NbVPoles();
+            auto pole = [&](int along, int index) {
+                return direction == 0 ? surface->Pole(along, index) : surface->Pole(index, along);
+            };
+            auto weight = [&](int along, int index) {
+                return direction == 0 ? surface->Weight(along, index) : surface->Weight(index, along);
+            };
+            double start = 0.0;
+            double end = 0.0;
+            double ratio = 0.0;
+            closes = count >= 3;
+            for (int index = 1; closes && index <= rows; ++index) {
+                const gp_Vec ds(pole(1, index), pole(2, index));
+                const gp_Vec de(pole(count - 1, index), pole(count, index));
+                const double ks = weight(2, index) / weight(1, index);
+                const double ke = weight(count - 1, index) / weight(count, index);
+                if (index == 1) {
+                    start = ks;
+                    end = ke;
+                }
+                if (ratio == 0.0 && de.Magnitude() > Precision::Confusion()) {
+                    ratio = ds.Dot(de) / de.SquareMagnitude();
+                }
+                closes = std::fabs(ks - start) <= 1e-12 * start && std::fabs(ke - end) <= 1e-12 * end;
             }
-            else {
-                surface->D1(across, first[1], point, du0, dv0);
-                surface->D1(across, last[1], point, du1, dv1);
+            closes = closes && ratio > 0.0;
+            for (int index = 1; closes && index <= rows; ++index) {
+                const gp_Vec ds(pole(1, index), pole(2, index));
+                const gp_Vec de(pole(count - 1, index), pole(count, index));
+                closes = (ds - de * ratio).Magnitude() <= Precision::Confusion();
             }
-            const gp_Vec& d0 = direction == 0 ? du0 : dv0;
-            const gp_Vec& d1 = direction == 0 ? du1 : dv1;
-            closes = d0.Magnitude() > Precision::Confusion() && d1.Magnitude() > Precision::Confusion()
-                && d0.Angle(d1) <= 1e-6;
         }
         if (!closes) {
             continue;

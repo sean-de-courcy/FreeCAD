@@ -309,6 +309,32 @@ class RefineSplitWallsTest(unittest.TestCase):
         self.assertLessEqual(max(e.Tolerance for e in refined.Edges), tolerance)
         self.assertLessEqual(max(e.Tolerance for e in cut.Edges), tolerance)
 
+    def testStripAcrossSeamCreasedBetweenSamplesStaysApart(self):
+        # review pr1120-r1 R1: the wall raised to degree 3 along the axis with 40 spans and one pole
+        # of the second row around the axis moved out by 0.5, so the seam is creased (about 2 deg)
+        # only for z in about 5.1 to 6.1 and smooth at z = 0, 1.25, ... 10. A test of the seam at
+        # samples merged the strip across the crease; the strip stays two faces. Its smooth twin
+        # (the same degree and spans, no pole moved) merges
+        def raised(surface, crease):
+            surface.increaseDegree(surface.UDegree, 3)
+            v0, v1 = surface.bounds()[2:]
+            for k in range(1, 40):
+                surface.insertVKnot(v0 + (v1 - v0) * k / 40.0, 1, 1e-12)
+            if crease:
+                pole = surface.getPole(2, 24) + V(0.5, 0, 0)
+                surface.setPole(2, 24, pole, surface.getWeight(2, 24))
+
+        probe = Part.Vertex(V(5, 0, 5.6))
+        for crease, seamFaces in ((True, 2), (False, 0)):
+            solid = clampedSeamCylinder(0.0, lambda s: raised(s, crease))
+            cut = solid.cut(wedge(0.08, 2 * math.pi - 0.08))
+            refined = cut.removeSplitter()
+            self.assertTrue(refined.isValid())
+            onSeam = [
+                f for f in refined.Faces if any(e.distToShape(probe)[0] < 1e-6 for e in f.Edges)
+            ]
+            self.assertEqual(len(onSeam), seamFaces, crease)
+
     def testBSplineSquaresMerge(self):
         a, b, _ = squaresAndPetal()
         refined = Part.Shell([a, b]).removeSplitter()
@@ -478,9 +504,10 @@ class RefineMergedWallHoledInEachHalfReferenceTest(RefineMergedHoledWallReferenc
 # ops#1120: a wall closed around its axis, clamped there.
 
 
-def clampedSeamCylinder(opening):
+def clampedSeamCylinder(opening, change=None):
     """A NURBS cylinder (r 5, h 10) whose wall is clamped around the axis, not periodic: its last
-    row of poles there moved by `opening` along X, the solid sewn back from the wall and the caps."""
+    row of poles there moved by `opening` along X, then `change` applied to it (if given), the solid
+    sewn back from the wall and the caps."""
     base = Part.makeCylinder(5, 10).toNurbs()
     wall = [f for f in base.Faces if f.Surface.isUPeriodic()][0]
     surface = wall.Surface.copy()
@@ -489,6 +516,8 @@ def clampedSeamCylinder(opening):
     for j in range(1, surface.NbVPoles + 1):
         pole = surface.getPole(last, j) + V(opening, 0, 0)
         surface.setPole(last, j, pole, surface.getWeight(last, j))
+    if change:
+        change(surface)
     caps = [f for f in base.Faces if not f.isSame(wall)]
     shell = Part.Shell(Part.makeShell([Part.Face(surface)] + caps).Faces)
     shell.sewShape(1e-4)
