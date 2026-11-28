@@ -2561,9 +2561,13 @@ void foldFloorPieces(const Context& ctx,
     }
     else {
         const Section section = sectionAt(ctx, data, atVertex);
-        // |toward . away| >= 1e-6: the floor is not along the edge
-        reach = 1.2 * std::max(section.length[0], section.length[1])
-            / std::abs(gp_Vec(toward).Dot(gp_Vec(away)));
+        // |toward . away| >= 1e-6: the floor is not along the edge. Never more than the bound
+        // before ops#1040 D, four extents: the cube about the vertex also takes in the side the
+        // footprint never reaches, and on an edge under about 17 degrees to the floor a larger cube
+        // refused folds that were right (review r2 L1)
+        reach = std::min(1.2 * std::max(section.length[0], section.length[1])
+                             / std::abs(gp_Vec(toward).Dot(gp_Vec(away))),
+                         2 * (section.length[0] + section.length[1]));
     }
     std::vector<TopoDS_Shape> behind;
     for (const auto& face : faces) {

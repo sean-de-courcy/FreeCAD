@@ -385,6 +385,40 @@ class TestFilletVertexFolds(unittest.TestCase):
                 self.assertSameBody(shape, expected)
                 self.assertTrue(self.refuses(tilted(second_x=2.0), corner, 2.0, kind))
 
+    def testShallowTiltedCornerKeepsTheFoldPastFourExtents(self):
+        """Review r2 L1 of ops#1040 D: the corners leaning at 12 degrees to the floor (2 high), the second block
+        (2 high) 9.5 away. The tool's footprint (2 / sin 12 = 9.6) runs the other way, and the bound stays the one
+        before ops#1040 D, four extents (8): the fold builds the plain round, fillet and chamfer, as it did."""
+        width = 3.9375
+        run = 2 / math.tan(math.radians(12))
+
+        def leaning(second_x=None):
+            shape = Part.makeBox(40, 40, 4, V(-20, -20, 0)).cut(Part.makeBox(20, 20, 4))
+            side = Part.makePolygon([V(-20, 0, 4), V(0, 0, 4), V(-run, 0, 6), V(-20, 0, 6), V(-20, 0, 4)])
+            shape = shape.fuse(Part.Face(side).extrude(V(0, -width, 0)))
+            if second_x is not None:
+                shape = shape.fuse(Part.makeBox(4, 4, 2, V(second_x, -4, 4)))
+            return shape.removeSplitter()
+
+        def corner(edge):
+            if len(edge.Vertexes) != 2:
+                return False
+            low, high = sorted((v.Point for v in edge.Vertexes), key=lambda p: p.z)
+            return (
+                abs(low.x) < 1e-7
+                and abs(low.z - 4) < 1e-7
+                and abs(high.z - 6) < 1e-7
+                and abs(low.y - high.y) < 1e-7
+                and (abs(low.y) < 1e-7 or abs(low.y + width) < 1e-7)
+            )
+
+        for kind in ("Fillet", "Chamfer"):
+            with self.subTest(kind=kind):
+                alone = self.dressUp(leaning(), corner, 2.0, kind)
+                shape = self.dressUp(leaning(second_x=9.5), corner, 2.0, kind)
+                expected = alone.fuse(Part.makeBox(4, 4, 2, V(9.5, -4, 4))).removeSplitter()
+                self.assertSameBody(shape, expected)
+
 
 # ops#898 causes L and P (sk898tlp's cases; Onshape RB136, RB138).
 # L: a block's two long top edges rounded, a handle r 7 standing on the end face x = 24 under part of the round's end
