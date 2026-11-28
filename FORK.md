@@ -562,7 +562,8 @@ names it.
 | `fix/i1085-tangent-tip` | fix | ops#1085 | - | open | `6c0e0ca721` (fork PR 564), 2026-11-28 | never (fork fix): a round on a tangent tip ending in two pocket walls builds as Onshape's |
 | `fix/i1086-pad-retry` | fix | ops#1086, ops#1101 | - | open | `96e64e083e` (fork PR 563), 2026-11-28 | dropped if upstream's OCCT fuses a column through an elbow's torus right |
 | `fix/i1122-atrium-faces` | fix | ops#1122 | - | open | `bf2cbbb763` (fork PR 566), 2026-11-28 | drop if upstream's refine merges Forward pieces of one torus or sphere |
-| `fix/i1120-seam-periodic` | fix | ops#1120 | - | open | (fork PR 565) | drop if upstream's refine builds a clamped closed B-spline group on a periodic surface |
+| `fix/i1120-seam-periodic` | fix | ops#1120 | - | open | `3f437693d7` (fork PR 565), 2026-11-28 | drop if upstream's refine builds a clamped closed B-spline group on a periodic surface |
+| `fix/i1040-fold-reach` | fix | ops#1040 | - | open | (fork PR 567) | never (fork fix): a corner fold over a merged face behind the floor bounds it by the tool's own reach |
 
 ## Fork-only commits in carried topics
 
