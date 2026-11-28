@@ -6811,6 +6811,82 @@ class TestPadColumnThroughElbow(unittest.TestCase):
         self.assertAlmostEqual(results[None][0], 1855.623, delta=0.2)
         self.assertLess(results[None][1], 10 * results["off"][1] + 5.0)
 
+    def testPinUnderAGrazedKnobIsNotRefused(self):
+        # Review pr1086-r2 (PinUnderRevolvedKnob): a slab (top z = 0) with a ball bump, a post and a
+        # beam; hanging from the beam on the z axis, beyond the Pad's profile, a turned knob (a
+        # spline profile revolved, its belly radius 2.7) or a NURBS ball of radius 2.7 (1 + 1e-6)
+        # around z = 13 or 14. A pin r 3 is padded down from z = 5, 10 long. The lost-material
+        # check's lines on 0.9 R = 2.7 graze the knob's belly or cut a sliver of the ball, and OCCT's
+        # line intersection returns one crossing there: the parity said lost though OCCT's one fuse
+        # is right. With the switch at refuse the Pad must stay valid, and be the switch off's
+        V = FreeCAD.Vector
+
+        def base(kind):
+            slab = Part.makeBox(60, 60, 10, V(-30, -30, -10))
+            parts = [
+                Part.makeSphere(2, V(5.2, 0, 0)),
+                Part.makeBox(5, 10, 30, V(20, -5, 0)),
+                Part.makeBox(35, 10, 10, V(-10, -5, 20)),
+            ]
+            if kind == "knob":
+                points = [V(0.3, 0, 9), V(1.62, 0, 10.5), V(2.7, 0, 13), V(1.89, 0, 16), V(0.3, 0, 18)]
+                spline = Part.BSplineCurve()
+                spline.interpolate(
+                    points,
+                    Tangents=[V(1, 0, 0.2), V(1, 0, 1), V(0, 0, 1), V(-1, 0, 1), V(-1, 0, 0.2)],
+                )
+                wire = Part.Wire(
+                    [
+                        spline.toShape(),
+                        Part.makeLine(points[-1], V(0, 0, 18)),
+                        Part.makeLine(V(0, 0, 18), V(0, 0, 9)),
+                        Part.makeLine(V(0, 0, 9), points[0]),
+                    ]
+                )
+                knob = Part.Face(wire).revolve(V(0, 0, 0), V(0, 0, 1), 360)
+                parts.append(knob if knob.ShapeType == "Solid" else Part.Solid(knob))
+                parts.append(Part.makeCylinder(0.3, 6, V(0, 0, 16)))
+            else:
+                parts.append(Part.makeSphere(2.7 * (1 + 1e-6), V(0, 0, 14)).toNurbs())
+                parts.append(Part.makeCylinder(0.3, 8, V(0, 0, 14)))
+            return slab.fuse(parts).removeSplitter()
+
+        for kind in ("knob", "nurbs"):
+            shape = base(kind)
+            results = {}
+            for switch in ("off", "refuse", None):
+                if switch:
+                    os.environ["FREECAD_CH_SECTOR_RETRY"] = switch
+                else:
+                    os.environ.pop("FREECAD_CH_SECTOR_RETRY", None)
+                feature = self.Doc.addObject("Part::Feature", "Base")
+                feature.Shape = shape
+                body = self.Doc.addObject("PartDesign::Body", "Body")
+                body.BaseFeature = feature
+                self.Doc.recompute()
+                sketch = body.newObject("Sketcher::SketchObject", "Pin")
+                sketch.Placement = FreeCAD.Placement(
+                    V(0, 0, 5), FreeCAD.Rotation(V(0, 0, 1), V(0, 0, -1))
+                )
+                sketch.addGeometry(Part.Circle(V(0, 0, 0), V(0, 0, 1), 3))
+                pad = body.newObject("PartDesign::Pad", "Pad")
+                pad.Profile = sketch
+                pad.Length = 10
+                self.Doc.recompute()
+                self.assertTrue(pad.isValid(), "%s %s: %s" % (kind, switch, pad.getStatusString()))
+                results[switch] = (
+                    round(pad.Shape.Volume, 6),
+                    len(pad.Shape.Faces),
+                    len(pad.Shape.Edges),
+                )
+                FreeCAD.closeDocument(self.Doc.Name)
+                self.Doc = FreeCAD.newDocument("PartDesignTestPadColumnThroughElbow")
+            self.assertEqual(results["off"], results[None], kind)
+            self.assertEqual(results["off"], results["refuse"], kind)
+            self.assertAlmostEqual(
+                results["off"][0] - shape.Volume, math.pi * 9 * 5, delta=0.01, msg=kind
+            )
+
     # --- names (test 6) -------------------------------------------------------------------------
 
     def testNamesSurviveAnEditAndAReopen(self):

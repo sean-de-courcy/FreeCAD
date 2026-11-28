@@ -1782,7 +1782,8 @@ bool curvedFaceNearTool(const TopoDS_Shape& base, const TopoDS_Shape& tool, cons
 /// parallel to the axis through the sample positions is intersected with the result's faces once
 /// (box-filtered): a point is inside exactly when an odd number of crossings lie beyond it on its
 /// line. A crossing on a face's boundary, a tangent one, or one within 1e-6 of a sample's height
-/// makes that line's parity unsafe: then its 16 points are classified one by one. A rung the ladder
+/// makes that line's parity unsafe: then its 16 points are classified one by one; so does a parity
+/// OUT the classifier refutes (a graze on a free-form face). A rung the ladder
 /// keeps is still checked at check c's 2178 points. Only the result is looked at, never the base
 bool missesToolInterior(const TopoDS_Shape& result, const PlainCylinder& cylinder)
 {
@@ -1836,22 +1837,36 @@ bool missesToolInterior(const TopoDS_Shape& result, const PlainCylinder& cylinde
                 safe = false;
             }
         }
-        for (int k = 1; k <= 16; ++k) {
-            bool out = false;
-            if (safe) {
+        auto classifiedOut = [&](int k) {
+            if (!inResult) {
+                inResult.emplace(solid);
+            }
+            inResult->Perform(start.Translated(height(k) * up), 1e-7);
+            return inResult->State() == TopAbs_OUT;
+        };
+        if (safe) {
+            // A parity OUT is confirmed by the classifier before it counts (review pr1086-r2): a
+            // line grazing a free-form face (a B-spline knob's belly on a sample radius, a sliver
+            // of a NURBS ball) can return one crossing where there are none or two, with State IN
+            // and no Tangent transition. Refuted, the line's parity is wrong and all its points
+            // are classified. The usual answer (no parity OUT) costs nothing more.
+            for (int k = 1; safe && k <= 16; ++k) {
                 const auto beyond = std::count_if(crossings.begin(), crossings.end(), [&](double w) {
                     return w > height(k);
                 });
-                out = beyond % 2 == 0;
-            }
-            else {
-                if (!inResult) {
-                    inResult.emplace(solid);
+                if (beyond % 2 == 0) {
+                    if (classifiedOut(k)) {
+                        return true;
+                    }
+                    safe = false;
                 }
-                inResult->Perform(start.Translated(height(k) * up), 1e-7);
-                out = inResult->State() == TopAbs_OUT;
             }
-            if (out) {
+            if (safe) {
+                continue;
+            }
+        }
+        for (int k = 1; k <= 16; ++k) {
+            if (classifiedOut(k)) {
                 return true;
             }
         }
