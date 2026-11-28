@@ -504,44 +504,58 @@ class RefineMergedWallHoledInEachHalfReferenceTest(RefineMergedHoledWallReferenc
 # ops#1120: a wall closed around its axis, clamped there.
 
 
-def clampedSeamCylinder(opening, change=None):
-    """A NURBS cylinder (r 5, h 10) whose wall is clamped around the axis, not periodic: its last
-    row of poles there moved by `opening` along X, then `change` applied to it (if given), the solid
-    sewn back from the wall and the caps."""
-    base = Part.makeCylinder(5, 10).toNurbs()
-    wall = [f for f in base.Faces if f.Surface.isUPeriodic()][0]
-    surface = wall.Surface.copy()
-    surface.setUNotPeriodic()
-    last = surface.NbUPoles
-    for j in range(1, surface.NbVPoles + 1):
-        pole = surface.getPole(last, j) + V(opening, 0, 0)
-        surface.setPole(last, j, pole, surface.getWeight(last, j))
+def clampedWall(change=None):
+    """A cylinder wall (r 5, h 10) as one clamped rational B-spline, not periodic: the quadratic
+    circle around the axis (9 poles, knots 0 to 4, end multiplicities 3), first and last rows of
+    poles equal, then `change` applied to the surface (if given)."""
+    w = math.sqrt(0.5)
+    ring = [(5, 0), (5, 5), (0, 5), (-5, 5), (-5, 0), (-5, -5), (0, -5), (5, -5), (5, 0)]
+    poles = [[V(x, y, 0), V(x, y, 10)] for x, y in ring]
+    weights = [[1.0 if i % 2 == 0 else w] * 2 for i in range(len(ring))]
+    surface = Part.BSplineSurface()
+    surface.buildFromPolesMultsKnots(
+        poles, [3, 2, 2, 2, 3], [2, 2], [0, 1, 2, 3, 4], [0, 1], False, False, 2, 1, weights
+    )
     if change:
         change(surface)
-    caps = [f for f in base.Faces if not f.isSame(wall)]
-    shell = Part.Shell(Part.makeShell([Part.Face(surface)] + caps).Faces)
-    shell.sewShape(1e-4)
-    return Part.Solid(shell)
+    return surface
 
 
-def creasedSeamCylinder():
-    """The clamped NURBS wall of clampedSeamCylinder() with its second row of poles around the axis
-    moved by 0.5 along X: closed, but creased at the seam; its caps made from its own edges."""
-    base = Part.makeCylinder(5, 10).toNurbs()
-    wall = [f for f in base.Faces if f.Surface.isUPeriodic()][0]
-    surface = wall.Surface.copy()
-    surface.setUNotPeriodic()
-    for j in range(1, surface.NbVPoles + 1):
-        surface.setPole(2, j, surface.getPole(2, j) + V(0.5, 0, 0), surface.getWeight(2, j))
+def wallSolid(surface):
+    """The solid of a closed wall and its two caps, made from the wall's own end circles."""
     face = Part.Face(surface)
     caps = [
-        Part.Face(Part.Wire([e]))
-        for e in face.Edges
-        if e.isClosed() and e.BoundBox.ZLength < 1e-9
+        Part.Face(Part.Wire([e])) for e in face.Edges if e.isClosed() and e.BoundBox.ZLength < 1e-9
     ]
     shell = Part.makeShell([face] + caps)
     shell.sewShape(1e-4)
     return Part.Solid(shell if shell.ShapeType == "Shell" else shell.Shells[0])
+
+
+def clampedSeamCylinder(opening, change=None):
+    """The clamped wall's solid, its last row of poles around the axis moved by `opening` along X,
+    then `change` applied (if given)."""
+
+    def opened(surface):
+        last = surface.NbUPoles
+        for j in range(1, surface.NbVPoles + 1):
+            pole = surface.getPole(last, j) + V(opening, 0, 0)
+            surface.setPole(last, j, pole, surface.getWeight(last, j))
+        if change:
+            change(surface)
+
+    return wallSolid(clampedWall(opened))
+
+
+def creasedSeamCylinder():
+    """The clamped wall with its second row of poles around the axis moved by 0.5 along X: closed,
+    but creased at the seam."""
+
+    def creased(surface):
+        for j in range(1, surface.NbVPoles + 1):
+            surface.setPole(2, j, surface.getPole(2, j) + V(0.5, 0, 0), surface.getWeight(2, j))
+
+    return wallSolid(clampedWall(creased))
 
 
 def wedge(start, end):

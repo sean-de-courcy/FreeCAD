@@ -2055,6 +2055,25 @@ GeomAbs_SurfaceType FaceTypedBSpline::getType() const
     return GeomAbs_BSplineSurface;
 }
 
+// The first and last rows of poles in a direction (0: U) agree to Precision::Confusion(), their
+// weights to 1e-12: the surface closes there, whether OCCT's exact test says so or not
+static bool endRowsMeet(const Handle(Geom_BSplineSurface) & surface, int direction)
+{
+    const int rows = direction == 0 ? surface->NbVPoles() : surface->NbUPoles();
+    for (int index = 1; index <= rows; ++index) {
+        const int i0 = direction == 0 ? 1 : index;
+        const int j0 = direction == 0 ? index : 1;
+        const int i1 = direction == 0 ? surface->NbUPoles() : index;
+        const int j1 = direction == 0 ? index : surface->NbVPoles();
+        if (surface->Pole(i0, j0).Distance(surface->Pole(i1, j1)) > Precision::Confusion()
+            || std::fabs(surface->Weight(i0, j0) - surface->Weight(i1, j1))
+                > 1e-12 * std::max(1.0, surface->Weight(i0, j0))) {
+            return false;
+        }
+    }
+    return true;
+}
+
 // A group across the seam of a B-spline surface that closes in a direction but is clamped there,
 // not periodic (ops#1120: a full revolution as one Bezier patch, its end pole rows 4e-14 apart, so
 // OCCT's own closure test, which wants them equal to gp::Resolution(), says open). The pieces lie
@@ -2064,8 +2083,9 @@ GeomAbs_SurfaceType FaceTypedBSpline::getType() const
 // Built on a periodic copy, the same parameters wrap onto the surface itself. Returns `surface`
 // itself unless every face of the group is on a B-spline surface, the group reaches both ends of a
 // direction that is not periodic and leaves a gap between them, the end rows of poles and weights
-// agree to Precision::Confusion() (they are then made equal), the seam is smooth (the rows next to
-// the ends in proportion, see below) and the periodic copy evaluates as the clamped one.
+// agree to Precision::Confusion() (they are then made equal), the ends are clamped, the other
+// direction does not close unless periodic, the seam is smooth (the rows next to the ends in
+// proportion, see below) and the periodic copy evaluates as the clamped one.
 // The reversed kind (a member on the surface run backwards) is not converted
 static Handle(Geom_BSplineSurface) periodicAcrossSeam(
     const FaceVectorType& faces,
@@ -2109,17 +2129,25 @@ static Handle(Geom_BSplineSurface) periodicAcrossSeam(
         if (!reachesBoth || !gap) {
             continue;
         }
-        const TColgp_Array2OfPnt& poles = surface->Poles();
-        const int rows = direction == 0 ? poles.RowLength() : poles.ColLength();
-        bool closes = true;
-        for (int index = 1; closes && index <= rows; ++index) {
-            const int i0 = direction == 0 ? 1 : index;
-            const int j0 = direction == 0 ? index : 1;
-            const int i1 = direction == 0 ? surface->NbUPoles() : index;
-            const int j1 = direction == 0 ? index : surface->NbVPoles();
-            closes = surface->Pole(i0, j0).Distance(surface->Pole(i1, j1)) <= Precision::Confusion()
-                && std::fabs(surface->Weight(i0, j0) - surface->Weight(i1, j1))
-                    <= 1e-12 * std::max(1.0, surface->Weight(i0, j0));
+        const int rows = direction == 0 ? surface->NbVPoles() : surface->NbUPoles();
+        if (!endRowsMeet(surface, direction)) {
+            continue;
+        }
+        // a wall closed but clamped in the other direction too is left as it is (review pr1120-r2
+        // L1: a torus clamped both ways, its whole ring in the other direction, failed the refine)
+        const int other = 1 - direction;
+        if (!(other == 0 ? surface->IsUPeriodic() : surface->IsVPeriodic())
+            && endRowsMeet(surface, other)) {
+            continue;
+        }
+        // the ends are clamped (the derivation below needs it)
+        const int degree = direction == 0 ? surface->UDegree() : surface->VDegree();
+        const int knots = direction == 0 ? surface->NbUKnots() : surface->NbVKnots();
+        auto multiplicity = [&](int index) {
+            return direction == 0 ? surface->UMultiplicity(index) : surface->VMultiplicity(index);
+        };
+        if (multiplicity(1) != degree + 1 || multiplicity(knots) != degree + 1) {
+            continue;
         }
         // and the seam is smooth everywhere along it (review pr1120-r1 R1: a sampled test missed
         // a crease between its samples). With the end rows equal (P0, weights b), the row next to
@@ -2127,39 +2155,44 @@ static Handle(Geom_BSplineSurface) periodicAcrossSeam(
         // end) and the pole differences P1 - P0 one common positive multiple of Pn - Pn-1, the
         // derivative across the seam at any parameter is sum N b (P1 - P0) times k at the start and
         // k' / that multiple at the end (the weight terms cancel, as sum N b (P0 - S) = 0 for the
-        // surface point S): parallel. A creased closed wall keeps its seam as an edge
-        if (closes) {
-            const int count = direction == 0 ? surface->NbUPoles() : surface->NbVPoles();
-            auto pole = [&](int along, int index) {
-                return direction == 0 ? surface->Pole(along, index) : surface->Pole(index, along);
-            };
-            auto weight = [&](int along, int index) {
-                return direction == 0 ? surface->Weight(along, index) : surface->Weight(index, along);
-            };
-            double start = 0.0;
-            double end = 0.0;
-            double ratio = 0.0;
-            closes = count >= 3;
-            for (int index = 1; closes && index <= rows; ++index) {
-                const gp_Vec ds(pole(1, index), pole(2, index));
-                const gp_Vec de(pole(count - 1, index), pole(count, index));
-                const double ks = weight(2, index) / weight(1, index);
-                const double ke = weight(count - 1, index) / weight(count, index);
-                if (index == 1) {
-                    start = ks;
-                    end = ke;
-                }
-                if (ratio == 0.0 && de.Magnitude() > Precision::Confusion()) {
-                    ratio = ds.Dot(de) / de.SquareMagnitude();
-                }
-                closes = std::fabs(ks - start) <= 1e-12 * start && std::fabs(ke - end) <= 1e-12 * end;
+        // surface point S): parallel. A creased closed wall keeps its seam as an edge. Every
+        // difference is to be longer than Precision::Confusion() (review pr1120-r2 S1: a wall
+        // reaching the axis, a dome, has rows of one point there, which no test can judge) and
+        // parallel to 1e-6 of its own length (R2: an absolute bound passed any crease once the
+        // poles next to the seam were close)
+        const int count = direction == 0 ? surface->NbUPoles() : surface->NbVPoles();
+        auto pole = [&](int along, int index) {
+            return direction == 0 ? surface->Pole(along, index) : surface->Pole(index, along);
+        };
+        auto weight = [&](int along, int index) {
+            return direction == 0 ? surface->Weight(along, index) : surface->Weight(index, along);
+        };
+        bool closes = count >= 3;
+        double start = 0.0;
+        double end = 0.0;
+        double ratio = 0.0;
+        double longest = 0.0;
+        for (int index = 1; closes && index <= rows; ++index) {
+            const gp_Vec ds(pole(1, index), pole(2, index));
+            const gp_Vec de(pole(count - 1, index), pole(count, index));
+            const double ks = weight(2, index) / weight(1, index);
+            const double ke = weight(count - 1, index) / weight(count, index);
+            if (index == 1) {
+                start = ks;
+                end = ke;
             }
-            closes = closes && ratio > 0.0;
-            for (int index = 1; closes && index <= rows; ++index) {
-                const gp_Vec ds(pole(1, index), pole(2, index));
-                const gp_Vec de(pole(count - 1, index), pole(count, index));
-                closes = (ds - de * ratio).Magnitude() <= Precision::Confusion();
+            if (de.Magnitude() > longest) {
+                longest = de.Magnitude();
+                ratio = ds.Dot(de) / de.SquareMagnitude();
             }
+            closes = ds.Magnitude() > Precision::Confusion() && de.Magnitude() > Precision::Confusion()
+                && std::fabs(ks - start) <= 1e-12 * start && std::fabs(ke - end) <= 1e-12 * end;
+        }
+        closes = closes && ratio > 0.0;
+        for (int index = 1; closes && index <= rows; ++index) {
+            const gp_Vec ds(pole(1, index), pole(2, index));
+            const gp_Vec de(pole(count - 1, index), pole(count, index));
+            closes = (ds - de * ratio).Magnitude() <= 1e-6 * ds.Magnitude();
         }
         if (!closes) {
             continue;
