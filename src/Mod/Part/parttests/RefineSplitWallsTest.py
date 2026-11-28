@@ -263,6 +263,166 @@ class RefineSplitWallsTest(unittest.TestCase):
         self.assertLess(abs(refined.Volume - exact), 1e-6 * exact)
         self.assertLessEqual(len(refined.Faces), 4)
 
+    # ops#1120: a strip across the seam of a wall that closes around its axis but is clamped there,
+    # not periodic. The two pieces lie at the two ends of the parameters; the merged face's wire
+    # ran on past the end, where the clamped surface is extrapolated (integration before 559: one
+    # face 2 % short of the strip, the volume 0.44 off; with 559 the pieces stayed apart). Onshape
+    # makes it one face. Expected: one face of the strip's area 0.16 * 5 * 10, the volume kept,
+    # the edges' tolerances not raised
+    def seamStrip(self, opening):
+        cut = clampedSeamCylinder(opening).cut(wedge(0.08, math.pi - 0.3)).cut(
+            wedge(-(math.pi - 0.3), -0.08)
+        )
+        self.assertTrue(cut.isValid())
+        refined = cut.removeSplitter()
+        self.assertTrue(refined.isValid())
+        self.assertTrue(relativelyEqual(refined.Volume, cut.Volume))
+        strip = [
+            f
+            for f in refined.Faces
+            if isinstance(f.Surface, Part.BSplineSurface) and abs(f.CenterOfMass.x - 5) < 0.1
+        ]
+        tolerance = max(e.Tolerance for e in cut.Edges)
+        self.assertLessEqual(max(e.Tolerance for e in refined.Edges), tolerance)
+        return cut, refined, strip
+
+    def testStripAcrossClampedSeamMerges(self):
+        for opening in (0.0, 1e-14, 1e-9):
+            cut, refined, strip = self.seamStrip(opening)
+            self.assertEqual(len(refined.Faces), len(cut.Faces) - 1, opening)
+            self.assertEqual(len(strip), 1, opening)
+            self.assertTrue(relativelyEqual(strip[0].Area, 0.16 * 5 * 10, 1e-9), strip[0].Area)
+            self.assertTrue(strip[0].Surface.isUPeriodic())
+
+    def testStripAcrossCreasedSeamStaysApart(self):
+        # the control: the seam creased (the second row of poles moved out by 0.5), so the wall is
+        # not smooth there and the strip keeps its seam edge; the refused attempt across it leaves
+        # no raised tolerance on the shape's edges (integration: 2.75e-2 on edges of 5e-6)
+        cut = creasedSeamCylinder().cut(wedge(0.08, math.pi - 0.3)).cut(
+            wedge(-(math.pi - 0.3), -0.08)
+        )
+        self.assertTrue(cut.isValid())
+        tolerance = max(e.Tolerance for e in cut.Edges)
+        refined = cut.removeSplitter()
+        self.assertTrue(refined.isValid())
+        self.assertEqual(len(refined.Faces), len(cut.Faces))
+        self.assertLessEqual(max(e.Tolerance for e in refined.Edges), tolerance)
+        self.assertLessEqual(max(e.Tolerance for e in cut.Edges), tolerance)
+
+    def testStripAcrossSeamCreasedBetweenSamplesStaysApart(self):
+        # review pr1120-r1 R1: the wall raised to degree 3 along the axis with 40 spans and one pole
+        # of the second row around the axis moved out by 0.5, so the seam is creased (about 2 deg)
+        # only for z in about 5.1 to 6.1 and smooth at z = 0, 1.25, ... 10. A test of the seam at
+        # samples merged the strip across the crease; the strip stays two faces. Its smooth twin
+        # (the same degree and spans, no pole moved) merges
+        def raised(surface, crease):
+            surface.increaseDegree(surface.UDegree, 3)
+            v0, v1 = surface.bounds()[2:]
+            for k in range(1, 40):
+                surface.insertVKnot(v0 + (v1 - v0) * k / 40.0, 1, 1e-12)
+            if crease:
+                pole = surface.getPole(2, 24) + V(0.5, 0, 0)
+                surface.setPole(2, 24, pole, surface.getWeight(2, 24))
+
+        probe = Part.Vertex(V(5, 0, 5.6))
+        for crease, seamFaces in ((True, 2), (False, 0)):
+            solid = clampedSeamCylinder(0.0, lambda s: raised(s, crease))
+            cut = solid.cut(wedge(0.08, 2 * math.pi - 0.08))
+            refined = cut.removeSplitter()
+            self.assertTrue(refined.isValid())
+            onSeam = [
+                f for f in refined.Faces if any(e.distToShape(probe)[0] < 1e-6 for e in f.Edges)
+            ]
+            self.assertEqual(len(onSeam), seamFaces, crease)
+
+    def checkSeamCut(self, solid, inner):
+        # the wall's seam strip left by cutting away the wedge from 0.08 to 2 pi - 0.08 about Z:
+        # refine keeps the volume, a slab cut through the refined solid takes what it takes from
+        # the pieces (a merged face off the surface moves it), and no edge tolerance is raised
+        cut = solid.cut(annularWedge(0.08, 2 * math.pi - 0.08, inner))
+        self.assertTrue(cut.isValid())
+        tolerance = max(e.Tolerance for e in cut.Edges)
+        refined = cut.removeSplitter()
+        self.assertTrue(refined.isValid())
+        self.assertTrue(relativelyEqual(refined.Volume, cut.Volume))
+        slab = Part.makeBox(30, 30, 1, V(-15, -15, 1))
+        self.assertTrue(relativelyEqual(refined.cut(slab).Volume, cut.cut(slab).Volume))
+        self.assertLessEqual(max(e.Tolerance for e in refined.Edges), tolerance)
+        return cut, refined
+
+    def testStripAcrossSeamOfDomeToApex(self):
+        # review pr1120-r2 S1: a dome whose wall reaches the axis, so its last row of poles along
+        # the profile is one point; the pole test passed trivially there and the merged face was
+        # off the surface (the slotted volume 0.29 off). Integration raised the edges' tolerance
+        # 2.5e3 times. The strip may stay two faces; it must not merge off the surface
+        self.checkSeamCut(clampedDome(), 0)
+        self.checkSeamCut(clampedDome(), 2)
+
+    def testCreasedSeamWithKnotsNearEndsStaysApart(self):
+        # review pr1120-r2 R2: the creased wall with a knot inserted at a fraction t of the range
+        # from each end around the axis: the same surface, the rows next to the seam now about
+        # 13 r t from the end rows. An absolute bound on the pole differences took the crease for
+        # smooth once they were short; the strip keeps its seam edge for every t
+        for t in (1e-3, 1e-6, 1e-8):
+
+            def change(surface, t=t):
+                for j in range(1, surface.NbVPoles + 1):
+                    pole = surface.getPole(2, j) + V(0.5, 0, 0)
+                    surface.setPole(2, j, pole, surface.getWeight(2, j))
+                u0, u1 = surface.bounds()[:2]
+                surface.insertUKnot(u0 + (u1 - u0) * t, 1, 0.0)
+                surface.insertUKnot(u1 - (u1 - u0) * t, 1, 0.0)
+
+            cut, refined = self.checkSeamCut(wallSolid(clampedWall(change)), 2)
+            self.assertEqual(len(refined.Faces), len(cut.Faces), t)
+
+    def testStripAcrossSeamOfWallThroughItsAxisStaysApart(self):
+        # review pr1120-r3 M1: a cone (r 5 - z) and a sphere (an arc from 0 to 120 deg) whose
+        # profile runs past the axis, trimmed at the apex: no row of poles is one point there. The
+        # merged face lost the apex edge and came out valid and off (area 4e-5 to 7.5e-5 short,
+        # under the area cap). Expected: the wall's area and the volume of the strip exact
+        a = math.radians(60)
+        for name, solid, area, volume in (
+            (
+                "cone",
+                throughTheAxis([(5, 0), (1, 4), (-3, 8)], [1, 1, 1]),
+                0.08 * 25 * math.sqrt(2),
+                0.08 * 125 / 3.0,
+            ),
+            (
+                "sphere",
+                throughTheAxis(
+                    [(5, 0), (5, 5 * math.tan(a)), (5 * math.cos(2 * a), 5 * math.sin(2 * a))],
+                    [1, 0.5, 1],
+                ),
+                0.16 * 25,
+                0.16 * 125 / 3.0,
+            ),
+        ):
+            cut, refined = self.checkSeamCut(solid, 0)
+            walls = bsplineFaces(refined)
+            self.assertTrue(relativelyEqual(sum(f.Area for f in walls), area, 1e-7), name)
+            self.assertTrue(relativelyEqual(refined.Volume, volume, 3e-6), name)
+            for wall in walls:
+                self.assertTrue(any(e.Degenerated for e in wall.Edges), name)
+
+    def testStripAcrossTorusClampedBothWays(self):
+        # review pr1120-r2 L1: a torus (R 5, r 1) clamped in both directions, and with U and V
+        # exchanged: refine failed on the exchanged one ("Removing splitter failed")
+        for exchange in (False, True):
+            surface = clampedTorus()
+            if exchange:
+                surface.exchangeUV()
+            shell = Part.Shell([Part.Face(surface)])
+            shell.sewShape(1e-4)
+            if shell.ShapeType == "Face":
+                shell = Part.Shell([shell])
+            solid = Part.Solid(shell)
+            if solid.Volume < 0:
+                solid.reverse()
+            self.assertTrue(relativelyEqual(solid.Volume, 2 * math.pi**2 * 5, 1e-9), exchange)
+            self.checkSeamCut(solid, 0)
+
     def testBSplineSquaresMerge(self):
         a, b, _ = squaresAndPetal()
         refined = Part.Shell([a, b]).removeSplitter()
@@ -427,6 +587,151 @@ class RefineMergedWallHoledInEachHalfReferenceTest(RefineMergedHoledWallReferenc
     """The control: the hole at x = -3, a whole hole in each half; the hole's halves don't merge."""
 
     holeX = -3.0
+
+
+# ops#1120: a wall closed around its axis, clamped there.
+
+
+def clampedWall(change=None):
+    """A cylinder wall (r 5, h 10) as one clamped rational B-spline, not periodic: the quadratic
+    circle around the axis (9 poles, knots 0 to 4, end multiplicities 3), first and last rows of
+    poles equal, then `change` applied to the surface (if given)."""
+    w = math.sqrt(0.5)
+    ring = [(5, 0), (5, 5), (0, 5), (-5, 5), (-5, 0), (-5, -5), (0, -5), (5, -5), (5, 0)]
+    poles = [[V(x, y, 0), V(x, y, 10)] for x, y in ring]
+    weights = [[1.0 if i % 2 == 0 else w] * 2 for i in range(len(ring))]
+    surface = Part.BSplineSurface()
+    surface.buildFromPolesMultsKnots(
+        poles, [3, 2, 2, 2, 3], [2, 2], [0, 1, 2, 3, 4], [0, 1], False, False, 2, 1, weights
+    )
+    if change:
+        change(surface)
+    return surface
+
+
+def wallSolid(surface):
+    """The solid of a closed wall and its two caps, made from the wall's own end circles."""
+    face = Part.Face(surface)
+    caps = [
+        Part.Face(Part.Wire([e])) for e in face.Edges if e.isClosed() and e.BoundBox.ZLength < 1e-9
+    ]
+    shell = Part.makeShell([face] + caps)
+    shell.sewShape(1e-4)
+    return Part.Solid(shell if shell.ShapeType == "Shell" else shell.Shells[0])
+
+
+def clampedSeamCylinder(opening, change=None):
+    """The clamped wall's solid, its last row of poles around the axis moved by `opening` along X,
+    then `change` applied (if given)."""
+
+    def opened(surface):
+        last = surface.NbUPoles
+        for j in range(1, surface.NbVPoles + 1):
+            pole = surface.getPole(last, j) + V(opening, 0, 0)
+            surface.setPole(last, j, pole, surface.getWeight(last, j))
+        if change:
+            change(surface)
+
+    return wallSolid(clampedWall(opened))
+
+
+def creasedSeamCylinder():
+    """The clamped wall with its second row of poles around the axis moved by 0.5 along X: closed,
+    but creased at the seam."""
+
+    def creased(surface):
+        for j in range(1, surface.NbVPoles + 1):
+            surface.setPole(2, j, surface.getPole(2, j) + V(0.5, 0, 0), surface.getWeight(2, j))
+
+    return wallSolid(clampedWall(creased))
+
+
+CIRCLE = [(1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1), (0, -1), (1, -1), (1, 0)]
+
+
+def clampedRevolution(profile, weights, mults, knots, degree=2):
+    """The quadratic rational profile `profile` ((x, z) poles) revolved about Z as one clamped
+    rational B-spline, U around the axis as in clampedWall."""
+    w = math.sqrt(0.5)
+    poles = [[V(x * cx, x * cy, z) for x, z in profile] for cx, cy in CIRCLE]
+    ws = [[(1.0 if i % 2 == 0 else w) * b for b in weights] for i in range(len(CIRCLE))]
+    surface = Part.BSplineSurface()
+    surface.buildFromPolesMultsKnots(
+        poles, [3, 2, 2, 2, 3], mults, [0, 1, 2, 3, 4], knots, False, False, 2, degree, ws
+    )
+    return surface
+
+
+def throughTheAxis(profile, weights):
+    """The quadratic profile revolved, its wall crossing the axis inside the profile's range: the
+    face up to the apex (radius 0, found by bisection) on its base disk. The apex is a degenerated
+    edge inside the surface, not a row of one pole."""
+    surface = clampedRevolution(profile, weights, [3, 3], [0, 1])
+    u0, u1, v0, v1 = surface.bounds()
+    low, high = v0, v1
+    for _ in range(80):
+        middle = 0.5 * (low + high)
+        if surface.value(u0, middle).x > 0:
+            low = middle
+        else:
+            high = middle
+    face = surface.toShape(u0, u1, v0, low)
+    base = [
+        Part.Face(Part.Wire([e]))
+        for e in face.Edges
+        if e.isClosed() and e.Length > 1e-5 and e.BoundBox.ZLength < 1e-9
+    ]
+    shell = Part.makeShell([face] + base)
+    shell.sewShape(1e-4)
+    solid = Part.Solid(shell)
+    if solid.Volume < 0:
+        solid.reverse()
+    return solid
+
+
+def clampedDome():
+    """A dome (r 5) on its base disk: the quarter circle from (5, 0) to the apex (0, 5) revolved."""
+    w = math.sqrt(0.5)
+    face = Part.Face(clampedRevolution([(5, 0), (5, 5), (0, 5)], [1, w, 1], [3, 3], [0, 1]))
+    base = [
+        Part.Face(Part.Wire([e]))
+        for e in face.Edges
+        if e.isClosed() and e.Length > 1 and abs(e.BoundBox.ZMax) < 1e-9
+    ]
+    shell = Part.makeShell([face] + base)
+    shell.sewShape(1e-4)
+    solid = Part.Solid(shell if shell.ShapeType == "Shell" else shell.Shells[0])
+    if solid.Volume < 0:
+        solid.reverse()
+    return solid
+
+
+def clampedTorus():
+    """A torus (R 5, r 1) as one rational B-spline clamped in both directions."""
+    w = math.sqrt(0.5)
+    tube = [(5 + x, z) for x, z in CIRCLE]
+    weights = [1.0 if j % 2 == 0 else w for j in range(len(CIRCLE))]
+    return clampedRevolution(tube, weights, [3, 2, 2, 2, 3], [0, 1, 2, 3, 4])
+
+
+def annularWedge(start, end, inner):
+    """The wedge between the angles `start` and `end` (radians) about Z, out to radius 15, from
+    radius `inner` (0: from the axis)."""
+    span = math.degrees(end - start)
+    shape = Part.makeCylinder(15, 30, V(0, 0, -10), V(0, 0, 1), span)
+    if inner:
+        shape = shape.cut(Part.makeCylinder(inner, 30, V(0, 0, -10), V(0, 0, 1), span))
+    shape.rotate(V(0, 0, 0), V(0, 0, 1), math.degrees(start))
+    return shape
+
+
+def wedge(start, end):
+    """The annular wedge between the angles `start` and `end` (radians) about Z, radii 2 to 15."""
+    span = math.degrees(end - start)
+    outer = Part.makeCylinder(15, 30, V(0, 0, -1), V(0, 0, 1), span)
+    shape = outer.cut(Part.makeCylinder(2, 30, V(0, 0, -1), V(0, 0, 1), span))
+    shape.rotate(V(0, 0, 0), V(0, 0, 1), math.degrees(start))
+    return shape
 
 
 # ops#1106: the B-spline kind's index-equal merge gets the guards of the reversed kind.
