@@ -22223,11 +22223,21 @@ bool constructMitreRunOns(
             TopTools_IndexedMapOfShape imaged;
             for (int i = 1; i <= baseFaces.Extent(); ++i) {
                 int count = 0;
+                TopTools_IndexedMapOfShape mine;
                 for (const auto& image : imagesThrough(stages, 0, baseFaces(i))) {
-                    if (image.ShapeType() == TopAbs_FACE && resultFaces.Contains(image)) {
-                        imaged.Add(image);
-                        ++count;
+                    if (image.ShapeType() != TopAbs_FACE || !resultFaces.Contains(image)
+                        || mine.Contains(image)) {
+                        continue;
                     }
+                    // One face that is the image of two faces of the base (two coplanar faces
+                    // merged) would leave each with one image and the count of the tools' own
+                    // faces right: refused (review pending-1038 r1, T1; none built so far)
+                    if (imaged.Contains(image)) {
+                        refuse("the mitre run-ons merged two faces of the base into one");
+                    }
+                    mine.Add(image);
+                    imaged.Add(image);
+                    ++count;
                 }
                 if (count == 0) {
                     refuse("the mitre run-ons' result has lost a face of the base");
@@ -22238,7 +22248,8 @@ bool constructMitreRunOns(
                 }
                 // A wall's pieces all face its way: a tool's face on the wall's plane facing the
                 // other way (a column over a hole's mouth, the hole covered) is not a piece of it
-                // (skeptic of the ops#1038 design, item 1)
+                // (skeptic of the ops#1038 design, item 1). A backstop: the covered hole of the
+                // tests refuses earlier, by the count of the tools' own faces (review r1, T2)
                 if (count > 1) {
                     const auto wall = facing(baseFaces(i));
                     for (const auto& image : imagesThrough(stages, 0, baseFaces(i))) {
