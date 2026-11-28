@@ -28,6 +28,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <numeric>
+#include <map>
+#include <functional>
 #include <numbers>
 #include <optional>
 #include <string>
@@ -40,6 +43,17 @@
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepClass3d_SolidClassifier.hxx>
 #include <BRepBuilderAPI_MakeVertex.hxx>
+#include <BRepBuilderAPI_MakeEdge.hxx>
+#include <BRepCheck_Analyzer.hxx>
+#include <BRepTools_History.hxx>
+#include <BRepTools_ReShape.hxx>
+#include <ElCLib.hxx>
+#include <GCPnts_AbscissaPoint.hxx>
+#include <GeomAPI_ProjectPointOnCurve.hxx>
+#include <Geom_TrimmedCurve.hxx>
+#include <gp_Circ.hxx>
+#include <gp_Elips.hxx>
+#include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
 #include <BRepClass_FaceClassifier.hxx>
 #include <BRepAlgoAPI_Common.hxx>
 #include <BRepAlgoAPI_Section.hxx>
@@ -129,6 +143,331 @@ App::PropertyAngle::Constraints FeatureExtrude::floatAngle = {-maxAngle, maxAngl
 
 namespace
 {
+// ops#1149 (design: the ops repo's notes/extrude-join-profile-edges-1149.md): a sketch curve
+// drawn in pieces (one ellipse as two arcs, a side as two collinear lines) reaches the prism as
+// one edge per piece, so the prism makes one wall per piece; Onshape makes one wall of one curve
+// however it is drawn. Here the profile's pieces that go on along one curve are joined into one
+// edge before the prism. A joint is a vertex with exactly two different edges of one wire; what
+// ends there in the sketch outside the profile (construction lines) is not looked at.
+bool onOneCurve(const TopoDS_Edge& carrier, const TopoDS_Edge& piece)
+{
+    const double tolerance = Precision::Confusion();
+    TopLoc_Location carrierLocation;
+    TopLoc_Location pieceLocation;
+    double first = 0;
+    double last = 0;
+    const Handle(Geom_Curve) carrierCurve = BRep_Tool::Curve(carrier, carrierLocation, first, last);
+    const Handle(Geom_Curve) pieceCurve = BRep_Tool::Curve(piece, pieceLocation, first, last);
+    if (carrierCurve.IsNull() || pieceCurve.IsNull()) {
+        return false;
+    }
+    if (carrierCurve == pieceCurve && carrierLocation.IsEqual(pieceLocation)) {
+        return true;  // pieces the arrangement cut from one sketch curve
+    }
+    const BRepAdaptor_Curve a(carrier);
+    const BRepAdaptor_Curve b(piece);
+    if (a.GetType() != b.GetType()) {
+        return false;
+    }
+    const double middle = 0.5 * (b.FirstParameter() + b.LastParameter());
+    const std::array<gp_Pnt, 3> points {
+        b.Value(b.FirstParameter()),
+        b.Value(middle),
+        b.Value(b.LastParameter())
+    };
+    switch (a.GetType()) {
+        case GeomAbs_Line: {
+            const gp_Lin line = a.Line();
+            return std::all_of(points.begin(), points.end(), [&](const gp_Pnt& p) {
+                return line.Distance(p) <= tolerance;
+            });
+        }
+        case GeomAbs_Circle: {
+            const gp_Circ ca = a.Circle();
+            const gp_Circ cb = b.Circle();
+            return ca.Location().Distance(cb.Location()) <= tolerance
+                && std::fabs(ca.Radius() - cb.Radius()) <= tolerance
+                && ca.Axis().IsParallel(cb.Axis(), Precision::Angular());
+        }
+        case GeomAbs_Ellipse: {
+            const gp_Elips ea = a.Ellipse();
+            const gp_Elips eb = b.Ellipse();
+            if (ea.Location().Distance(eb.Location()) > tolerance
+                || std::fabs(ea.MajorRadius() - eb.MajorRadius()) > tolerance
+                || std::fabs(ea.MinorRadius() - eb.MinorRadius()) > tolerance
+                || !ea.Axis().IsParallel(eb.Axis(), Precision::Angular())) {
+                return false;
+            }
+            // the major axes may point opposite ways: the points decide
+            return std::all_of(points.begin(), points.end(), [&](const gp_Pnt& p) {
+                return p.Distance(ElCLib::Value(ElCLib::Parameter(ea, p), ea)) <= tolerance;
+            });
+        }
+        default:
+            return false;  // two B-splines, parabola or hyperbola arcs: never one curve
+    }
+}
+
+// The tangent at `vertex` pointing out of `edge` (null where `vertex` doesn't end it once)
+gp_Vec outOf(const TopoDS_Edge& edge, const TopoDS_Vertex& vertex)
+{
+    TopoDS_Vertex start;
+    TopoDS_Vertex end;
+    TopExp::Vertices(edge, start, end);
+    if (start.IsSame(end)) {
+        return {};
+    }
+    const BRepAdaptor_Curve curve(edge);
+    gp_Pnt point;
+    gp_Vec tangent;
+    if (vertex.IsSame(end)) {
+        curve.D1(curve.LastParameter(), point, tangent);
+        return tangent;
+    }
+    if (vertex.IsSame(start)) {
+        curve.D1(curve.FirstParameter(), point, tangent);
+        return tangent.Reversed();
+    }
+    return {};
+}
+
+double lengthOf(const TopoDS_Edge& edge)
+{
+    const BRepAdaptor_Curve curve(edge);
+    return GCPnts_AbscissaPoint::Length(curve, 1e-10);
+}
+
+// The sketch geometry id a profile edge's first name starts with (`g13;...`), or -1
+long geometryIdOf(const std::string& name)
+{
+    std::size_t at = 0;
+    while (at + 1 < name.size() && (name[at] == '_' || name[at] == ';')) {
+        ++at;
+    }
+    if (at >= name.size() || name[at] != 'g') {
+        return -1;
+    }
+    char* end = nullptr;
+    const long id = std::strtol(name.c_str() + at + 1, &end, 10);
+    return end != name.c_str() + at + 1 && (*end == ';' || *end == '\0') ? id : -1;
+}
+
+TopoShape joinProfileEdgesOnOneCurve(const TopoShape& profile)
+{
+    const TopoDS_Shape& shape = profile.getShape();
+    if (shape.IsNull()) {
+        return profile;
+    }
+    TopTools_IndexedDataMapOfShapeListOfShape vertexEdges;
+    TopExp::MapShapesAndUniqueAncestors(shape, TopAbs_VERTEX, TopAbs_EDGE, vertexEdges);
+    TopTools_IndexedDataMapOfShapeListOfShape edgeWires;
+    TopExp::MapShapesAndUniqueAncestors(shape, TopAbs_EDGE, TopAbs_WIRE, edgeWires);
+    const int count = edgeWires.Extent();
+    std::vector<int> parent(count + 1);
+    std::iota(parent.begin(), parent.end(), 0);
+    std::function<int(int)> root = [&](int i) {
+        return parent[i] == i ? i : parent[i] = root(parent[i]);
+    };
+    bool any = false;
+    for (int i = 1; i <= vertexEdges.Extent(); ++i) {
+        const TopTools_ListOfShape& edges = vertexEdges(i);
+        if (edges.Extent() != 2 || edges.First().IsSame(edges.Last())) {
+            continue;
+        }
+        const TopoDS_Edge& a = TopoDS::Edge(edges.First());
+        const TopoDS_Edge& b = TopoDS::Edge(edges.Last());
+        const TopTools_ListOfShape& wa = edgeWires.FindFromKey(a);
+        const TopTools_ListOfShape& wb = edgeWires.FindFromKey(b);
+        if (wa.Extent() != 1 || wb.Extent() != 1 || !wa.First().IsSame(wb.First())) {
+            continue;
+        }
+        if (!onOneCurve(a, b) && !onOneCurve(b, a)) {
+            continue;
+        }
+        const TopoDS_Vertex& vertex = TopoDS::Vertex(vertexEdges.FindKey(i));
+        const gp_Vec leaving = outOf(a, vertex);
+        const gp_Vec entering = outOf(b, vertex).Reversed();
+        if (leaving.Magnitude() < gp::Resolution() || entering.Magnitude() < gp::Resolution()
+            || leaving.Normalized().Dot(entering.Normalized()) < 1.0 - 1e-9) {
+            continue;  // not going on past the joint
+        }
+        parent[root(edgeWires.FindIndex(a))] = root(edgeWires.FindIndex(b));
+        any = true;
+    }
+    if (!any) {
+        return profile;
+    }
+    std::map<int, std::vector<int>> chains;
+    for (int i = 1; i <= count; ++i) {
+        chains[root(i)].push_back(i);
+    }
+    BRepTools_ReShape reshape;
+    std::vector<std::pair<TopoDS_Shape, TopoDS_Shape>> joins;  // piece, joined edge
+    std::vector<std::pair<TopoDS_Shape, std::vector<TopoDS_Shape>>> joined;  // edge, its pieces
+    for (const auto& [key, members] : chains) {
+        if (members.size() < 2) {
+            continue;
+        }
+        std::vector<TopoDS_Edge> pieces;
+        double sum = 0;
+        std::size_t longest = 0;
+        double longestLength = -1;
+        for (int index : members) {
+            pieces.push_back(TopoDS::Edge(edgeWires.FindKey(index).Oriented(TopAbs_FORWARD)));
+            const double length = lengthOf(pieces.back());
+            sum += length;
+            if (length > longestLength) {
+                longestLength = length;
+                longest = pieces.size() - 1;
+            }
+        }
+        const TopoDS_Edge& carrier = pieces[longest];
+        if (!std::all_of(pieces.begin(), pieces.end(), [&](const TopoDS_Edge& piece) {
+                return onOneCurve(carrier, piece);
+            })) {
+            continue;
+        }
+        // the chain's ends: the vertices only one of its pieces holds
+        TopTools_IndexedDataMapOfShapeListOfShape chainVertices;
+        for (const TopoDS_Edge& piece : pieces) {
+            TopExp::MapShapesAndAncestors(piece, TopAbs_VERTEX, TopAbs_EDGE, chainVertices);
+        }
+        std::vector<TopoDS_Vertex> ends;
+        for (int i = 1; i <= chainVertices.Extent(); ++i) {
+            if (chainVertices(i).Extent() == 1) {
+                ends.push_back(TopoDS::Vertex(chainVertices.FindKey(i)));
+            }
+        }
+        double first = 0;
+        double last = 0;
+        Handle(Geom_Curve) curve = BRep_Tool::Curve(carrier, first, last);
+        while (auto trimmed = Handle(Geom_TrimmedCurve)::DownCast(curve)) {
+            curve = trimmed->BasisCurve();
+        }
+        if (curve.IsNull()) {
+            continue;
+        }
+        // the length tells the chain from the rest of a closed curve; the point inside, a half
+        // from the other half
+        const double bound = 1e-6 * sum + Precision::Confusion();
+        // a point inside the carrier, which the joined edge must pass
+        const BRepAdaptor_Curve carrierCurve(carrier);
+        const gp_Pnt inside
+            = carrierCurve.Value(0.5 * (carrierCurve.FirstParameter() + carrierCurve.LastParameter()));
+        auto passes = [&](const TopoDS_Edge& edge) {
+            BRepExtrema_DistShapeShape distance(BRepBuilderAPI_MakeVertex(inside).Vertex(), edge);
+            return distance.IsDone() && distance.Value() <= 1e-6
+                && std::fabs(lengthOf(edge) - sum) <= bound;
+        };
+        TopoDS_Edge whole;
+        if (ends.empty()) {
+            // a whole closed curve: the edge a curve drawn in one piece has
+            if (!curve->IsClosed() && !curve->IsPeriodic()) {
+                continue;
+            }
+            BRepBuilderAPI_MakeEdge maker(curve);
+            if (maker.IsDone() && passes(maker.Edge())) {
+                whole = maker.Edge();
+            }
+        }
+        else if (ends.size() == 2) {
+            for (int turn = 0; turn < 2 && whole.IsNull(); ++turn) {
+                BRepBuilderAPI_MakeEdge maker(curve, ends[turn], ends[1 - turn]);
+                if (maker.IsDone() && passes(maker.Edge())) {
+                    whole = maker.Edge();
+                }
+            }
+        }
+        if (whole.IsNull()) {
+            continue;
+        }
+        // the joined edge put in place of the first piece, the same way along the curve
+        const TopoDS_Edge& piece = pieces.front();
+        const BRepAdaptor_Curve pieceCurve(piece);
+        gp_Pnt point;
+        gp_Vec tangent;
+        pieceCurve.D1(0.5 * (pieceCurve.FirstParameter() + pieceCurve.LastParameter()), point, tangent);
+        GeomAPI_ProjectPointOnCurve projection(point, curve);
+        if (projection.NbPoints() == 0) {
+            continue;
+        }
+        gp_Pnt onWhole;
+        gp_Vec wholeTangent;
+        curve->D1(projection.LowerDistanceParameter(), onWhole, wholeTangent);
+        const bool sameWay = wholeTangent.Dot(tangent) > 0;
+        reshape.Replace(piece, sameWay ? whole : TopoDS::Edge(whole.Reversed()));
+        std::vector<TopoDS_Shape> sources;
+        for (std::size_t k = 0; k < pieces.size(); ++k) {
+            if (k > 0) {
+                reshape.Remove(pieces[k]);
+            }
+            joins.emplace_back(pieces[k], whole);
+            sources.push_back(pieces[k]);
+        }
+        joined.emplace_back(whole, sources);
+    }
+    if (joins.empty()) {
+        return profile;
+    }
+    const TopoDS_Shape result = reshape.Apply(shape);
+    auto area = [](const TopoDS_Shape& s) {
+        GProp_GProps props;
+        BRepGProp::SurfaceProperties(s, props);
+        return props.Mass();
+    };
+    auto faces = [](const TopoDS_Shape& s) {
+        TopTools_IndexedMapOfShape map;
+        TopExp::MapShapes(s, TopAbs_FACE, map);
+        return map.Extent();
+    };
+    if (result.IsNull() || faces(result) != faces(shape) || !BRepCheck_Analyzer(result).IsValid()
+        || std::fabs(area(result) - area(shape)) > 1e-9 * std::fabs(area(shape)) + 1e-9) {
+        FC_LOG("profile edges on one curve left as drawn: the joined profile didn't check");
+        return profile;
+    }
+    Handle(BRepTools_History) history = reshape.History();
+    for (const auto& [piece, whole] : joins) {
+        const TopTools_ListOfShape& made = history->Modified(piece);
+        if (std::none_of(made.begin(), made.end(), [&](const TopoDS_Shape& s) {
+                return s.IsSame(whole);
+            })) {
+            history->AddModified(piece, whole);
+        }
+    }
+    TopoShape out(profile.Tag, profile.Hasher, profile.getHistoryAlgorithm());
+    out.makeShapeWithElementMap(result, Part::MapperHistory(history), {profile});
+    // The joined edge's first name is the piece's of the oldest sketch geometry (lowest id), so
+    // its wall and rims are named as that piece's are today, whatever the drawing order
+    for (const auto& [whole, sources] : joined) {
+        const int index = out.findShape(whole);
+        if (index <= 0) {
+            continue;
+        }
+        const Data::IndexedName element = Data::IndexedName::fromConst("Edge", index);
+        auto names = out.getElementMappedNames(element);
+        if (names.size() < 2) {
+            continue;
+        }
+        auto oldest = names.begin();
+        long lowest = std::numeric_limits<long>::max();
+        for (auto it = names.begin(); it != names.end(); ++it) {
+            const long id = geometryIdOf(it->first.toString());
+            if (id >= 0 && id < lowest) {
+                lowest = id;
+                oldest = it;
+            }
+        }
+        if (oldest == names.begin()) {
+            continue;
+        }
+        std::rotate(names.begin(), oldest, oldest + 1);
+        for (std::size_t i = 0; i < names.size(); ++i) {
+            out.setElementName(element, names[i].first, out.Tag, &names[i].second, i == 0);
+        }
+    }
+    return out;
+}
+
 // What an extrusion up to `face` reaches, as generateSingleExtrusionSide(), getUpToFace() and
 // makeElementPrismUntil() decide it, for the reference solver's equivalence probe (ops#7,
 // Task 2 PR 5; the plan's Q3 (a)). Two candidates are equivalent only if the extrusion decides
@@ -1981,6 +2320,10 @@ App::DocumentObjectExecReturn* FeatureExtrude::buildExtrusion(ExtrudeOptions opt
         obj = getVerifiedObject();
         if (makeface) {
             sketchshape = getTopoShapeVerifiedFace();
+            // ops#1149: a sketch curve drawn in pieces is one edge, so one wall, as Onshape's
+            if (obj->isDerivedFrom<Part::Part2DObject>()) {
+                sketchshape = joinProfileEdgesOnOneCurve(sketchshape);
+            }
             // A solid extrude takes planar faces only: Onshape refuses a curved face at pick
             // (hands-on check B3-4, ops#640). A feature that holds one anyway (an older file, a
             // script) fails, and the part stays as it was (the failure's pass-through, ops#126)
