@@ -340,8 +340,9 @@ class TestFilletPropagation(unittest.TestCase):
         self.assertTrue(fillet.isValid(), fillet.getStatusString())
         self.assertEqual(len(fillet.Shape.Solids), 1)
         self.assertAlmostEqual(fillet.Shape.Volume, volume - self.torusRunOn(1.0, math.pi, 2), delta=1e-4)
-        # Onshape has 11: debt (ops#899, review F2), the round's pieces on one torus stay apart
-        self.assertEqual(len(fillet.Shape.Faces), 13)
+        # Onshape has 11: the round's two Forward pieces on one torus are one face since ops#1122
+        # (the refine joins them; 13 before, ops#899 review F2's debt)
+        self.assertEqual(len(fillet.Shape.Faces), 11)
 
     def testOffOnAHollowArcWithOneSharpEnd(self):
         """FGC-NS44 #73's kind: the arc goes on tangentially into a wall at one end; at the other the body turns
