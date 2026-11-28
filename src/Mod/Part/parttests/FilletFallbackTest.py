@@ -9689,6 +9689,91 @@ class MitreRunOnTest(unittest.TestCase):
         self.assertNotIn("Part::GeomSphere", types)
         self.assertNotIn("Part::GeomSurfaceOfRevolution", types)
 
+    @staticmethod
+    def wallHole(x, z, radius, y0=0.0, depth=10.0):
+        """A hole into the wall y = y0 + depth from y0, about (x, z)"""
+        return Part.makeCylinder(radius, depth, V(x, y0, z), V(0, 1, 0))
+
+    @staticmethod
+    def planesOn(shape, y):
+        return [
+            f
+            for f in shape.Faces
+            if f.Surface.TypeId == "Part::GeomPlane"
+            and abs(f.BoundBox.YMin - y) < 1e-7
+            and abs(f.BoundBox.YMax - y) < 1e-7
+        ]
+
+    def testHoleTangentToBothLinesPinchesTheWall(self):
+        # ops#1038 (NS44 Test Tube Nest #48 "Case Corners"): a hole through the corner's wall
+        # y = 10 whose rim touches both the floor round's tangent line z = 12 and the new round's
+        # x = 15 (the base by Booleans: the floor's round on the holed block fails at Part level,
+        # a separate defect). The wall comes out in two faces at the touch points, which the
+        # run-ons' face count refused (and OCCT failed, naming the ellipse). As Onshape's: the two
+        # features in the other order, the wall in two faces (fr1040). The hole only touches the
+        # tools, so the corner's volume is the closed form
+        h = 2.5
+        hole = self.wallHole(15 + h, 12 + h, h)
+        base = self.pocket().cut(hole)
+        result = base.makeFillet(self.r, self.picks(base, 10, 10))
+        axis = V(10 + self.r, 10 + self.r, 0)
+        torus = self.section(self.r, 10, self.q, axis, V(-1, 0, 0)).revolve(axis, V(0, 0, 1), 90)
+        expected = (
+            self.pocket()
+            .fuse([self.column(V(10, 10, 0), self.r, 10, 20), torus])
+            .removeSplitter()
+            .cut(hole)
+        )
+        self.assertTrue(result.isValid())
+        self.assertEqual(len(result.Solids), 1)
+        self.assertEqual(len(result.Faces), len(base.Faces) + 3)
+        self.assertAlmostEqual(
+            result.Volume - base.Volume, self.change(self.r, self.q, 8.0), delta=1e-6
+        )
+        self.assertLess(result.cut(expected).Volume + expected.cut(result).Volume, 1e-6)
+        self.assertEqual(len(self.planesOn(result, 10)), 2)
+
+    def testHoleTangentToTheNewLineOnlyStillBuilds(self):
+        # The same hole 1 higher touches only the new round's tangent line: the wall stays one
+        # face (built before ops#1038 too)
+        h = 2.5
+        base = self.pocket().cut(self.wallHole(15 + h, 13 + h, h))
+        result = base.makeFillet(self.r, self.picks(base, 10, 10))
+        self.assertTrue(result.isValid())
+        self.assertEqual(len(result.Faces), len(base.Faces) + 2)
+        self.assertAlmostEqual(
+            result.Volume - base.Volume, self.change(self.r, self.q, 8.0), delta=1e-6
+        )
+
+    def testHoleCoveredByTheColumnRefused(self):
+        # A hole through the wall across the new round's tangent line x = 15: the column closes
+        # its mouth, the volume is the closed form, and the body is not the other order's (by
+        # 0.642; skeptic of the ops#1038 design). The column's face over the mouth faces away
+        # from the wall: not a piece of it, refused (as the face count refused it before)
+        base = self.pocket().cut(self.wallHole(15, 15, 2.0))
+        self.assertRefused(base, self.picks(base, 10, 10))
+        # The user is told the run-ons' reason, not only the construction's ellipse (ops#1038)
+        with self.assertRaises(Exception) as raised:
+            base.makeFillet(self.r, self.picks(base, 10, 10))
+        self.assertIn("the mitre run-ons refused: ", str(raised.exception))
+
+    def testConvexHoleTangentToBothLinesPinchesTheWall(self):
+        # The convex corner (a box's bottom rim q 2, its edge (0, 0) r 5) with a blind hole 3 deep
+        # into the wall y = 0 tangent to the new round's line x = 5 and the rim round's z = 2: the
+        # wall in two faces, the corner's volume the closed form (the other order's body V
+        # 3823.517508, skeptic of the ops#1038 design)
+        h = 2.5
+        base = self.rimmed().cut(self.wallHole(5 + h, 2 + h, h, depth=3.0))
+        result = base.makeFillet(self.r, self.picks(base, 0, 0))
+        self.assertTrue(result.isValid())
+        self.assertEqual(len(result.Solids), 1)
+        self.assertEqual(len(result.Faces), len(base.Faces) + 3)
+        self.assertAlmostEqual(
+            base.Volume - result.Volume, self.change(self.r, self.q, 8.0), delta=1e-6
+        )
+        self.assertAlmostEqual(result.Volume, 3823.517508, delta=1e-5)
+        self.assertEqual(len(self.planesOn(result, 0)), 2)
+
     def testBumpInTheKiteRefused(self):
         # A bump on wall x = 10 within the new round's reach, above the floor rounds
         bump = Part.makeBox(0.5, 0.5, 1, V(10, 11, 15))

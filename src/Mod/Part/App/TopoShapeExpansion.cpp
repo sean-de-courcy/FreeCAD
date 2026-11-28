@@ -10450,7 +10450,8 @@ bool roundMitreRunOns(
     double radius,
     const char* op,
     bool early = false,
-    bool* refused = nullptr
+    bool* refused = nullptr,
+    std::string* why = nullptr
 )
 {
     if (inRimSplitRest || KernelBudget::pastDeadline()) {
@@ -10477,6 +10478,7 @@ bool roundMitreRunOns(
         FilletFallback::Construction construction;
         std::vector<TopoDS_Shape> rest;
         std::string reason;
+        bool recognised = false;
         bool built = false;
     };
     auto split = std::make_shared<Split>();
@@ -10487,7 +10489,8 @@ bool roundMitreRunOns(
             request,
             split->construction,
             split->rest,
-            &split->reason
+            &split->reason,
+            &split->recognised
         );
     };
     if (early) {
@@ -10503,6 +10506,10 @@ bool roundMitreRunOns(
         FC_LOG("fillet by mitre run-ons: " << split->reason);
         if (refused) {
             *refused = true;
+        }
+        // Only a refusal of recognised corners (not of the selection's form) is the user's
+        if (why && split->recognised) {
+            *why = split->reason;
         }
         return false;
     }
@@ -10767,8 +10774,9 @@ TopoShape& TopoShape::makeElementFillet(
     // it, and where its construction refused, the call after OCCT's failure below is not asked
     // again (it would refuse the same way)
     bool mitreRunOnsRefused = false;
+    std::string mitreRunOnsWhy;
     if (radius1 == radius2 && mitreRunOnCandidate(edgeShapes, contourEdges)) {
-        if (roundMitreRunOns(*this, shape, edges, radius1, op, true, &mitreRunOnsRefused)) {
+        if (roundMitreRunOns(*this, shape, edges, radius1, op, true, &mitreRunOnsRefused, &mitreRunOnsWhy)) {
             return *this;
         }
     }
@@ -10991,7 +10999,7 @@ TopoShape& TopoShape::makeElementFillet(
             return *this;
         }
         if (outcome->failed && radius1 == radius2 && !mitreRunOnsRefused
-            && roundMitreRunOns(*this, shape, edges, radius1, op)) {
+            && roundMitreRunOns(*this, shape, edges, radius1, op, false, nullptr, &mitreRunOnsWhy)) {
             return *this;
         }
         if (outcome->failed && edges.size() > 1 && radius1 == radius2) {
@@ -11028,7 +11036,16 @@ TopoShape& TopoShape::makeElementFillet(
             return *this;
         }
         if (outcome->failed) {
-            raiseDressUpError(*mkFillet, outcome->occtError, outcome->reason);
+            // ops#1038: where the mitre run-ons refused a corner, their reason is the user's too
+            // (it went only to the log, and the message named the construction's ellipse edge)
+            raiseDressUpError(
+                *mkFillet,
+                outcome->occtError,
+                mitreRunOnsWhy.empty() ? outcome->reason
+                    : outcome->reason.empty()
+                    ? "the mitre run-ons refused: " + mitreRunOnsWhy
+                    : outcome->reason + "; the mitre run-ons refused: " + mitreRunOnsWhy
+            );
         }
         if (outcome->thin) {
             raiseThinFaceError("The fillet", outcome->reason);
