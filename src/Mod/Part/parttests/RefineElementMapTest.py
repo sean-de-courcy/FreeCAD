@@ -425,6 +425,62 @@ class RefineConeTorusSphereTest(unittest.TestCase):
         torus = [f for f in refined.Faces if type(f.Surface).__name__ == "Toroid"][0]
         self.assertAlmostEqual(torus.Area, (2 * math.pi * 5) * (2 * math.pi * 20) / 4, places=6)
 
+    def testForwardPiecesOfOneTorusOrSphereMerge(self):
+        # ops#1122 (NS88 Labyrinth #18): two patches of one surface sewn along a line of it, as
+        # one face Forward or Reversed. On a torus or a sphere the merged face was built on the
+        # complement for a Forward pair and refused, so only Reversed pairs merged
+        for kind in ("torus", "sphere", "cone", "cylinder"):
+            for flip in (False, True):
+                with self.subTest(kind=kind, flip=flip):
+                    if kind == "torus":
+                        surface = Part.Toroid()
+                        surface.MajorRadius, surface.MinorRadius = 20, 2
+                        a, b = surface.toShape(0.3, 1.0, 2, 3), surface.toShape(1.0, 1.5, 2, 3)
+                    elif kind == "sphere":
+                        surface = Part.Sphere()
+                        surface.Radius = 5
+                        a, b = surface.toShape(0.3, 1.0, 0.2, 0.9), surface.toShape(1.0, 1.5, 0.2, 0.9)
+                    else:
+                        surface = Part.Cone() if kind == "cone" else Part.Cylinder()
+                        if kind == "cone":
+                            surface.SemiAngle = 0.3
+                        surface.Radius = 5
+                        a, b = surface.toShape(0.3, 1.0, 2, 6), surface.toShape(1.0, 1.5, 2, 6)
+                    shell = Part.Shell([a, b]).copy()
+                    shell.sewShape()
+                    if flip:
+                        shell = shell.reversed()
+                    self.assertEqual(shell.Faces[0].Orientation, "Reversed" if flip else "Forward")
+                    refined = shell.removeSplitter()
+                    self.assertEqual(len(refined.Faces), 1)
+                    self.assertAlmostEqual(refined.Area, a.Area + b.Area, places=9)
+
+    def testRoundAlongAFloorCircleInTwoEdgesIsOneTorus(self):
+        # ops#1122: a boss whose wall was built as two halves, refined into one cylinder: its foot
+        # circle keeps a vertex where the halves met, so OCCT's round along it is two Forward faces
+        # of one torus, which the refine makes one (Onshape: one face per smooth round)
+        half = Part.makeBox(40, 40, 10, V(0, -20, 0))
+        post = Part.makeCylinder(10, 5, V(0, 0, 5))
+        body = Part.makeBox(40, 40, 5, V(-20, -20, 0)).fuse(post.common(half)).fuse(post.cut(half))
+        body = body.removeSplitter()
+        foot = [
+            e
+            for e in body.Edges
+            if e.Curve.TypeId == "Part::GeomCircle"
+            and abs(e.BoundBox.ZMin - 5) < 1e-9
+            and abs(e.BoundBox.ZMax - 5) < 1e-9
+        ]
+        self.assertGreater(len(foot), 1)
+        rounded = body.makeFillet(1.0, foot)
+        tori = [f for f in rounded.Faces if type(f.Surface).__name__ == "Toroid"]
+        self.assertEqual(len(tori), 2)
+        self.assertEqual({f.Orientation for f in tori}, {"Forward"})
+        refined = rounded.removeSplitter()
+        self.assertTrue(refined.isValid())
+        self.assertEqual(kinds(refined)["Toroid"], 1)
+        self.assertAlmostEqual(refined.Volume, rounded.Volume, delta=1e-6)
+        self.assertAlmostEqual(refined.Area, rounded.Area, delta=1e-6)
+
     def testChamferedDiscMirrored(self):
         disc = Part.makeCylinder(10, 5)
         rim = [e for e in disc.Edges if e.BoundBox.ZMin > 4.999 and e.Length > 60]

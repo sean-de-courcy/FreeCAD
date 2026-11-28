@@ -560,7 +560,8 @@ names it.
 | `fix/i1041-pattern-gap-close` | fix | ops#1041 | - | open | `4dafc72ea9` (fork PR 561), 2026-11-27 | never (fork fix): with Reapply on, a pattern's adding copy within 0.008375 of the part has the gap closed as Onshape does, or the pattern stops when it can't be closed exactly |
 | `fix/i1114-corner-split` | fix | ops#1114 | - | open | `a41174e94e` (fork PR 562), 2026-11-27 | never (fork fix): an inside floor corner on a concave arc wall runs on when its section is in the material at the vertex (A); a fillet refused at a reflex corner with a circle splits into the corner's loops and the rest (B), as Onshape's DU6 |
 | `fix/i1085-tangent-tip` | fix | ops#1085 | - | open | `6c0e0ca721` (fork PR 564), 2026-11-28 | never (fork fix): a round on a tangent tip ending in two pocket walls builds as Onshape's |
-| `fix/i1086-pad-retry` | fix | ops#1086, ops#1101 | - | open | (fork PR 563) | dropped if upstream's OCCT fuses a column through an elbow's torus right |
+| `fix/i1086-pad-retry` | fix | ops#1086, ops#1101 | - | open | `96e64e083e` (fork PR 563), 2026-11-28 | dropped if upstream's OCCT fuses a column through an elbow's torus right |
+| `fix/i1122-atrium-faces` | fix | ops#1122 | - | open | (fork PR 566) | drop if upstream's refine merges Forward pieces of one torus or sphere |
 
 ## Fork-only commits in carried topics
 
