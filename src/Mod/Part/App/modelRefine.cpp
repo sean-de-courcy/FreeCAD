@@ -48,8 +48,10 @@
 #include <BRepBuilderAPI_MakeSolid.hxx>
 #include <BRepBuilderAPI_Sewing.hxx>
 #include <BRepCheck_Analyzer.hxx>
+#include <BRepClass_FaceClassifier.hxx>
 #include <BRepGProp.hxx>
 #include <GCPnts_AbscissaPoint.hxx>
+#include <gp_Pnt2d.hxx>
 #include <Geom2d_BSplineCurve.hxx>
 #include <Geom2d_Curve.hxx>
 #include <Geom2d_TrimmedCurve.hxx>
@@ -78,6 +80,7 @@
 #include <Precision.hxx>
 #include <ShapeAnalysis_Curve.hxx>
 #include <ShapeAnalysis_Shell.hxx>
+#include <ShapeAnalysis_Surface.hxx>
 #include <ShapeBuild_ReShape.hxx>
 #include <ShapeFix_Face.hxx>
 #include <Standard_Version.hxx>
@@ -86,6 +89,7 @@
 #include <TColStd_Array1OfReal.hxx>
 #include <TColStd_Array2OfReal.hxx>
 #include <TopoDS.hxx>
+#include <TopoDS_Vertex.hxx>
 #include <TopoDS_Compound.hxx>
 #include <TopoDS_Iterator.hxx>
 #include <TopoDS_Shape.hxx>
@@ -1146,6 +1150,188 @@ bool coversGroup(
     return difference <= allowed + std::min(slack, 1e-4 * area);
 }
 
+// What a tolerance may become through a fuse of edges, or a merged face's build (ops#1051)
+static double growthAllowed(double tolerance)
+{
+    return 10.0 * std::max(tolerance, 1e-6);
+}
+
+// The tolerances of a shape's edges and vertices: read before a fuse of edges, compared and put
+// back after one that is undone (the face fix writes into what the fused shape shares with it)
+struct Tolerances
+{
+    TopTools_IndexedMapOfShape shapes;
+    std::vector<double> values;
+
+    explicit Tolerances(const TopoDS_Shape& shape)
+    {
+        TopExp::MapShapes(shape, TopAbs_EDGE, shapes);
+        TopExp::MapShapes(shape, TopAbs_VERTEX, shapes);
+        values.reserve(shapes.Extent());
+        for (int index = 1; index <= shapes.Extent(); ++index) {
+            values.push_back(now(shapes(index)));
+        }
+    }
+    static double now(const TopoDS_Shape& shape)
+    {
+        return shape.ShapeType() == TopAbs_EDGE ? BRep_Tool::Tolerance(TopoDS::Edge(shape))
+                                                : BRep_Tool::Tolerance(TopoDS::Vertex(shape));
+    }
+    bool grew() const
+    {
+        for (int index = 1; index <= shapes.Extent(); ++index) {
+            if (now(shapes(index)) > growthAllowed(values[index - 1])) {
+                return true;
+            }
+        }
+        return false;
+    }
+    void putBack() const
+    {
+        for (int index = 1; index <= shapes.Extent(); ++index) {
+            const TopoDS_Shape& shape = shapes(index);
+            if (now(shape) == values[index - 1]) {
+                continue;
+            }
+            if (shape.ShapeType() == TopAbs_EDGE) {
+                Handle(BRep_TEdge)::DownCast(shape.TShape())->Tolerance(values[index - 1]);
+            }
+            else {
+                Handle(BRep_TVertex)::DownCast(shape.TShape())->Tolerance(values[index - 1]);
+            }
+        }
+    }
+};
+
+// The face's oriented normal at (u, v), or a null vector where the surface is singular
+gp_Vec orientedNormal(const TopoDS_Face& face, double u, double v, gp_Pnt& point)
+{
+    BRepAdaptor_Surface surface(face);
+    gp_Vec du, dv;
+    surface.D1(u, v, point, du, dv);
+    gp_Vec normal = du.Crossed(dv);
+    if (normal.Magnitude() <= Precision::Confusion() * Precision::Confusion()) {
+        return {};
+    }
+    normal.Normalize();
+    return face.Orientation() == TopAbs_REVERSED ? normal.Reversed() : normal;
+}
+
+// A point inside the face and its oriented normal there, from an 8 x 8 grid over its parameter
+// range; false where no point of the grid is inside
+bool interiorPoint(const TopoDS_Face& face, gp_Pnt& point, gp_Vec& normal)
+{
+    Standard_Real u0 = 0.0, u1 = 0.0, v0 = 0.0, v1 = 0.0;
+    BRepTools::UVBounds(face, u0, u1, v0, v1);
+    for (int i = 1; i < 8; ++i) {
+        for (int j = 1; j < 8; ++j) {
+            const double u = u0 + (u1 - u0) * i / 8.0;
+            const double v = v0 + (v1 - v0) * j / 8.0;
+            BRepClass_FaceClassifier classifier(face, gp_Pnt2d(u, v), Precision::PConfusion());
+            if (classifier.State() != TopAbs_IN) {
+                continue;
+            }
+            normal = orientedNormal(face, u, v, point);
+            if (normal.Magnitude() > 0.5) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+// The parameter moved by whole periods into [first, last], where it can be
+double intoRange(double value, double first, double last, bool periodic, double period)
+{
+    if (!periodic || period <= 0.0) {
+        return value;
+    }
+    while (value < first - Precision::PConfusion()) {
+        value += period;
+    }
+    while (value > last + Precision::PConfusion()) {
+        value -= period;
+    }
+    return value;
+}
+
+enum class Side
+{
+    Same,      // the merged face covers each checked point of the group, facing the same way
+    Opposite,   // it covers them all, facing the other way
+    Unknown,    // it misses one, or faces some each way
+    Unchecked   // no point of the group could be checked
+};
+
+// Which way the merged face lies on the group (ops#1051): a point inside each face of the group
+// must be inside the merged face, and the oriented normals there compared. The face bounded by
+// the group's wires run the other way is the complement on a closed surface, or the same region
+// facing the other way
+Side sideOnGroup(const FaceVectorType& faces, const TopoDS_Face& face)
+{
+    const Handle(Geom_Surface) surface = BRep_Tool::Surface(face);
+    if (surface.IsNull()) {
+        return Side::Unknown;
+    }
+    ShapeAnalysis_Surface analysis(surface);
+    Standard_Real u0 = 0.0, u1 = 0.0, v0 = 0.0, v1 = 0.0;
+    BRepTools::UVBounds(face, u0, u1, v0, v1);
+    int same = 0;
+    int opposite = 0;
+    for (const auto& f : faces) {
+        gp_Pnt point;
+        gp_Vec normal;
+        if (!interiorPoint(f, point, normal)) {
+            continue;
+        }
+        gp_Pnt2d uv = analysis.ValueOfUV(point, Precision::Confusion());
+        if (analysis.Gap() > Precision::Confusion()) {
+            return Side::Unknown;
+        }
+        const double u = intoRange(uv.X(), u0, u1, surface->IsUPeriodic(),
+                                   surface->IsUPeriodic() ? surface->UPeriod() : 0.0);
+        const double v = intoRange(uv.Y(), v0, v1, surface->IsVPeriodic(),
+                                   surface->IsVPeriodic() ? surface->VPeriod() : 0.0);
+        BRepClass_FaceClassifier classifier(face, gp_Pnt2d(u, v), Precision::PConfusion());
+        if (classifier.State() != TopAbs_IN) {
+            return Side::Unknown;
+        }
+        gp_Pnt on;
+        const gp_Vec there = orientedNormal(face, u, v, on);
+        if (there.Magnitude() < 0.5) {
+            return Side::Unknown;
+        }
+        (there.Dot(normal) > 0.0 ? same : opposite)++;
+    }
+    if (same > 0 && opposite == 0) {
+        return Side::Same;
+    }
+    if (opposite > 0 && same == 0) {
+        return Side::Opposite;
+    }
+    return same == 0 && opposite == 0 ? Side::Unchecked : Side::Unknown;
+}
+
+// The merged face's centre of mass is the group's, within 1e-3 of the square root of the area
+// (ops#1051): a complement of the same area has its centre a radius or so away, and a right merge
+// differs by the boundary slack coversGroup() allows
+bool sameCentre(const FaceVectorType& faces, const TopoDS_Face& face)
+{
+    GProp_GProps group;
+    for (const auto& f : faces) {
+        GProp_GProps props;
+        BRepGProp::SurfaceProperties(f, props);
+        group.Add(props);
+    }
+    if (group.Mass() <= 0.0) {
+        return false;
+    }
+    GProp_GProps merged;
+    BRepGProp::SurfaceProperties(face, merged);
+    const double allowed = 1e-3 * std::sqrt(group.Mass()) + Precision::Confusion();
+    return group.CentreOfMass().Distance(merged.CentreOfMass()) <= allowed;
+}
+
 enum class Revolved
 {
     Cone,
@@ -1272,7 +1458,43 @@ TopoDS_Face buildRevolvedFace(Revolved kind, const FaceVectorType& faces, const 
         face.Orientation(faces.at(0).Orientation());
     }
     else {
-        if (degenerated) {
+        // A sphere cap round a pole (ops#1051): a hemisphere rounded over a rim in arcs is lunes
+        // meeting at the pole. Their one other boundary, a wire round the axis, bounds the cap;
+        // the face fix adds the pole and the seam
+        bool cap = degenerated && kind == Revolved::Sphere && kept.size() == 1;
+        if (cap) {
+            // every degenerated edge at one and the same pole of the surface's frame (a group
+            // with both poles is a lune; one with a degenerated edge elsewhere has its faces on
+            // spheres of other frames)
+            auto sphere = Handle(Geom_SphericalSurface)::DownCast(basis);
+            const gp_Ax3 frame = sphere->Position();
+            const gp_Vec up = gp_Vec(frame.Direction()) * sphere->Radius();
+            const gp_Pnt north = frame.Location().Translated(up);
+            const gp_Pnt south = frame.Location().Translated(-up);
+            int atNorth = 0;
+            int atSouth = 0;
+            for (const auto& boundary : boundaries) {
+                for (const auto& edge : boundary) {
+                    if (!BRep_Tool::Degenerated(edge)) {
+                        continue;
+                    }
+                    const TopoDS_Vertex vertex = TopExp::FirstVertex(edge);
+                    const gp_Pnt point = BRep_Tool::Pnt(vertex);
+                    const double tolerance = BRep_Tool::Tolerance(vertex) + Precision::Confusion();
+                    if (point.Distance(north) <= tolerance) {
+                        ++atNorth;
+                    }
+                    else if (point.Distance(south) <= tolerance) {
+                        ++atSouth;
+                    }
+                    else {
+                        cap = false;
+                    }
+                }
+            }
+            cap = cap && (atNorth == 0) != (atSouth == 0);
+        }
+        if (degenerated && !cap) {
             return {};  // a cap to an apex or a pole beside another boundary: not built here
         }
         std::vector<TopoDS_Wire> wires;
@@ -1319,42 +1541,98 @@ TopoDS_Face buildRevolvedFace(Revolved kind, const FaceVectorType& faces, const 
         if (roundAxis > 0 && roundTube > 0) {
             return {};
         }
-
-        if (encircling.empty()) {
-            BRepBuilderAPI_MakeFace maker(basis, wires.front());
-            if (!maker.IsDone()) {
-                return {};
-            }
-            for (std::size_t i = 1; i < wires.size(); ++i) {
-                maker.Add(wires[i]);
-                if (!maker.IsDone()) {
-                    return {};
-                }
-            }
-            face = fixFace(maker.Face());
+        if (cap && (encircling.size() != 1 || roundAxis != 1)) {
+            return {};
         }
-        else {
-            // a band between two wires round the axis, as a cylinder's; a sphere's are caps and
-            // zones, not built here
-            if (encircling.size() != 2 || kind == Revolved::Sphere) {
-                return {};
+        // a band between two wires round the axis, as a cylinder's; a sphere's zones are not
+        // built here
+        if (!cap && !encircling.empty() && (encircling.size() != 2 || kind == Revolved::Sphere)) {
+            return {};
+        }
+
+        // The face from the wires as they run, or with each wire reversed (`reverse`). Which of
+        // the two bounds the group depends on the orientation of the face the surface is copied
+        // from and on the order of the group's forward and reversed pieces (ops#1051: a fillet's
+        // torus in two pieces came out invalid with negative area as built, valid reversed)
+        auto attempt = [&](bool reverse) -> TopoDS_Face {
+            auto run = [reverse](const TopoDS_Wire& wire) {
+                return reverse ? TopoDS::Wire(wire.Reversed()) : wire;
+            };
+            std::vector<TopoDS_Wire> order;
+            bool inside = true;
+            if (cap) {
+                // the wire's sense alone picks the side: MakeFace's own inside test turns a
+                // wire round a sphere's axis to bound the cap away from the frame's south pole
+                order.push_back(encircling.front());
+                inside = false;
             }
-            std::vector<TopoDS_Wire> order(inner);
-            order.push_back(encircling.front());
-            order.push_back(encircling.back());
-            // the inner wires first, as for a cylinder: those across the seam fail otherwise
-            BRepBuilderAPI_MakeFace maker(basis, order.front(), false);
+            else if (encircling.empty()) {
+                order = wires;
+            }
+            else {
+                // the inner wires first, as for a cylinder: those across the seam fail otherwise
+                order = inner;
+                order.push_back(encircling.front());
+                order.push_back(encircling.back());
+                inside = false;
+            }
+            BRepBuilderAPI_MakeFace maker(basis, run(order.front()), inside);
             if (!maker.IsDone()) {
                 return {};
             }
             for (std::size_t i = 1; i < order.size(); ++i) {
-                maker.Add(order[i]);
+                maker.Add(run(order[i]));
                 if (!maker.IsDone()) {
                     return {};
                 }
             }
-            face = fixFace(maker.Face());
+            TopoDS_Face built = fixFace(maker.Face());
+            if (built.IsNull() || !withinPeriods(built, kind)
+                || !BRepCheck_Analyzer(built).IsValid() || !coversGroup(faces, built)) {
+                return {};
+            }
+            return built;
+        };
+        // The face must also lie where the group lies: on a closed surface the complement of the
+        // group can have its area (a hemisphere's, half a torus'). It is turned to face as the
+        // group does. The wires as they run come first, as always; there a face no point of the
+        // group can be checked on is kept, as before. A try's face fix writes the tolerances it
+        // raises into the group's own edges: they are put back before the next try, and a face
+        // built the new ways (reversed, a cap) whose fix raised one of them past growthAllowed()
+        // is refused. The seam and pole edges the fix adds to a cap come with its own 1e-5
+        TopoDS_Compound group;
+        BRep_Builder builder;
+        builder.MakeCompound(group);
+        for (const auto& f : faces) {
+            builder.Add(group, f);
         }
+        const Tolerances before(group);
+        for (const bool reverse : {false, true}) {
+            before.putBack();
+            face = attempt(reverse);
+            if (face.IsNull() || !sameCentre(faces, face)) {
+                continue;
+            }
+            if ((reverse || cap) && before.grew()) {
+                continue;
+            }
+            switch (sideOnGroup(faces, face)) {
+                case Side::Same:
+                    return face;
+                case Side::Opposite:
+                    face.Reverse();
+                    return face;
+                case Side::Unchecked:
+                    if (!reverse && !cap) {
+                        return face;
+                    }
+                    break;
+                case Side::Unknown:
+                    break;
+            }
+        }
+        before.putBack();
+        return {};
     }
     if (face.IsNull() || !withinPeriods(face, kind) || !BRepCheck_Analyzer(face).IsValid()) {
         return {};
@@ -1552,11 +1830,6 @@ static void collectSeamEdges(const TopoDS_Shell& shell, TopTools_IndexedMapOfSha
 // that curve joined again from its edges' own ranges; one that still leaves it is not fused; and
 // a fuse after which any tolerance grew past growthAllowed() is undone for its edges.
 
-// What a tolerance may become through a fuse of edges
-static double growthAllowed(double tolerance)
-{
-    return 10.0 * std::max(tolerance, 1e-6);
-}
 
 // The largest distance of an edge's curve on one surface from its 3D curve, at the same parameter
 static double curveOnSurfaceGap(
@@ -1742,52 +2015,6 @@ static bool fusedEdgeFollowsItsFaces(
     return true;
 }
 
-// The tolerances of a shape's edges and vertices: read before a fuse of edges, compared and put
-// back after one that is undone (the face fix writes into what the fused shape shares with it)
-struct Tolerances
-{
-    TopTools_IndexedMapOfShape shapes;
-    std::vector<double> values;
-
-    explicit Tolerances(const TopoDS_Shape& shape)
-    {
-        TopExp::MapShapes(shape, TopAbs_EDGE, shapes);
-        TopExp::MapShapes(shape, TopAbs_VERTEX, shapes);
-        values.reserve(shapes.Extent());
-        for (int index = 1; index <= shapes.Extent(); ++index) {
-            values.push_back(now(shapes(index)));
-        }
-    }
-    static double now(const TopoDS_Shape& shape)
-    {
-        return shape.ShapeType() == TopAbs_EDGE ? BRep_Tool::Tolerance(TopoDS::Edge(shape))
-                                                : BRep_Tool::Tolerance(TopoDS::Vertex(shape));
-    }
-    bool grew() const
-    {
-        for (int index = 1; index <= shapes.Extent(); ++index) {
-            if (now(shapes(index)) > growthAllowed(values[index - 1])) {
-                return true;
-            }
-        }
-        return false;
-    }
-    void putBack() const
-    {
-        for (int index = 1; index <= shapes.Extent(); ++index) {
-            const TopoDS_Shape& shape = shapes(index);
-            if (now(shape) == values[index - 1]) {
-                continue;
-            }
-            if (shape.ShapeType() == TopAbs_EDGE) {
-                Handle(BRep_TEdge)::DownCast(shape.TShape())->Tolerance(values[index - 1]);
-            }
-            else {
-                Handle(BRep_TVertex)::DownCast(shape.TShape())->Tolerance(values[index - 1]);
-            }
-        }
-    }
-};
 
 FaceTypedBSpline::FaceTypedBSpline()
     : FaceTypedBase(GeomAbs_BSplineSurface)

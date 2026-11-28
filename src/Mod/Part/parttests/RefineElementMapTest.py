@@ -459,6 +459,199 @@ class RefineConeTorusSphereTest(unittest.TestCase):
         self.assertAlmostEqual(refined.Volume, fused.Volume, places=6)
 
 
+# Refine merges a torus or sphere group on the side the group lies (FreeCAD-CH ops#1051).
+#
+# Two forms where refine left pieces on one surface after a dress-up, where Onshape shows one face:
+# a floor fillet round a wall end whose half cylinder is in two quarters gives two pieces of one
+# torus, which the uniter built as a face from the boundary wires as they run, invalid there (the
+# wire's sense depends on the first face's orientation); and a hemisphere rounded over a rim in arcs
+# gives lunes meeting at the pole, a cap the uniter did not build. The uniter now builds the face
+# from the wires reversed when the face as they run fails its guards, and builds a sphere cap round
+# one pole. On a closed surface the face from the wires run either way can be the complement of the
+# group, of the same area where the group is half the surface: the merged face must also have the
+# group's centre of mass and hold a point inside each face of the group, and faces as the group
+# faces (a half torus cut out of a box came out as its complement before, an invalid solid).
+#
+# Designed models; the expected results are geometric, worked out per case: a torus band's area by
+# its integral, a hemisphere's 2 pi R^2 with its centre of mass R / 2 from its rim's plane, a
+# spherical zone's centre of mass midway between its planes (Archimedes), a cap of height h 2 pi R h.
+# Volumes are the unrefined solid's.
+
+
+def sector(a0, a1):
+    """The wedge a0 <= angle <= a1 (degrees) about the z axis, 100 around and 100 tall."""
+    wedge = Part.makeCylinder(100, 100, V(0, 0, -50), V(0, 0, 1), a1 - a0)
+    wedge.rotate(V(0, 0, 0), V(0, 0, 1), a0)
+    return wedge
+
+
+def facesOf(shape, kind):
+    return [f for f in shape.Faces if type(f.Surface).__name__ == kind]
+
+
+class RefineRevolvedSideTest(unittest.TestCase):
+    def refined(self, fused, expected, volume=1e-7):
+        refined = fused.removeSplitter()
+        self.assertTrue(refined.isValid())
+        self.assertEqual(len(refined.Solids), 1)
+        self.assertEqual(kinds(refined), expected, kinds(fused))
+        self.assertAlmostEqual(refined.Volume, fused.Volume, delta=volume * fused.Volume)
+        return refined
+
+    def assertFace(self, face, area, centre):
+        self.assertAlmostEqual(face.Area, area, delta=1e-7 * area)
+        self.assertLess((face.CenterOfMass - centre).Length, 1e-6, face.CenterOfMass)
+
+    def wallEndFillet(self):
+        # a wall on a plate, its end a half cylinder R 3 in two quarters, the floor edges round it
+        # filleted r 1
+        plate = Part.makeBox(60, 40, 5, V(-30, -20, -5))
+        wall = Part.makeBox(20, 6, 10, V(-20, -3, 0))
+        q1 = Part.makeCylinder(3, 10, V(0, 0, 0), V(0, 0, 1), 90)
+        q2 = Part.makeCylinder(3, 10, V(0, 0, 0), V(0, 0, 1), 90)
+        q2.rotate(V(0, 0, 0), V(0, 0, 1), -90)
+        base = plate.fuse(wall.fuse(q1).fuse(q2)).removeSplitter()
+        floor = [
+            e
+            for e in base.Edges
+            if abs(e.BoundBox.ZMin) < 1e-9
+            and abs(e.BoundBox.ZMax) < 1e-9
+            and abs(e.BoundBox.YMax) <= 3 + 1e-6
+            and abs(e.BoundBox.YMin) <= 3 + 1e-6
+            and e.BoundBox.XMin > -20 - 1e-6
+        ]
+        self.assertEqual(len(floor), 5)
+        return base.makeFillet(1.0, floor)
+
+    # the concave quarter tube of the fillet, tube centre at R 4 and z 1, the half turn about the
+    # axis: pi * integral over phi in [pi/2, pi] of (4 + cos phi) = pi (2 pi - 1)
+    TORUS_AREA = math.pi * (2 * math.pi - 1)
+
+    def testFloorFilletRoundWallEndInQuartersMerges(self):
+        filleted = self.wallEndFillet()
+        self.assertEqual(kinds(filleted)["Toroid"], 2)
+        refined = self.refined(filleted, {"Plane": 10, "Cylinder": 4, "Toroid": 1})
+        torus = facesOf(refined, "Toroid")[0]
+        self.assertAlmostEqual(torus.Area, self.TORUS_AREA, delta=1e-7)
+        self.assertAlmostEqual(torus.CenterOfMass.y, 0.0, delta=1e-6)
+
+    def testTorusPiecesMergeInEveryOrder(self):
+        pieces = facesOf(self.wallEndFillet(), "Toroid")
+        for name, faces in (
+            ("as built", pieces),
+            ("the other first", pieces[::-1]),
+            ("flipped", [f.reversed() for f in pieces]),
+            ("flipped, the other first", [f.reversed() for f in pieces[::-1]]),
+        ):
+            refined = Part.Shell(faces).removeSplitter()
+            self.assertEqual(len(refined.Faces), 1, name)
+            self.assertAlmostEqual(refined.Faces[0].Area, self.TORUS_AREA, delta=1e-7, msg=name)
+            self.assertEqual(refined.Faces[0].Orientation, faces[0].Orientation, name)
+
+    def testHemisphereTipOverRimInArcsMerges(self):
+        # a leg R 2.5 whose wall and rim are three 120 degree sectors, its tip rounded r 2.5
+        plate = Part.makeBox(20, 20, 2, V(-10, -10, -2))
+        legs = [Part.makeCylinder(2.5, 10, V(0, 0, 0), V(0, 0, 1), 120) for _ in range(3)]
+        for k, leg in enumerate(legs):
+            leg.rotate(V(0, 0, 0), V(0, 0, 1), 120 * k)
+        # refined, as a body's base: the tip is one disc whose rim stays in three arcs
+        solid = plate.fuse(legs[0].fuse(legs[1]).fuse(legs[2])).removeSplitter()
+        rim = [
+            e
+            for e in solid.Edges
+            if abs(e.BoundBox.ZMin - 10) < 1e-9 and abs(e.BoundBox.ZMax - 10) < 1e-9
+        ]
+        self.assertEqual(len(rim), 3)
+        filleted = solid.makeFillet(2.5, rim)
+        self.assertEqual(kinds(filleted)["Sphere"], 3)
+        refined = self.refined(filleted, {"Plane": 6, "Cylinder": 1, "Sphere": 1})
+        exact = 20 * 20 * 2 + math.pi * 2.5**2 * 7.5 + 2 / 3 * math.pi * 2.5**3
+        self.assertAlmostEqual(refined.Volume, exact, delta=1e-7 * exact)
+        self.assertFace(facesOf(refined, "Sphere")[0], 2 * math.pi * 2.5**2, V(0, 0, 8.75))
+
+    def lunes(self, solid, offset=15):
+        pieces = [solid.common(sector(120 * k + offset, 120 * k + offset + 120)) for k in range(3)]
+        return pieces[0].fuse(pieces[1]).fuse(pieces[2])
+
+    def testHemispheresInLunesMergeOnTheirSide(self):
+        # the sphere's seam cuts one lune, so four pieces; the upper half has the north pole, the
+        # lower the south pole. Each half's complement is the other: the same area
+        for z0, centre in ((0, 5), (-10, -5)):
+            half = Part.makeSphere(10).common(Part.makeBox(30, 30, 10, V(-15, -15, z0)))
+            fused = self.lunes(half)
+            self.assertEqual(kinds(fused)["Sphere"], 4)
+            refined = self.refined(fused, {"Plane": 1, "Sphere": 1})
+            self.assertFace(facesOf(refined, "Sphere")[0], 200 * math.pi, V(0, 0, centre))
+
+    def testLargeCapInLunesMerges(self):
+        # the part of a sphere R 2.5 below z = 1.5, in lunes at the south pole: a zone from -2.5 to
+        # 1.5 round the pole, its centre of mass at z = -0.5
+        low = Part.makeSphere(2.5).cut(Part.makeBox(10, 10, 10, V(-5, -5, 1.5)))
+        refined = self.refined(self.lunes(low, 10), {"Plane": 1, "Sphere": 1})
+        area = 4 * math.pi * 2.5**2 - 2 * math.pi * 2.5 * 1.0
+        self.assertFace(facesOf(refined, "Sphere")[0], area, V(0, 0, -0.5))
+
+    def testTiltedCapInThirdsMerges(self):
+        # a cap of height 1.5 off a plane tilted 15 degrees, holding the pole, in thirds
+        box = Part.makeBox(20, 20, 20, V(-10, -10, 1.0))
+        box.rotate(V(0, 0, 0), V(1, 0, 0), 15)
+        cap = Part.makeSphere(2.5).common(box)
+        # the rim's curve on the sphere is approximated: Shape.Volume, not adaptive, moves by
+        # about 2e-7 of itself; the area (adaptive) is exact to 1e-8 of itself
+        refined = self.refined(self.lunes(cap, 5), {"Plane": 1, "Sphere": 1}, volume=1e-6)
+        sphere = facesOf(refined, "Sphere")[0]
+        self.assertAlmostEqual(sphere.Area, 2 * math.pi * 2.5 * 1.5, delta=1e-8 * sphere.Area)
+
+    def testHalfTorusCutFromBoxStaysOnItsSide(self):
+        # a half torus (y >= 0) in two quarters, cut out of a box: the groove's faces are reversed.
+        # The face from the wires as they run was the other half, and the solid invalid
+        torus = Part.makeTorus(10, 2).common(sector(0, 180))
+        pieces = torus.common(sector(0, 90)).fuse(torus.common(sector(90, 180)))
+        box = Part.makeBox(40, 40, 10, V(-20, -20, -5))
+        for solid in (pieces, box.cut(pieces)):
+            refined = self.refined(solid, {"Plane": len(facesOf(solid, "Plane")), "Toroid": 1})
+            # the half torus' surface centre: y = (2 R^2 + r^2) / (pi R)
+            self.assertFace(
+                facesOf(refined, "Toroid")[0], 2 * math.pi**2 * 10 * 2, V(0, 204 / (10 * math.pi), 0)
+            )
+
+    def testConvexRimFilletOnHalvesMerges(self):
+        # a cylinder R 5 in two halves, its top rim filleted r 1: a convex quarter tube at R 4
+        halves = [Part.makeCylinder(5, 10, V(0, 0, 0), V(0, 0, 1), 180) for _ in range(2)]
+        halves[1].rotate(V(0, 0, 0), V(0, 0, 1), 180)
+        solid = halves[0].fuse(halves[1])
+        rim = [
+            e
+            for e in solid.Edges
+            if abs(e.BoundBox.ZMin - 10) < 1e-9 and abs(e.BoundBox.ZMax - 10) < 1e-9
+        ]
+        refined = self.refined(solid.makeFillet(1.0, rim), {"Plane": 2, "Cylinder": 1, "Toroid": 1})
+        torus = facesOf(refined, "Toroid")[0]
+        self.assertAlmostEqual(torus.Area, 2 * math.pi * (4 * math.pi / 2 + 1), delta=1e-7)
+
+    def testLunesThroughBothPolesStayApart(self):
+        # a half sphere x >= 0 in two quarter lunes: each piece runs from pole to pole, no cap
+        half = Part.makeSphere(2.5).common(Part.makeBox(10, 10, 10, V(0, -5, -5)))
+        fused = half.common(Part.makeBox(10, 10, 10, V(0, 0, -5))).fuse(
+            half.common(Part.makeBox(10, 10, 10, V(0, -10, -5)))
+        )
+        refined = self.refined(fused, {"Plane": 1, "Sphere": 2})
+        for sphere in facesOf(refined, "Sphere"):
+            self.assertAlmostEqual(sphere.CenterOfMass.x, 1.25, delta=1e-6)
+
+    def testCapWithHoleStaysApart(self):
+        # two wires besides the pole: not a cap this builds
+        cap = (
+            Part.makeSphere(2.5)
+            .common(Part.makeBox(10, 10, 10, V(-5, -5, 0.5)))
+            .cut(Part.makeCylinder(0.3, 10, V(1.0, 0, -1)))
+        )
+        fused = self.lunes(cap, 5)
+        refined = fused.removeSplitter()
+        self.assertTrue(refined.isValid())
+        self.assertEqual(kinds(refined)["Sphere"], kinds(fused)["Sphere"])
+
+
 class RefineConeReferenceTest(unittest.TestCase):
     """A Part::Refine of the fused cone halves; a datum point at the centre of mass of its cone face."""
 

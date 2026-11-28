@@ -109,6 +109,7 @@ from parttests.CompoundFilterTest import CompoundFilterTest
 from parttests.RefineElementMapTest import RefineElementMapTest
 from parttests.RefineElementMapTest import RefineConeTorusSphereTest  # ops#931
 from parttests.RefineElementMapTest import RefineConeReferenceTest  # ops#931
+from parttests.RefineElementMapTest import RefineRevolvedSideTest  # ops#1051
 from parttests.GTransformKeepsPlanesTest import GTransformKeepsPlanesTest
 from parttests.FlatFaceAxesTest import FlatFaceAxesTest
 from parttests.RefineFuseEdgesTest import RefineFuseEdgesTest
