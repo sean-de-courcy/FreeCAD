@@ -2020,11 +2020,13 @@ App::DocumentObjectExecReturn* executeStudioPartPattern(Transformed& pattern)
     return App::DocumentObject::StdReturn;
 }
 
+}  // namespace
+
 /// FreeCAD-CH ops#901: the shell test of checkResult() (Feature.cpp), on the shells of \a result's
 /// solids that hold a face \a base doesn't have. True when each is closed and its faces are
 /// oriented consistently, so the feature won't be refused for a shell. \a firstSolidOnly: only
 /// the first solid, the one getSolid() keeps under the enforced single-solid rule and the only one
-/// checkResult() then sees
+/// checkResult() then sees. Declared in FeatureExtrude.cpp too (ops#1086), as is the next one
 bool newShellsSound(const TopoDS_Shape& result, const TopoDS_Shape& base, bool firstSolidOnly)
 {
     TopTools_IndexedMapOfShape baseFaces;
@@ -2065,6 +2067,9 @@ bool resultWillBeChecked(const PartDesign::Feature& feature)
                .GetParameterGroupByPath("User parameter:BaseApp/Preferences/Mod/PartDesign")
                ->GetBool("CheckResults", true);
 }
+
+namespace
+{
 
 double solidVolume(const TopoDS_Shape& shape)
 {
