@@ -481,7 +481,8 @@ PartExport bool constructMitreRunOns(
     const Request& request,
     Construction& out,
     std::vector<TopoDS_Shape>& rest,
-    std::string* reason
+    std::string* reason,
+    bool* recognised = nullptr
 );
 
 /** Whether a chamfer by equal distances is one the construction builds before OCCT because a

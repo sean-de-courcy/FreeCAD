@@ -21181,6 +21181,7 @@ struct RunOnCorner
     TopoDS_Edge line;     // L, picked
     TopoDS_Edge mitre;    // E, picked: the earlier rounds' mitre, from V to W
     TopoDS_Face rounds[2];  // CA, CB
+    TopoDS_Face walls[2];   // A, B: L's faces
     gp_Pnt foot;          // L's line on the plane F of the earlier rounds
     gp_Dir up;            // along L, from F toward L's other end
     gp_Dir into[2];       // in A and in B, normal to L, into the face
@@ -21298,6 +21299,8 @@ RunOnCorner runOnCorner(
     const double square = 1e-9;  // of unit directions
     RunOnCorner corner;
     corner.line = line;
+    corner.walls[0] = faces[0];
+    corner.walls[1] = faces[1];
     const gp_Pnt v = BRep_Tool::Pnt(vertex);
     corner.up = awayFrom(line, vertex);
     const gp_Pln planes[2] = {BRepAdaptor_Surface(faces[0], Standard_False).Plane(),
@@ -21926,10 +21929,14 @@ bool constructMitreRunOns(
     const Request& request,
     Construction& out,
     std::vector<TopoDS_Shape>& rest,
-    std::string* reason
+    std::string* reason,
+    bool* recognised
 )
 {
     rest.clear();
+    if (recognised) {
+        *recognised = false;
+    }
     try {
         if (request.kind != Kind::Fillet || request.size1 <= 0
             || std::abs(request.size1 - request.size2) > linearTolerance || edges.empty()
@@ -22027,6 +22034,11 @@ bool constructMitreRunOns(
             }
         }
         const bool convex = corners.front().convex;
+        // Past here a refusal is of the corners' construction or its result, not of their form:
+        // the reason the user is given where the fillet then fails (ops#1038)
+        if (recognised) {
+            *recognised = true;
+        }
         // The tools, each measured against its closed form, and what of the base lies in them:
         // the earlier rounds' fill in the kite (2K), or for a convex corner the material less
         // what they cut (skeptic 2)
@@ -22180,10 +22192,72 @@ bool constructMitreRunOns(
         TopExp::MapShapes(base, TopAbs_FACE, baseFaces);
         TopExp::MapShapes(shape, TopAbs_FACE, resultFaces);
         // A notch, a hole or a boss in a corner's reach leaves the volumes as they are and adds a
-        // face (skeptic 3)
-        if (resultFaces.Extent() != baseFaces.Extent() + 2 * static_cast<int>(corners.size())) {
-            refuse("the mitre run-ons' result has " + std::to_string(resultFaces.Extent())
-                   + " faces, not the base's " + std::to_string(baseFaces.Extent()) + " and 2 per corner");
+        // face (skeptic 3): every face of the base keeps one image, and the faces that are images of
+        // none are the tools' own, 2 per corner. Only a corner's own walls A and B may come out in
+        // more than one piece: a hole's rim tangent to both the earlier round's and the new round's
+        // tangent lines pinches the wall in two at the touch points, as Onshape's (ops#1038, Test
+        // Tube Nest #48)
+        {
+            TopTools_IndexedMapOfShape walls;
+            for (const auto& corner : corners) {
+                walls.Add(corner.walls[0]);
+                walls.Add(corner.walls[1]);
+            }
+            // A plane face's outward normal
+            auto facing = [](const TopoDS_Shape& shape) -> std::optional<gp_Dir> {
+                const TopoDS_Face& face = TopoDS::Face(shape);
+                BRepAdaptor_Surface surface(face, Standard_False);
+                if (surface.GetType() != GeomAbs_Plane) {
+                    return std::nullopt;
+                }
+                const gp_Pln plane = surface.Plane();
+                gp_Dir normal = plane.Axis().Direction();
+                if (!plane.Direct()) {
+                    normal.Reverse();
+                }
+                if (face.Orientation() == TopAbs_REVERSED) {
+                    normal.Reverse();
+                }
+                return normal;
+            };
+            TopTools_IndexedMapOfShape imaged;
+            for (int i = 1; i <= baseFaces.Extent(); ++i) {
+                int count = 0;
+                for (const auto& image : imagesThrough(stages, 0, baseFaces(i))) {
+                    if (image.ShapeType() == TopAbs_FACE && resultFaces.Contains(image)) {
+                        imaged.Add(image);
+                        ++count;
+                    }
+                }
+                if (count == 0) {
+                    refuse("the mitre run-ons' result has lost a face of the base");
+                }
+                if (count > 1 && !walls.Contains(baseFaces(i))) {
+                    refuse("the mitre run-ons split a face of the base other than a corner's walls in "
+                           + std::to_string(count));
+                }
+                // A wall's pieces all face its way: a tool's face on the wall's plane facing the
+                // other way (a column over a hole's mouth, the hole covered) is not a piece of it
+                // (skeptic of the ops#1038 design, item 1)
+                if (count > 1) {
+                    const auto wall = facing(baseFaces(i));
+                    for (const auto& image : imagesThrough(stages, 0, baseFaces(i))) {
+                        if (image.ShapeType() != TopAbs_FACE || !resultFaces.Contains(image)) {
+                            continue;
+                        }
+                        const auto piece = facing(image);
+                        if (!wall || !piece || wall->Dot(*piece) < 1 - angularTolerance) {
+                            refuse("the mitre run-ons split a corner's wall into pieces that do not "
+                                   "all face its way");
+                        }
+                    }
+                }
+            }
+            const int own = resultFaces.Extent() - imaged.Extent();
+            if (own != 2 * static_cast<int>(corners.size())) {
+                refuse("the mitre run-ons' result has " + std::to_string(own)
+                       + " faces of their tools, not 2 per corner");
+            }
         }
         if (convex) {
             for (const auto& piece : pieces) {
